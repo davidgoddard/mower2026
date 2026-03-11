@@ -1,9 +1,12 @@
-"use strict";
-
 // Manual Pi-side exerciser for the second-generation motor ESP protocol.
 // Requires the `i2c-bus` Node package on the Pi.
+//
+// This script works in physical wheel directions rather than raw motor signs.
+// Configure the sign mapping below so a positive physical wheel target means
+// "vehicle forward" for each side even if the motors are mirrored.
 
-const i2c = require("i2c-bus");
+import i2c from "i2c-bus";
+import { loadSystemParameters } from "./systemConfig.js";
 
 const I2C_ADDRESS = 0x66;
 const BUS_NUMBER = 1;
@@ -15,6 +18,10 @@ const MESSAGE_TYPE_WHEEL_SPEED_COMMAND = 0x21;
 const MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
 
 const FEEDBACK_FRAME_SIZE = 9 + 26 + 2;
+const SAMPLE_INTERVAL_MS = 200;
+const STEADY_STATE_IGNORE_SAMPLES = 2;
+const MAX_FRAME_ATTEMPTS = 4;
+const RETRY_DELAY_MS = 60;
 
 function crc16Ccitt(data) {
   let crc = 0xffff;
@@ -45,7 +52,19 @@ function decodeFrame(frame) {
   if (frame[0] !== PROTOCOL_START_OF_FRAME) {
     throw new Error("bad start-of-frame");
   }
+  if (frame[1] !== PROTOCOL_VERSION) {
+    throw new Error(`bad protocol version: ${frame[1]}`);
+  }
+  if (frame[2] !== NODE_ID_MOTOR) {
+    throw new Error(`bad node id: ${frame[2]}`);
+  }
+  if (frame[3] !== MESSAGE_TYPE_MOTOR_FEEDBACK) {
+    throw new Error(`bad message type: ${frame[3]}`);
+  }
   const payloadLength = frame.readUInt16LE(7);
+  if (payloadLength !== 26) {
+    throw new Error(`bad payload length: ${payloadLength}`);
+  }
   const crc = frame.readUInt16LE(9 + payloadLength);
   const expected = crc16Ccitt(frame.subarray(1, 9 + payloadLength));
   if (crc !== expected) {
@@ -57,6 +76,12 @@ function decodeFrame(frame) {
     flags: frame[4],
     payload: frame.subarray(9, 9 + payloadLength),
   };
+}
+
+function formatHex(buffer, length = buffer.length) {
+  return Array.from(buffer.subarray(0, length))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join(" ");
 }
 
 function encodeWheelSpeedCommand({
@@ -99,17 +124,112 @@ function decodeMotorFeedbackPayload(payload) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toRawWheelTarget(physicalMetersPerSecond, forwardSign) {
+  return physicalMetersPerSecond * forwardSign;
+}
+
+function toPhysicalWheelSpeed(rawMetersPerSecond, forwardSign) {
+  return rawMetersPerSecond * forwardSign;
+}
+
+function average(values) {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function summariseStep(label, leftTargetPhysical, rightTargetPhysical, samples) {
+  const steadySamples = samples.slice(Math.min(STEADY_STATE_IGNORE_SAMPLES, samples.length));
+
+  if (steadySamples.length === 0) {
+    return {
+      label,
+      leftTargetPhysical,
+      rightTargetPhysical,
+      sampleCount: samples.length,
+      steadySampleCount: 0,
+      note: "No steady-state samples collected.",
+    };
+  }
+
+  const leftActualAverage = average(steadySamples.map((sample) => sample.leftWheelActualPhysicalMetersPerSecond));
+  const rightActualAverage = average(steadySamples.map((sample) => sample.rightWheelActualPhysicalMetersPerSecond));
+  const leftPwmAverage = average(steadySamples.map((sample) => sample.leftPwmAppliedPercent));
+  const rightPwmAverage = average(steadySamples.map((sample) => sample.rightPwmAppliedPercent));
+  const leftAbsActual = Math.abs(leftActualAverage);
+  const rightAbsActual = Math.abs(rightActualAverage);
+
+  return {
+    label,
+    leftTargetPhysical,
+    rightTargetPhysical,
+    sampleCount: samples.length,
+    steadySampleCount: steadySamples.length,
+    leftActualPhysicalAverage: Number(leftActualAverage.toFixed(3)),
+    rightActualPhysicalAverage: Number(rightActualAverage.toFixed(3)),
+    leftError: Number((leftActualAverage - leftTargetPhysical).toFixed(3)),
+    rightError: Number((rightActualAverage - rightTargetPhysical).toFixed(3)),
+    leftPwmAverage: Number(leftPwmAverage.toFixed(1)),
+    rightPwmAverage: Number(rightPwmAverage.toFixed(1)),
+    achievedSpeedRatio:
+      leftAbsActual > 0 && rightAbsActual > 0 ? Number((rightAbsActual / leftAbsActual).toFixed(3)) : null,
+    pwmRatio:
+      Math.abs(leftPwmAverage) > 0 && Math.abs(rightPwmAverage) > 0
+        ? Number((Math.abs(rightPwmAverage) / Math.abs(leftPwmAverage)).toFixed(3))
+        : null,
+    suggestedRightScaleVsLeft:
+      leftAbsActual > 0 && rightAbsActual > 0 ? Number((leftAbsActual / rightAbsActual).toFixed(3)) : null,
+  };
+}
+
+function printStepSummary(summary) {
+  console.log(`\n${summary.label} summary`);
+  console.log(summary);
+  if (summary.suggestedRightScaleVsLeft != null) {
+    console.log(
+      `Suggested right-side feed-forward scale relative to left: ${summary.suggestedRightScaleVsLeft} (1.000 means balanced).`,
+    );
+  }
+}
+
 async function writeFrame(bus, frame) {
   await bus.i2cWrite(I2C_ADDRESS, frame.length, frame);
 }
 
 async function requestFeedback(bus, sequence) {
-  const requestFrame = encodeFrame(MESSAGE_TYPE_MOTOR_FEEDBACK, sequence, Buffer.alloc(0));
-  await writeFrame(bus, requestFrame);
-  const response = Buffer.alloc(FEEDBACK_FRAME_SIZE);
-  await bus.i2cRead(I2C_ADDRESS, response.length, response);
-  const decoded = decodeFrame(response);
-  return decodeMotorFeedbackPayload(decoded.payload);
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_FRAME_ATTEMPTS; attempt += 1) {
+    try {
+      const requestFrame = encodeFrame(MESSAGE_TYPE_MOTOR_FEEDBACK, sequence, Buffer.alloc(0));
+      await writeFrame(bus, requestFrame);
+      const response = Buffer.alloc(FEEDBACK_FRAME_SIZE);
+      const { bytesRead } = await bus.i2cRead(I2C_ADDRESS, response.length, response);
+      if (bytesRead !== response.length) {
+        throw new Error(`short read from motor node: expected ${response.length}, got ${bytesRead}; bytes=${formatHex(response, bytesRead)}`);
+      }
+
+      let decoded;
+      try {
+        decoded = decodeFrame(response);
+      } catch (error) {
+        throw new Error(`invalid response frame from motor node: bytes=${formatHex(response)}; ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return decodeMotorFeedbackPayload(decoded.payload);
+    } catch (error) {
+      lastError = error;
+      if (attempt < MAX_FRAME_ATTEMPTS) {
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function sendCommand(bus, sequence, left, right, enableDrive = true) {
@@ -125,37 +245,68 @@ async function sendCommand(bus, sequence, left, right, enableDrive = true) {
   await writeFrame(bus, encodeFrame(MESSAGE_TYPE_WHEEL_SPEED_COMMAND, sequence, payload));
 }
 
-async function runStep(bus, sequenceStart, label, left, right, durationMs) {
+async function runStep(bus, sequenceStart, mapping, label, leftTargetPhysical, rightTargetPhysical, durationMs) {
   console.log(`\n=== ${label} ===`);
+  const leftTargetRaw = toRawWheelTarget(leftTargetPhysical, mapping.leftMotorForwardSign);
+  const rightTargetRaw = toRawWheelTarget(rightTargetPhysical, mapping.rightMotorForwardSign);
   const started = Date.now();
   let sequence = sequenceStart;
+  const samples = [];
   while (Date.now() - started < durationMs) {
-    await sendCommand(bus, sequence++, left, right, true);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sendCommand(bus, sequence++, leftTargetRaw, rightTargetRaw, true);
+    await sleep(SAMPLE_INTERVAL_MS);
     const feedback = await requestFeedback(bus, sequence++);
-    console.log(label, feedback);
+    const sample = {
+      ...feedback,
+      leftWheelTargetPhysicalMetersPerSecond: leftTargetPhysical,
+      rightWheelTargetPhysicalMetersPerSecond: rightTargetPhysical,
+      leftWheelTargetRawMetersPerSecond: leftTargetRaw,
+      rightWheelTargetRawMetersPerSecond: rightTargetRaw,
+      leftWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.leftWheelActualMetersPerSecond, mapping.leftMotorForwardSign),
+      rightWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.rightWheelActualMetersPerSecond, mapping.rightMotorForwardSign),
+    };
+    samples.push(sample);
+    console.log(label, sample);
   }
+  printStepSummary(summariseStep(label, leftTargetPhysical, rightTargetPhysical, samples));
   return sequence;
 }
 
 async function stop(bus, sequence) {
-  await sendCommand(bus, sequence, 0, 0, false);
+  let activeSequence = sequence;
+  console.log("\n=== stop ===");
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await sendCommand(bus, activeSequence++, 0, 0, false);
+    await sleep(120);
+    const feedback = await requestFeedback(bus, activeSequence++);
+    console.log("stop", feedback);
+  }
+  return activeSequence;
 }
 
 async function main() {
+  const { filePath, parameters } = await loadSystemParameters();
   const bus = await i2c.openPromisified(BUS_NUMBER);
   let sequence = 1;
   try {
-    sequence = await runStep(bus, sequence, "spin-right", 0.30, -0.30, 2000);
-    sequence = await runStep(bus, sequence, "spin-left", -0.30, 0.30, 2000);
-    sequence = await runStep(bus, sequence, "forward", 0.35, 0.35, 2500);
-    sequence = await runStep(bus, sequence, "backward", -0.25, -0.25, 2000);
-    sequence = await runStep(bus, sequence, "swap-forward-back", 0.25, 0.25, 1200);
-    sequence = await runStep(bus, sequence, "swap-backward-forward", -0.25, -0.25, 1200);
-    sequence = await runStep(bus, sequence, "arc-left", 0.35, 0.20, 2500);
-    sequence = await runStep(bus, sequence, "arc-right", 0.20, 0.35, 2500);
+    console.log("Physical wheel direction mapping:");
+    console.log({
+      configPath: filePath,
+      LEFT_FORWARD_SIGN: parameters.leftMotorForwardSign,
+      RIGHT_FORWARD_SIGN: parameters.rightMotorForwardSign,
+      note: "Raw command = physical wheel target * forward sign",
+    });
+
+    sequence = await runStep(bus, sequence, parameters, "spin-right", 0.30, -0.30, 2000);
+    sequence = await runStep(bus, sequence, parameters, "spin-left", -0.30, 0.30, 2000);
+    sequence = await runStep(bus, sequence, parameters, "vehicle-forward", 0.35, 0.35, 2500);
+    sequence = await runStep(bus, sequence, parameters, "vehicle-backward", -0.25, -0.25, 2000);
+    sequence = await runStep(bus, sequence, parameters, "swap-forward-back", 0.25, 0.25, 1200);
+    sequence = await runStep(bus, sequence, parameters, "swap-backward-forward", -0.25, -0.25, 1200);
+    sequence = await runStep(bus, sequence, parameters, "arc-left", 0.35, 0.20, 2500);
+    sequence = await runStep(bus, sequence, parameters, "arc-right", 0.20, 0.35, 2500);
   } finally {
-    await stop(bus, sequence++);
+    sequence = await stop(bus, sequence++);
     await bus.close();
   }
 }

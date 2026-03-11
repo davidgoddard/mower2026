@@ -20,6 +20,7 @@ const DEFAULT_POSE: PoseEstimate = {
 
 export class PoseEstimator {
   private estimate: PoseEstimate;
+  private lastImuTimestampMillis: number | undefined;
 
   public constructor(
     private readonly options: PoseEstimatorOptions,
@@ -47,9 +48,13 @@ export class PoseEstimator {
       this.applyHeadingMeasurement(bundle, trust);
     }
 
+    if (bundle.imu !== undefined) {
+      this.applyImuMeasurement(bundle, trust);
+    }
+
     this.estimate = {
       ...this.estimate,
-      confidence: Math.max(trust.positionTrust, trust.headingTrust, trust.wheelTrust),
+      confidence: Math.max(trust.positionTrust, trust.headingTrust, trust.wheelTrust, trust.imuTrust),
       timestampMillis: this.latestTimestamp(bundle),
     };
 
@@ -108,10 +113,30 @@ export class PoseEstimator {
     };
   }
 
+  private applyImuMeasurement(bundle: MeasurementBundle, trust: TrustLevels): void {
+    const imu = bundle.imu;
+    if (imu === undefined || trust.imuTrust === 0) {
+      return;
+    }
+
+    const referenceTimestampMillis = this.lastImuTimestampMillis ?? this.estimate.timestampMillis;
+    const timestampDeltaMillis = Math.max(0, imu.timestampMillis - referenceTimestampMillis);
+    const deltaHeadingDegrees = imu.angularVelocity.zDegreesPerSecond * (timestampDeltaMillis / 1000) * trust.imuTrust;
+
+    this.estimate = {
+      ...this.estimate,
+      headingDegrees: normalizeAngleDegrees(this.estimate.headingDegrees + deltaHeadingDegrees),
+      yawRateDegreesPerSecond: imu.angularVelocity.zDegreesPerSecond * trust.imuTrust,
+      timestampMillis: imu.timestampMillis,
+    };
+    this.lastImuTimestampMillis = imu.timestampMillis;
+  }
+
   private latestTimestamp(bundle: MeasurementBundle): number {
     return bundle.position?.timestampMillis
       ?? bundle.heading?.timestampMillis
       ?? bundle.wheelOdometry?.timestampMillis
+      ?? bundle.imu?.timestampMillis
       ?? this.estimate.timestampMillis;
   }
 }

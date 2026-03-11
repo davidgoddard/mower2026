@@ -36,12 +36,15 @@ This checklist captures the remaining physical and electrical facts needed to fi
 
 ## Encoder hardware
 
-- Encoder type:
-- Pulses per motor revolution: legacy config uses `324`
+- Encoder type: current motor documentation indicates `FG` speed pulse output rather than quadrature encoder
+- Electrical output type: open-collector `NPN`
+- Pulses per motor revolution: motor sheet indicates `12 pulses / round`
 - Any gearbox ratio between motor and wheel:
-- Effective counts per wheel revolution: legacy config implies `324 * 5 = 1620` counts per wheel revolution
-- Whether count direction is available or only pulse count:
-- Whether both encoder channels are equally reliable:
+- Effective counts per wheel revolution: depends on confirmed gear ratio; legacy `1620` value should now be treated as provisional
+- Whether count direction is available or only pulse count: pulse count only from `FG`; direction is inferred from commanded drive direction rather than measured directly
+- Whether both feedback channels are equally reliable:
+- Pull-up resistor fitted on each FG line:
+- Pull-up voltage used for FG line: should be `3.3 V` for direct ESP32 input unless level shifting is added
 
 ## Electrical and sensing
 
@@ -66,6 +69,7 @@ This checklist captures the remaining physical and electrical facts needed to fi
 - Known drift direction on straight drive:
 - Known wheel slip conditions:
 - Known GPS blind spots or multipath areas:
+- Observed false FG pulses at zero motor power:
 
 ## Notes
 
@@ -85,3 +89,4 @@ This checklist captures the remaining physical and electrical facts needed to fi
   - `rampDown` can be much faster because an idler lets the cutter free-spin while the drive wheels stop
   - nominal physical cutting width is about `0.40 m`
   - `0.30 m` cutting width in legacy config was an intentional overlap margin rather than the true deck width
+  - current motor documentation shows yellow `FG` feedback output with `12 pulses / round`

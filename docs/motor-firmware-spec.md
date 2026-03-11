@@ -35,7 +35,7 @@ The motor ESP shall own:
 
 - PWM generation
 - motor direction output
-- wheel encoder counting
+- FG pulse counting
 - wheel-speed execution
 - acceleration and deceleration limiting
 - safe reversal handling
@@ -69,7 +69,6 @@ See:
 - `src/protocols/motorProtocol.ts`
 - `src/protocols/motorCodec.ts`
 - `docs/protocol.md`
-- `docs/motor-firmware-migration.md`
 
 ## Required motor feedback contract
 
@@ -105,7 +104,7 @@ Useful legacy features worth preserving:
 - safe stop-before-reverse behavior
 - configurable ramp-up and ramp-down
 - direction inversion support
-- encoder pulse counting
+- pulse counting
 - watchdog-style command freshness logic
 
 Features to retire:
@@ -123,7 +122,7 @@ The new motor ESP should use this layered design:
 3. convert wheel-speed targets into internal wheel controllers
 4. enforce ramp and reversal safety
 5. drive PWM and direction outputs
-6. sample encoders
+6. sample FG feedback pulses
 7. estimate actual wheel speed
 8. publish feedback to Pi
 
@@ -142,7 +141,7 @@ Reason:
 
 Fallback design if needed during bring-up:
 
-- open-loop PWM execution with encoder reporting
+- open-loop PWM execution with FG pulse reporting
 
 But this should be treated as an intermediate step, not the final interface.
 
@@ -150,8 +149,8 @@ But this should be treated as an intermediate step, not the final interface.
 
 The motor ESP should internally maintain:
 
-- accumulated encoder counts per wheel
-- encoder delta counts per reporting interval
+- accumulated FG pulse counts per wheel
+- FG pulse delta counts per reporting interval
 - estimated wheel speed in meters per second
 - currently applied PWM output
 - current direction state
@@ -172,6 +171,52 @@ Current bits:
 - bit 4: right driver fault
 - bit 5: over-current
 
+For the current FG-based hardware, the left/right encoder fault bits should also be used when:
+
+- a wheel is commanded to move but no FG activity is observed, or
+- meaningful FG activity is observed while the wheel is idle / not allowed to drive
+
+## Motor feedback electrical reality
+
+The current brushless motors appear to expose an `FG` speed output rather than a quadrature encoder.
+
+Known characteristics from the motor documentation:
+
+- yellow wire = `FG`
+- output type = open-collector `NPN`
+- pulse rate = `12 pulses / round`
+
+This has three important consequences:
+
+- the ESP input must have a valid pull-up
+- the signal should be interpreted as speed pulses, not full phase encoder data
+- wheel-speed scaling must include the motor-to-wheel gear ratio
+
+Recommended wiring guidance:
+
+- share ground between motor and ESP
+- connect the yellow `FG` line to an ESP GPIO input
+- pull that line up to `3.3 V`
+- prefer an external pull-up resistor in the `4.7k-10k` range for field use
+
+Current board-level pin mapping and the ESP32-WROOM-32 pin reference image are documented in `external-hardware/esp32/motor-controller-v2/README.md`.
+
+Do not pull the `FG` line directly to `5 V` into an ESP32 GPIO.
+
+The ESP32 internal `INPUT_PULLUP` may be acceptable for bench testing, but an external pull-up is the safer design assumption for the mower.
+
+## Wheel-speed scaling note
+
+Current motor feedback should be treated as FG pulse feedback rather than conventional encoder counts.
+
+If the `12 pulses / round` value is correct and refers to motor revolution, then:
+
+- `motorRevsPerSecond = fgPulsesPerSecond / 12`
+- `wheelRevsPerSecond = motorRevsPerSecond / gearRatio`
+- `wheelSpeedMetersPerSecond = wheelRevsPerSecond * wheelCircumference`
+
+Until the gear ratio is confirmed, absolute wheel-speed scaling should be treated as provisional.
+
 ## Command timeout rule
 
 If no valid command is received within `commandTimeoutMillis`:
@@ -179,6 +224,8 @@ If no valid command is received within `commandTimeoutMillis`:
 - requested wheel speeds shall be treated as zero
 - outputs shall ramp down safely
 - watchdog fault shall be set
+
+When watchdog is unhealthy or drive is disabled, the firmware should not try to "correct" spurious FG activity with compensating PWM. Zero command should remain zero command.
 
 The ESP must fail safe without requiring the Pi to explicitly send stop repeatedly.
 
@@ -239,15 +286,9 @@ Should represent the signed or direction-aware actuation level actually driven a
 
 Should be false whenever command freshness has expired or local execution is no longer trustworthy.
 
-## Open hardware-dependent decisions
+## Remaining hardware-dependent decisions
 
-These block the final motor firmware implementation details:
-
-- exact encoder type and counts per wheel revolution
-- exact wheel circumference
-- whether current sensing exists
-- whether the PWM output should be represented as signed percent, raw duty step, or another unit in feedback
-- the final wheel-speed controller structure and gains
+The remaining motor hardware decisions and final firmware data gaps are tracked centrally in [requirements-traceability.md](requirements-traceability.md).
 
 ## Recommended next implementation step
 
@@ -256,5 +297,5 @@ When the motor ESP rewrite starts:
 1. keep the low-level pin and ramping structure from the legacy design where still valid
 2. replace the command interface with explicit wheel-speed targets
 3. add real feedback publication at a fixed rate
-4. validate encoder count direction and scaling
+4. validate FG pull-up wiring, noise immunity, and scaling
 5. only then tune local wheel-speed control

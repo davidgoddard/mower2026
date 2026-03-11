@@ -10,10 +10,13 @@ import type { LineSegment } from "../guidance/guidanceTypes.js";
 import type { WheelCommandPlanner } from "../control/wheelCommandPlanner.js";
 import type { CommandLimiter } from "../control/commandLimiter.js";
 import type { WheelTargets } from "../control/controlTypes.js";
+import { mapPhysicalWheelTargetsToRaw } from "../control/motorMapping.js";
 import type { EventLogger } from "../logging/eventLogger.js";
 import type { TelemetryLogger } from "../logging/telemetryLogger.js";
 import type { SafetyManager } from "../safety/safetyManager.js";
 import type { PoseEstimate } from "../estimation/estimatorTypes.js";
+import type { ImuSensor, RawImuSample } from "../sensing/imuSensor.js";
+import type { MeasurementBundle } from "../sensing/measurementTypes.js";
 
 export interface RuntimeAppDependencies {
   readonly bus: BusAdapter;
@@ -29,6 +32,10 @@ export interface RuntimeAppDependencies {
   readonly telemetryLogger: TelemetryLogger;
   readonly eventLogger: EventLogger;
   readonly safetyManager: SafetyManager;
+  readonly imuSensor?: ImuSensor;
+  readonly imuAdapter?: {
+    adapt(sample: RawImuSample): MeasurementBundle;
+  };
 }
 
 export class RuntimeApp {
@@ -54,8 +61,14 @@ export class RuntimeApp {
   public async runCycle(): Promise<PoseEstimate> {
     const gnssBundle = this.deps.gnssAdapter.adapt(await this.deps.gnssNodeClient.refresh());
     const motorBundle = this.deps.motorFeedbackAdapter.adapt(await this.deps.motorNodeClient.refreshFeedback());
+    const imuBundle = this.deps.imuSensor !== undefined && this.deps.imuAdapter !== undefined
+      ? this.deps.imuAdapter.adapt(await this.deps.imuSensor.read())
+      : undefined;
 
     this.deps.poseEstimator.ingest(motorBundle);
+    if (imuBundle !== undefined) {
+      this.deps.poseEstimator.ingest(imuBundle);
+    }
     const estimate = this.deps.poseEstimator.ingest(gnssBundle);
 
     this.deps.telemetryLogger.append("pose.estimate", estimate as unknown as Record<string, unknown>);
@@ -79,7 +92,9 @@ export class RuntimeApp {
     }
 
     const motionIntent = this.deps.lineTracker.track(this.activeSegment, estimate);
-    const wheelTargets = this.deps.commandLimiter.limit(this.lastWheelTargets, this.deps.wheelCommandPlanner.plan(motionIntent));
+    const plannedTargets = this.deps.wheelCommandPlanner.plan(motionIntent);
+    const rawTargets = mapPhysicalWheelTargetsToRaw(this.deps.parameterStore.get(), plannedTargets);
+    const wheelTargets = this.deps.commandLimiter.limit(this.lastWheelTargets, rawTargets);
     this.lastWheelTargets = wheelTargets;
 
     await this.deps.motorNodeClient.sendWheelSpeedCommand({
@@ -89,6 +104,7 @@ export class RuntimeApp {
       enableDrive: true,
       commandTimeoutMillis: 250,
       maxAccelerationMetersPerSecondSquared: this.deps.parameterStore.get().maxWheelAccelerationMetersPerSecondSquared,
+      maxDecelerationMetersPerSecondSquared: this.deps.parameterStore.get().maxWheelDecelerationMetersPerSecondSquared,
     });
 
     return estimate;

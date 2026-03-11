@@ -37,6 +37,6 @@ test("decodeFrame rejects a corrupted CRC", () => {
     new Uint8Array([9, 8, 7]),
   );
 
-  frame[4] ^= 0xff;
+  frame[4] = (frame[4] ?? 0) ^ 0xff;
   assert.throws(() => decodeFrame(frame), /CRC mismatch/);
 });

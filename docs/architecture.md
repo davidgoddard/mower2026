@@ -8,6 +8,8 @@ The system has three computing domains:
 - GNSS ESP node
 - Motor ESP node
 
+The IMU is currently expected to remain Pi-side hardware rather than moving to an ESP node. The legacy mower wiring used a BMI160-class device on the Pi I2C chain at address `0x69`.
+
 The Pi owns truth and intent. The ESP nodes own time-critical execution.
 
 ## Data flow
@@ -58,3 +60,7 @@ The codebase now contains a minimal but executable control path:
 ## Firmware implications
 
 The motor firmware needs a redesign around explicit wheel-speed commands and richer feedback. The GNSS firmware may need message additions, but those additions must stay compact enough for I2C.
+
+Current IMU implication:
+
+- the Pi-side sensing layer now has an explicit raw IMU sample interface and adapter shape for a three-axis gyro plus three-axis accelerometer path

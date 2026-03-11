@@ -4,7 +4,7 @@
 
 // Second-generation motor controller for ESP32.
 // It accepts explicit left/right wheel speed targets over I2C and returns
-// a coherent feedback snapshot with encoder deltas, estimated wheel speeds,
+// a coherent feedback snapshot with FG pulse deltas, estimated wheel speeds,
 // applied PWM, and watchdog/fault state.
 
 // ===== I2C / protocol =====
@@ -56,7 +56,10 @@ static const uint32_t ENCODER_FAULT_DELAY_MS = 500;
 
 // ===== Geometry / scaling =====
 static const float DEFAULT_WHEEL_CIRCUMFERENCE_METERS = 0.70f;
-static const int32_t DEFAULT_ENCODER_COUNTS_PER_WHEEL_REV = 1620;
+// Provisional FG scaling. Current motor documentation suggests a 12-pulse FG
+// output per motor revolution, but absolute wheel speed still depends on the
+// real motor-to-wheel gear ratio. Keep this configurable until measured.
+static const int32_t DEFAULT_FEEDBACK_PULSES_PER_WHEEL_REV = 1620;
 
 // ===== Fault bits =====
 static const uint16_t MOTOR_FAULT_WATCHDOG_EXPIRED = (1u << 0);
@@ -298,6 +301,13 @@ void applyMotorHardware(MotorState &motor) {
   ledc_update_duty(PWM_MODE, motor.pwmChannel);
 }
 
+void forceMotorStop(MotorState &motor) {
+  motor.requestedPwmPercent = 0;
+  motor.appliedPwmPercent = 0;
+  motor.targetMetersPerSecond = 0.0f;
+  applyMotorHardware(motor);
+}
+
 void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t rampUpMs, uint32_t rampDownMs) {
   int targetSign = motor.requestedPwmPercent >= 0 ? 1 : -1;
   int targetMagnitude = abs(motor.requestedPwmPercent);
@@ -333,14 +343,15 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
 
 // ===== Control / feedback =====
 float pulsesToMeters(int32_t pulses) {
-  return (static_cast<float>(pulses) / static_cast<float>(DEFAULT_ENCODER_COUNTS_PER_WHEEL_REV)) * DEFAULT_WHEEL_CIRCUMFERENCE_METERS;
+  return (static_cast<float>(pulses) / static_cast<float>(DEFAULT_FEEDBACK_PULSES_PER_WHEEL_REV)) * DEFAULT_WHEEL_CIRCUMFERENCE_METERS;
 }
 
 void updateEncoderFault(MotorState &motor, bool leftMotor, uint32_t nowMillis) {
   bool commandedToMove = fabs(motor.targetMetersPerSecond) >= DEFAULT_ENCODER_FAULT_SPEED_THRESHOLD;
   bool measuredMoving = fabs(motor.actualMetersPerSecond) >= DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD;
+  bool unexpectedIdleMotion = !commandedToMove && measuredMoving;
 
-  if (commandedToMove && !measuredMoving) {
+  if ((commandedToMove && !measuredMoving) || unexpectedIdleMotion) {
     if (motor.encoderFaultSinceMillis == 0) {
       motor.encoderFaultSinceMillis = nowMillis;
     }
@@ -419,6 +430,12 @@ void runControlStep(uint32_t nowMillis) {
   float rightTarget = allowDrive ? g_latestCommand.rightWheelTargetMetersPerSecond : 0.0f;
   g_leftMotor.targetMetersPerSecond = leftTarget;
   g_rightMotor.targetMetersPerSecond = rightTarget;
+
+  if (!allowDrive) {
+    forceMotorStop(g_leftMotor);
+    forceMotorStop(g_rightMotor);
+    return;
+  }
 
   g_leftMotor.requestedPwmPercent = estimateOpenLoopPwm(leftTarget, g_leftMotor.actualMetersPerSecond);
   g_rightMotor.requestedPwmPercent = estimateOpenLoopPwm(rightTarget, g_rightMotor.actualMetersPerSecond);

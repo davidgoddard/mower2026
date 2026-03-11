@@ -28,3 +28,10 @@
 - Use unit tests first for pure TypeScript logic.
 - Add replay-driven tests once telemetry schemas exist.
 - Add hardware integration tests only after protocol boundaries stabilize.
+
+## Runtime and Pi tooling
+
+- Prefer Node 20 on the Raspberry Pi for this project's hardware-facing scripts.
+- Current manual I2C exercisers depend on `i2c-bus`, which is not presently a safe choice for Node 22.
+- Use `nvm` to select Node 20 before running `npm install` or any manual hardware script.
+- Rebuild native dependencies whenever the Node major version changes.

@@ -5,7 +5,8 @@ import { CommandLimiter } from "../../src/control/commandLimiter.js";
 test("CommandLimiter constrains wheel step changes", () => {
   const limiter = new CommandLimiter({
     maxWheelSpeedMetersPerSecond: 1,
-    maxWheelStepMetersPerSecond: 0.2,
+    maxWheelAccelerationStepMetersPerSecond: 0.2,
+    maxWheelDecelerationStepMetersPerSecond: 0.4,
   });
 
   const result = limiter.limit(
@@ -20,5 +21,5 @@ test("CommandLimiter constrains wheel step changes", () => {
   );
 
   assert.equal(Number(result.leftMetersPerSecond.toFixed(3)), 0.3);
-  assert.equal(Number(result.rightMetersPerSecond.toFixed(3)), -0.1);
+  assert.equal(Number(result.rightMetersPerSecond.toFixed(3)), -0.3);
 });

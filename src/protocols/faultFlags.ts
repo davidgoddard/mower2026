@@ -13,3 +13,7 @@ export const enum MotorFaultFlag {
   RightDriverFault = 1 << 4,
   OverCurrent = 1 << 5,
 }
+
+export const enum ImuFaultFlag {
+  StaleSample = 1 << 0,
+}

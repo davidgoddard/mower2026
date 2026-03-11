@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Clean-room autonomous mower control stack for Raspberry Pi and ESP nodes.",
+  "dependencies": {
+    "i2c-bus": "^5.2.3"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/**/*.test.js"

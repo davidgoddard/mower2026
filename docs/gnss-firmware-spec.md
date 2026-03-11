@@ -148,6 +148,54 @@ Rationale:
 
 These rates must still be validated against actual UM982 behavior and rover ESP CPU usage.
 
+## Current sketch startup configuration
+
+The current ESP32 GNSS sketch in `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino` configures the UM982 over `Serial2` at `115200` baud using ASCII commands.
+
+Startup sequence:
+
+1. send `ascii`
+2. pause briefly
+3. send the current configuration command list with a short delay between lines
+
+Current command list:
+
+```text
+freset
+CONFIG ANTENNA POWERON
+CONFIG NMEAVERSION V410
+CONFIG RTK TIMEOUT 600
+CONFIG RTK RELIABILITY 3 1
+CONFIG PPP TIMEOUT 120
+CONFIG HEADING OFFSET 0.0 0.0
+CONFIG HEADING RELIABILITY 3
+CONFIG HEADING FIXLENGTH
+CONFIG HEADING LENGTH 30.00 5.00
+CONFIG DGPS TIMEOUT 600
+CONFIG RTCMB1CB2A ENABLE
+CONFIG ANTENNADELTAHEN 0.0000 0.0000 0.0000
+CONFIG PPS ENABLE GPS POSITIVE 500000 1000 0 0
+CONFIG SIGNALGROUP 3 6
+CONFIG ANTIJAM AUTO
+CONFIG AGNSS DISABLE
+CONFIG BASEOBSFILTER DISABLE
+CONFIG LOGSEQ 1
+CONFIG COM1 115200
+CONFIG COM2 115200
+CONFIG COM3 115200
+PVTSLNA COM2 0.1
+RECTIMEA COM2 1
+UNIHEADINGA COM2 0.2
+```
+
+Interpretation of the runtime log commands:
+
+- `PVTSLNA COM2 0.1` requests `PVTSLNA` at `10 Hz`
+- `RECTIMEA COM2 1` requests `RECTIMEA` at `1 Hz`
+- `UNIHEADINGA COM2 0.2` requests `UNIHEADINGA` at `5 Hz`
+
+The heading-length command currently encodes an antenna baseline assumption of about `0.30 m` with `0.05 m` tolerance.
+
 ## GNSS ESP processing pipeline
 
 1. Receive RTCM fragments over ESP-NOW from the base node.
@@ -158,6 +206,23 @@ These rates must still be validated against actual UM982 behavior and rover ESP 
 6. Optionally read `UNIHEADINGB` for heading-quality enrichment.
 7. Convert receiver fields into one compact navigation sample.
 8. Expose that compact sample to the Pi over I2C.
+
+## Indoor comms test guidance
+
+The current Pi-side GNSS manual test is intended to prove I2C comms and coherent framing even when the mower is indoors.
+
+Indoor success criteria:
+
+- repeated valid framed GNSS samples
+- low or zero invalid read count
+- fresh `sampleAgeMillis`
+- `fixType` may still be `none` or `single`
+
+Indoor non-goals:
+
+- precise local position
+- trustworthy heading
+- RTK float/fixed confirmation
 
 ## Pi-facing compact sample mapping
 
@@ -251,13 +316,9 @@ These were effectively lost in the legacy rover ESP and should be retained now:
 - baseline length
 - explicit freshness
 
-## Open decisions
+## Remaining implementation decisions
 
-These remain unresolved and block final firmware implementation details:
-
-- whether `UNIHEADINGB` is required continuously or only for diagnostics
-- whether heading accuracy should be taken only from `UNIHEADINGB` or approximated from heading type when absent
-- whether the GNSS ESP should keep any raw lat/lon internally available for debug endpoints
+The remaining GNSS firmware decisions and data gaps are tracked centrally in [requirements-traceability.md](requirements-traceability.md).
 
 ## Recommended next implementation step
 

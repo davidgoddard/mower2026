@@ -59,3 +59,105 @@ test("PoseEstimator blends GNSS position and heading toward measurements", () =>
   assert.equal(Number(estimate.headingDegrees.toFixed(3)), 72);
   assert.equal(estimate.confidence, 0.9);
 });
+
+test("PoseEstimator integrates IMU yaw rate into heading", () => {
+  const estimator = new PoseEstimator({
+    wheelBaseMeters: 0.5,
+    initialPose: {
+      xMeters: 0,
+      yMeters: 0,
+      headingDegrees: 0,
+      speedMetersPerSecond: 0,
+      yawRateDegreesPerSecond: 0,
+      confidence: 0,
+      timestampMillis: 1_000,
+    },
+  });
+
+  const estimate = estimator.ingest({
+    imu: {
+      timestampMillis: 1_500,
+      angularVelocity: {
+        xDegreesPerSecond: 0,
+        yDegreesPerSecond: 0,
+        zDegreesPerSecond: 20,
+      },
+      acceleration: {
+        xMetersPerSecondSquared: 0,
+        yMetersPerSecondSquared: 0,
+        zMetersPerSecondSquared: 9.81,
+      },
+    },
+    faultFlags: 0,
+    stale: false,
+  });
+
+  assert.equal(Number(estimate.headingDegrees.toFixed(3)), 7);
+  assert.equal(Number(estimate.yawRateDegreesPerSecond.toFixed(3)), 14);
+  assert.equal(estimate.timestampMillis, 1_500);
+});
+
+test("PoseEstimator keeps IMU integration stable across mixed timestamp domains", () => {
+  const estimator = new PoseEstimator({
+    wheelBaseMeters: 0.5,
+    initialPose: {
+      xMeters: 0,
+      yMeters: 0,
+      headingDegrees: 0,
+      speedMetersPerSecond: 0,
+      yawRateDegreesPerSecond: 0,
+      confidence: 0,
+      timestampMillis: 1_000,
+    },
+  });
+
+  estimator.ingest({
+    imu: {
+      timestampMillis: 1_500,
+      angularVelocity: {
+        xDegreesPerSecond: 0,
+        yDegreesPerSecond: 0,
+        zDegreesPerSecond: 20,
+      },
+      acceleration: {
+        xMetersPerSecondSquared: 0,
+        yMetersPerSecondSquared: 0,
+        zMetersPerSecondSquared: 9.81,
+      },
+    },
+    faultFlags: 0,
+    stale: false,
+  });
+
+  estimator.ingest({
+    heading: {
+      headingDegrees: 5,
+      accuracyDegrees: 1,
+      timestampMillis: 100,
+      source: "gnss",
+    },
+    faultFlags: 0,
+    stale: false,
+  });
+
+  const estimate = estimator.ingest({
+    imu: {
+      timestampMillis: 1_600,
+      angularVelocity: {
+        xDegreesPerSecond: 0,
+        yDegreesPerSecond: 0,
+        zDegreesPerSecond: 20,
+      },
+      acceleration: {
+        xMetersPerSecondSquared: 0,
+        yMetersPerSecondSquared: 0,
+        zMetersPerSecondSquared: 9.81,
+      },
+    },
+    faultFlags: 0,
+    stale: false,
+  });
+
+  assert.equal(Number(estimate.headingDegrees.toFixed(3)), 6.8);
+  assert.equal(estimate.timestampMillis, 1_600);
+});

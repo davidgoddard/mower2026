@@ -21,10 +21,25 @@ export interface WheelOdometryMeasurement {
   readonly rightSpeedMetersPerSecond: number;
 }
 
+export interface ImuMeasurement {
+  readonly timestampMillis: number;
+  readonly angularVelocity: {
+    readonly xDegreesPerSecond: number;
+    readonly yDegreesPerSecond: number;
+    readonly zDegreesPerSecond: number;
+  };
+  readonly acceleration: {
+    readonly xMetersPerSecondSquared: number;
+    readonly yMetersPerSecondSquared: number;
+    readonly zMetersPerSecondSquared: number;
+  };
+}
+
 export interface MeasurementBundle {
   readonly position?: PositionMeasurement;
   readonly heading?: HeadingMeasurement;
   readonly wheelOdometry?: WheelOdometryMeasurement;
+  readonly imu?: ImuMeasurement;
   readonly faultFlags: number;
   readonly stale: boolean;
 }

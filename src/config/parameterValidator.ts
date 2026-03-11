@@ -18,8 +18,13 @@ export function validateParameters(parameters: ParameterSet): ParameterValidatio
   requirePositive(parameters, "antennaBaselineMeters", issues);
   requirePositive(parameters, "maxWheelSpeedMetersPerSecond", issues);
   requirePositive(parameters, "maxWheelAccelerationMetersPerSecondSquared", issues);
+  requirePositive(parameters, "maxWheelDecelerationMetersPerSecondSquared", issues);
   requirePositive(parameters, "motorRampUpMillis", issues);
   requirePositive(parameters, "motorRampDownMillis", issues);
+  requirePositive(parameters, "leftMotorForwardScale", issues);
+  requirePositive(parameters, "leftMotorReverseScale", issues);
+  requirePositive(parameters, "rightMotorForwardScale", issues);
+  requirePositive(parameters, "rightMotorReverseScale", issues);
   requirePositive(parameters, "waypointArrivalToleranceMeters", issues);
   requirePositive(parameters, "headingArrivalToleranceDegrees", issues);
 
@@ -41,6 +46,34 @@ export function validateParameters(parameters: ParameterSet): ParameterValidatio
     issues.push({
       field: "motorRampDownMillis",
       message: "motor ramp-down is unexpectedly large relative to ramp-up",
+    });
+  }
+
+  if (!isDirectionSign(parameters.leftMotorForwardSign)) {
+    issues.push({
+      field: "leftMotorForwardSign",
+      message: "left motor forward sign must be either -1 or 1",
+    });
+  }
+
+  if (!isDirectionSign(parameters.rightMotorForwardSign)) {
+    issues.push({
+      field: "rightMotorForwardSign",
+      message: "right motor forward sign must be either -1 or 1",
+    });
+  }
+
+  if (!isDirectionSign(parameters.controllerSteeringSign)) {
+    issues.push({
+      field: "controllerSteeringSign",
+      message: "controller steering sign must be either -1 or 1",
+    });
+  }
+
+  if (!isDirectionSign(parameters.controllerSpeedSign)) {
+    issues.push({
+      field: "controllerSpeedSign",
+      message: "controller speed sign must be either -1 or 1",
     });
   }
 
@@ -66,4 +99,8 @@ function requirePositive(
       message: `${String(field)} must be positive`,
     });
   }
+}
+
+function isDirectionSign(value: number): boolean {
+  return value === -1 || value === 1;
 }

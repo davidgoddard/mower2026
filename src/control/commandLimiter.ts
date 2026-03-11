@@ -3,7 +3,8 @@ import { clamp } from "../util/math.js";
 
 export interface CommandLimiterOptions {
   readonly maxWheelSpeedMetersPerSecond: number;
-  readonly maxWheelStepMetersPerSecond: number;
+  readonly maxWheelAccelerationStepMetersPerSecond: number;
+  readonly maxWheelDecelerationStepMetersPerSecond: number;
 }
 
 export class CommandLimiter {
@@ -14,17 +15,26 @@ export class CommandLimiter {
       leftMetersPerSecond: clampStep(
         clamp(requested.leftMetersPerSecond, -this.options.maxWheelSpeedMetersPerSecond, this.options.maxWheelSpeedMetersPerSecond),
         previous.leftMetersPerSecond,
-        this.options.maxWheelStepMetersPerSecond,
+        this.options.maxWheelAccelerationStepMetersPerSecond,
+        this.options.maxWheelDecelerationStepMetersPerSecond,
       ),
       rightMetersPerSecond: clampStep(
         clamp(requested.rightMetersPerSecond, -this.options.maxWheelSpeedMetersPerSecond, this.options.maxWheelSpeedMetersPerSecond),
         previous.rightMetersPerSecond,
-        this.options.maxWheelStepMetersPerSecond,
+        this.options.maxWheelAccelerationStepMetersPerSecond,
+        this.options.maxWheelDecelerationStepMetersPerSecond,
       ),
     };
   }
 }
 
-function clampStep(requested: number, previous: number, maxStep: number): number {
+function clampStep(
+  requested: number,
+  previous: number,
+  maxAccelerationStep: number,
+  maxDecelerationStep: number,
+): number {
+  const movingFurtherFromZero = Math.abs(requested) > Math.abs(previous) && Math.sign(requested || 1) === Math.sign(previous || 1);
+  const maxStep = movingFurtherFromZero ? maxAccelerationStep : maxDecelerationStep;
   return clamp(requested, previous - maxStep, previous + maxStep);
 }

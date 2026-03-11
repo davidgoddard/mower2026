@@ -90,7 +90,8 @@ test("RuntimeApp runs one end-to-end control cycle and emits a wheel command", a
     }),
     commandLimiter: new CommandLimiter({
       maxWheelSpeedMetersPerSecond: 1,
-      maxWheelStepMetersPerSecond: 1,
+      maxWheelAccelerationStepMetersPerSecond: 1,
+      maxWheelDecelerationStepMetersPerSecond: 1,
     }),
     parameterStore,
     telemetryLogger,
@@ -113,7 +114,10 @@ test("RuntimeApp runs one end-to-end control cycle and emits a wheel command", a
 
   const command = decodeWheelSpeedCommand(commandFrames[0]!.payload);
   assert.equal(command.enableDrive, true);
-  assert.equal(command.leftWheelTargetMetersPerSecond > command.rightWheelTargetMetersPerSecond, true);
+  assert.equal(
+    Math.abs(command.leftWheelTargetMetersPerSecond) > Math.abs(command.rightWheelTargetMetersPerSecond),
+    true,
+  );
   assert.equal(telemetryLogger.entries("pose.estimate").length, 1);
   assert.equal(eventLogger.entries()[0]?.eventName, "runtime.initialised");
 });
@@ -185,7 +189,8 @@ test("RuntimeApp sends a disabled command when safety blocks motion", async () =
     }),
     commandLimiter: new CommandLimiter({
       maxWheelSpeedMetersPerSecond: 1,
-      maxWheelStepMetersPerSecond: 1,
+      maxWheelAccelerationStepMetersPerSecond: 1,
+      maxWheelDecelerationStepMetersPerSecond: 1,
     }),
     parameterStore,
     telemetryLogger,
@@ -210,4 +215,125 @@ test("RuntimeApp sends a disabled command when safety blocks motion", async () =
   assert.equal(command.leftWheelTargetMetersPerSecond, 0);
   assert.equal(command.rightWheelTargetMetersPerSecond, 0);
   assert.equal(eventLogger.entries().some((entry) => entry.eventName === "runtime.motion_inhibited"), true);
+});
+
+test("RuntimeApp ingests IMU when imu dependencies are provided", async () => {
+  const bus = new InMemoryBusAdapter();
+  const parameterStore = new InMemoryParameterStore();
+  const gnssNodeClient = new PollingGnssNodeClient(bus);
+  const motorNodeClient = new PollingMotorNodeClient(bus);
+  const telemetryLogger = new MemoryTelemetryLogger();
+  const eventLogger = new MemoryEventLogger();
+  let imuReads = 0;
+
+  bus.setResponder(NodeId.Gnss, (requestFrame) => {
+    const request = decodeFrame(requestFrame);
+    return PollingGnssNodeClient.encodeResponse(
+      {
+        timestampMillis: 1_000,
+        xMeters: 0,
+        yMeters: 0,
+        headingDegrees: 0,
+        positionAccuracyMeters: 0.01,
+        headingAccuracyDegrees: 0.5,
+        fixType: "fixed",
+        satellitesInUse: 18,
+        sampleAgeMillis: 10,
+      },
+      request.header.sequence,
+    );
+  });
+
+  bus.setResponder(NodeId.Motor, (requestFrame) => {
+    const request = decodeFrame(requestFrame);
+    return PollingMotorNodeClient.encodeFeedbackResponse(
+      {
+        timestampMillis: 1_000,
+        leftWheelActualMetersPerSecond: 0,
+        rightWheelActualMetersPerSecond: 0,
+        leftEncoderDelta: 0,
+        rightEncoderDelta: 0,
+        leftPwmApplied: 0,
+        rightPwmApplied: 0,
+        watchdogHealthy: true,
+        faultFlags: 0,
+      },
+      request.header.sequence,
+    );
+  });
+
+  const app = new RuntimeApp({
+    bus,
+    gnssNodeClient,
+    motorNodeClient,
+    gnssAdapter: new GnssAdapter({ staleAfterMillis: 250, now: () => 1_100 }),
+    motorFeedbackAdapter: new MotorFeedbackAdapter({
+      leftMetersPerEncoderCount: 0.001,
+      rightMetersPerEncoderCount: 0.001,
+      staleAfterMillis: 250,
+      now: () => 1_100,
+    }),
+    poseEstimator: new PoseEstimator({ wheelBaseMeters: 0.5 }),
+    lineTracker: new LineTracker({
+      nominalSpeedMetersPerSecond: 0.5,
+      maxSpeedMetersPerSecond: 0.8,
+      crossTrackGain: -20,
+      headingGain: 1,
+      maxYawRateDegreesPerSecond: 90,
+    }),
+    wheelCommandPlanner: new WheelCommandPlanner({
+      wheelBaseMeters: 0.5,
+      maxWheelSpeedMetersPerSecond: 1,
+    }),
+    commandLimiter: new CommandLimiter({
+      maxWheelSpeedMetersPerSecond: 1,
+      maxWheelAccelerationStepMetersPerSecond: 1,
+      maxWheelDecelerationStepMetersPerSecond: 1,
+    }),
+    parameterStore,
+    telemetryLogger,
+    eventLogger,
+    safetyManager: new PermissiveSafetyManager(),
+    imuSensor: {
+      async read() {
+        imuReads += 1;
+        return {
+          timestampMillis: 1_100,
+          angularVelocity: {
+            xDegreesPerSecond: 0,
+            yDegreesPerSecond: 0,
+            zDegreesPerSecond: 10,
+          },
+          acceleration: {
+            xMetersPerSecondSquared: 0,
+            yMetersPerSecondSquared: 0,
+            zMetersPerSecondSquared: 9.81,
+          },
+        };
+      },
+    },
+    imuAdapter: {
+      adapt(sample) {
+        return {
+          imu: {
+            timestampMillis: sample.timestampMillis,
+            angularVelocity: sample.angularVelocity,
+            acceleration: sample.acceleration,
+          },
+          faultFlags: 0,
+          stale: false,
+        };
+      },
+    },
+  });
+
+  await app.initialise();
+  app.setActiveSegment({
+    start: { xMeters: 0, yMeters: 0, headingDegrees: 0 },
+    end: { xMeters: 5, yMeters: 0, headingDegrees: 0 },
+  });
+
+  await app.runCycle();
+
+  assert.equal(imuReads, 1);
 });

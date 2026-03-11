@@ -187,7 +187,6 @@ It should:
 - report fault bits using the shared motor fault bitfield
 
 See [motor-firmware-spec.md](/Volumes/mower/mower/docs/motor-firmware-spec.md).
-Migration details are in [motor-firmware-migration.md](/Volumes/mower/mower/docs/motor-firmware-migration.md).
 
 ## Shared fault bits
 

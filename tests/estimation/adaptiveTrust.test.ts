@@ -27,6 +27,7 @@ test("AdaptiveTrust favors fixed RTK position over stale data", () => {
     positionTrust: 0.9,
     headingTrust: 0.8,
     wheelTrust: 0,
+    imuTrust: 0,
   });
 });
 
@@ -49,6 +50,7 @@ test("AdaptiveTrust suppresses stale measurements", () => {
       positionTrust: 0,
       headingTrust: 0,
       wheelTrust: 0,
+      imuTrust: 0,
     },
   );
 });

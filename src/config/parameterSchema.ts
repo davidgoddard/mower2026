@@ -10,8 +10,17 @@ export interface ParameterSet {
   readonly frontAntennaForwardOfAxleMeters: number;
   readonly maxWheelSpeedMetersPerSecond: number;
   readonly maxWheelAccelerationMetersPerSecondSquared: number;
+  readonly maxWheelDecelerationMetersPerSecondSquared: number;
   readonly motorRampUpMillis: number;
   readonly motorRampDownMillis: number;
+  readonly leftMotorForwardSign: number;
+  readonly rightMotorForwardSign: number;
+  readonly leftMotorForwardScale: number;
+  readonly leftMotorReverseScale: number;
+  readonly rightMotorForwardScale: number;
+  readonly rightMotorReverseScale: number;
+  readonly controllerSteeringSign: number;
+  readonly controllerSpeedSign: number;
   readonly waypointArrivalToleranceMeters: number;
   readonly headingArrivalToleranceDegrees: number;
 }

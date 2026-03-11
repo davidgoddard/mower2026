@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Mower Hardware Dashboard</title>
+    <style>
+      :root {
+        --bg: #f0efe8;
+        --ink: #1f2a1d;
+        --muted: #5d6955;
+        --panel: rgba(255, 255, 255, 0.82);
+        --line: rgba(31, 42, 29, 0.12);
+        --ok: #2f8f65;
+        --warn: #d57b2a;
+        --bad: #bf4f3b;
+        --accent: #1f5e7a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top right, rgba(31, 94, 122, 0.16), transparent 30%),
+          linear-gradient(180deg, #faf8f1, #dde3d5 65%, #cfd7c7);
+      }
+
+      .page {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 18px 14px 40px;
+      }
+
+      .hero {
+        margin-bottom: 16px;
+        padding: 22px 18px;
+        background: linear-gradient(135deg, rgba(255,255,255,0.88), rgba(232, 236, 225, 0.88));
+        border: 1px solid var(--line);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2rem, 7vw, 3.4rem);
+        line-height: 0.95;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+        font-size: 0.98rem;
+      }
+
+      .status-row, .grid, .checks, .logs {
+        display: grid;
+        gap: 12px;
+      }
+
+      .status-row {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin-bottom: 12px;
+      }
+
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .checks, .logs {
+        margin-top: 12px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        padding: 14px;
+        backdrop-filter: blur(8px);
+      }
+
+      .wide {
+        grid-column: 1 / -1;
+      }
+
+      .label {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+
+      .big {
+        margin-top: 8px;
+        font-size: 1.75rem;
+      }
+
+      .sub {
+        margin-top: 8px;
+        color: var(--muted);
+        line-height: 1.45;
+        font-size: 0.95rem;
+      }
+
+      .badge {
+        display: inline-block;
+        margin-top: 10px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .ok {
+        background: rgba(47, 143, 101, 0.14);
+        color: var(--ok);
+      }
+
+      .warn {
+        background: rgba(213, 123, 42, 0.14);
+        color: var(--warn);
+      }
+
+      .bad {
+        background: rgba(191, 79, 59, 0.14);
+        color: var(--bad);
+      }
+
+      .pair {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .mini {
+        padding: 10px;
+        background: rgba(255,255,255,0.45);
+        border: 1px solid var(--line);
+      }
+
+      .mini-value {
+        margin-top: 6px;
+        font-size: 1.08rem;
+      }
+
+      .check {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
+
+      pre {
+        margin: 10px 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        color: #233028;
+      }
+
+      details summary {
+        cursor: pointer;
+        color: var(--accent);
+      }
+
+      @media (max-width: 760px) {
+        .status-row,
+        .grid,
+        .pair {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <h1>Mower Hardware Dashboard</h1>
+        <p class="subtitle">
+          Phone view for live manual-test verification. It reads the current IMU, GNSS, and motor log files on the Pi and refreshes automatically.
+        </p>
+      </section>
+
+      <section class="status-row">
+        <div class="card">
+          <div class="label">IMU</div>
+          <div class="big" id="imuStatus">Waiting</div>
+          <div class="sub" id="imuSummary">No IMU sample yet</div>
+        </div>
+        <div class="card">
+          <div class="label">GNSS</div>
+          <div class="big" id="gnssStatus">Waiting</div>
+          <div class="sub" id="gnssSummary">No GNSS sample yet</div>
+        </div>
+        <div class="card">
+          <div class="label">Motion</div>
+          <div class="big" id="motionStatus">Waiting</div>
+          <div class="sub" id="motionSummary">No motor feedback yet</div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="label">IMU Orientation</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Roll</div>
+              <div class="mini-value" id="imuRoll">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Pitch</div>
+              <div class="mini-value" id="imuPitch">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Gyro Z</div>
+              <div class="mini-value" id="imuGyroZ">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Gravity</div>
+              <div class="mini-value" id="imuGravity">-</div>
+            </div>
+          </div>
+          <div class="sub" id="imuExpected">Expected: still mower should show small gyro and gravity near 9.8.</div>
+        </article>
+
+        <article class="card">
+          <div class="label">GNSS State</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Fix</div>
+              <div class="mini-value" id="gnssFix">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Satellites</div>
+              <div class="mini-value" id="gnssSats">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Heading</div>
+              <div class="mini-value" id="gnssHeading">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Speed</div>
+              <div class="mini-value" id="gnssSpeed">-</div>
+            </div>
+          </div>
+          <div class="sub" id="gnssExpected">Expected: indoor tests often show poor fix and unusable heading.</div>
+        </article>
+
+        <article class="card">
+          <div class="label">Motor Feedback</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Direction</div>
+              <div class="mini-value" id="motorDirection">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Speed</div>
+              <div class="mini-value" id="motorSpeed">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Turn Bias</div>
+              <div class="mini-value" id="motorTurn">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Watchdog</div>
+              <div class="mini-value" id="motorWatchdog">-</div>
+            </div>
+          </div>
+          <div class="sub" id="motorExpected">Expected: watchdog can drop after stop commands; motion should match the active manual test step.</div>
+        </article>
+
+        <article class="card">
+          <div class="label">Position Snapshot</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">X</div>
+              <div class="mini-value" id="gnssX">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Y</div>
+              <div class="mini-value" id="gnssY">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Age</div>
+              <div class="mini-value" id="gnssAge">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Accuracy</div>
+              <div class="mini-value" id="gnssAccuracy">-</div>
+            </div>
+          </div>
+          <div class="sub" id="serverTimestamp">-</div>
+        </article>
+      </section>
+
+      <section class="checks">
+        <article class="card wide">
+          <div class="label">Sanity Checks</div>
+          <div id="checksList" class="sub">Waiting for data...</div>
+        </article>
+      </section>
+
+      <section class="logs">
+        <article class="card wide">
+          <div class="label">Recent Log Tails</div>
+          <details>
+            <summary>IMU log</summary>
+            <pre id="imuLogText"></pre>
+          </details>
+          <details>
+            <summary>GNSS log</summary>
+            <pre id="gnssLogText"></pre>
+          </details>
+          <details>
+            <summary>Motor log</summary>
+            <pre id="motorLogText"></pre>
+          </details>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const el = {
+        imuStatus: document.getElementById("imuStatus"),
+        imuSummary: document.getElementById("imuSummary"),
+        gnssStatus: document.getElementById("gnssStatus"),
+        gnssSummary: document.getElementById("gnssSummary"),
+        motionStatus: document.getElementById("motionStatus"),
+        motionSummary: document.getElementById("motionSummary"),
+        imuRoll: document.getElementById("imuRoll"),
+        imuPitch: document.getElementById("imuPitch"),
+        imuGyroZ: document.getElementById("imuGyroZ"),
+        imuGravity: document.getElementById("imuGravity"),
+        imuExpected: document.getElementById("imuExpected"),
+        gnssFix: document.getElementById("gnssFix"),
+        gnssSats: document.getElementById("gnssSats"),
+        gnssHeading: document.getElementById("gnssHeading"),
+        gnssSpeed: document.getElementById("gnssSpeed"),
+        gnssExpected: document.getElementById("gnssExpected"),
+        motorDirection: document.getElementById("motorDirection"),
+        motorSpeed: document.getElementById("motorSpeed"),
+        motorTurn: document.getElementById("motorTurn"),
+        motorWatchdog: document.getElementById("motorWatchdog"),
+        motorExpected: document.getElementById("motorExpected"),
+        gnssX: document.getElementById("gnssX"),
+        gnssY: document.getElementById("gnssY"),
+        gnssAge: document.getElementById("gnssAge"),
+        gnssAccuracy: document.getElementById("gnssAccuracy"),
+        serverTimestamp: document.getElementById("serverTimestamp"),
+        checksList: document.getElementById("checksList"),
+        imuLogText: document.getElementById("imuLogText"),
+        gnssLogText: document.getElementById("gnssLogText"),
+        motorLogText: document.getElementById("motorLogText"),
+      };
+
+      function format(value, decimals = 2) {
+        return Number(value).toFixed(decimals);
+      }
+
+      function setBadge(node, text, status) {
+        node.textContent = text;
+        node.className = `big badge ${status}`;
+      }
+
+      function renderImu(imu) {
+        if (!imu.ok) {
+          setBadge(el.imuStatus, "Missing", "bad");
+          el.imuSummary.textContent = imu.message;
+          return;
+        }
+
+        const data = imu.data;
+        setBadge(el.imuStatus, data.derived.stationaryGyroLikely ? "Healthy" : "Active", data.derived.stationaryGyroLikely ? "ok" : "warn");
+        el.imuSummary.textContent = `timestamp ${data.timestampMillis}`;
+        el.imuRoll.textContent = `${format(data.derived.rollDegrees)} deg`;
+        el.imuPitch.textContent = `${format(data.derived.pitchDegrees)} deg`;
+        el.imuGyroZ.textContent = `${format(data.angularVelocity.zDegreesPerSecond, 3)} deg/s`;
+        el.imuGravity.textContent = `${format(data.derived.gravityMagnitude)} m/s^2`;
+        el.imuExpected.textContent = Math.abs(data.derived.gravityMagnitude - 9.80665) < 0.6
+          ? "Expected: gravity magnitude is in a healthy range."
+          : "Warning: gravity magnitude is noticeably off; check mounting or movement.";
+      }
+
+      function renderGnss(gnss) {
+        if (!gnss.ok) {
+          setBadge(el.gnssStatus, "Missing", "bad");
+          el.gnssSummary.textContent = gnss.message;
+          return;
+        }
+
+        const data = gnss.data;
+        const status = data.sample.fixType >= 2 ? "ok" : "warn";
+        setBadge(el.gnssStatus, data.derived.fixTypeLabel, status);
+        el.gnssSummary.textContent = `sample age ${data.sample.sampleAgeMillis} ms`;
+        el.gnssFix.textContent = data.derived.fixTypeLabel;
+        el.gnssSats.textContent = String(data.sample.satellitesInUse);
+        el.gnssHeading.textContent = data.sample.headingDegrees == null ? "unavailable" : `${format(data.sample.headingDegrees)} deg`;
+        el.gnssSpeed.textContent = `${format(data.derived.speedMetersPerSecond, 3)} m/s`;
+        el.gnssX.textContent = `${format(data.sample.xMeters, 3)} m`;
+        el.gnssY.textContent = `${format(data.sample.yMeters, 3)} m`;
+        el.gnssAge.textContent = `${data.sample.sampleAgeMillis} ms`;
+        el.gnssAccuracy.textContent = `${format(data.sample.positionAccuracyMeters, 3)} m`;
+        el.gnssExpected.textContent = data.sample.fixType <= 1
+          ? "Expected indoors: weak fix or no usable heading is normal."
+          : "Expected outdoors: heading and speed should become stable with a stronger fix.";
+      }
+
+      function renderMotor(motor) {
+        if (!motor.ok) {
+          setBadge(el.motionStatus, "Missing", "bad");
+          el.motionSummary.textContent = motor.message;
+          return;
+        }
+
+        const data = motor.data;
+        setBadge(el.motionStatus, data.derived.directionLabel, data.watchdogHealthy ? "ok" : "warn");
+        el.motionSummary.textContent = data._label ? `latest step ${data._label}` : `timestamp ${data.timestampMillis}`;
+        el.motorDirection.textContent = data.derived.directionLabel;
+        el.motorSpeed.textContent = `${format(data.derived.speedMetersPerSecond, 3)} m/s`;
+        el.motorTurn.textContent = data.derived.turningLabel;
+        el.motorWatchdog.textContent = data.watchdogHealthy ? "healthy" : `fault ${data.faultFlags}`;
+        el.motorExpected.textContent = data.watchdogHealthy
+          ? "Expected during active motion tests: watchdog should remain healthy."
+          : "Expected after stop or idle: watchdog may expire and set fault bit 0.";
+      }
+
+      function renderChecks(checks) {
+        if (checks.length === 0) {
+          el.checksList.textContent = "No derived checks available.";
+          return;
+        }
+
+        el.checksList.innerHTML = checks.map((item) => {
+          return `<div class="check"><span>${item.name}</span><span class="badge ${item.status === "ok" ? "ok" : "warn"}">${item.detail}</span></div>`;
+        }).join("");
+      }
+
+      function renderLogs(logs) {
+        el.imuLogText.textContent = logs.imu;
+        el.gnssLogText.textContent = logs.gnss;
+        el.motorLogText.textContent = logs.motor;
+      }
+
+      async function refresh() {
+        const response = await fetch("/api/state", { cache: "no-store" });
+        const state = await response.json();
+
+        renderImu(state.imu);
+        renderGnss(state.gnss);
+        renderMotor(state.motor);
+        renderChecks(state.expectations);
+        renderLogs(state.logs);
+        el.serverTimestamp.textContent = `Last refresh: ${new Date(state.serverTimestampMillis).toLocaleTimeString()}`;
+
+        window.setTimeout(refresh, state.refreshIntervalMillis || 1000);
+      }
+
+      refresh().catch((error) => {
+        el.serverTimestamp.textContent = `Dashboard error: ${error.message}`;
+        window.setTimeout(() => refresh().catch(() => {}), 1500);
+      });
+    </script>
+  </body>
+</html>
