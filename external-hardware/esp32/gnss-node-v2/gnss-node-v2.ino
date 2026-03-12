@@ -6,7 +6,8 @@
 // Second-generation GNSS node for ESP32 + UM982.
 // Responsibilities:
 // - relay RTCM corrections from a base station via ESP-NOW
-// - configure the UM982 for the logs we need
+// - assume the UM982 has already been provisioned with persistent logs
+// - optionally verify that the expected logs are present
 // - parse PVTSLNA / RECTIMEA / UNIHEADINGA
 // - expose a compact framed GNSS sample to the Pi over I2C
 //
@@ -22,7 +23,7 @@ static const uint8_t MESSAGE_TYPE_GNSS_SAMPLE = 0x01;
 
 static const size_t FRAME_HEADER_SIZE = 9;
 static const size_t FRAME_CRC_SIZE = 2;
-static const size_t GNSS_PAYLOAD_SIZE = 26;
+static const size_t GNSS_PAYLOAD_SIZE = 36;
 static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + GNSS_PAYLOAD_SIZE + FRAME_CRC_SIZE;
 
 // ===== ESP32 pins =====
@@ -30,6 +31,9 @@ static const uint8_t I2C_SDA_PIN = 21;
 static const uint8_t I2C_SCL_PIN = 22;
 static const uint8_t UM982_RX_PIN = 16;
 static const uint8_t UM982_TX_PIN = 17;
+static const uint8_t LED_HEADING_PIN = 5;
+static const uint8_t LED_POSITION_PIN = 18;
+static const uint8_t LED_RTCM_PIN = 19;
 
 HardwareSerial UM982(2);
 
@@ -47,16 +51,85 @@ static const float ANTENNA_BASELINE_TOLERANCE_METERS = 0.05f;
 // debug or payload expansion, but the current compact payload does not use it directly.
 static const float FRONT_ANTENNA_FORWARD_OF_AXLE_METERS = 0.07f;
 
+// ===== Receiver startup policy =====
+// Default operating model:
+// - provision the UM982 once outside this sketch
+// - save that receiver configuration persistently on the UM982 itself
+// - let the ESP simply read the already-configured logs on every boot
+//
+// Re-enabling boot-time receiver configuration is kept as an escape hatch for
+// bench work only because it has proven fragile on the mower hardware.
+static const bool CONFIGURE_RECEIVER_AT_BOOT = false;
+static const bool VERIFY_EXPECTED_LOGS_AT_BOOT = true;
+
 // ===== RTCM relay =====
 static const size_t RTCM_BUFFER_SIZE = 2048;
 static uint8_t g_rtcmBuffer[RTCM_BUFFER_SIZE];
 static int g_rtcmIndex = 0;
 static uint16_t g_lastRtcmSequence = 0;
 static uint32_t g_lastRtcmMillis = 0;
+static uint32_t g_lastRtcmLedPulseMillis = 0;
+
+// ===== LED status =====
+enum LedQualityState : uint8_t {
+  LED_QUALITY_NONE = 0,
+  LED_QUALITY_SINGLE = 1,
+  LED_QUALITY_DIFF = 2,
+  LED_QUALITY_FLOAT = 3,
+  LED_QUALITY_FIXED = 4,
+};
+
+static LedQualityState g_headingLedState = LED_QUALITY_NONE;
+static LedQualityState g_positionLedState = LED_QUALITY_NONE;
+
+static uint32_t g_lastHeadingLedCycleMillis = 0;
+static uint32_t g_lastHeadingLedFlashMillis = 0;
+static uint8_t g_headingLedFlashCount = 0;
+static bool g_headingLedOn = false;
+
+static uint32_t g_lastPositionLedCycleMillis = 0;
+static uint32_t g_lastPositionLedFlashMillis = 0;
+static uint8_t g_positionLedFlashCount = 0;
+static bool g_positionLedOn = false;
 
 // ===== Receiver parsing =====
 static char g_lineBuffer[1024];
 static size_t g_lineLength = 0;
+static uint32_t g_lastAnyReceiverLineMillis = 0;
+static uint32_t g_lastDebugPrintMillis = 0;
+static uint32_t g_totalReceiverLineCount = 0;
+static uint32_t g_totalPvtslnaCount = 0;
+static uint32_t g_totalRectimeaCount = 0;
+static uint32_t g_totalUniheadingaCount = 0;
+static uint32_t g_totalUnknownLineCount = 0;
+static uint32_t g_lastUniloglistMillis = 0;
+static uint32_t g_lastDeviceReadyMillis = 0;
+static uint32_t g_totalDeviceReadyCount = 0;
+static uint8_t g_startupRawLinePrintCount = 0;
+static const uint8_t STARTUP_RAW_LINE_PRINT_LIMIT = 24;
+static bool g_waitingForResetReady = false;
+static bool g_resetReadySeen = false;
+static bool g_waitingForCommandResponse = false;
+static bool g_commandResponseSeen = false;
+static bool g_commandResponseOk = false;
+static String g_expectedCommandResponse = "";
+static bool g_waitingForUniloglist = false;
+static bool g_seenUniloglistHeader = false;
+static bool g_unilogPvtslnaActive = false;
+static bool g_unilogRectimeaActive = false;
+static bool g_unilogUniheadingaActive = false;
+static const uint32_t COMMAND_RESPONSE_TIMEOUT_MILLIS = 3000;
+static const uint32_t DELAYED_READY_TIMEOUT_MILLIS = 20000;
+
+enum CommandWaitMode : uint8_t {
+  WAIT_OK_ONLY = 0,
+  WAIT_OK_THEN_READY = 1,
+};
+
+struct ReceiverCommandStep {
+  const char *command;
+  CommandWaitMode waitMode;
+};
 
 enum CompactFixType : uint8_t {
   FIX_NONE = 0,
@@ -110,6 +183,8 @@ double g_originLongitudeDegrees = 0.0;
 uint16_t g_lastRequestSequence = 0;
 uint8_t g_txFrame[MAX_FRAME_SIZE];
 size_t g_txFrameLength = 0;
+
+void readUm982Lines();
 
 // ===== Helpers =====
 uint16_t crc16Ccitt(const uint8_t *data, size_t length) {
@@ -231,6 +306,38 @@ CompactFixType mapPositionType(const String &type) {
   return FIX_NONE;
 }
 
+LedQualityState mapHeadingLedState(const String &type) {
+  if (type == "NARROW_INT" || type == "L1_INT") {
+    return LED_QUALITY_FIXED;
+  }
+  if (type == "NARROW_FLOAT" || type == "L1_FLOAT") {
+    return LED_QUALITY_FLOAT;
+  }
+  if (type == "PSRDIFF") {
+    return LED_QUALITY_DIFF;
+  }
+  if (type == "SINGLE") {
+    return LED_QUALITY_SINGLE;
+  }
+  return LED_QUALITY_NONE;
+}
+
+LedQualityState mapPositionLedState(const String &type) {
+  if (type == "RTKFIXED" || type == "NARROW_INT" || type == "L1_INT" || type == "WIDE_INT") {
+    return LED_QUALITY_FIXED;
+  }
+  if (type == "RTKFLOAT" || type == "NARROW_FLOAT" || type == "L1_FLOAT" || type == "IONOFREE_FLOAT") {
+    return LED_QUALITY_FLOAT;
+  }
+  if (type == "PSRDIFF") {
+    return LED_QUALITY_DIFF;
+  }
+  if (type == "SINGLE" || type == "SBAS") {
+    return LED_QUALITY_SINGLE;
+  }
+  return LED_QUALITY_NONE;
+}
+
 bool isHeadingTypeUsable(const String &type) {
   return type == "NARROW_INT" || type == "L1_INT" || type == "NARROW_FLOAT" || type == "L1_FLOAT" || type == "PSRDIFF";
 }
@@ -254,6 +361,296 @@ float conservativeHorizontalAccuracy(float latStd, float lonStd) {
     return 99.0f;
   }
   return value;
+}
+
+const char *fixTypeLabel(CompactFixType fixType) {
+  switch (fixType) {
+    case FIX_FIXED:
+      return "fixed";
+    case FIX_FLOAT:
+      return "float";
+    case FIX_SINGLE:
+      return "single";
+    case FIX_NONE:
+    default:
+      return "none";
+  }
+}
+
+const char *logVerificationLabel() {
+  if (g_lastUniloglistMillis == 0) {
+    return "unknown";
+  }
+  const uint8_t activeCount =
+    (g_unilogPvtslnaActive ? 1 : 0) +
+    (g_unilogRectimeaActive ? 1 : 0) +
+    (g_unilogUniheadingaActive ? 1 : 0);
+  if (activeCount == 3) {
+    return "ok";
+  }
+  if (activeCount == 0) {
+    return "none";
+  }
+  return "partial";
+}
+
+void printDebugStatus() {
+  const uint32_t nowMillis = millis();
+  if ((nowMillis - g_lastDebugPrintMillis) < 1000u) {
+    return;
+  }
+  g_lastDebugPrintMillis = nowMillis;
+
+  const uint32_t receiverAgeMillis = g_lastAnyReceiverLineMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastAnyReceiverLineMillis;
+  const uint32_t pvtslnaAgeMillis = g_latestPvtsln.valid ? nowMillis - g_latestPvtsln.localMillis : 0xFFFFFFFFu;
+  const uint32_t uniheadingAgeMillis = g_latestUniheading.valid ? nowMillis - g_latestUniheading.localMillis : 0xFFFFFFFFu;
+  const uint32_t rtcmAgeMillis = g_lastRtcmMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastRtcmMillis;
+  const uint32_t uniloglistAgeMillis = g_lastUniloglistMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastUniloglistMillis;
+  const uint32_t deviceReadyAgeMillis = g_lastDeviceReadyMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastDeviceReadyMillis;
+
+  Serial.print("[GNSS] lines=");
+  Serial.print(g_totalReceiverLineCount);
+  Serial.print(" pvtslna=");
+  Serial.print(g_totalPvtslnaCount);
+  Serial.print(" rectimea=");
+  Serial.print(g_totalRectimeaCount);
+  Serial.print(" uniheadinga=");
+  Serial.print(g_totalUniheadingaCount);
+  Serial.print(" unknown=");
+  Serial.print(g_totalUnknownLineCount);
+  Serial.print(" readyEvents=");
+  Serial.print(g_totalDeviceReadyCount);
+  Serial.print(" logConfig=");
+  Serial.print(logVerificationLabel());
+  Serial.print("(");
+  Serial.print(g_unilogPvtslnaActive ? 1 : 0);
+  Serial.print(g_unilogRectimeaActive ? 1 : 0);
+  Serial.print(g_unilogUniheadingaActive ? 1 : 0);
+  Serial.print(")");
+  Serial.print(" fix=");
+  Serial.print(fixTypeLabel(g_latestPvtsln.fixType));
+  Serial.print(" sats=");
+  Serial.print(g_latestPvtsln.satellitesInUse);
+  Serial.print(" headingValid=");
+  Serial.print(g_latestPvtsln.headingValid ? "yes" : "no");
+  Serial.print(" receiverAgeMs=");
+  if (receiverAgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(receiverAgeMillis);
+  }
+  Serial.print(" pvtslnaAgeMs=");
+  if (pvtslnaAgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(pvtslnaAgeMillis);
+  }
+  Serial.print(" uniheadingAgeMs=");
+  if (uniheadingAgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(uniheadingAgeMillis);
+  }
+  Serial.print(" rtcmAgeMs=");
+  if (rtcmAgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(rtcmAgeMillis);
+  }
+  Serial.print(" uniloglistAgeMs=");
+  if (uniloglistAgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(uniloglistAgeMillis);
+  }
+  Serial.print(" readyAgeMs=");
+  if (deviceReadyAgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(deviceReadyAgeMillis);
+  }
+  Serial.println();
+}
+
+void printStartupRawLine(const char *line) {
+  if (strncmp(line, "$devicename,", 12) == 0) {
+    g_lastDeviceReadyMillis = millis();
+    g_totalDeviceReadyCount += 1;
+    g_lastUniloglistMillis = 0;
+    g_seenUniloglistHeader = false;
+    g_unilogPvtslnaActive = false;
+    g_unilogRectimeaActive = false;
+    g_unilogUniheadingaActive = false;
+    Serial.print("[GNSS-EVENT] ");
+    Serial.println(line);
+    return;
+  }
+  if (g_startupRawLinePrintCount >= STARTUP_RAW_LINE_PRINT_LIMIT) {
+    return;
+  }
+  g_startupRawLinePrintCount += 1;
+  Serial.print("[GNSS-RAW] ");
+  Serial.println(line);
+}
+
+bool waitForReceiverReadyEvent(uint32_t timeoutMillis) {
+  const uint32_t startMillis = millis();
+  g_waitingForResetReady = true;
+  g_resetReadySeen = false;
+
+  while ((millis() - startMillis) < timeoutMillis) {
+    readUm982Lines();
+    if (g_resetReadySeen) {
+      g_waitingForResetReady = false;
+      return true;
+    }
+    delay(10);
+  }
+
+  g_waitingForResetReady = false;
+  return false;
+}
+
+void noteCommandResponse(const char *line) {
+  const char *responseMarker = strstr(line, ",response:");
+  if (responseMarker == nullptr) {
+    return;
+  }
+  String command = String(line + 9).substring(0, responseMarker - (line + 9));
+  if (!g_waitingForCommandResponse || command != g_expectedCommandResponse) {
+    return;
+  }
+  g_commandResponseSeen = true;
+  g_commandResponseOk = strstr(responseMarker, "OK") != nullptr;
+}
+
+bool sendCommandAndWait(const char *command, CommandWaitMode waitMode, uint32_t timeoutMillis) {
+  Serial.print("[GNSS-CONFIG] ");
+  Serial.println(command);
+  g_expectedCommandResponse = String(command);
+  g_waitingForCommandResponse = true;
+  g_commandResponseSeen = false;
+  g_commandResponseOk = false;
+  UM982.println(command);
+
+  const uint32_t startMillis = millis();
+  while ((millis() - startMillis) < timeoutMillis) {
+    readUm982Lines();
+    if (g_commandResponseSeen) {
+      g_waitingForCommandResponse = false;
+      if (!g_commandResponseOk) {
+        return false;
+      }
+      if (waitMode == WAIT_OK_THEN_READY) {
+        Serial.println("[GNSS-CONFIG] waiting for delayed $devicename readiness marker");
+        const bool ready = waitForReceiverReadyEvent(DELAYED_READY_TIMEOUT_MILLIS);
+        if (ready) {
+          Serial.println("[GNSS-CONFIG] delayed receiver ready marker seen");
+        } else {
+          Serial.println("[GNSS-CONFIG] delayed receiver ready marker timeout");
+        }
+        return ready;
+      }
+      return true;
+    }
+    delay(10);
+  }
+
+  g_waitingForCommandResponse = false;
+  return false;
+}
+
+void updateQualityLed(
+  uint8_t pin,
+  LedQualityState state,
+  uint32_t &lastCycleStartMillis,
+  uint32_t &lastFlashMillis,
+  uint8_t &flashCount,
+  bool &ledOn
+) {
+  const uint32_t cycleDurationMillis = 2000;
+  const uint32_t flashIntervalMillis = 200;
+
+  if (state == LED_QUALITY_FIXED) {
+    digitalWrite(pin, HIGH);
+    flashCount = 0;
+    ledOn = false;
+    lastFlashMillis = 0;
+    lastCycleStartMillis = millis();
+    return;
+  }
+
+  if (state == LED_QUALITY_NONE) {
+    digitalWrite(pin, LOW);
+    flashCount = 0;
+    ledOn = false;
+    lastFlashMillis = 0;
+    lastCycleStartMillis = millis();
+    return;
+  }
+
+  if ((millis() - lastCycleStartMillis) > cycleDurationMillis) {
+    lastCycleStartMillis = millis();
+    flashCount = 0;
+    ledOn = false;
+    digitalWrite(pin, LOW);
+    lastFlashMillis = 0;
+  }
+
+  if (flashCount < static_cast<uint8_t>(state)) {
+    if ((millis() - lastFlashMillis) >= flashIntervalMillis) {
+      ledOn = !ledOn;
+      digitalWrite(pin, ledOn ? HIGH : LOW);
+      lastFlashMillis = millis();
+      if (!ledOn) {
+        flashCount += 1;
+      }
+    }
+  } else {
+    digitalWrite(pin, LOW);
+  }
+}
+
+void flashStartupLeds() {
+  for (int index = 0; index < 10; index += 1) {
+    digitalWrite(LED_HEADING_PIN, HIGH);
+    digitalWrite(LED_POSITION_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_HEADING_PIN, LOW);
+    digitalWrite(LED_POSITION_PIN, LOW);
+    delay(100);
+  }
+}
+
+void updateIndicatorLeds() {
+  const uint32_t nowMillis = millis();
+  const bool freshFix = g_latestPvtsln.valid && ((nowMillis - g_latestPvtsln.localMillis) <= 2000u);
+
+  if (!freshFix) {
+    digitalWrite(LED_HEADING_PIN, LOW);
+    digitalWrite(LED_POSITION_PIN, LOW);
+  } else {
+    updateQualityLed(
+      LED_HEADING_PIN,
+      g_headingLedState,
+      g_lastHeadingLedCycleMillis,
+      g_lastHeadingLedFlashMillis,
+      g_headingLedFlashCount,
+      g_headingLedOn
+    );
+    updateQualityLed(
+      LED_POSITION_PIN,
+      g_positionLedState,
+      g_lastPositionLedCycleMillis,
+      g_lastPositionLedFlashMillis,
+      g_positionLedFlashCount,
+      g_positionLedOn
+    );
+  }
+
+  if ((nowMillis - g_lastRtcmLedPulseMillis) > 100u) {
+    digitalWrite(LED_RTCM_PIN, LOW);
+  }
 }
 
 void ensureOriginFromCurrentFix() {
@@ -325,50 +722,93 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
       UM982.write(g_rtcmBuffer, g_rtcmIndex);
       g_rtcmIndex = 0;
       g_lastRtcmMillis = millis();
+      g_lastRtcmLedPulseMillis = g_lastRtcmMillis;
+      digitalWrite(LED_RTCM_PIN, HIGH);
     }
   }
 }
 
 // ===== UM982 configuration =====
-const char *UM982_CONFIG_COMMANDS[] = {
-  "freset",
-  "CONFIG ANTENNA POWERON",
-  "CONFIG NMEAVERSION V410",
-  "CONFIG RTK TIMEOUT 600",
-  "CONFIG RTK RELIABILITY 3 1",
-  "CONFIG PPP TIMEOUT 120",
-  "CONFIG HEADING OFFSET 0.0 0.0",
-  "CONFIG HEADING RELIABILITY 3",
-  "CONFIG HEADING FIXLENGTH",
-  "CONFIG HEADING LENGTH 30.00 5.00",
-  "CONFIG DGPS TIMEOUT 600",
-  "CONFIG RTCMB1CB2A ENABLE",
-  "CONFIG ANTENNADELTAHEN 0.0000 0.0000 0.0000",
-  "CONFIG PPS ENABLE GPS POSITIVE 500000 1000 0 0",
-  "CONFIG SIGNALGROUP 3 6",
-  "CONFIG ANTIJAM AUTO",
-  "CONFIG AGNSS DISABLE",
-  "CONFIG BASEOBSFILTER DISABLE",
-  "CONFIG LOGSEQ 1",
-  "CONFIG COM1 115200",
-  "CONFIG COM2 115200",
-  "CONFIG COM3 115200",
-  "PVTSLNA COM2 0.1",
-  "RECTIMEA COM2 1",
-  "UNIHEADINGA COM2 0.2"
+const ReceiverCommandStep UM982_CONFIG_COMMANDS[] = {
+  { "CONFIG ANTENNA POWERON", WAIT_OK_ONLY },
+  { "CONFIG NMEAVERSION V410", WAIT_OK_ONLY },
+  { "CONFIG RTK TIMEOUT 600", WAIT_OK_ONLY },
+  { "CONFIG RTK RELIABILITY 3 1", WAIT_OK_ONLY },
+  { "CONFIG PPP TIMEOUT 120", WAIT_OK_ONLY },
+  { "CONFIG HEADING OFFSET 0.0 0.0", WAIT_OK_ONLY },
+  { "CONFIG HEADING RELIABILITY 3", WAIT_OK_ONLY },
+  { "CONFIG HEADING FIXLENGTH", WAIT_OK_ONLY },
+  { "CONFIG HEADING LENGTH 30.00 5.00", WAIT_OK_ONLY },
+  { "CONFIG DGPS TIMEOUT 600", WAIT_OK_ONLY },
+  { "CONFIG RTCMB1CB2A ENABLE", WAIT_OK_ONLY },
+  { "CONFIG ANTENNADELTAHEN 0.0000 0.0000 0.0000", WAIT_OK_ONLY },
+  { "CONFIG PPS ENABLE GPS POSITIVE 500000 1000 0 0", WAIT_OK_ONLY },
+  { "CONFIG SIGNALGROUP 3 6", WAIT_OK_THEN_READY },
+  { "CONFIG AGNSS DISABLE", WAIT_OK_ONLY },
+  { "CONFIG BASEOBSFILTER DISABLE", WAIT_OK_ONLY },
+  { "CONFIG LOGSEQ 1", WAIT_OK_ONLY },
+  { "PVTSLNA COM2 0.1", WAIT_OK_ONLY },
+  { "RECTIMEA COM2 1", WAIT_OK_ONLY },
+  { "UNIHEADINGA COM2 0.2", WAIT_OK_ONLY }
 };
 
-void sendReceiverConfiguration() {
-  UM982.println("ascii");
-  delay(200);
-  for (size_t index = 0; index < sizeof(UM982_CONFIG_COMMANDS) / sizeof(UM982_CONFIG_COMMANDS[0]); index += 1) {
-    UM982.println(UM982_CONFIG_COMMANDS[index]);
-    delay(80);
+void resetReceiverConfiguration() {
+  Serial.println("[GNSS-CONFIG] freset");
+  UM982.println("freset");
+  Serial.println("[GNSS-CONFIG] waiting for $devicename readiness marker");
+  const bool ready = waitForReceiverReadyEvent(8000);
+  if (ready) {
+    Serial.println("[GNSS-CONFIG] receiver ready marker seen");
+  } else {
+    Serial.println("[GNSS-CONFIG] receiver ready marker timeout");
   }
+  delay(250);
+}
+
+void verifyReceiverLogConfiguration() {
+  if (!VERIFY_EXPECTED_LOGS_AT_BOOT) {
+    return;
+  }
+
+  g_waitingForUniloglist = true;
+  g_seenUniloglistHeader = false;
+  g_unilogPvtslnaActive = false;
+  g_unilogRectimeaActive = false;
+  g_unilogUniheadingaActive = false;
+  const bool ok = sendCommandAndWait("UNILOGLIST", WAIT_OK_ONLY, COMMAND_RESPONSE_TIMEOUT_MILLIS);
+  if (!ok) {
+    Serial.println("[GNSS-CONFIG] command failed or timed out: UNILOGLIST");
+  }
+}
+
+void sendReceiverConfiguration() {
+  if (!CONFIGURE_RECEIVER_AT_BOOT) {
+    Serial.println("[GNSS-CONFIG] boot-time receiver programming is disabled");
+    Serial.println("[GNSS-CONFIG] expecting persisted UM982 configuration and verifying active logs only");
+    verifyReceiverLogConfiguration();
+    return;
+  }
+
+  resetReceiverConfiguration();
+  for (size_t index = 0; index < sizeof(UM982_CONFIG_COMMANDS) / sizeof(UM982_CONFIG_COMMANDS[0]); index += 1) {
+    const bool ok = sendCommandAndWait(
+      UM982_CONFIG_COMMANDS[index].command,
+      UM982_CONFIG_COMMANDS[index].waitMode,
+      COMMAND_RESPONSE_TIMEOUT_MILLIS
+    );
+    if (!ok) {
+      Serial.print("[GNSS-CONFIG] command failed or timed out: ");
+      Serial.println(UM982_CONFIG_COMMANDS[index].command);
+      Serial.println("[GNSS-CONFIG] aborting remaining startup configuration");
+      return;
+    }
+  }
+  verifyReceiverLogConfiguration();
 }
 
 // ===== Parsing =====
 void parsePvtslna(const char *line) {
+  g_totalPvtslnaCount += 1;
   String payload = payloadAfterSemicolon(line);
   if (payload.length() == 0) {
     return;
@@ -388,6 +828,8 @@ void parsePvtslna(const char *line) {
   g_latestPvtsln.valid = true;
   g_latestPvtsln.localMillis = millis();
   g_latestPvtsln.fixType = mapPositionType(bestposType);
+  g_headingLedState = mapHeadingLedState(headingTypeField);
+  g_positionLedState = mapPositionLedState(bestposType);
   g_latestPvtsln.latitudeDegrees = latField.toDouble();
   g_latestPvtsln.longitudeDegrees = lonField.toDouble();
   g_latestPvtsln.positionAccuracyMeters = conservativeHorizontalAccuracy(latStdField.toFloat(), lonStdField.toFloat());
@@ -413,6 +855,7 @@ void parsePvtslna(const char *line) {
 }
 
 void parseRectimea(const char *line) {
+  g_totalRectimeaCount += 1;
   String payload = payloadAfterSemicolon(line);
   if (payload.length() == 0) {
     return;
@@ -426,6 +869,7 @@ void parseRectimea(const char *line) {
 }
 
 void parseUniheadinga(const char *line) {
+  g_totalUniheadingaCount += 1;
   String payload = payloadAfterSemicolon(line);
   if (payload.length() == 0) {
     return;
@@ -446,13 +890,53 @@ void parseUniheadinga(const char *line) {
   g_latestUniheading.headingStdDevValid = headingStdField.length() > 0 && g_latestUniheading.headingStdDevDegrees > 0.0f;
 }
 
+void parseUniloglistHeader() {
+  g_lastUniloglistMillis = millis();
+  g_seenUniloglistHeader = true;
+  g_unilogPvtslnaActive = false;
+  g_unilogRectimeaActive = false;
+  g_unilogUniheadingaActive = false;
+}
+
+void parseUniloglistEntry(const char *line) {
+  g_lastUniloglistMillis = millis();
+  if (strstr(line, "PVTSLNA COM2") != nullptr) {
+    g_unilogPvtslnaActive = true;
+  }
+  if (strstr(line, "RECTIMEA COM2") != nullptr) {
+    g_unilogRectimeaActive = true;
+  }
+  if (strstr(line, "UNIHEADINGA COM2") != nullptr) {
+    g_unilogUniheadingaActive = true;
+  }
+}
+
 void handleUm982Line(const char *line) {
+  g_totalReceiverLineCount += 1;
+  g_lastAnyReceiverLineMillis = millis();
+  printStartupRawLine(line);
+  if (g_waitingForResetReady && strncmp(line, "$devicename,", 12) == 0) {
+    g_resetReadySeen = true;
+  }
+  if (strncmp(line, "$command,", 9) == 0) {
+    noteCommandResponse(line);
+  }
   if (strncmp(line, "#PVTSLNA", 8) == 0) {
     parsePvtslna(line);
   } else if (strncmp(line, "#RECTIMEA", 9) == 0) {
     parseRectimea(line);
   } else if (strncmp(line, "#UNIHEADINGA", 12) == 0) {
     parseUniheadinga(line);
+  } else if (strncmp(line, "#UNILOGLIST", 11) == 0) {
+    parseUniloglistHeader();
+  } else if (line[0] == '<') {
+    if (g_waitingForUniloglist || g_seenUniloglistHeader) {
+      parseUniloglistEntry(line);
+    } else {
+      g_totalUnknownLineCount += 1;
+    }
+  } else {
+    g_totalUnknownLineCount += 1;
   }
 }
 
@@ -482,9 +966,29 @@ void readUm982Lines() {
 void buildGnssPayload(uint8_t *payloadOut) {
   uint32_t nowMillis = millis();
   uint16_t sampleAgeMillis = 0xFFFF;
+  uint16_t receiverLineAgeMillis = 0xFFFF;
+  uint16_t pvtslnaAgeMillis = 0xFFFF;
+  uint16_t uniheadingAgeMillis = 0xFFFF;
+  uint16_t rtcmAgeMillis = 0xFFFF;
   if (g_latestPvtsln.valid) {
     uint32_t age = nowMillis - g_latestPvtsln.localMillis;
     sampleAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
+  }
+  if (g_lastAnyReceiverLineMillis != 0) {
+    uint32_t age = nowMillis - g_lastAnyReceiverLineMillis;
+    receiverLineAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
+  }
+  if (g_latestPvtsln.valid) {
+    uint32_t age = nowMillis - g_latestPvtsln.localMillis;
+    pvtslnaAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
+  }
+  if (g_latestUniheading.valid) {
+    uint32_t age = nowMillis - g_latestUniheading.localMillis;
+    uniheadingAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
+  }
+  if (g_lastRtcmMillis != 0) {
+    uint32_t age = nowMillis - g_lastRtcmMillis;
+    rtcmAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
   }
 
   int32_t xMillimeters = 0;
@@ -526,6 +1030,15 @@ void buildGnssPayload(uint8_t *payloadOut) {
   payloadOut[22] = static_cast<uint8_t>(g_latestPvtsln.fixType);
   payloadOut[23] = g_latestPvtsln.satellitesInUse;
   writeU16LE(&payloadOut[24], sampleAgeMillis);
+  writeU16LE(&payloadOut[26], receiverLineAgeMillis);
+  writeU16LE(&payloadOut[28], pvtslnaAgeMillis);
+  writeU16LE(&payloadOut[30], uniheadingAgeMillis);
+  writeU16LE(&payloadOut[32], rtcmAgeMillis);
+  payloadOut[34] =
+    (g_unilogPvtslnaActive ? 0x01 : 0x00) |
+    (g_unilogRectimeaActive ? 0x02 : 0x00) |
+    (g_unilogUniheadingaActive ? 0x04 : 0x00);
+  payloadOut[35] = 0;
 }
 
 void refreshTxFrame() {
@@ -589,6 +1102,14 @@ void setup() {
   Serial.begin(115200);
   UM982.begin(115200, SERIAL_8N1, UM982_RX_PIN, UM982_TX_PIN);
 
+  pinMode(LED_HEADING_PIN, OUTPUT);
+  pinMode(LED_POSITION_PIN, OUTPUT);
+  pinMode(LED_RTCM_PIN, OUTPUT);
+  digitalWrite(LED_HEADING_PIN, LOW);
+  digitalWrite(LED_POSITION_PIN, LOW);
+  digitalWrite(LED_RTCM_PIN, LOW);
+  flashStartupLeds();
+
   Wire.begin(I2C_SLAVE_ADDRESS, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
   Wire.onReceive(onReceive);
   Wire.onRequest(onRequest);
@@ -602,5 +1123,7 @@ void setup() {
 void loop() {
   readUm982Lines();
   refreshTxFrame();
+  updateIndicatorLeds();
+  printDebugStatus();
   delay(5);
 }

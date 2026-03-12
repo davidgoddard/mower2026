@@ -1,7 +1,7 @@
 import type { GnssFixType, GnssSample } from "./gnssProtocol.js";
 import { decodeOptionalInt16, decodeOptionalUint16, encodeOptionalInt16, encodeOptionalUint16 } from "./codecPrimitives.js";
 
-const GNSS_PAYLOAD_LENGTH = 26;
+const GNSS_PAYLOAD_LENGTH = 36;
 
 const fixTypeToCode: Record<GnssFixType, number> = {
   none: 0,
@@ -36,6 +36,12 @@ export function encodeGnssSample(sample: GnssSample): Uint8Array {
   view.setUint8(22, fixTypeToCode[sample.fixType]);
   view.setUint8(23, sample.satellitesInUse);
   view.setUint16(24, sample.sampleAgeMillis, true);
+  encodeOptionalUint16(view, 26, sample.debug?.receiverLineAgeMillis, 1);
+  encodeOptionalUint16(view, 28, sample.debug?.pvtslnaAgeMillis, 1);
+  encodeOptionalUint16(view, 30, sample.debug?.uniheadingAgeMillis, 1);
+  encodeOptionalUint16(view, 32, sample.debug?.rtcmAgeMillis, 1);
+  view.setUint8(34, sample.debug?.logConfigMask ?? 0);
+  view.setUint8(35, 0);
 
   return payload;
 }
@@ -56,6 +62,11 @@ export function decodeGnssSample(payload: Uint8Array): GnssSample {
   const pitchDegrees = decodeOptionalInt16(view, 14, 100);
   const groundSpeedMetersPerSecond = decodeOptionalUint16(view, 16, 1000);
   const headingAccuracyDegrees = decodeOptionalUint16(view, 20, 100);
+  const receiverLineAgeMillis = decodeOptionalUint16(view, 26, 1);
+  const pvtslnaAgeMillis = decodeOptionalUint16(view, 28, 1);
+  const uniheadingAgeMillis = decodeOptionalUint16(view, 30, 1);
+  const rtcmAgeMillis = decodeOptionalUint16(view, 32, 1);
+  const logConfigMask = view.getUint8(34);
 
   return {
     timestampMillis: view.getUint32(0, true),
@@ -69,5 +80,22 @@ export function decodeGnssSample(payload: Uint8Array): GnssSample {
     ...(pitchDegrees === undefined ? {} : { pitchDegrees }),
     ...(groundSpeedMetersPerSecond === undefined ? {} : { groundSpeedMetersPerSecond }),
     ...(headingAccuracyDegrees === undefined ? {} : { headingAccuracyDegrees }),
+    ...(
+      receiverLineAgeMillis === undefined
+      && pvtslnaAgeMillis === undefined
+      && uniheadingAgeMillis === undefined
+      && rtcmAgeMillis === undefined
+      && logConfigMask === 0
+        ? {}
+        : {
+            debug: {
+              ...(receiverLineAgeMillis === undefined ? {} : { receiverLineAgeMillis }),
+              ...(pvtslnaAgeMillis === undefined ? {} : { pvtslnaAgeMillis }),
+              ...(uniheadingAgeMillis === undefined ? {} : { uniheadingAgeMillis }),
+              ...(rtcmAgeMillis === undefined ? {} : { rtcmAgeMillis }),
+              ...(logConfigMask === 0 ? {} : { logConfigMask }),
+            },
+          }
+    ),
   };
 }

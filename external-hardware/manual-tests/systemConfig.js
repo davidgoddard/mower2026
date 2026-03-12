@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,10 +23,18 @@ export async function loadSystemParameters() {
     "leftMotorReverseScale",
     "rightMotorForwardScale",
     "rightMotorReverseScale",
+    "calibrationTurnScale",
+    "calibrationLineGainScale",
+    "waypointArrivalToleranceMeters",
+    "headingArrivalToleranceDegrees",
   ]) {
     if (typeof parsed[field] !== "number" || !(parsed[field] > 0)) {
       throw new Error(`Invalid ${field} in ${filePath}; expected a positive number.`);
     }
+  }
+
+  if (typeof parsed.pivotAntennaExcursionMeters !== "number" || parsed.pivotAntennaExcursionMeters < 0) {
+    throw new Error(`Invalid pivotAntennaExcursionMeters in ${filePath}; expected a zero or positive number.`);
   }
 
   for (const field of [
@@ -42,4 +50,9 @@ export async function loadSystemParameters() {
     filePath,
     parameters: parsed,
   };
+}
+
+export async function saveSystemParameters(filePath, parameters) {
+  const content = `${JSON.stringify(parameters, null, 2)}\n`;
+  await writeFile(filePath, content, "utf8");
 }

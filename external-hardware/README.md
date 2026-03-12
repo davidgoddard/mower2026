@@ -46,3 +46,7 @@ Current Pi-side scripts:
   - legacy-HID-based controller probe; confirms the games controller is detected and shows live button/axis state using the legacy vendor/product mapping
 - `manual-tests/manual_drive_server.js`
   - live manual-drive integration server; reads the games controller, drives the motor node, polls GNSS + IMU + motor feedback, serves `manual-tests/manual_drive_dashboard.html`, and writes a JSONL session log
+- `manual-tests/calibration_runner_server.js`
+  - automatic calibration runner; uses the live GNSS + IMU + motor path, serves `manual-tests/calibration_dashboard.html`, repeats calibration iterations, writes JSONL event and telemetry logs, and persists learned values back into `config/system-parameters.json`
+- `manual-tests/site_capture_server.js`
+  - live site-capture server; reuses the manual-drive stack, serves `manual-tests/site_capture_dashboard.html`, records perimeter and obstacle geometry from live pose, and persists completed site JSON files under `manual-tests/captures/`

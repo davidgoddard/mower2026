@@ -10,7 +10,7 @@ const PROTOCOL_START_OF_FRAME = 0x4d;
 const PROTOCOL_VERSION = 0x01;
 const NODE_ID_GNSS = 0x10;
 const MESSAGE_TYPE_GNSS_SAMPLE = 0x01;
-const FRAME_LENGTH = 9 + 26 + 2;
+const FRAME_LENGTH = 9 + 36 + 2;
 const SAMPLE_INTERVAL_MS = 500;
 const MAX_FRAME_ATTEMPTS = 4;
 const RETRY_DELAY_MS = 60;
@@ -57,7 +57,7 @@ function decodeFrame(frame) {
     throw new Error(`bad message type: ${frame[3]}`);
   }
   const payloadLength = frame.readUInt16LE(7);
-  if (payloadLength !== 26) {
+  if (payloadLength !== 36) {
     throw new Error(`bad payload length: ${payloadLength}`);
   }
   const crc = frame.readUInt16LE(9 + payloadLength);
@@ -89,7 +89,18 @@ function decodeGnssPayload(payload) {
     fixType: payload[22],
     satellitesInUse: payload[23],
     sampleAgeMillis: payload.readUInt16LE(24),
+    debug: {
+      receiverLineAgeMillis: payload.readUInt16LE(26),
+      pvtslnaAgeMillis: payload.readUInt16LE(28),
+      uniheadingAgeMillis: payload.readUInt16LE(30),
+      rtcmAgeMillis: payload.readUInt16LE(32),
+      logConfigMask: payload.readUInt8(34),
+    },
   };
+}
+
+function optionalAge(value) {
+  return value === 0xffff ? null : value;
 }
 
 function describeFixType(fixType) {
@@ -120,6 +131,38 @@ function classifySample(sample) {
 
   if (sample.sampleAgeMillis > 2000) {
     notes.push(`GNSS sample age is high (${sample.sampleAgeMillis} ms).`);
+  }
+
+  const receiverLineAgeMillis = optionalAge(sample.debug.receiverLineAgeMillis);
+  const pvtslnaAgeMillis = optionalAge(sample.debug.pvtslnaAgeMillis);
+  const uniheadingAgeMillis = optionalAge(sample.debug.uniheadingAgeMillis);
+  const rtcmAgeMillis = optionalAge(sample.debug.rtcmAgeMillis);
+  const logConfigMask = sample.debug.logConfigMask ?? 0;
+
+  if (receiverLineAgeMillis == null) {
+    notes.push("No receiver lines have been seen by the rover ESP.");
+  } else if (receiverLineAgeMillis > 2000) {
+    notes.push(`Receiver output is stale (${receiverLineAgeMillis} ms since any UM982 line).`);
+  }
+
+  if (pvtslnaAgeMillis == null) {
+    notes.push("No PVTSLNA position logs have been parsed yet.");
+  }
+
+  if (uniheadingAgeMillis == null) {
+    notes.push("No UNIHEADINGA heading logs have been parsed yet.");
+  }
+
+  if (rtcmAgeMillis == null) {
+    notes.push("No RTCM corrections have been forwarded to the rover receiver yet.");
+  }
+
+  if ((logConfigMask & 0x07) === 0x07) {
+    notes.push("Receiver log verification passed: PVTSLNA, RECTIMEA, and UNIHEADINGA are active on COM2.");
+  } else if (logConfigMask !== 0) {
+    notes.push(`Receiver log verification is partial (mask 0x${logConfigMask.toString(16)}).`);
+  } else {
+    notes.push("Receiver log verification has not yet confirmed the expected COM2 logs.");
   }
 
   return {
@@ -172,7 +215,16 @@ async function main() {
           flags: result.flags,
           commsHealthy: classification.commsHealthy,
           fixTypeLabel: describeFixType(result.sample.fixType),
-          sample: result.sample,
+          sample: {
+            ...result.sample,
+            debug: {
+              receiverLineAgeMillis: optionalAge(result.sample.debug.receiverLineAgeMillis),
+              pvtslnaAgeMillis: optionalAge(result.sample.debug.pvtslnaAgeMillis),
+              uniheadingAgeMillis: optionalAge(result.sample.debug.uniheadingAgeMillis),
+              rtcmAgeMillis: optionalAge(result.sample.debug.rtcmAgeMillis),
+              logConfigMask: result.sample.debug.logConfigMask,
+            },
+          },
           notes: classification.notes,
           invalidReads,
         });

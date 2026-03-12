@@ -304,6 +304,7 @@ void applyMotorHardware(MotorState &motor) {
 void forceMotorStop(MotorState &motor) {
   motor.requestedPwmPercent = 0;
   motor.appliedPwmPercent = 0;
+  motor.currentDirectionSign = 0;
   motor.targetMetersPerSecond = 0.0f;
   applyMotorHardware(motor);
 }
@@ -337,6 +338,8 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
     motor.currentDirectionSign = 1;
   } else if (motor.appliedPwmPercent < 0) {
     motor.currentDirectionSign = -1;
+  } else if (targetMagnitude == 0) {
+    motor.currentDirectionSign = 0;
   }
   applyMotorHardware(motor);
 }
@@ -391,8 +394,10 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   g_rightPulseAccumulator = 0;
   interrupts();
 
-  int32_t signedLeftPulses = leftPulses * g_leftMotor.currentDirectionSign;
-  int32_t signedRightPulses = rightPulses * g_rightMotor.currentDirectionSign;
+  bool leftDriven = abs(g_leftMotor.appliedPwmPercent) > 0 && g_leftMotor.currentDirectionSign != 0;
+  bool rightDriven = abs(g_rightMotor.appliedPwmPercent) > 0 && g_rightMotor.currentDirectionSign != 0;
+  int32_t signedLeftPulses = leftDriven ? (leftPulses * g_leftMotor.currentDirectionSign) : 0;
+  int32_t signedRightPulses = rightDriven ? (rightPulses * g_rightMotor.currentDirectionSign) : 0;
   float elapsedSeconds = static_cast<float>(elapsedMs) / 1000.0f;
 
   g_leftMotor.actualMetersPerSecond = pulsesToMeters(signedLeftPulses) / elapsedSeconds;

@@ -1,0 +1,21 @@
+[Unit]
+Description=Mower core Pi app
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__MOWER_USER__
+Group=__MOWER_GROUP__
+WorkingDirectory=__MOWER_REPO_DIR__
+Environment=MOWER_REPO_DIR=__MOWER_REPO_DIR__
+Environment=MOWER_CORE_APP_PORT=8090
+Environment=MOWER_I2C_BUS_NUMBER=1
+ExecStart=__MOWER_LAUNCHER__
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

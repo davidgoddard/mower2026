@@ -148,17 +148,33 @@ Rationale:
 
 These rates must still be validated against actual UM982 behavior and rover ESP CPU usage.
 
-## Current sketch startup configuration
+## Current sketch startup policy
 
-The current ESP32 GNSS sketch in `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino` configures the UM982 over `Serial2` at `115200` baud using ASCII commands.
+The current ESP32 GNSS sketch in `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino` now defaults to a passive startup model over `Serial2` at `115200` baud.
 
-Startup sequence:
+Default startup sequence:
 
-1. send `ascii`
-2. pause briefly
-3. send the current configuration command list with a short delay between lines
+1. start the UART
+2. begin parsing whatever the UM982 is already streaming
+3. optionally send `UNILOGLIST`
+4. verify whether the expected runtime logs are already active
 
-Current command list:
+This is now preferred because repeated runtime reconfiguration from the ESP has proven fragile on the mower hardware.
+
+Expected operating model:
+
+1. provision the UM982 once using a direct serial session
+2. save that configuration persistently on the UM982 itself using the receiver's own persistence workflow
+3. reboot normally
+4. let the ESP only parse and verify logs at startup
+
+Boot-time receiver programming still exists in the sketch as an opt-in bench/debug escape hatch, but it is disabled by default via:
+
+```text
+CONFIGURE_RECEIVER_AT_BOOT = false
+```
+
+Receiver configuration that should exist persistently on the UM982:
 
 ```text
 freset
@@ -176,13 +192,9 @@ CONFIG RTCMB1CB2A ENABLE
 CONFIG ANTENNADELTAHEN 0.0000 0.0000 0.0000
 CONFIG PPS ENABLE GPS POSITIVE 500000 1000 0 0
 CONFIG SIGNALGROUP 3 6
-CONFIG ANTIJAM AUTO
 CONFIG AGNSS DISABLE
 CONFIG BASEOBSFILTER DISABLE
 CONFIG LOGSEQ 1
-CONFIG COM1 115200
-CONFIG COM2 115200
-CONFIG COM3 115200
 PVTSLNA COM2 0.1
 RECTIMEA COM2 1
 UNIHEADINGA COM2 0.2
@@ -193,6 +205,69 @@ Interpretation of the runtime log commands:
 - `PVTSLNA COM2 0.1` requests `PVTSLNA` at `10 Hz`
 - `RECTIMEA COM2 1` requests `RECTIMEA` at `1 Hz`
 - `UNIHEADINGA COM2 0.2` requests `UNIHEADINGA` at `5 Hz`
+
+Commands deliberately excluded from normal rover boot:
+
+- `ascii`
+  - this UM982 firmware rejects it with `PARSING FAILED NO MATCHING FUNC`
+- `CONFIG ANTIJAM AUTO`
+  - observed to trigger a later receiver/interface restart, clearing the volatile session
+- `CONFIG COM1 115200`
+- `CONFIG COM2 115200`
+- `CONFIG COM3 115200`
+  - unnecessary on the known-good mower hardware and risky during runtime boot
+
+Currently classified delayed command:
+
+- `CONFIG SIGNALGROUP 3 6`
+  - returns `OK`
+  - then emits a delayed `$devicename,...` event
+  - therefore the startup sequencer waits for that second readiness marker before continuing
+  - if that delayed readiness event never arrives within the extended timeout window, startup configuration aborts
+
+On normal boot, the sketch only sends `UNILOGLIST` and parses the response to verify that all three expected `COM2` logs are actually active. The serial `[GNSS]` status line reports this as:
+
+- `logConfig=ok(111)` when all three logs are present
+- `logConfig=partial(...)` when only some are present
+- `logConfig=none(000)` when none are present
+- `logConfig=unknown` before any `UNILOGLIST` response has been parsed
+
+The mower's current UM982 breakout module wiring uses the lower header row labeled:
+
+```text
+EN  GND  TXD  RXD  VCC  PPS
+```
+
+That header is the receiver `COM2` UART for this project wiring. See [UM982-module-pinout.md](/Volumes/mower/mower/external-hardware/esp32/gnss-node-v2/UM982-module-pinout.md).
+
+Reference base-station config captured from the user's working base on `2026-03-11`:
+
+```text
+CONFIG ANTENNA POWERON
+CONFIG NMEAVERSION V410
+CONFIG RTK TIMEOUT 120
+CONFIG RTK RELIABILITY 3 1
+CONFIG PPP TIMEOUT 120
+CONFIG DGPS TIMEOUT 300
+CONFIG RTCMB1CB2A ENABLE
+CONFIG ANTENNADELTAHEN 0.0000 0.0000 0.0000
+CONFIG PPS ENABLE GPS POSITIVE 500000 1000 0 0
+CONFIG SIGNALGROUP 2
+CONFIG ANTIJAM AUTO
+CONFIG AGNSS DISABLE
+CONFIG BASEOBSFILTER DISABLE
+CONFIG COM1 115200
+CONFIG COM2 115200
+CONFIG COM3 115200
+```
+
+This is useful for documenting the correction source, but it does not by itself explain a rover node showing:
+
+- `fixType = none`
+- `satellites = 0`
+- `sampleAgeMillis = 65535`
+
+That symptom indicates the rover is not parsing usable live receiver logs such as `PVTSLNA`.
 
 The heading-length command currently encodes an antenna baseline assumption of about `0.30 m` with `0.05 m` tolerance.
 

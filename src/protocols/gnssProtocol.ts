@@ -13,4 +13,11 @@ export interface GnssSample extends TimestampedPayload {
   readonly fixType: GnssFixType;
   readonly satellitesInUse: number;
   readonly sampleAgeMillis: number;
+  readonly debug?: {
+    readonly receiverLineAgeMillis?: number;
+    readonly pvtslnaAgeMillis?: number;
+    readonly uniheadingAgeMillis?: number;
+    readonly rtcmAgeMillis?: number;
+    readonly logConfigMask?: number;
+  };
 }

@@ -14,6 +14,7 @@ There are two categories:
 Important distinction:
 
 - [manual_drive_server.js](../external-hardware/manual-tests/manual_drive_server.js) is the current live runtime-facing bring-up path
+- [site_capture_server.js](../external-hardware/manual-tests/site_capture_server.js) is the first live perimeter/obstacle capture path built on top of the same manual-drive stack
 - [hardware_dashboard_server.js](../external-hardware/manual-tests/hardware_dashboard_server.js) is an older log-driven dashboard and is not the main runtime boundary
 
 ## Prerequisites
@@ -235,6 +236,108 @@ Recommended first test:
 3. verify wheel targets move as expected
 4. verify actual wheel feedback follows
 5. only then test on the ground
+
+### `calibration_runner_server.js` + `calibration_dashboard.html`
+
+Purpose:
+- current automatic calibration bring-up path
+
+What it does:
+- waits for live GNSS, IMU, motor, and estimator readiness
+- runs the planned calibration sequence automatically
+- repeats calibration iterations until you stop it
+- updates learned control values after each completed iteration
+- persists learned values into [config/system-parameters.json](../config/system-parameters.json)
+- performs:
+  - static hold
+  - left and right pivots
+  - straight forward and reverse runs
+  - a combined arrival trial
+- serves a phone dashboard over SSE
+- writes JSONL event and telemetry logs
+
+Run:
+
+```sh
+node calibration_runner_server.js
+```
+
+Open:
+
+- `http://<pi-ip>:8094`
+
+Files:
+- [external-hardware/manual-tests/calibration_runner_server.js](../external-hardware/manual-tests/calibration_runner_server.js)
+- [external-hardware/manual-tests/calibration_dashboard.html](../external-hardware/manual-tests/calibration_dashboard.html)
+
+### `site_capture_server.js` + `site_capture_dashboard.html`
+
+Purpose:
+- first live site-capture path for perimeter and obstacle recording
+
+What it does:
+- reuses the same controller, GNSS, IMU, motor, and estimator path as manual drive
+- serves a phone page with capture actions
+- records perimeter and obstacle polygons using automatic waypoint sampling from live pose
+- supports:
+  - start perimeter
+  - finish perimeter
+  - start obstacle
+  - finish obstacle
+  - undo last point
+  - discard current obstacle
+  - discard full capture
+  - finish capture and save site JSON
+- writes a JSONL session log
+- persists completed site models into `external-hardware/manual-tests/captures/`
+
+Run:
+
+```sh
+node site_capture_server.js
+```
+
+Open:
+
+- `http://<pi-ip>:8094`
+
+Files:
+- [external-hardware/manual-tests/site_capture_server.js](../external-hardware/manual-tests/site_capture_server.js)
+- [external-hardware/manual-tests/site_capture_dashboard.html](../external-hardware/manual-tests/site_capture_dashboard.html)
+
+Expected behavior:
+- manual driving still behaves like the live bring-up path
+- once perimeter capture is active, points are sampled automatically as the mower moves or turns
+- the page shows the current perimeter, obstacles, active capture trace, and current pose
+- finishing capture saves a site JSON file for later review/planning
+
+Expected behavior:
+- the `Start Calibration` button remains disabled until:
+  - GNSS is float or fixed
+  - GNSS heading is present and fresh
+  - IMU is live
+  - motor feedback is live
+  - estimator is live
+- once started, the mower should:
+  - remain still briefly
+  - pivot left and right without operator input
+  - drive short straight lines
+  - attempt a final target arrival
+- the page should show three live goal cards:
+  - turning accuracy
+  - straight-line tracking
+  - arrival distance
+- those cards should move between red, orange, and green as the runner improves the profile
+- each completed iteration should be added to a recent-history list
+- learned values should persist across restart because they are written back to [config/system-parameters.json](../config/system-parameters.json)
+
+Recommended first test:
+
+1. place the mower in a clear open area with at least 2 m free in every direction
+2. power the base station and wait for rover RTK quality to improve
+3. confirm the GNSS LEDs and page both indicate healthy heading/fix
+4. keep the e-stop or power cut available
+5. start calibration from the phone page
 
 ## Expected Behaviors By Symptom
 

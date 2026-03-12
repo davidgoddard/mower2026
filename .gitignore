@@ -1,5 +1,8 @@
 dist/
 node_modules/
 *.tsbuildinfo
+.DS_Store
+**/.DS_Store
+._*
 external-hardware/manual-tests/*.log
 external-hardware/manual-tests/*.jsonl

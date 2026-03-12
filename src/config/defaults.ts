@@ -23,6 +23,9 @@ export const defaultParameters: ParameterSet = {
   rightMotorReverseScale: 1.0,
   controllerSteeringSign: 1,
   controllerSpeedSign: 1,
+  calibrationTurnScale: 1.0,
+  calibrationLineGainScale: 1.0,
+  pivotAntennaExcursionMeters: 0.0,
   waypointArrivalToleranceMeters: 0.05,
   headingArrivalToleranceDegrees: 2,
 };

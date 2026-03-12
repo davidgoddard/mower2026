@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { decodeGnssSample, encodeGnssSample, gnssPayloadLength } from "../../src/protocols/gnssCodec.js";
 
 test("GNSS codec uses a compact fixed payload length", () => {
-  assert.equal(gnssPayloadLength(), 26);
+  assert.equal(gnssPayloadLength(), 34);
 });
 
 test("GNSS codec round-trips optional and required fields", () => {
@@ -19,6 +19,12 @@ test("GNSS codec round-trips optional and required fields", () => {
     fixType: "fixed" as const,
     satellitesInUse: 18,
     sampleAgeMillis: 40,
+    debug: {
+      receiverLineAgeMillis: 12,
+      pvtslnaAgeMillis: 34,
+      uniheadingAgeMillis: 56,
+      rtcmAgeMillis: 78,
+    },
   };
 
   const decoded = decodeGnssSample(encodeGnssSample(sample));
@@ -41,4 +47,5 @@ test("GNSS codec preserves undefined optional fields", () => {
   assert.equal(decoded.pitchDegrees, undefined);
   assert.equal(decoded.groundSpeedMetersPerSecond, undefined);
   assert.equal(decoded.headingAccuracyDegrees, undefined);
+  assert.equal(decoded.debug, undefined);
 });

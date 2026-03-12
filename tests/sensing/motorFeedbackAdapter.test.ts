@@ -56,4 +56,30 @@ test("MotorFeedbackAdapter marks stale or unhealthy feedback as watchdog faults"
 
   assert.equal(bundle.stale, true);
   assert.equal(bundle.faultFlags, MotorFaultFlag.WatchdogExpired);
+  assert.equal(bundle.wheelOdometry, undefined);
+});
+
+test("MotorFeedbackAdapter suppresses wheel odometry when encoder faults are present", () => {
+  const adapter = new MotorFeedbackAdapter({
+    leftMetersPerEncoderCount: 0.001,
+    rightMetersPerEncoderCount: 0.001,
+    staleAfterMillis: 100,
+    now: () => 1_050,
+  });
+
+  const bundle = adapter.adapt({
+    timestampMillis: 1_000,
+    leftWheelActualMetersPerSecond: 0.2,
+    rightWheelActualMetersPerSecond: 0.2,
+    leftEncoderDelta: 10,
+    rightEncoderDelta: 10,
+    leftPwmApplied: 10,
+    rightPwmApplied: 10,
+    watchdogHealthy: true,
+    faultFlags: MotorFaultFlag.LeftEncoderFault,
+  });
+
+  assert.equal(bundle.stale, false);
+  assert.equal(bundle.faultFlags, MotorFaultFlag.LeftEncoderFault);
+  assert.equal(bundle.wheelOdometry, undefined);
 });

@@ -21,6 +21,9 @@ export interface ParameterSet {
   readonly rightMotorReverseScale: number;
   readonly controllerSteeringSign: number;
   readonly controllerSpeedSign: number;
+  readonly calibrationTurnScale: number;
+  readonly calibrationLineGainScale: number;
+  readonly pivotAntennaExcursionMeters: number;
   readonly waypointArrivalToleranceMeters: number;
   readonly headingArrivalToleranceDegrees: number;
 }

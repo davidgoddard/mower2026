@@ -25,6 +25,8 @@ export function validateParameters(parameters: ParameterSet): ParameterValidatio
   requirePositive(parameters, "leftMotorReverseScale", issues);
   requirePositive(parameters, "rightMotorForwardScale", issues);
   requirePositive(parameters, "rightMotorReverseScale", issues);
+  requirePositive(parameters, "calibrationTurnScale", issues);
+  requirePositive(parameters, "calibrationLineGainScale", issues);
   requirePositive(parameters, "waypointArrivalToleranceMeters", issues);
   requirePositive(parameters, "headingArrivalToleranceDegrees", issues);
 
@@ -39,6 +41,13 @@ export function validateParameters(parameters: ParameterSet): ParameterValidatio
     issues.push({
       field: "frontAntennaForwardOfAxleMeters",
       message: "front antenna forward offset must be zero or positive",
+    });
+  }
+
+  if (parameters.pivotAntennaExcursionMeters < 0) {
+    issues.push({
+      field: "pivotAntennaExcursionMeters",
+      message: "pivot antenna excursion must be zero or positive",
     });
   }
 

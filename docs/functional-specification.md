@@ -9,11 +9,14 @@ This specification defines the second-generation mower control system that runs 
 The system shall:
 
 - estimate mower pose, heading, speed, yaw rate, and confidence
-- follow straight-line route legs between waypoints with bounded position and heading error
+- capture one or more mowing areas by manually driving their perimeters and obstacles
+- generate deterministic coverage plans that favor long straight mowing runs and low turn counts
+- begin a mowing mission from an arbitrary mower placement by selecting the best local area and lane entry
+- follow straight-line route legs between planned coverage lane endpoints with bounded position and heading error
 - continue operating safely through temporary GNSS degradation
 - support self-calibration of turning, straight driving, and compensation parameters
 - log telemetry, faults, calibration runs, and replayable test sessions
-- support manually-driven route recording and autonomous route replay
+- support manually-driven capture, operator review, and autonomous execution of saved coverage plans
 
 ## Functional requirements
 
@@ -97,11 +100,59 @@ Calibration shall include:
 - forward and reverse asymmetry assessment
 - validation before parameter acceptance
 
-### FR-012 Manual route capture and replay
+### FR-012 Site capture
 
-The system shall allow a user to manually drive the mower, mark waypoints, store a route, and later replay that route autonomously with improved path quality.
+The system shall allow an operator to manually drive the mower to capture:
 
-### FR-013 Logging and replay
+- an outer perimeter polygon
+- zero or more obstacle polygons
+- raw capture samples for later review
+
+Capture shall support automatic point sampling based on movement, heading change, and elapsed time so the operator does not need to mark every waypoint manually.
+
+### FR-013 Site review and validation
+
+The system shall allow an operator to review captured raw paths and derived polygons and shall support, at minimum:
+
+- undoing the last captured point
+- discarding the current obstacle
+- rerunning polygon simplification
+- surfacing validation warnings before planning
+
+### FR-014 Coverage planning
+
+The system shall derive a mowing plan from the captured site using a deterministic pipeline that can:
+
+- simplify the outer perimeter and obstacle polygons
+- derive free space
+- evaluate candidate mowing orientations
+- split strongly non-convex geometry into multiple coverage areas
+- generate clipped stripe lanes
+- score candidate plans using straight-run length, lane length, fragment count, and turn count
+
+### FR-015 Mission plan representation
+
+The mission planner output shall include, at minimum:
+
+- coverage areas
+- lane geometry
+- lane endpoints
+- preferred travel direction
+- area transition anchors or equivalent transition metadata
+- operator-inspectable export data
+
+### FR-016 Mission start selection
+
+When a mowing mission begins, the system shall:
+
+- localize the mower
+- determine which saved area contains the mower or is the nearest reachable area
+- score valid lane-entry candidates using distance and heading-change cost
+- choose a valid starting lane without assuming a fixed mission start point
+
+The initial implementation may use nearest-lane-endpoint selection with heading-change tie-breaking.
+
+### FR-017 Logging and replay
 
 The system shall record sufficient telemetry and events to:
 
@@ -110,11 +161,11 @@ The system shall record sufficient telemetry and events to:
 - replay runs offline
 - compare expected and achieved behavior
 
-### FR-014 Safety
+### FR-018 Safety
 
 The system shall stop or degrade behavior safely when faults, stale data, invalid state estimates, or command timeouts occur.
 
-### FR-015 Resumability
+### FR-019 Resumability
 
 Project progress shall be documented so future work can resume from a requirement-by-requirement status view.
 
@@ -138,4 +189,4 @@ Transport-independent logic shall not require redesign when the bus changes from
 
 ### NFR-005 Observability
 
-Logging shall support fault diagnosis, calibration review, and route replay analysis.
+Logging shall support fault diagnosis, calibration review, site capture review, planning review, and mission replay analysis.

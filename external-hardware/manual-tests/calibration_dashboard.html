@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mower Calibration</title>
+  <style>
+    :root {
+      --bg: #f5efe3;
+      --panel: rgba(255, 248, 240, 0.92);
+      --ink: #16323a;
+      --muted: #6c7d83;
+      --green: #2f8f5b;
+      --orange: #d88926;
+      --red: #cb4b4b;
+      --border: rgba(22, 50, 58, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Gill Sans", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(64, 138, 88, 0.2), transparent 32%),
+        radial-gradient(circle at top right, rgba(216, 137, 38, 0.15), transparent 28%),
+        linear-gradient(180deg, #f8f3e8, var(--bg));
+      color: var(--ink);
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 18px 14px 28px;
+    }
+    .hero, .card {
+      border-radius: 20px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      box-shadow: 0 18px 40px rgba(22, 50, 58, 0.08);
+    }
+    .hero {
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    .subtitle {
+      margin-top: 8px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: inherit;
+      font-weight: 800;
+    }
+    .start { background: #2f8f5b; color: white; }
+    .abort { background: #cb4b4b; color: white; }
+    button:disabled { opacity: 0.4; }
+    .meta {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-bottom: 14px;
+    }
+    .meta .card {
+      padding: 14px;
+      min-height: 120px;
+    }
+    .label {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .value {
+      font-size: 28px;
+      font-weight: 800;
+    }
+    .small {
+      margin-top: 8px;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 14px;
+    }
+    .goal-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      margin-bottom: 14px;
+    }
+    .goal-card {
+      padding: 16px;
+      min-height: 170px;
+      position: relative;
+      overflow: hidden;
+    }
+    .goal-card.green { background: linear-gradient(160deg, rgba(47,143,91,0.18), rgba(255,248,240,0.95)); }
+    .goal-card.orange { background: linear-gradient(160deg, rgba(216,137,38,0.2), rgba(255,248,240,0.95)); }
+    .goal-card.red { background: linear-gradient(160deg, rgba(203,75,75,0.2), rgba(255,248,240,0.95)); }
+    .goal-quality {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .goal-card.green .goal-quality { background: rgba(47,143,91,0.16); color: var(--green); }
+    .goal-card.orange .goal-quality { background: rgba(216,137,38,0.16); color: var(--orange); }
+    .goal-card.red .goal-quality { background: rgba(203,75,75,0.16); color: var(--red); }
+    .goal-title {
+      margin-top: 10px;
+      font-size: 24px;
+      font-weight: 800;
+    }
+    .goal-target {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .history.card {
+      padding: 16px;
+    }
+    .history-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .history-item {
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      padding: 12px;
+      background: rgba(255,255,255,0.58);
+    }
+    .history-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      flex-wrap: wrap;
+      font-weight: 700;
+    }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .pill.green { background: rgba(47,143,91,0.16); color: var(--green); }
+    .pill.orange { background: rgba(216,137,38,0.16); color: var(--orange); }
+    .pill.red { background: rgba(203,75,75,0.16); color: var(--red); }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.45 ui-monospace, monospace;
+      color: #2f444b;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Calibration Scoreboard</h1>
+      <p class="subtitle">This view focuses on the three operator goals: turn stopping accuracy, straight-line tracking, and arrival distance. The runner keeps recalibrating and storing learned values after each completed iteration until you stop it or all goals go green.</p>
+      <div class="actions">
+        <button id="start" class="start">Start Learning</button>
+        <button id="abort" class="abort">Stop</button>
+      </div>
+    </section>
+
+    <section class="meta">
+      <article class="card">
+        <div class="label">Readiness</div>
+        <div id="ready" class="value">Unknown</div>
+        <div id="readyMeta" class="small">Waiting for sensor state.</div>
+      </article>
+      <article class="card">
+        <div class="label">Iteration</div>
+        <div id="iteration" class="value">0</div>
+        <div id="iterationMeta" class="small">Idle</div>
+      </article>
+      <article class="card">
+        <div class="label">Learned Profile</div>
+        <div id="profile" class="value">1.00 / 1.00</div>
+        <div id="profileMeta" class="small">Turn scale / line gain</div>
+      </article>
+      <article class="card">
+        <div class="label">Logs</div>
+        <div id="logs" class="small">Waiting for paths...</div>
+      </article>
+    </section>
+
+    <section class="goal-grid">
+      <article id="goal-turn" class="card goal-card red">
+        <div id="turnQuality" class="goal-quality">No Data</div>
+        <div class="goal-title">Turning</div>
+        <div id="turnValue" class="value">n/a</div>
+        <div id="turnMeta" class="goal-target">Green at 0.5 deg or better.</div>
+      </article>
+      <article id="goal-line" class="card goal-card red">
+        <div id="lineQuality" class="goal-quality">No Data</div>
+        <div class="goal-title">Straight Line</div>
+        <div id="lineValue" class="value">n/a</div>
+        <div id="lineMeta" class="goal-target">Green at 1-2 cm peak deviation.</div>
+      </article>
+      <article id="goal-arrival" class="card goal-card red">
+        <div id="arrivalQuality" class="goal-quality">No Data</div>
+        <div class="goal-title">Arrival</div>
+        <div id="arrivalValue" class="value">n/a</div>
+        <div id="arrivalMeta" class="goal-target">Green at 5 cm or better.</div>
+      </article>
+    </section>
+
+    <section class="history card">
+      <div class="label">Recent Iterations</div>
+      <div id="history" class="history-list">
+        <div class="history-item">No completed iterations yet.</div>
+      </div>
+    </section>
+
+    <section class="meta" style="margin-top: 14px;">
+      <article class="card">
+        <div class="label">Current Trial</div>
+        <div id="trial" class="value">Idle</div>
+        <div id="trialMeta" class="small">No trial running.</div>
+      </article>
+      <article class="card">
+        <div class="label">Pose</div>
+        <div id="pose" class="value">n/a</div>
+        <div id="poseMeta" class="small">Estimator offline.</div>
+      </article>
+      <article class="card">
+        <div class="label">Notes</div>
+        <pre id="notes">Waiting for state...</pre>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const els = {
+      start: document.getElementById("start"),
+      abort: document.getElementById("abort"),
+      ready: document.getElementById("ready"),
+      readyMeta: document.getElementById("readyMeta"),
+      iteration: document.getElementById("iteration"),
+      iterationMeta: document.getElementById("iterationMeta"),
+      profile: document.getElementById("profile"),
+      profileMeta: document.getElementById("profileMeta"),
+      logs: document.getElementById("logs"),
+      trial: document.getElementById("trial"),
+      trialMeta: document.getElementById("trialMeta"),
+      pose: document.getElementById("pose"),
+      poseMeta: document.getElementById("poseMeta"),
+      notes: document.getElementById("notes"),
+      history: document.getElementById("history"),
+      turnCard: document.getElementById("goal-turn"),
+      lineCard: document.getElementById("goal-line"),
+      arrivalCard: document.getElementById("goal-arrival"),
+      turnQuality: document.getElementById("turnQuality"),
+      lineQuality: document.getElementById("lineQuality"),
+      arrivalQuality: document.getElementById("arrivalQuality"),
+      turnValue: document.getElementById("turnValue"),
+      lineValue: document.getElementById("lineValue"),
+      arrivalValue: document.getElementById("arrivalValue"),
+      turnMeta: document.getElementById("turnMeta"),
+      lineMeta: document.getElementById("lineMeta"),
+      arrivalMeta: document.getElementById("arrivalMeta"),
+    };
+
+    function qualityLabel(quality) {
+      if (quality === "green") return "Green";
+      if (quality === "orange") return "Orange";
+      return "Red";
+    }
+
+    function setGoal(card, qualityEl, valueEl, metaEl, goal, unit, extraText) {
+      if (!goal) {
+        card.className = "card goal-card red";
+        qualityEl.textContent = "No Data";
+        valueEl.textContent = "n/a";
+        metaEl.textContent = extraText;
+        return;
+      }
+      card.className = `card goal-card ${goal.quality}`;
+      qualityEl.textContent = qualityLabel(goal.quality);
+      valueEl.textContent = `${goal.value.toFixed(3)} ${unit}`;
+      metaEl.textContent = `Target ${goal.target} ${unit}. ${extraText}`;
+    }
+
+    function pill(quality) {
+      return `<span class="pill ${quality}">${qualityLabel(quality)}</span>`;
+    }
+
+    async function post(url) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+    }
+
+    function renderHistory(history) {
+      if (!history || history.length === 0) {
+        els.history.innerHTML = '<div class="history-item">No completed iterations yet.</div>';
+        return;
+      }
+      els.history.innerHTML = history.map((entry) => `
+        <div class="history-item">
+          <div class="history-head">
+            <div>Iteration ${entry.iteration}</div>
+            <div>${pill(entry.quality)}</div>
+          </div>
+          <div class="small">
+            Turn ${entry.goals.turn.value.toFixed(3)} deg |
+            Line ${entry.goals.line.value.toFixed(3)} m |
+            Arrival ${entry.goals.arrival.value.toFixed(3)} m
+          </div>
+          <div class="small">
+            Learned turn ${entry.recommendations.recommendedTurnScale},
+            line ${entry.recommendations.recommendedLineGainScale},
+            arrival tol ${entry.recommendations.recommendedArrivalToleranceMeters} m
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function render(state) {
+      els.ready.textContent = state.readiness.ready ? "Ready" : "Waiting";
+      els.readyMeta.textContent = state.readiness.ready
+        ? "GNSS, IMU, motor feedback, and estimator are all ready."
+        : state.readiness.reasons.join(" | ");
+
+      els.iteration.textContent = String(state.calibration.iteration || 0);
+      els.iterationMeta.textContent = state.calibration.running
+        ? `${state.calibration.currentTrialId || "starting"} | phase ${state.calibration.phase}`
+        : (state.calibration.lastError ? `Last error: ${state.calibration.lastError}` : "Idle");
+
+      if (state.calibration.learnedProfile) {
+        els.profile.textContent = `${state.calibration.learnedProfile.turnScale.toFixed(2)} / ${state.calibration.learnedProfile.lineGainScale.toFixed(2)}`;
+        els.profileMeta.textContent = `Turn scale / line gain | arrival tol ${state.calibration.learnedProfile.arrivalToleranceMeters.toFixed(3)} m`;
+      } else {
+        els.profile.textContent = "n/a";
+        els.profileMeta.textContent = "No learned profile yet.";
+      }
+
+      els.logs.textContent = `Telemetry: ${state.telemetryLogPath}\nEvents: ${state.eventLogPath}\nLearning: ${state.learningStatePath}`;
+
+      setGoal(els.turnCard, els.turnQuality, els.turnValue, els.turnMeta, state.calibration.goals?.turn, "deg", "Turn should stop right on the target angle.");
+      setGoal(els.lineCard, els.lineQuality, els.lineValue, els.lineMeta, state.calibration.goals?.line, "m", "Peak deviation from the perfect line.");
+      setGoal(els.arrivalCard, els.arrivalQuality, els.arrivalValue, els.arrivalMeta, state.calibration.goals?.arrival, "m", "Average final target miss distance.");
+
+      renderHistory(state.calibration.history);
+
+      els.trial.textContent = state.calibration.running ? (state.calibration.currentTrialId || "Starting") : "Idle";
+      els.trialMeta.textContent = state.calibration.currentDescription || "No trial running.";
+
+      if (state.estimate.ok) {
+        els.pose.textContent = `${state.estimate.sample.xMeters.toFixed(2)}, ${state.estimate.sample.yMeters.toFixed(2)}`;
+        els.poseMeta.textContent = `Heading ${state.estimate.sample.headingDegrees.toFixed(1)} deg | speed ${state.estimate.sample.speedMetersPerSecond.toFixed(2)} m/s`;
+      } else {
+        els.pose.textContent = "n/a";
+        els.poseMeta.textContent = state.estimate.error;
+      }
+
+      els.notes.textContent = (state.notes || []).join("\n");
+      els.start.disabled = state.calibration.running || !state.readiness.ready;
+      els.abort.disabled = !state.calibration.running;
+    }
+
+    els.start.addEventListener("click", async () => {
+      try {
+        await post("/api/calibration/start");
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    els.abort.addEventListener("click", async () => {
+      try {
+        await post("/api/calibration/abort");
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    const events = new EventSource("/events");
+    events.onmessage = (event) => render(JSON.parse(event.data));
+  </script>
+</body>
+</html>

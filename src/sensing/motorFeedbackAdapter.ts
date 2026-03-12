@@ -27,10 +27,17 @@ export class MotorFeedbackAdapter {
     }
 
     return {
-      wheelOdometry: this.buildWheelOdometryMeasurement(sample),
+      ...(this.shouldUseWheelOdometry(faultFlags) ? { wheelOdometry: this.buildWheelOdometryMeasurement(sample) } : {}),
       faultFlags,
       stale,
     };
+  }
+
+  private shouldUseWheelOdometry(faultFlags: number): boolean {
+    const odometryInvalidMask = MotorFaultFlag.WatchdogExpired
+      | MotorFaultFlag.LeftEncoderFault
+      | MotorFaultFlag.RightEncoderFault;
+    return (faultFlags & odometryInvalidMask) === 0;
   }
 
   private buildWheelOdometryMeasurement(sample: MotorFeedbackSample): WheelOdometryMeasurement {

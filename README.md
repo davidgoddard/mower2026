@@ -2,6 +2,10 @@
 
 Second-generation autonomous mower software for a Raspberry Pi with GNSS and motor ESP nodes.
 
+Built to run a modified Flymo H400 manual push mower.
+
+![Mower](./docs/images/mower.png)
+
 ## Current state
 
 This directory is the new clean codebase. Legacy code in `/Volumes/mower/legacy/mower` is reference material only.
@@ -32,6 +36,32 @@ This directory is the new clean codebase. Legacy code in `/Volumes/mower/legacy/
 ## Tooling
 
 The project uses plain TypeScript and Node's built-in test runner to keep the baseline simple.
+
+## Core Pi App
+
+The intended mower operator entrypoint is now the app-owned Pi runtime under `pi-app/`.
+
+Current core app files:
+
+- `pi-app/core_server.js`
+- `pi-app/web/core_dashboard.html`
+- `pi-app/hidGameController.js`
+- `pi-app/systemConfig.js`
+
+What it does today:
+
+- boots into `manual` mode by default
+- hosts a landing page on the Pi
+- allows mode switching between:
+  - `manual`
+  - `site_capture`
+  - `autonomous`
+- keeps the live controller, GNSS, IMU, motor, and estimator loop active
+- provides first-pass site capture and site JSON persistence
+
+Current limitation:
+
+- `autonomous` mode can execute one selected lane, then stop; multi-lane mission flow is not implemented yet
 
 ## Commands
 
@@ -83,6 +113,43 @@ Manual hardware tests and phone/web viewers are available for:
 - IMU sanity checks
 - games controller inspection
 - live manual drive with phone telemetry
+
+For operator use, prefer the core app over the manual-test servers:
+
+```sh
+cd /Volumes/mower/mower
+npm run build
+node pi-app/core_server.js
+```
+
+Then open:
+
+- `http://<pi-ip>:8090`
+
+## systemd
+
+To install the core app as a boot-time service named `mower` on the Pi:
+
+```sh
+cd /Volumes/mower/mower
+chmod +x pi-app/mower-launch.sh pi-app/systemd/install-mower-service.sh
+sudo pi-app/systemd/install-mower-service.sh
+```
+
+Then manage it with:
+
+```sh
+sudo systemctl start mower
+sudo systemctl stop mower
+sudo systemctl restart mower
+sudo systemctl status mower
+```
+
+The service files are:
+
+- `pi-app/mower-launch.sh`
+- `pi-app/systemd/mower.service.template`
+- `pi-app/systemd/install-mower-service.sh`
 
 The full guide is here:
 

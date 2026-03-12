@@ -34,6 +34,29 @@ The codebase now contains a minimal but executable control path:
 6. `RuntimeApp` executes one control cycle and applies `RuleBasedSafetyManager` decisions.
 7. Telemetry and events can be captured via memory loggers and replayed in tests.
 
+## Current operator app boundary
+
+The intended Pi-side operator boundary is now a single core app:
+
+- `pi-app/core_server.js`
+- `pi-app/web/core_dashboard.html`
+
+That core app is responsible for:
+
+- booting into manual drive by default
+- hosting the landing page on the Pi
+- exposing mode switching between:
+  - manual
+  - site capture
+  - autonomous
+- keeping one shared live controller/sensor/estimator loop behind those modes
+
+Current implementation status:
+
+- manual mode is live
+- site-capture mode is live for first-pass perimeter/obstacle recording
+- autonomous mode is a shell only and does not yet execute mowing missions
+
 ## Design constraints
 
 - I2C bandwidth is limited, so messages must be compact and mower-oriented.

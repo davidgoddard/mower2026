@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Mower Core App</title>
+    <style>
+      :root {
+        --bg: #f3efe5;
+        --ink: #1b221d;
+        --muted: #627163;
+        --panel: rgba(255, 252, 246, 0.92);
+        --line: rgba(27, 34, 29, 0.12);
+        --ok: #2c875f;
+        --warn: #b56a28;
+        --bad: #b1493d;
+        --accent: #1e5a72;
+        --field: rgba(37, 95, 74, 0.1);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(30, 90, 114, 0.12), transparent 24%),
+          radial-gradient(circle at top right, rgba(37, 95, 74, 0.12), transparent 24%),
+          linear-gradient(180deg, #fcfbf6, #e8e2d5 72%, #d8d0c0);
+      }
+      .page {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 16px 12px 40px;
+      }
+      .hero, .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+      }
+      .hero {
+        padding: 24px 18px;
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2.2rem, 7vw, 3.8rem);
+        line-height: 0.92;
+      }
+      .subtitle, .sub, pre, .hint {
+        color: var(--muted);
+      }
+      .subtitle {
+        margin: 0;
+        line-height: 1.5;
+        font-size: 1rem;
+      }
+      .row, .grid, .actions {
+        display: grid;
+        gap: 12px;
+      }
+      .row {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .actions {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .card {
+        padding: 14px;
+      }
+      .wide {
+        grid-column: 1 / -1;
+      }
+      .label {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .value {
+        margin-top: 8px;
+        font-size: 1.5rem;
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .ok { background: rgba(44, 135, 95, 0.14); color: var(--ok); }
+      .warn { background: rgba(181, 106, 40, 0.14); color: var(--warn); }
+      .bad { background: rgba(177, 73, 61, 0.14); color: var(--bad); }
+      .pair {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .mini {
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.55);
+        border: 1px solid var(--line);
+      }
+      .mini-value {
+        margin-top: 6px;
+        font-size: 1rem;
+      }
+      button {
+        appearance: none;
+        border: 0;
+        padding: 12px 14px;
+        background: linear-gradient(180deg, #2c6a84, #1f5366);
+        color: white;
+        font: inherit;
+        font-weight: 700;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
+        cursor: pointer;
+      }
+      button.secondary {
+        background: linear-gradient(180deg, #2a6c54, #215440);
+        color: #f6fbf7;
+      }
+      button.warn {
+        background: linear-gradient(180deg, #b56a28, #8f4d1d);
+        color: #fff5ec;
+      }
+      button.danger {
+        background: linear-gradient(180deg, #b1493d, #8b362c);
+        color: #fff1ef;
+      }
+      button:disabled {
+        opacity: 1;
+        cursor: not-allowed;
+        text-shadow: none;
+        color: #655f57;
+        background: linear-gradient(180deg, #ddd4c6, #c8beaf);
+      }
+      button.secondary:disabled {
+        color: #4f6156;
+        background: linear-gradient(180deg, #ced8d1, #b7c2ba);
+      }
+      button.warn:disabled {
+        color: #74441d;
+        background: linear-gradient(180deg, #e4c5a7, #d0aa82);
+      }
+      button.danger:disabled {
+        color: #73372f;
+        background: linear-gradient(180deg, #e6c0ba, #d2a59d);
+      }
+      .section-hidden {
+        display: none;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 360px;
+        background: linear-gradient(180deg, rgba(37, 95, 74, 0.06), rgba(30, 90, 114, 0.04));
+        border: 1px solid var(--line);
+      }
+      pre {
+        margin: 10px 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+      ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 0.88rem;
+      }
+      @media (max-width: 760px) {
+        .row, .grid, .pair, .actions {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <h1>Mower Core App</h1>
+        <p class="subtitle">
+          The Pi boots into manual mode. Switch to site capture to define mowing areas, or open autonomous mode when mission execution is ready.
+        </p>
+      </section>
+
+      <section class="row">
+        <article class="card">
+          <div class="label">Mode</div>
+          <div class="value" id="modeStatus">Manual</div>
+          <div class="sub" id="modeSummary">Default boot mode</div>
+        </article>
+        <article class="card">
+          <div class="label">Controller</div>
+          <div class="value" id="controllerStatus">Waiting</div>
+          <div class="sub" id="controllerSummary">No controller state yet</div>
+        </article>
+        <article class="card">
+          <div class="label">Estimate</div>
+          <div class="value" id="estimateStatus">Waiting</div>
+          <div class="sub" id="estimateSummary">No fused estimate yet</div>
+        </article>
+      </section>
+
+      <section class="card wide">
+        <div class="label">Mode Switch</div>
+        <div class="actions" style="margin-top: 12px;">
+          <button id="modeManual">Manual Drive</button>
+          <button id="modeCapture" class="secondary">Define Mowing Areas</button>
+          <button id="modeAutonomous" class="warn">Start Mowing</button>
+        </div>
+        <div class="hint" id="actionStatus">Mode changes are applied live.</div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="label">Manual Drive</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Demand</div>
+              <div class="mini-value" id="manualDemand">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Wheel Targets</div>
+              <div class="mini-value" id="wheelTargets">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Wheel Actual</div>
+              <div class="mini-value" id="wheelActual">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Mode</div>
+              <div class="mini-value" id="commandMode">-</div>
+            </div>
+          </div>
+          <div class="sub">Use controller top or right-top to arm drive. Cross or left-top disables drive.</div>
+        </article>
+
+        <article class="card">
+          <div class="label">Pose + GNSS</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">X</div>
+              <div class="mini-value" id="estimateX">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Y</div>
+              <div class="mini-value" id="estimateY">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Heading</div>
+              <div class="mini-value" id="estimateHeading">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">GNSS Fix</div>
+              <div class="mini-value" id="gnssFix">-</div>
+            </div>
+          </div>
+          <div class="sub" id="gnssSummary">No GNSS data yet</div>
+        </article>
+
+        <article class="card wide" id="captureSection">
+          <div class="label">Site Capture</div>
+          <div class="actions" style="margin-top: 12px;">
+            <button id="startPerimeter" class="secondary">Start Perimeter</button>
+            <button id="finishPerimeter" class="warn">Finish Perimeter</button>
+            <button id="startObstacle" class="secondary">Start Obstacle</button>
+            <button id="finishObstacle" class="warn">Finish Obstacle</button>
+            <button id="undoLastPoint" class="secondary">Undo Last Point</button>
+            <button id="discardCurrentObstacle" class="danger">Discard Obstacle</button>
+            <button id="finishCapture" class="secondary">Finish Capture</button>
+            <button id="discardCapture" class="danger">Discard Capture</button>
+          </div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Perimeter Points</div>
+              <div class="mini-value" id="perimeterPoints">0</div>
+            </div>
+            <div class="mini">
+              <div class="label">Obstacles</div>
+              <div class="mini-value" id="obstacleCount">0</div>
+            </div>
+            <div class="mini">
+              <div class="label">Active Capture</div>
+              <div class="mini-value" id="activeCapture">idle</div>
+            </div>
+            <div class="mini">
+              <div class="label">Warnings</div>
+              <div class="mini-value" id="warningCount">0</div>
+            </div>
+          </div>
+          <div class="sub" id="captureSummary">Switch to site-capture mode to record mowing areas.</div>
+        </article>
+
+        <article class="card wide" id="autonomousSection">
+          <div class="label">Autonomous Mode</div>
+          <div class="actions" style="margin-top: 12px;">
+            <button id="generatePlan" class="secondary">Generate Plan</button>
+            <button id="selectMissionStart" class="secondary">Select Start</button>
+            <button id="startAutonomous" class="warn">Start Mowing</button>
+            <button id="stopAutonomous" class="danger">Stop Autonomous</button>
+          </div>
+          <div class="sub" id="autonomousSummary">Autonomous execution is not implemented yet.</div>
+          <div class="hint">This mode is the intended home for mission start selection and mowing execution.</div>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Site Review + Planning</div>
+          <div class="actions" style="margin-top: 12px;">
+            <button id="refreshSites">Refresh Sites</button>
+            <button id="generatePlanReview" class="secondary">Generate Plan For Selected Site</button>
+            <button id="selectMissionStartReview" class="secondary">Select Start From Current Pose</button>
+          </div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Saved Sites</div>
+              <div class="mini-value" id="savedSiteCount">0</div>
+            </div>
+            <div class="mini">
+              <div class="label">Selected Site</div>
+              <div class="mini-value" id="selectedSite">none</div>
+            </div>
+            <div class="mini">
+              <div class="label">Plan Lanes</div>
+              <div class="mini-value" id="planLaneCount">0</div>
+            </div>
+            <div class="mini">
+              <div class="label">Best Angle</div>
+              <div class="mini-value" id="planOrientation">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Exec Segment</div>
+              <div class="mini-value" id="executionSegment">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Exec Phase</div>
+              <div class="mini-value" id="executionPhase">-</div>
+            </div>
+          </div>
+          <div class="sub" id="planSummary">No plan generated yet.</div>
+          <div class="sub" id="missionStartSummary">No mission start selected yet.</div>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Geometry Preview</div>
+          <canvas id="mapCanvas" width="1040" height="360"></canvas>
+          <div class="hint">Green = saved perimeter. Rust = saved obstacles. Grey dotted = active capture. Blue dot = current pose.</div>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Warnings</div>
+          <ul id="warnings"></ul>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Notes</div>
+          <ul id="notes"></ul>
+          <div class="sub" id="savedSitePath"></div>
+          <div class="sub" id="sessionPath"></div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const canvas = $("mapCanvas");
+      const context = canvas.getContext("2d");
+
+      function format(value, decimals = 2) {
+        return Number(value).toFixed(decimals);
+      }
+
+      function badge(text, status) {
+        return `<span class="badge ${status}">${text}</span>`;
+      }
+
+      function setHtml(id, html) {
+        $(id).innerHTML = html;
+      }
+
+      async function postJson(url, body) {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = await response.json();
+        if (!payload.ok) {
+          throw new Error(payload.error ?? "Request failed");
+        }
+      }
+
+      function drawPolyline(points, strokeStyle, dashed = false) {
+        if (!points || points.length === 0) {
+          return;
+        }
+        context.save();
+        context.strokeStyle = strokeStyle;
+        context.lineWidth = 2;
+        context.setLineDash(dashed ? [6, 6] : []);
+        context.beginPath();
+        context.moveTo(points[0].screenX, points[0].screenY);
+        for (let index = 1; index < points.length; index += 1) {
+          context.lineTo(points[index].screenX, points[index].screenY);
+        }
+        context.stroke();
+        context.restore();
+      }
+
+      function drawSegments(segments, strokeStyle) {
+        for (const segment of segments) {
+          drawPolyline(segment, strokeStyle, false);
+        }
+      }
+
+      function mapGeometryPoints(state) {
+        const all = [];
+        const perimeter = state.capture.perimeter?.simplifiedPoints ?? [];
+        const active = state.capture.activeCapture?.points ?? [];
+        const obstacles = state.capture.obstacles.flatMap((polygon) => polygon.simplifiedPoints);
+        const lanes = state.planning.currentPlan
+          ? state.planning.currentPlan.areas.flatMap((area) => area.lanes.flatMap((lane) => [lane.start, lane.end]))
+          : [];
+        const missionStart = state.planning.lastMissionStartSelection?.approachPose
+          ? [state.planning.lastMissionStartSelection.approachPose]
+          : [];
+        for (const point of [...perimeter, ...active, ...obstacles, ...lanes, ...missionStart]) {
+          all.push(point);
+        }
+        if (state.estimate.ok) {
+          all.push(state.estimate.sample);
+        }
+        if (all.length === 0) {
+          return null;
+        }
+
+        const xs = all.map((point) => point.xMeters);
+        const ys = all.map((point) => point.yMeters);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        const width = Math.max(maxX - minX, 1);
+        const height = Math.max(maxY - minY, 1);
+        const padding = 24;
+        const scale = Math.min(
+          (canvas.width - (padding * 2)) / width,
+          (canvas.height - (padding * 2)) / height,
+        );
+
+        const project = (point) => ({
+          ...point,
+          screenX: padding + ((point.xMeters - minX) * scale),
+          screenY: canvas.height - padding - ((point.yMeters - minY) * scale),
+        });
+
+        return {
+          perimeter: perimeter.map(project),
+          active: active.map(project),
+          obstacles: state.capture.obstacles.map((polygon) => polygon.simplifiedPoints.map(project)),
+          lanes: state.planning.currentPlan
+            ? state.planning.currentPlan.areas.flatMap((area) =>
+              area.lanes.map((lane) => [project(lane.start), project(lane.end)]),
+            )
+            : [],
+          estimate: state.estimate.ok ? project(state.estimate.sample) : null,
+          missionStart: state.planning.lastMissionStartSelection?.approachPose
+            ? project(state.planning.lastMissionStartSelection.approachPose)
+            : null,
+        };
+      }
+
+      function drawMap(state) {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        const mapped = mapGeometryPoints(state);
+        if (!mapped) {
+          context.fillStyle = "#627163";
+          context.font = "18px Georgia";
+          context.fillText("No site geometry yet. Switch to site-capture mode to define mowing areas.", 24, 42);
+          return;
+        }
+
+        drawPolyline(mapped.perimeter, "#255f4a");
+        for (const obstacle of mapped.obstacles) {
+          drawPolyline(obstacle, "#a04f2d");
+        }
+        drawPolyline(mapped.active, "#7b8076", true);
+        drawSegments(mapped.lanes, "#1e5a72");
+
+        if (mapped.estimate) {
+          context.save();
+          context.fillStyle = "#1e5a72";
+          context.beginPath();
+          context.arc(mapped.estimate.screenX, mapped.estimate.screenY, 5, 0, Math.PI * 2);
+          context.fill();
+          context.restore();
+        }
+
+        if (mapped.missionStart) {
+          context.save();
+          context.strokeStyle = "#b1493d";
+          context.lineWidth = 3;
+          context.beginPath();
+          context.arc(mapped.missionStart.screenX, mapped.missionStart.screenY, 8, 0, Math.PI * 2);
+          context.stroke();
+          context.restore();
+        }
+      }
+
+      function render(state) {
+        const mode = state.app.currentMode;
+        const controller = state.controller;
+        const estimate = state.estimate;
+        const capture = state.capture;
+
+        setHtml("modeStatus", badge(mode.replace("_", " "), mode === "manual" ? "ok" : "warn"));
+        $("modeSummary").textContent = mode === "manual"
+          ? "Default operator mode. Controller can drive immediately when armed."
+          : mode === "site_capture"
+            ? "Manual driving stays available while perimeter and obstacle geometry are recorded."
+            : state.app.autonomousMessage;
+
+        setHtml("controllerStatus", badge(
+          controller.connected ? (controller.manualDriveEnabled ? "Live + Armed" : "Live") : "Disconnected",
+          controller.connected ? (controller.manualDriveEnabled ? "warn" : "ok") : "bad",
+        ));
+        $("controllerSummary").textContent = controller.product
+          ? `${controller.product} | speed ${format(controller.speed, 2)} | angle ${format(controller.angleDegrees, 1)} deg`
+          : "Controller unavailable";
+
+        if (estimate.ok) {
+          setHtml("estimateStatus", badge(`heading ${format(estimate.sample.headingDegrees, 1)} deg`, "ok"));
+          $("estimateSummary").textContent = `speed ${format(estimate.sample.speedMetersPerSecond, 3)} m/s | confidence ${format(estimate.sample.confidence, 2)}`;
+          $("estimateX").textContent = `${format(estimate.sample.xMeters, 3)} m`;
+          $("estimateY").textContent = `${format(estimate.sample.yMeters, 3)} m`;
+          $("estimateHeading").textContent = `${format(estimate.sample.headingDegrees, 1)} deg`;
+        } else {
+          setHtml("estimateStatus", badge("Unavailable", "bad"));
+          $("estimateSummary").textContent = estimate.error;
+        }
+
+        $("manualDemand").textContent = `speed ${format(controller.speed, 2)} | angle ${format(controller.angleDegrees, 1)} deg`;
+        $("wheelTargets").textContent = `L ${format(state.command.limitedLeftMetersPerSecond, 3)} | R ${format(state.command.limitedRightMetersPerSecond, 3)} m/s`;
+        $("wheelActual").textContent = state.motor.ok
+          ? `L ${format(state.motor.derived.leftPhysicalMetersPerSecond, 3)} | R ${format(state.motor.derived.rightPhysicalMetersPerSecond, 3)} m/s`
+          : "No motor feedback";
+        $("commandMode").textContent = state.command.mode;
+
+        $("gnssFix").textContent = state.gnss.ok ? state.gnss.sample.fixType : "-";
+        $("gnssSummary").textContent = state.gnss.ok
+          ? `x ${format(state.gnss.sample.xMeters, 3)} | y ${format(state.gnss.sample.yMeters, 3)} | sats ${state.gnss.sample.satellitesInUse}`
+          : state.gnss.error;
+
+        $("perimeterPoints").textContent = capture.perimeter ? String(capture.perimeter.rawPoints.length) : "0";
+        $("obstacleCount").textContent = String(capture.obstacles.length);
+        $("activeCapture").textContent = capture.activeCapture
+          ? `${capture.activeCapture.kind} (${capture.activeCapture.points.length})`
+          : "idle";
+        $("warningCount").textContent = String(capture.warnings.length);
+        $("captureSummary").textContent = capture.lastRecordResult
+          ? `${capture.lastRecordResult.recorded ? "Recorded" : "Skipped"} | ${capture.lastRecordResult.reason}`
+          : "No capture samples recorded yet.";
+
+        $("savedSiteCount").textContent = String(state.review.savedSiteFiles.length);
+        $("selectedSite").textContent = state.review.selectedSitePath ?? "none";
+        if (state.planning.currentPlan) {
+          $("planLaneCount").textContent = String(state.planning.currentPlan.areas[0]?.lanes.length ?? 0);
+          $("planOrientation").textContent = `${format(state.planning.currentPlan.metrics.candidateOrientationDegrees, 1)} deg`;
+          $("planSummary").textContent =
+            `Total lane length ${format(state.planning.currentPlan.metrics.totalLaneLengthMeters, 2)} m | average ${format(state.planning.currentPlan.metrics.averageLaneLengthMeters, 2)} m | warnings ${state.planning.currentPlan.warnings.length}`;
+        } else {
+          $("planLaneCount").textContent = "0";
+          $("planOrientation").textContent = "-";
+          $("planSummary").textContent = "No plan generated yet.";
+        }
+
+        $("missionStartSummary").textContent = state.planning.lastMissionStartSelection
+          ? `Lane ${state.planning.lastMissionStartSelection.laneId} ${state.planning.lastMissionStartSelection.endpoint} | distance ${format(state.planning.lastMissionStartSelection.distanceMeters, 2)} m | heading penalty ${format(state.planning.lastMissionStartSelection.headingPenaltyDegrees, 1)} deg`
+          : "No mission start selected yet.";
+        $("executionSegment").textContent = state.planning.laneExecution?.activeSegmentId ?? "-";
+        $("executionPhase").textContent = state.planning.laneExecution?.phase ?? "-";
+
+        $("autonomousSummary").textContent =
+          `Status: ${state.app.autonomousStatus}. ${state.app.autonomousMessage}`;
+
+        $("warnings").innerHTML = capture.warnings.length === 0
+          ? "<li>No validation warnings.</li>"
+          : capture.warnings.map((warning) => `<li>${warning.code}: ${warning.message}</li>`).join("");
+
+        $("notes").innerHTML = state.notes.map((note) => `<li>${note}</li>`).join("");
+        $("savedSitePath").textContent = state.lastSavedSitePath
+          ? `Last saved site: ${state.lastSavedSitePath}`
+          : "No saved site yet.";
+        $("sessionPath").textContent = `Session telemetry: ${state.sessionLogPath}`;
+
+        $("captureSection").classList.toggle("section-hidden", mode !== "site_capture");
+        $("autonomousSection").classList.toggle("section-hidden", mode !== "autonomous");
+
+        $("startPerimeter").disabled = mode !== "site_capture" || !!capture.activeCapture;
+        $("finishPerimeter").disabled = mode !== "site_capture" || capture.activeCapture?.kind !== "perimeter";
+        $("startObstacle").disabled = mode !== "site_capture" || !!capture.activeCapture || !capture.perimeter;
+        $("finishObstacle").disabled = mode !== "site_capture" || capture.activeCapture?.kind !== "obstacle";
+        $("undoLastPoint").disabled = mode !== "site_capture" || !capture.activeCapture || capture.activeCapture.points.length === 0;
+        $("discardCurrentObstacle").disabled = mode !== "site_capture" || capture.activeCapture?.kind !== "obstacle";
+        $("finishCapture").disabled = mode !== "site_capture" || !!capture.activeCapture || !capture.perimeter;
+        $("discardCapture").disabled = mode !== "site_capture" || (!capture.perimeter && capture.obstacles.length === 0 && !capture.activeCapture);
+        $("refreshSites").disabled = false;
+        $("generatePlan").disabled = state.review.selectedSitePath == null;
+        $("generatePlanReview").disabled = state.review.selectedSitePath == null;
+        $("selectMissionStart").disabled = !state.planning.currentPlan || !estimate.ok;
+        $("selectMissionStartReview").disabled = !state.planning.currentPlan || !estimate.ok;
+        $("startAutonomous").disabled = mode !== "autonomous";
+        $("stopAutonomous").disabled = mode !== "autonomous";
+
+        drawMap(state);
+      }
+
+      [
+        ["modeManual", () => postJson("/api/app", { action: "set_mode", mode: "manual" })],
+        ["modeCapture", () => postJson("/api/app", { action: "set_mode", mode: "site_capture" })],
+        ["modeAutonomous", () => postJson("/api/app", { action: "set_mode", mode: "autonomous" })],
+        ["startPerimeter", () => postJson("/api/capture", { action: "start_perimeter" })],
+        ["finishPerimeter", () => postJson("/api/capture", { action: "finish_perimeter" })],
+        ["startObstacle", () => postJson("/api/capture", { action: "start_obstacle" })],
+        ["finishObstacle", () => postJson("/api/capture", { action: "finish_obstacle" })],
+        ["undoLastPoint", () => postJson("/api/capture", { action: "undo_last_point" })],
+        ["discardCurrentObstacle", () => postJson("/api/capture", { action: "discard_current_obstacle" })],
+        ["finishCapture", () => postJson("/api/capture", { action: "finish_capture" })],
+        ["discardCapture", () => postJson("/api/capture", { action: "discard_capture" })],
+        ["refreshSites", () => postJson("/api/app", { action: "refresh_sites" })],
+        ["generatePlan", () => postJson("/api/app", { action: "generate_plan" })],
+        ["generatePlanReview", () => postJson("/api/app", { action: "generate_plan" })],
+        ["selectMissionStart", () => postJson("/api/app", { action: "select_mission_start" })],
+        ["selectMissionStartReview", () => postJson("/api/app", { action: "select_mission_start" })],
+        ["startAutonomous", () => postJson("/api/app", { action: "start_autonomous" })],
+        ["stopAutonomous", () => postJson("/api/app", { action: "stop_autonomous" })],
+      ].forEach(([id, action]) => {
+        $(id).addEventListener("click", () => {
+          $("actionStatus").textContent = `Running ${id}...`;
+          action().then(() => {
+            $("actionStatus").textContent = `Completed ${id}.`;
+          }).catch((error) => {
+            $("actionStatus").textContent = error instanceof Error ? error.message : String(error);
+          });
+        });
+      });
+
+      const source = new EventSource("/events");
+      source.onmessage = (event) => render(JSON.parse(event.data));
+      source.onerror = () => {
+        $("notes").innerHTML = "<li>Connection lost. Waiting for server...</li>";
+      };
+    </script>
+  </body>
+</html>
