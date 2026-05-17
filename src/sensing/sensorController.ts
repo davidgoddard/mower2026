@@ -89,8 +89,20 @@ export class SensorController {
       motors: {
         status: "idle",
         error: null,
+        commandedLeftWheelSpeedMetersPerSecond: null,
+        commandedRightWheelSpeedMetersPerSecond: null,
+        leftWheelSpeedMetersPerSecond: null,
+        rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
         rightRpm: null,
+        leftEncoderDelta: null,
+        rightEncoderDelta: null,
+        leftPwmAppliedPercent: null,
+        rightPwmAppliedPercent: null,
+        leftMotorCurrentAmps: null,
+        rightMotorCurrentAmps: null,
+        watchdogHealthy: null,
+        faultFlags: null,
       },
     });
 
@@ -142,6 +154,30 @@ export class SensorController {
     });
   }
 
+  async setMotorWheelSpeeds(leftWheelTargetMetersPerSecond: number, rightWheelTargetMetersPerSecond: number): Promise<void> {
+    await this.gateway.setMotorWheelSpeeds(leftWheelTargetMetersPerSecond, rightWheelTargetMetersPerSecond);
+    const current = this.primitivesStore.snapshot().motors;
+    this.primitivesStore.update({
+      motors: {
+        ...current,
+        commandedLeftWheelSpeedMetersPerSecond: leftWheelTargetMetersPerSecond,
+        commandedRightWheelSpeedMetersPerSecond: rightWheelTargetMetersPerSecond,
+      },
+    });
+  }
+
+  async stopMotors(): Promise<void> {
+    await this.gateway.stopMotors();
+    const current = this.primitivesStore.snapshot().motors;
+    this.primitivesStore.update({
+      motors: {
+        ...current,
+        commandedLeftWheelSpeedMetersPerSecond: 0,
+        commandedRightWheelSpeedMetersPerSecond: 0,
+      },
+    });
+  }
+
   private async runLoop(): Promise<void> {
     let nextTickMillis = this.nowMillis();
     let loopCount = 0;
@@ -173,6 +209,7 @@ export class SensorController {
   private async pollAllSensors(): Promise<void> {
     await this.pollImu();
     await this.pollGnss();
+    await this.pollMotors();
   }
 
   private async pollImu(): Promise<void> {
@@ -236,6 +273,43 @@ export class SensorController {
         },
       });
       this.logger.error("sensor.gnss.poll_failed", { error: message });
+    }
+  }
+
+  private async pollMotors(): Promise<void> {
+    try {
+      const sample = await this.gateway.readMotorFeedback();
+      const current = this.primitivesStore.snapshot().motors;
+      this.primitivesStore.update({
+        motors: {
+          ...current,
+          status: "running",
+          error: null,
+          leftWheelSpeedMetersPerSecond: sample.leftWheelActualMetersPerSecond,
+          rightWheelSpeedMetersPerSecond: sample.rightWheelActualMetersPerSecond,
+          leftRpm: null,
+          rightRpm: null,
+          leftEncoderDelta: sample.leftEncoderDelta,
+          rightEncoderDelta: sample.rightEncoderDelta,
+          leftPwmAppliedPercent: sample.leftPwmApplied,
+          rightPwmAppliedPercent: sample.rightPwmApplied,
+          leftMotorCurrentAmps: sample.leftMotorCurrentAmps ?? null,
+          rightMotorCurrentAmps: sample.rightMotorCurrentAmps ?? null,
+          watchdogHealthy: sample.watchdogHealthy,
+          faultFlags: sample.faultFlags,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const current = this.primitivesStore.snapshot().motors;
+      this.primitivesStore.update({
+        motors: {
+          ...current,
+          status: "error",
+          error: message,
+        },
+      });
+      this.logger.error("sensor.motors.poll_failed", { error: message });
     }
   }
 }

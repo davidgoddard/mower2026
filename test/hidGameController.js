@@ -1,0 +1,344 @@
+import { EventEmitter } from "node:events";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+const hidModuleCandidates = [
+  "node-hid",
+  path.resolve(__dirname, "../../../legacy/mower/node_modules/node-hid"),
+];
+const HID = loadHidModule();
+
+const DEFAULT_VENDOR_ID = 0x2563;
+const DEFAULT_PRODUCT_ID = 0x0526;
+
+const buttonLayout = [
+  [5, 0x0f, 0x00, "top"],
+  [5, 0x0f, 0x02, "right"],
+  [5, 0x0f, 0x04, "bottom"],
+  [5, 0x0f, 0x06, "left"],
+  [6, 0x00, 0x10, "triangle"],
+  [6, 0x00, 0x02, "circle"],
+  [6, 0x00, 0x01, "cross"],
+  [6, 0x00, 0x08, "square"],
+  [6, 0x00, 0x40, "left-top"],
+  [6, 0x00, 0x80, "right-top"],
+  [7, 0x00, 0x04, "select"],
+  [7, 0x00, 0x08, "start"],
+  [7, 0x00, 0x10, "analog"],
+];
+
+function loadHidModule() {
+  for (const candidate of hidModuleCandidates) {
+    try {
+      return require(candidate);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "MODULE_NOT_FOUND") {
+        continue;
+      }
+      throw error;
+    }
+  }
+  return null;
+}
+
+function nearlyEqual(a, b, epsilon = 1e-9) {
+  return Math.abs(a - b) <= epsilon;
+}
+
+function joystickToAngle(input, steeringSign) {
+  const centered = input - 128;
+  const angle = (90 * centered) / 127;
+  return Math.max(-90, Math.min(90, angle * steeringSign));
+}
+
+function joystickToSpeed(input, speedSign) {
+  const norm = input / 128;
+  let speed = Math.max(-1, Math.min(1, 1 - norm)) * speedSign;
+  if (Math.abs(speed) < 0.02) {
+    speed = 0;
+  }
+  return Number(speed.toFixed(2));
+}
+
+function centeredAxisValue(input) {
+  return input - 128;
+}
+
+function decodeButtons(data, previousButtons) {
+  const currentButtons = {};
+  const pressedEvents = [];
+
+  for (const [byteIndex, mask, bit, label] of buttonLayout) {
+    const pressed = (mask ^ data[byteIndex]) === (mask ^ bit);
+    currentButtons[label] = pressed;
+    if (!previousButtons[label] && pressed) {
+      pressedEvents.push(label);
+    }
+  }
+
+  return { currentButtons, pressedEvents };
+}
+
+export class HidGameController extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.vendorId = options.vendorId ?? DEFAULT_VENDOR_ID;
+    this.productId = options.productId ?? DEFAULT_PRODUCT_ID;
+    this.reconnectDelayMs = options.reconnectDelayMs ?? 2000;
+    this.steeringSign = options.steeringSign ?? 1;
+    this.speedSign = options.speedSign ?? 1;
+    this.device = undefined;
+    this.connected = false;
+    this.closed = false;
+    this.retryTimer = undefined;
+    this.product = undefined;
+    this.path = undefined;
+    this.lastAngleDegrees = 0;
+    this.lastSpeed = 0;
+    this.lastSteeringByte = 128;
+    this.lastSpeedByte = 128;
+    this.lastPacketHex = "";
+    this.lastUpdateMillis = 0;
+    this.buttons = Object.fromEntries(buttonLayout.map(([, , , label]) => [label, false]));
+  }
+
+  start() {
+    this.closed = false;
+    this.attach();
+  }
+
+  snapshot() {
+    return {
+      connected: this.connected,
+      vendorId: this.vendorId,
+      productId: this.productId,
+      product: this.product,
+      path: this.path,
+      steeringByte: this.lastSteeringByte,
+      speedByte: this.lastSpeedByte,
+      steeringCentered: centeredAxisValue(this.lastSteeringByte),
+      speedCentered: centeredAxisValue(this.lastSpeedByte),
+      angleDegrees: this.lastAngleDegrees,
+      speed: this.lastSpeed,
+      buttons: { ...this.buttons },
+      lastPacketHex: this.lastPacketHex,
+      lastUpdateMillis: this.lastUpdateMillis,
+    };
+  }
+
+  close() {
+    this.closed = true;
+    if (this.retryTimer !== undefined) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+    if (this.device !== undefined) {
+      this.device.removeAllListeners();
+      this.device.close();
+      this.device = undefined;
+    }
+  }
+
+  attach() {
+    if (this.closed) {
+      return;
+    }
+
+    if (HID === null) {
+      this.connected = false;
+      this.product = "node-hid unavailable";
+      this.path = undefined;
+      this.emit("update", this.snapshot());
+      this.scheduleReconnect();
+      return;
+    }
+
+    const devices = HID.devices();
+    const target = devices.find((device) => device.vendorId === this.vendorId && device.productId === this.productId);
+
+    if (!target) {
+      this.connected = false;
+      this.product = undefined;
+      this.path = undefined;
+      this.emit("update", this.snapshot());
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.product = target.product;
+    this.path = target.path;
+    try {
+      this.device = new HID.HID(target.path);
+    } catch (error) {
+      this.connected = false;
+      this.product = target.product;
+      this.path = target.path;
+      this.emit("error", error);
+      this.emit("update", this.snapshot());
+      this.scheduleReconnect();
+      return;
+    }
+    this.connected = true;
+    this.emit("connected", this.snapshot());
+    this.emit("update", this.snapshot());
+
+    this.device.on("data", (data) => {
+      this.handleData(data);
+    });
+
+    this.device.on("error", (error) => {
+      this.connected = false;
+      this.emit("error", error);
+      this.emit("update", this.snapshot());
+      this.scheduleReconnect();
+    });
+  }
+
+  handleData(data) {
+    const steeringByte = data[3];
+    const speedByte = data[4];
+    const speed = joystickToSpeed(speedByte, this.speedSign);
+    const angleDegrees = joystickToAngle(steeringByte, this.steeringSign);
+    const { currentButtons, pressedEvents } = decodeButtons(data, this.buttons);
+
+    this.buttons = currentButtons;
+    this.lastSteeringByte = steeringByte;
+    this.lastSpeedByte = speedByte;
+    this.lastPacketHex = Buffer.from(data).toString("hex");
+    this.lastUpdateMillis = Date.now();
+
+    if (!nearlyEqual(speed, this.lastSpeed, 0.01) || !nearlyEqual(angleDegrees, this.lastAngleDegrees, 0.5)) {
+      this.lastSpeed = speed;
+      this.lastAngleDegrees = angleDegrees;
+    }
+
+    for (const label of pressedEvents) {
+      this.emit(label, this.snapshot());
+    }
+
+    this.emit("update", this.snapshot());
+  }
+
+  scheduleReconnect() {
+    if (this.closed || this.retryTimer !== undefined) {
+      return;
+    }
+
+    if (this.device !== undefined) {
+      this.device.removeAllListeners();
+      try {
+        this.device.close();
+      } catch {
+        // ignore close failures during reconnect
+      }
+      this.device = undefined;
+    }
+
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      this.attach();
+    }, this.reconnectDelayMs);
+  }
+}
+
+function isDirectRun() {
+  if (process.argv.includes("--test") || process.execArgv.includes("--test")) {
+    return false;
+  }
+
+  const entryPath = process.argv[1];
+  if (!entryPath) {
+    return false;
+  }
+
+  return path.resolve(entryPath) === __filename;
+}
+
+function summariseButtons(buttons) {
+  return Object.entries(buttons)
+    .filter(([, pressed]) => pressed)
+    .map(([label]) => label)
+    .join(", ");
+}
+
+if (isDirectRun()) {
+  const steeringSign = Number(process.env.MOWER_CONTROLLER_STEERING_SIGN ?? 1);
+  const speedSign = Number(process.env.MOWER_CONTROLLER_SPEED_SIGN ?? 1);
+  const heartbeatMs = Number(process.env.MOWER_CONTROLLER_HEARTBEAT_MS ?? 1000);
+
+  const controller = new HidGameController({ steeringSign, speedSign });
+
+  const buttonLabels = [
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "triangle",
+    "circle",
+    "cross",
+    "square",
+    "left-top",
+    "right-top",
+    "select",
+    "start",
+    "analog",
+  ];
+
+  function printSnapshot(prefix, snapshot) {
+    console.log(prefix, {
+      connected: snapshot.connected,
+      product: snapshot.product ?? "unknown",
+      path: snapshot.path ?? "unavailable",
+      angleDegrees: snapshot.angleDegrees,
+      speed: snapshot.speed,
+      pressedButtons: summariseButtons(snapshot.buttons) || "none",
+    });
+  }
+
+  controller.on("connected", (snapshot) => {
+    printSnapshot("controller.connected", snapshot);
+  });
+
+  controller.on("update", (snapshot) => {
+    printSnapshot("controller.update", snapshot);
+  });
+
+  for (const label of buttonLabels) {
+    controller.on(label, (snapshot) => {
+      console.log(`button.pressed: ${label}`);
+      printSnapshot("controller.button_snapshot", snapshot);
+    });
+  }
+
+  controller.on("error", (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("controller.error", message);
+  });
+
+  const heartbeat = setInterval(() => {
+    printSnapshot("controller.heartbeat", controller.snapshot());
+  }, heartbeatMs);
+
+  process.on("SIGINT", () => {
+    clearInterval(heartbeat);
+    controller.close();
+    process.exitCode = 0;
+  });
+
+  process.on("SIGTERM", () => {
+    clearInterval(heartbeat);
+    controller.close();
+    process.exitCode = 0;
+  });
+
+  console.log("starting hid controller inspector", {
+    steeringSign,
+    speedSign,
+    heartbeatMs,
+  });
+  controller.start();
+}

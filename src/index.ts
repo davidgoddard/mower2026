@@ -17,3 +17,11 @@ export { I2C_PRIORITY } from "./i2c/priorities.js";
 export { Bmi160ImuSensor } from "./imu/bmi160ImuSensor.js";
 export { SensorController } from "./sensing/sensorController.js";
 export { createPiSensorHardwareGateway } from "./sensing/sensorHardwareGateway.js";
+export { MotorNodeClient } from "./motors/motorNodeClient.js";
+export {
+  buildMotorDirectionMapping,
+  mapPhysicalWheelTargetsToRaw,
+  mapRawMotorFeedbackToPhysical,
+} from "./motors/motorMapping.js";
+export { HidGameController } from "./controller/hidGameController.js";
+export { computeManualDriveDemand, normalizeManualTurnDemand } from "./control/manualDriveProfile.js";

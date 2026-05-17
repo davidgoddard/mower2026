@@ -20,6 +20,7 @@ This keeps application logic independent from device/protocol details.
 - Poll order in each loop:
   1. IMU
   2. GNSS
+  3. Motors
 - Latest successful value is retained per sensor.
 - On sensor error, last good values are preserved and error state is updated.
 
@@ -72,11 +73,32 @@ Current sensor-related shape:
   "motors": {
     "status": "idle",
     "error": null,
+    "commandedLeftWheelSpeedMetersPerSecond": null,
+    "commandedRightWheelSpeedMetersPerSecond": null,
+    "leftWheelSpeedMetersPerSecond": null,
+    "rightWheelSpeedMetersPerSecond": null,
     "leftRpm": null,
-    "rightRpm": null
+    "rightRpm": null,
+    "leftEncoderDelta": null,
+    "rightEncoderDelta": null,
+    "leftPwmAppliedPercent": null,
+    "rightPwmAppliedPercent": null,
+    "leftMotorCurrentAmps": null,
+    "rightMotorCurrentAmps": null,
+    "watchdogHealthy": null,
+    "faultFlags": null
   }
 }
 ```
+
+### Motor command API
+
+The controller exposes motor command methods:
+
+- `setMotorWheelSpeeds(leftWheelTargetMetersPerSecond, rightWheelTargetMetersPerSecond)`
+- `stopMotors()`
+
+`stopMotors()` maps to a dedicated stop command with higher I2C priority than normal speed commands.
 
 ## Heading Convention
 
@@ -165,3 +187,88 @@ Both decode to the same application `GnssSample` shape.
 - GNSS read path retries short transient failures (`maxAttempts`, short delay).
 - Frame decode rejects invalid SOF, short frame, bad CRC, and unexpected node/message types.
 - Sensor controller updates `gnss.status = "error"` with message and keeps previous numeric values for visibility.
+
+## Motor I2C/Protocol
+
+### Addressing and transport
+
+- Motor node I2C address: `MOWER_MOTOR_I2C_ADDRESS` (default `0x66`)
+- Motor direction signs:
+  - `MOWER_LEFT_MOTOR_FORWARD_SIGN` (default `-1`)
+  - `MOWER_RIGHT_MOTOR_FORWARD_SIGN` (default `-1`)
+
+Runtime convention is application-facing forward-positive wheel speeds. Direction-sign inversion is applied in the motor hardware gateway when converting:
+- app command -> raw motor command
+- raw motor feedback -> app-facing feedback
+
+### Framed messages
+
+The same common frame contract is used.
+
+Motor message types:
+
+- `0x21`: wheel speed command
+- `0x22`: motor feedback sample
+
+### Wheel speed command payload (`15` bytes)
+
+- `timestampMillis` (`uint32`)
+- `leftWheelTargetMetersPerSecond` (`int16`, scale `1/1000`)
+- `rightWheelTargetMetersPerSecond` (`int16`, scale `1/1000`)
+- `enableDrive` (`uint8`, `1` enabled / `0` stop)
+- `commandTimeoutMillis` (`uint16`)
+- `maxAccelerationMetersPerSecondSquared` (`uint16`, optional, `0xffff` sentinel, scale `1/1000`)
+- `maxDecelerationMetersPerSecondSquared` (`uint16`, optional, `0xffff` sentinel, scale `1/1000`)
+
+### Motor feedback payload (`26` bytes)
+
+- `timestampMillis` (`uint32`)
+- `leftWheelActualMetersPerSecond` (`int16`, scale `1/1000`)
+- `rightWheelActualMetersPerSecond` (`int16`, scale `1/1000`)
+- `leftEncoderDelta` (`int32`)
+- `rightEncoderDelta` (`int32`)
+- `leftPwmApplied` (`int8`)
+- `rightPwmApplied` (`int8`)
+- `leftMotorCurrentAmps` (optional `uint16`, `0xffff` sentinel, scale `1/10`)
+- `rightMotorCurrentAmps` (optional `uint16`, `0xffff` sentinel, scale `1/10`)
+- `watchdogHealthy` (`uint8`)
+- `faultFlags` (`uint16`)
+
+For control/odometry purposes the most important motor feedback value is encoder delta per sample (`leftEncoderDelta`, `rightEncoderDelta`), which is intended to be integrated over time.
+
+### Motor queue priorities
+
+- Stop command priority: `1` (`I2C_PRIORITY.stop`)
+- Normal motor speed commands priority: `2` (`I2C_PRIORITY.motorSpeed`)
+- Motor feedback read priority: `2`
+
+This ensures queued stop commands are sent ahead of other queued traffic.
+
+## Game Controller Interface
+
+The runtime supports a HID game controller interface for manual drive.
+
+Default controller signs in this runtime:
+- `MOWER_CONTROLLER_STEERING_SIGN=-1`
+- `MOWER_CONTROLLER_SPEED_SIGN=1`
+
+### Manual drive arm/disarm
+
+- `right-top` button: arm manual drive
+- `left-top` button: disarm manual drive and issue motor stop
+
+### Joystick mapping
+
+The mapping follows the previous working model:
+
+- Steering byte: `data[3]` to angle in `[-90, 90]` degrees
+- Speed byte: `data[4]` to speed demand in `[-1, 1]`
+- Speed deadband near center: magnitude under `0.02` is treated as `0`
+
+Manual demand shaping then converts speed + turn demand into wheel targets (straight/arc/spin modes) and sends those targets through the normal motor command path.
+
+### Motion path
+
+Manual-drive commands are not applied directly to PWM. They flow through the same wheel-speed command primitive used by the rest of the app, so the motor node's ramp and watchdog behavior still apply.
+
+If controller connection drops while manual drive is armed, the runtime disarms manual mode and issues a stop command.

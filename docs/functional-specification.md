@@ -106,6 +106,8 @@ The controller should send all messages in the queue in the priority order as so
 
 The user will interact with the controller through a web page.  A server will provide the support for this web page through HTTP API.
 
+A HID games controller interface shall be supported for manual driving.
+
 #### Primitives Viewer
 
 The web page must feature a tabbed content area one tab of which is the "Primitives" view.  This will be for showing raw low level data from the sensors.
@@ -114,6 +116,10 @@ The primitives JSON should expose sensor domains as distinct sections:
 - `imu`
 - `gnss`
 - `motors`
+
+For motors, primitives should include both:
+- last commanded wheel speeds
+- latest feedback sample (wheel speeds, encoder deltas, watchdog/fault state)
 
 ### Sensor Interface
 
@@ -130,6 +136,47 @@ The Sensor Controller will be responsible for polling each configured sensor dev
 The Sensor Controller is the single owner of sensor polling cadence.  Device-specific polling loops are not to be run independently outside this controller in production runtime.
 
 The Sensor Controller should expose a snapshot/read API for the latest sensor state so other components can consume sensor data without direct hardware coupling.
+
+#### Motor interface
+
+The sensor controller shall poll motor feedback each loop and expose the latest motor state in primitives.
+
+The sensor controller shall expose motor command methods for:
+- setting left and right wheel target speeds
+- issuing a stop command
+
+Motor stop commands must use the highest bus priority (`1`) and motor speed commands use priority (`2`).
+
+Application-level motor command convention shall be:
+- positive wheel speed means forward
+- negative wheel speed means reverse
+
+Where hardware wiring/motor node direction differs, inversion shall be applied only at the hardware adapter boundary, not in application control logic.
+
+Motor feedback shall include, at minimum:
+- left and right wheel speeds in meters per second
+- encoder pulse delta per wheel since the previous sample
+- watchdog health and fault flags
+
+Encoder pulse deltas are required so higher level components can integrate distance over time.
+
+Motor commands and feedback shall use framed i2c request/response messages with these message types:
+- `0x21` wheel speed command
+- `0x22` feedback sample
+
+Motor i2c default address shall be `0x66` and remain configurable for bring-up/testing overrides.
+
+#### Manual drive controller interface
+
+Manual drive arming/disarming shall use:
+- right-top button to enable manual drive
+- left-top button to disable manual drive and stop motors
+
+Joystick speed/steering demands shall be mapped to left/right wheel speed targets using the previous proven manual-drive shaping model (including deadband and spin/arc behaviour), then sent via the standard motor command primitive so normal motor ramping behavior is preserved.
+
+Manual-drive commands must never bypass the motor node control path.
+
+If controller connectivity is lost while manual drive is armed, manual drive shall disarm and issue a motor stop command.
 
 #### IMU interface
 

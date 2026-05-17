@@ -52,6 +52,23 @@ test('SensorController polls IMU and stores latest integrated heading state', as
           sampleAgeMillis: 90,
         };
       },
+      async readMotorFeedback() {
+        return {
+          timestampMillis: now,
+          leftWheelActualMetersPerSecond: 0.2,
+          rightWheelActualMetersPerSecond: 0.21,
+          leftEncoderDelta: 10,
+          rightEncoderDelta: 11,
+          leftPwmApplied: 42,
+          rightPwmApplied: 43,
+          leftMotorCurrentAmps: 1.2,
+          rightMotorCurrentAmps: 1.3,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelSpeeds() {},
+      async stopMotors() {},
       async close() {},
     };
 
@@ -75,6 +92,9 @@ test('SensorController polls IMU and stores latest integrated heading state', as
     assert.equal(snapshot.gnss.status, 'running');
     assert.equal(snapshot.gnss.headingDeg, 90);
     assert.equal(snapshot.gnss.fixType, 'fixed');
+    assert.equal(snapshot.motors.status, 'running');
+    assert.equal(snapshot.motors.leftWheelSpeedMetersPerSecond, 0.2);
+    assert.equal(snapshot.motors.rightWheelSpeedMetersPerSecond, 0.21);
 
     await controller.stop();
     await logger.close();
@@ -113,6 +133,21 @@ test('SensorController allows heading reset and continues integration from new b
           sampleAgeMillis: 120,
         };
       },
+      async readMotorFeedback() {
+        return {
+          timestampMillis: now,
+          leftWheelActualMetersPerSecond: 0,
+          rightWheelActualMetersPerSecond: 0,
+          leftEncoderDelta: 0,
+          rightEncoderDelta: 0,
+          leftPwmApplied: 0,
+          rightPwmApplied: 0,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelSpeeds() {},
+      async stopMotors() {},
       async close() {},
     };
 
@@ -141,6 +176,84 @@ test('SensorController allows heading reset and continues integration from new b
     const snapshot = primitivesStore.snapshot();
     assert.equal((snapshot.imu.headingDeg ?? 0) <= 180, true);
     assert.equal((snapshot.imu.headingDeg ?? 0) > -180, true);
+
+    await logger.close();
+  });
+});
+
+test('SensorController exposes motor command API and prioritised stop passthrough', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    const calls = [];
+    const gateway = {
+      async initialise() {},
+      async readImu() {
+        return { timestampMillis: 0, angularVelocity: { zDegreesPerSecond: 0 } };
+      },
+      async readGnss() {
+        return {
+          timestampMillis: 0,
+          xMeters: 0,
+          yMeters: 0,
+          positionAccuracyMeters: 1,
+          fixType: 'none',
+          satellitesInUse: 0,
+          sampleAgeMillis: 0,
+        };
+      },
+      async readMotorFeedback() {
+        return {
+          timestampMillis: 0,
+          leftWheelActualMetersPerSecond: 0,
+          rightWheelActualMetersPerSecond: 0,
+          leftEncoderDelta: 0,
+          rightEncoderDelta: 0,
+          leftPwmApplied: 0,
+          rightPwmApplied: 0,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelSpeeds(left, right) {
+        calls.push({ type: 'speed', left, right });
+      },
+      async stopMotors() {
+        calls.push({ type: 'stop' });
+      },
+      async close() {},
+    };
+
+    const primitivesStore = new PrimitivesStore();
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway,
+      pollIntervalMs: 100,
+      sleep: async () => {},
+      nowMillis: () => 0,
+      maxLoopCount: 1,
+    });
+
+    await controller.setMotorWheelSpeeds(0.5, -0.5);
+    const afterSpeedCommand = primitivesStore.snapshot();
+    assert.equal(afterSpeedCommand.motors.commandedLeftWheelSpeedMetersPerSecond, 0.5);
+    assert.equal(afterSpeedCommand.motors.commandedRightWheelSpeedMetersPerSecond, -0.5);
+    await controller.stopMotors();
+    const afterStop = primitivesStore.snapshot();
+    assert.equal(afterStop.motors.commandedLeftWheelSpeedMetersPerSecond, 0);
+    assert.equal(afterStop.motors.commandedRightWheelSpeedMetersPerSecond, 0);
+
+    assert.deepEqual(calls, [
+      { type: 'speed', left: 0.5, right: -0.5 },
+      { type: 'stop' },
+    ]);
 
     await logger.close();
   });

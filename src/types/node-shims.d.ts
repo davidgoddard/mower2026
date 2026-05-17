@@ -9,12 +9,31 @@ declare module "node:fs/promises" {
 }
 
 declare module "node:path" {
+  const path: any;
+  export default path;
   export const join: (...parts: string[]) => string;
   export const resolve: (...parts: string[]) => string;
+  export const dirname: (value: string) => string;
 }
 
 declare module "node:http" {
   export const createServer: any;
+}
+
+declare module "node:events" {
+  export class EventEmitter {
+    on(event: string, listener: (...args: any[]) => void): this;
+    emit(event: string, ...args: any[]): boolean;
+    removeAllListeners(): void;
+  }
+}
+
+declare module "node:module" {
+  export const createRequire: (filename: string) => any;
+}
+
+declare module "node:url" {
+  export const fileURLToPath: (url: string) => string;
 }
 
 declare module "node:buffer" {
@@ -24,6 +43,11 @@ declare module "node:buffer" {
 declare module "i2c-bus" {
   const i2c: any;
   export default i2c;
+}
+
+declare module "node-hid" {
+  const hid: any;
+  export default hid;
 }
 
 declare module "node:worker_threads" {
