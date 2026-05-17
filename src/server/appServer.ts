@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import { HidGameController } from "../controller/hidGameController.js";
+import { ManualDriveCoordinator } from "../control/manualDriveCoordinator.js";
 import { SessionLogger } from "../logging/index.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
@@ -13,6 +15,14 @@ interface StartMowerServerOptions {
   sensorPollingIntervalMs?: number;
   i2cBusNumber?: number;
   gnssI2cAddress?: number;
+  motorI2cAddress?: number;
+  leftMotorForwardSign?: number;
+  rightMotorForwardSign?: number;
+  controllerEnabled?: boolean;
+  controllerSteeringSign?: number;
+  controllerSpeedSign?: number;
+  manualDriveLoopMs?: number;
+  maxWheelSpeedMetersPerSecond?: number;
 }
 
 export interface RunningMowerServer {
@@ -111,6 +121,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   const requestLogger = logger.child({ context: "http", source: "HttpRouter" });
   let sensorGateway: SensorHardwareGateway | null = null;
   let sensorController: SensorController | null = null;
+  let manualDriveCoordinator: ManualDriveCoordinator | null = null;
   logger.transition("boot", "starting", { port, host });
 
   const server = createServer((request: any, response: any) => {
@@ -155,7 +166,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   try {
     sensorGateway = await createPiSensorHardwareGateway(
       options.i2cBusNumber ?? 1,
-      { gnssAddress: options.gnssI2cAddress ?? 0x52 },
+      {
+        gnssAddress: options.gnssI2cAddress ?? 0x52,
+        motorAddress: options.motorI2cAddress ?? 0x66,
+        leftMotorForwardSign: options.leftMotorForwardSign ?? -1,
+        rightMotorForwardSign: options.rightMotorForwardSign ?? -1,
+      },
     );
     sensorController = new SensorController({
       logger,
@@ -164,6 +180,21 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
     });
     await sensorController.start();
+
+    if (options.controllerEnabled ?? true) {
+      const hidController = new HidGameController({
+        steeringSign: options.controllerSteeringSign ?? -1,
+        speedSign: options.controllerSpeedSign ?? 1,
+      });
+      manualDriveCoordinator = new ManualDriveCoordinator({
+        logger,
+        sensorController,
+        hidController,
+        controlIntervalMs: options.manualDriveLoopMs ?? 100,
+        maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
+      });
+      manualDriveCoordinator.start();
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("sensors.start_failed", { error: message });
@@ -189,6 +220,24 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         fixType: "unknown",
         satellitesInUse: null,
         sampleAgeMillis: null,
+      },
+      motors: {
+        status: "error",
+        error: message,
+        commandedLeftWheelSpeedMetersPerSecond: null,
+        commandedRightWheelSpeedMetersPerSecond: null,
+        leftWheelSpeedMetersPerSecond: null,
+        rightWheelSpeedMetersPerSecond: null,
+        leftRpm: null,
+        rightRpm: null,
+        leftEncoderDelta: null,
+        rightEncoderDelta: null,
+        leftPwmAppliedPercent: null,
+        rightPwmAppliedPercent: null,
+        leftMotorCurrentAmps: null,
+        rightMotorCurrentAmps: null,
+        watchdogHealthy: null,
+        faultFlags: null,
       },
     });
   }
@@ -216,6 +265,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         });
       });
 
+      await manualDriveCoordinator?.stop();
       await sensorController?.stop();
       await sensorGateway?.close();
       await logger.flush();

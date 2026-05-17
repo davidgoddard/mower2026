@@ -16,6 +16,15 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/gnss/gnssProtocol.ts`: GNSS sample contract used by runtime.
 - `src/gnss/gnssCodec.ts`: GNSS payload decoding (supports both 36-byte and 38-byte payload layouts).
 - `src/gnss/gnssNodeClient.ts`: GNSS request/response polling client over I2C framed protocol.
+- `src/motors/motorProtocol.ts`: motor command/feedback contracts.
+- `src/motors/motorCodec.ts`: wheel-speed command encoding and motor-feedback payload decoding.
+- `src/motors/motorMapping.ts`: app-facing forward-positive wheel convention mapping to/from raw motor node direction signs.
+- `src/motors/motorNodeClient.ts`: motor command send + feedback polling over framed I2C protocol.
+- `src/controller/hidGameController.ts`: HID game controller input adapter and button event source.
+- `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
+- `src/control/manualDriveCoordinator.ts`: manual-drive loop; maps controller input to motor commands.
+  - arm/disarm mapping: `right-top` arms, `left-top` disarms and stops.
+  - safety behavior: controller disconnect while armed triggers disarm + stop.
 - `src/protocols/commonProtocol.ts`: shared node/message identifiers and frame header shape.
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
 - `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
@@ -23,6 +32,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/sensing/sensorController.ts`: single 30Hz sensor polling controller and latest sensor state integration.
   - heading API: `getHeadingDegrees()` and `setHeadingDegrees(...)` for absolute heading reset integration.
   - heading convention: internal signed degrees `(-180, 180]`; GNSS field heading rotated via `90 - heading`.
+  - motor API: `setMotorWheelSpeeds(...)` and `stopMotors()` command passthrough to hardware boundary.
 - `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers.
 - `src/i2c/types.ts`: I2C transport and queued request types.
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
@@ -31,6 +41,9 @@ This document maps problem domains to candidate files removing the need for Code
 - `test/i2cBusController.test.js`: queue priority and replacement behavior tests.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
+- `test/motorNodeClient.test.js`: motor command priority and feedback-frame decode tests.
+- `test/motorMapping.test.js`: motor direction sign mapping tests.
+- `test/manualDriveProfile.test.js`: manual-drive demand shaping tests.
 
 ## Operation And Server Entry
 - `src/server/main.ts`: production server entrypoint (compiled to `dist/server/main.js`).

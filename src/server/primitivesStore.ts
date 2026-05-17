@@ -25,8 +25,20 @@ export interface PrimitiveSnapshot {
   motors: {
     status: "idle" | "running" | "error";
     error: string | null;
+    commandedLeftWheelSpeedMetersPerSecond: number | null;
+    commandedRightWheelSpeedMetersPerSecond: number | null;
+    leftWheelSpeedMetersPerSecond: number | null;
+    rightWheelSpeedMetersPerSecond: number | null;
     leftRpm: number | null;
     rightRpm: number | null;
+    leftEncoderDelta: number | null;
+    rightEncoderDelta: number | null;
+    leftPwmAppliedPercent: number | null;
+    rightPwmAppliedPercent: number | null;
+    leftMotorCurrentAmps: number | null;
+    rightMotorCurrentAmps: number | null;
+    watchdogHealthy: boolean | null;
+    faultFlags: number | null;
   };
 }
 
@@ -94,8 +106,20 @@ export class PrimitivesStore {
       motors: {
         status: "idle",
         error: null,
+        commandedLeftWheelSpeedMetersPerSecond: null,
+        commandedRightWheelSpeedMetersPerSecond: null,
+        leftWheelSpeedMetersPerSecond: null,
+        rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
         rightRpm: null,
+        leftEncoderDelta: null,
+        rightEncoderDelta: null,
+        leftPwmAppliedPercent: null,
+        rightPwmAppliedPercent: null,
+        leftMotorCurrentAmps: null,
+        rightMotorCurrentAmps: null,
+        watchdogHealthy: null,
+        faultFlags: null,
       },
     };
   }
