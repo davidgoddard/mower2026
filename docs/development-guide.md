@@ -4,6 +4,7 @@
 
 - The mower is a Raspberry Pi based project and requires the Pi to be mounted as a drive - always check and ask if the pi is not available.  The code lives in `/Volumes/mower/mower` when mounted or something similar
 - Requirements are tracked in [docs/functional-specification.md](functional-specification.md)
+- Sensor API and payload contracts are tracked in [docs/sensors.md](sensors.md)
 
 ## Engineering rules
 

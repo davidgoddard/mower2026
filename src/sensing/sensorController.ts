@@ -14,8 +14,18 @@ interface SensorControllerOptions {
 }
 
 function normalizeHeadingDegrees(heading: number): number {
-  const fullTurn = 360;
-  return ((heading % fullTurn) + fullTurn) % fullTurn;
+  let normalized = heading;
+  while (normalized <= -180) {
+    normalized += 360;
+  }
+  while (normalized > 180) {
+    normalized -= 360;
+  }
+  return normalized;
+}
+
+function convertFieldHeadingToInternalDegrees(fieldHeadingDegrees: number): number {
+  return normalizeHeadingDegrees(90 - fieldHeadingDegrees);
 }
 
 function defaultSleep(delayMs: number): Promise<void> {
@@ -67,9 +77,14 @@ export class SensorController {
       gnss: {
         status: "idle",
         error: null,
-        latitude: null,
-        longitude: null,
-        fixQuality: "unknown",
+        xMeters: null,
+        yMeters: null,
+        headingDeg: null,
+        positionAccuracyMeters: null,
+        headingAccuracyDeg: null,
+        fixType: "unknown",
+        satellitesInUse: null,
+        sampleAgeMillis: null,
       },
       motors: {
         status: "idle",
@@ -157,7 +172,7 @@ export class SensorController {
 
   private async pollAllSensors(): Promise<void> {
     await this.pollImu();
-    // GNSS and motor polling are intentionally staged for the next controlled integration step.
+    await this.pollGnss();
   }
 
   private async pollImu(): Promise<void> {
@@ -188,6 +203,39 @@ export class SensorController {
         },
       });
       this.logger.error("sensor.imu.poll_failed", { error: message });
+    }
+  }
+
+  private async pollGnss(): Promise<void> {
+    try {
+      const sample = await this.gateway.readGnss();
+      this.primitivesStore.update({
+        gnss: {
+          status: "running",
+          error: null,
+          xMeters: sample.xMeters,
+          yMeters: sample.yMeters,
+          headingDeg: sample.headingDegrees == null
+            ? null
+            : convertFieldHeadingToInternalDegrees(sample.headingDegrees),
+          positionAccuracyMeters: sample.positionAccuracyMeters,
+          headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
+          fixType: sample.fixType,
+          satellitesInUse: sample.satellitesInUse,
+          sampleAgeMillis: sample.sampleAgeMillis,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const current = this.primitivesStore.snapshot().gnss;
+      this.primitivesStore.update({
+        gnss: {
+          ...current,
+          status: "error",
+          error: message,
+        },
+      });
+      this.logger.error("sensor.gnss.poll_failed", { error: message });
     }
   }
 }

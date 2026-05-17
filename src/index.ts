@@ -1,6 +1,11 @@
 export function normalizeHeadingDegrees(heading: number): number {
-  const fullTurn = 360;
-  const normalized = ((heading % fullTurn) + fullTurn) % fullTurn;
+  let normalized = heading;
+  while (normalized <= -180) {
+    normalized += 360;
+  }
+  while (normalized > 180) {
+    normalized -= 360;
+  }
   return normalized;
 }
 

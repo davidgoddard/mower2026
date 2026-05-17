@@ -12,6 +12,7 @@ interface StartMowerServerOptions {
   logDir?: string;
   sensorPollingIntervalMs?: number;
   i2cBusNumber?: number;
+  gnssI2cAddress?: number;
 }
 
 export interface RunningMowerServer {
@@ -152,7 +153,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   const boundPort = typeof boundAddress?.port === "number" ? boundAddress.port : port;
 
   try {
-    sensorGateway = await createPiSensorHardwareGateway(options.i2cBusNumber ?? 1);
+    sensorGateway = await createPiSensorHardwareGateway(
+      options.i2cBusNumber ?? 1,
+      { gnssAddress: options.gnssI2cAddress ?? 0x52 },
+    );
     sensorController = new SensorController({
       logger,
       primitivesStore: primitives,
@@ -173,6 +177,18 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         status: "error",
         error: message,
         headingDeg: null,
+      },
+      gnss: {
+        status: "error",
+        error: message,
+        xMeters: null,
+        yMeters: null,
+        headingDeg: null,
+        positionAccuracyMeters: null,
+        headingAccuracyDeg: null,
+        fixType: "unknown",
+        satellitesInUse: null,
+        sampleAgeMillis: null,
       },
     });
   }

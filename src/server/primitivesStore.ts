@@ -13,9 +13,14 @@ export interface PrimitiveSnapshot {
   gnss: {
     status: "idle" | "running" | "error";
     error: string | null;
-    latitude: number | null;
-    longitude: number | null;
-    fixQuality: string;
+    xMeters: number | null;
+    yMeters: number | null;
+    headingDeg: number | null;
+    positionAccuracyMeters: number | null;
+    headingAccuracyDeg: number | null;
+    fixType: "unknown" | "none" | "single" | "float" | "fixed";
+    satellitesInUse: number | null;
+    sampleAgeMillis: number | null;
   };
   motors: {
     status: "idle" | "running" | "error";
@@ -77,9 +82,14 @@ export class PrimitivesStore {
       gnss: {
         status: "idle",
         error: null,
-        latitude: null,
-        longitude: null,
-        fixQuality: "unknown",
+        xMeters: null,
+        yMeters: null,
+        headingDeg: null,
+        positionAccuracyMeters: null,
+        headingAccuracyDeg: null,
+        fixType: "unknown",
+        satellitesInUse: null,
+        sampleAgeMillis: null,
       },
       motors: {
         status: "idle",
