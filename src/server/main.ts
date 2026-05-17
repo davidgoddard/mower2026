@@ -4,6 +4,7 @@ const host = process.env.MOWER_CORE_APP_HOST ?? "0.0.0.0";
 const port = resolveServerPort(process.env.MOWER_CORE_APP_PORT, 8090);
 const logDir = process.env.MOWER_LOG_DIR;
 const i2cBusNumber = Number(process.env.MOWER_I2C_BUS_NUMBER ?? 1);
+const gnssI2cAddress = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? 0x52);
 const sensorPollingIntervalMs = Number(process.env.MOWER_SENSOR_POLL_INTERVAL_MS ?? 33);
 
 const runningServer = await startMowerServer({
@@ -12,6 +13,7 @@ const runningServer = await startMowerServer({
   port,
   logDir,
   i2cBusNumber,
+  gnssI2cAddress,
   sensorPollingIntervalMs,
 });
 

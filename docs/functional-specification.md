@@ -110,6 +110,11 @@ The user will interact with the controller through a web page.  A server will pr
 
 The web page must feature a tabbed content area one tab of which is the "Primitives" view.  This will be for showing raw low level data from the sensors.
 
+The primitives JSON should expose sensor domains as distinct sections:
+- `imu`
+- `gnss`
+- `motors`
+
 ### Sensor Interface
 
 A component is required to interface the controller to the sensor information.
@@ -133,3 +138,43 @@ The sensor controller must maintain a IMU based heading angle integrating the ya
 The IMU primitive exposed to application consumers should be heading-focused.  The application should request heading and receive heading, without requiring raw yaw rate or raw sample timestamps in the external sensor API.
 
 The sensor controller shall support an external absolute heading update (for example from GNSS) which resets the maintained IMU heading to that supplied value.  After reset, yaw integration continues from the new heading baseline.
+
+The externally exposed IMU heading must be normalized to the signed range `[-180, 180]`.
+
+#### GNSS interface
+
+GNSS samples shall be obtained over the shared I2C bus from the GNSS node using request/response framing.
+
+The GNSS node default i2c address is `0x52` and should remain configurable for bring-up/testing overrides.
+
+The GNSS response payload should provide planar position and heading primitives, including:
+- timestamp
+- `xMeters`, `yMeters`
+- fix type / quality
+- optional heading and heading accuracy
+- optional ground speed
+- sample age and related health/debug ages where available.
+
+The application should support the currently observed GNSS payload variants (`36` and `38` bytes) while decoding them into one consistent runtime sample model.
+
+The application should validate that GNSS responses are of the expected node/message type before accepting the sample.
+
+The I2C GNSS request path should be resilient to transient bus errors using short retry attempts before surfacing a read failure.
+
+#### Planar coordinate and heading conventions
+
+All runtime position, heading, and geometry calculations shall be performed on a Cartesian X/Y plane in meters.
+
+Latitude/longitude shall not be used in control, planning, guidance, or estimator math.
+
+If upstream GNSS data originates in latitude/longitude, conversion to planar X/Y meters must happen before the data enters the application estimator/control flow.
+
+Internal heading conventions shall be tied to the X/Y plane:
+- 0 degrees points along +X
+- positive angles rotate counterclockwise toward +Y.
+
+GNSS heading values that use field/navigation convention (clockwise from north) must be rotated into the internal X/Y heading convention before use in estimator/control logic (for example `internalHeading = normalize(90 - fieldHeading)`).
+
+The GNSS heading exposed to application consumers must be this rotated internal heading and normalized to the signed range `[-180, 180]`.
+
+IMU heading integration direction must match this same internal heading convention so that IMU and GNSS heading increases/decreases are aligned.

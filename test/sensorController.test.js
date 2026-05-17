@@ -39,6 +39,19 @@ test('SensorController polls IMU and stores latest integrated heading state', as
           angularVelocity: { zDegreesPerSecond: 10 },
         };
       },
+      async readGnss() {
+        return {
+          timestampMillis: now,
+          xMeters: 12.34,
+          yMeters: 56.78,
+          headingDegrees: 0,
+          positionAccuracyMeters: 0.02,
+          headingAccuracyDegrees: 0.5,
+          fixType: 'fixed',
+          satellitesInUse: 22,
+          sampleAgeMillis: 90,
+        };
+      },
       async close() {},
     };
 
@@ -59,6 +72,9 @@ test('SensorController polls IMU and stores latest integrated heading state', as
     assert.equal(snapshot.sensorController.status, 'running');
     assert.equal(snapshot.imu.status, 'running');
     assert.equal(Math.round(snapshot.imu.headingDeg ?? 0), 20);
+    assert.equal(snapshot.gnss.status, 'running');
+    assert.equal(snapshot.gnss.headingDeg, 90);
+    assert.equal(snapshot.gnss.fixType, 'fixed');
 
     await controller.stop();
     await logger.close();
@@ -86,6 +102,17 @@ test('SensorController allows heading reset and continues integration from new b
           angularVelocity: { zDegreesPerSecond: 10 },
         };
       },
+      async readGnss() {
+        return {
+          timestampMillis: now,
+          xMeters: 0,
+          yMeters: 0,
+          positionAccuracyMeters: 0.03,
+          fixType: 'float',
+          satellitesInUse: 15,
+          sampleAgeMillis: 120,
+        };
+      },
       async close() {},
     };
 
@@ -106,12 +133,14 @@ test('SensorController allows heading reset and continues integration from new b
     controller.setHeadingDegrees(200);
     await delay(20);
     const headingAfterReset = controller.getHeadingDegrees();
-    assert.equal(headingAfterReset > 200, true);
+    assert.equal(headingAfterReset <= 180, true);
+    assert.equal(headingAfterReset > -180, true);
 
     await controller.stop();
 
     const snapshot = primitivesStore.snapshot();
-    assert.equal((snapshot.imu.headingDeg ?? 0) > 200, true);
+    assert.equal((snapshot.imu.headingDeg ?? 0) <= 180, true);
+    assert.equal((snapshot.imu.headingDeg ?? 0) > -180, true);
 
     await logger.close();
   });

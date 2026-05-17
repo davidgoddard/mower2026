@@ -6,6 +6,14 @@ Autonomous mower control system for Raspberry Pi, featuring RTK-GPS guided navig
 
 ![Mower](./docs/images/mower.png)
 
+## Current Runtime Documentation
+
+For the currently implemented Pi runtime and sensor interfaces, use:
+
+- [docs/functional-specification.md](./docs/functional-specification.md)
+- [docs/system-map.md](./docs/system-map.md)
+- [docs/sensors.md](./docs/sensors.md)
+
 ---
 
 ## 🎯 Project Vision
@@ -111,4 +119,3 @@ graph TB
 **Software:**
 - Node.js 20.x (required for `i2c-bus` compatibility)
 - Git
-

@@ -13,8 +13,16 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/imu/bmi160ImuSensor.ts`: BMI160 gyro access and bias calibration over I2C.
 - `src/imu/bmi160Registers.ts`: BMI160 register/command constants.
 - `src/imu/types.ts`: IMU sample and sensor contracts.
+- `src/gnss/gnssProtocol.ts`: GNSS sample contract used by runtime.
+- `src/gnss/gnssCodec.ts`: GNSS payload decoding (supports both 36-byte and 38-byte payload layouts).
+- `src/gnss/gnssNodeClient.ts`: GNSS request/response polling client over I2C framed protocol.
+- `src/protocols/commonProtocol.ts`: shared node/message identifiers and frame header shape.
+- `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
+- `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
+- `src/bus/crc.ts`: CRC16-CCITT implementation.
 - `src/sensing/sensorController.ts`: single 30Hz sensor polling controller and latest sensor state integration.
   - heading API: `getHeadingDegrees()` and `setHeadingDegrees(...)` for absolute heading reset integration.
+  - heading convention: internal signed degrees `(-180, 180]`; GNSS field heading rotated via `90 - heading`.
 - `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers.
 - `src/i2c/types.ts`: I2C transport and queued request types.
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
@@ -30,6 +38,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/homePage.ts`: minimal tabbed UI page with a Primitives tab.
 - `src/server/primitivesStore.ts`: in-memory primitives state holder.
   - primitives payload shape contains `imu`, `gnss`, and `motors` sections.
+- `docs/sensors.md`: sensor boundary/API contract, heading convention, GNSS frame/payload documentation, and primitive field purpose.
 - `scripts/mower-launch.sh`: launcher used by both `npm run start` and systemd.
 - `systemd/mower.service.template`: systemd unit template for runtime process management.
 - `systemd/install-mower-service.sh`: installer for `/etc/systemd/system/mower.service`.
