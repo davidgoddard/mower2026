@@ -1,0 +1,6 @@
+node_modules/
+dist/
+logs/
+data/logs/
+.DS_Store
+._.DS_Store

@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Mower Site Capture</title>
+    <style>
+      :root {
+        --bg: #f6f1e6;
+        --ink: #1f241d;
+        --muted: #656f60;
+        --panel: rgba(255, 252, 247, 0.9);
+        --line: rgba(31, 36, 29, 0.12);
+        --accent: #255f4a;
+        --accent-2: #a04f2d;
+        --ok: #2c865f;
+        --warn: #b66a28;
+        --bad: #af4336;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(37, 95, 74, 0.14), transparent 28%),
+          linear-gradient(180deg, #fcfbf7, #e8e4d8 72%, #ddd6c7);
+      }
+      .page {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 16px 12px 40px;
+      }
+      .hero, .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+      }
+      .hero {
+        padding: 22px 18px;
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2.1rem, 7vw, 3.5rem);
+        line-height: 0.94;
+      }
+      .subtitle, .sub, pre, .hint {
+        color: var(--muted);
+      }
+      .subtitle {
+        margin: 0;
+        line-height: 1.5;
+        font-size: 0.98rem;
+      }
+      .grid, .row, .actions {
+        display: grid;
+        gap: 12px;
+      }
+      .row {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .actions {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .card {
+        padding: 14px;
+      }
+      .wide {
+        grid-column: 1 / -1;
+      }
+      .label {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .ok { background: rgba(44, 134, 95, 0.14); color: var(--ok); }
+      .warn { background: rgba(182, 106, 40, 0.14); color: var(--warn); }
+      .bad { background: rgba(175, 67, 54, 0.14); color: var(--bad); }
+      .value {
+        margin-top: 8px;
+        font-size: 1.55rem;
+      }
+      .pair {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .mini {
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.5);
+        border: 1px solid var(--line);
+      }
+      .mini-value {
+        margin-top: 6px;
+        font-size: 1rem;
+      }
+      .sub {
+        margin-top: 8px;
+        line-height: 1.45;
+        font-size: 0.94rem;
+      }
+      pre {
+        margin: 10px 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+      ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+      button {
+        appearance: none;
+        border: 0;
+        padding: 12px 14px;
+        background: linear-gradient(180deg, #2a6c54, #215440);
+        color: white;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: linear-gradient(180deg, #b56738, #8e4b24);
+      }
+      button.danger {
+        background: linear-gradient(180deg, #b14b40, #8d372d);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 360px;
+        background: linear-gradient(180deg, rgba(37, 95, 74, 0.06), rgba(160, 79, 45, 0.03));
+        border: 1px solid var(--line);
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 0.88rem;
+      }
+      @media (max-width: 760px) {
+        .row, .grid, .pair, .actions {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <h1>Site Capture</h1>
+        <p class="subtitle">
+          Drive manually, start perimeter capture, then add obstacles. Points are auto-sampled from live pose changes and saved as site JSON.
+        </p>
+      </section>
+
+      <section class="row">
+        <article class="card">
+          <div class="label">Controller</div>
+          <div class="value" id="controllerStatus">Waiting</div>
+          <div class="sub" id="controllerSummary">No controller state yet</div>
+        </article>
+        <article class="card">
+          <div class="label">Pose</div>
+          <div class="value" id="estimateStatus">Waiting</div>
+          <div class="sub" id="estimateSummary">No fused estimate yet</div>
+        </article>
+        <article class="card">
+          <div class="label">Capture</div>
+          <div class="value" id="captureStatus">Idle</div>
+          <div class="sub" id="captureSummary">No active capture</div>
+        </article>
+      </section>
+
+      <section class="card wide">
+        <div class="label">Capture Controls</div>
+        <div class="actions" style="margin-top: 12px;">
+          <button id="startPerimeter">Start Perimeter</button>
+          <button id="finishPerimeter" class="secondary">Finish Perimeter</button>
+          <button id="startObstacle">Start Obstacle</button>
+          <button id="finishObstacle" class="secondary">Finish Obstacle</button>
+          <button id="undoLastPoint" class="secondary">Undo Last Point</button>
+          <button id="discardCurrentObstacle" class="danger">Discard Obstacle</button>
+          <button id="finishCapture">Finish Capture</button>
+          <button id="discardCapture" class="danger">Discard Capture</button>
+        </div>
+        <div class="hint" id="actionStatus">Actions are sent directly to the live capture server.</div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="label">Live Pose</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">X</div>
+              <div class="mini-value" id="estimateX">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Y</div>
+              <div class="mini-value" id="estimateY">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Heading</div>
+              <div class="mini-value" id="estimateHeading">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Confidence</div>
+              <div class="mini-value" id="estimateConfidence">-</div>
+            </div>
+          </div>
+          <div class="sub" id="lastRecord">No capture samples recorded yet</div>
+        </article>
+
+        <article class="card">
+          <div class="label">Capture Summary</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Perimeter Points</div>
+              <div class="mini-value" id="perimeterPoints">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Obstacles</div>
+              <div class="mini-value" id="obstacleCount">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Active Points</div>
+              <div class="mini-value" id="activePoints">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Warnings</div>
+              <div class="mini-value" id="warningCount">-</div>
+            </div>
+          </div>
+          <div class="sub" id="savedPath">No site JSON saved yet</div>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Geometry Preview</div>
+          <canvas id="mapCanvas" width="980" height="360"></canvas>
+          <div class="hint">Green = perimeter. Rust = obstacle. Dotted grey = active capture. Blue dot = current pose.</div>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Warnings</div>
+          <ul id="warnings"></ul>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Raw Capture State</div>
+          <pre id="captureRaw">Waiting for capture state...</pre>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Notes</div>
+          <ul id="notes"></ul>
+          <div class="sub" id="sessionPath"></div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const canvas = $("mapCanvas");
+      const context = canvas.getContext("2d");
+
+      function format(value, decimals = 2) {
+        return Number(value).toFixed(decimals);
+      }
+
+      function badge(text, status) {
+        return `<span class="badge ${status}">${text}</span>`;
+      }
+
+      function setHtml(id, html) {
+        $(id).innerHTML = html;
+      }
+
+      async function sendAction(action) {
+        $("actionStatus").textContent = `Sending ${action}...`;
+        const response = await fetch("/api/capture", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        const payload = await response.json();
+        $("actionStatus").textContent = payload.ok
+          ? `Action completed: ${action}`
+          : `Action failed: ${payload.error}`;
+      }
+
+      function drawPolyline(points, strokeStyle, dashed = false) {
+        if (!points || points.length === 0) {
+          return;
+        }
+        context.save();
+        context.strokeStyle = strokeStyle;
+        context.lineWidth = 2;
+        context.setLineDash(dashed ? [6, 6] : []);
+        context.beginPath();
+        context.moveTo(points[0].screenX, points[0].screenY);
+        for (let index = 1; index < points.length; index += 1) {
+          context.lineTo(points[index].screenX, points[index].screenY);
+        }
+        context.stroke();
+        context.restore();
+      }
+
+      function mapGeometryPoints(state) {
+        const all = [];
+        const perimeter = state.capture.perimeter?.simplifiedPoints ?? [];
+        const active = state.capture.activeCapture?.points ?? [];
+        const obstacles = state.capture.obstacles.flatMap((polygon) => polygon.simplifiedPoints);
+        for (const point of [...perimeter, ...active, ...obstacles]) {
+          all.push(point);
+        }
+        if (state.estimate.ok) {
+          all.push(state.estimate.sample);
+        }
+        if (all.length === 0) {
+          return null;
+        }
+
+        const xs = all.map((point) => point.xMeters);
+        const ys = all.map((point) => point.yMeters);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        const width = Math.max(maxX - minX, 1);
+        const height = Math.max(maxY - minY, 1);
+        const padding = 24;
+        const scale = Math.min(
+          (canvas.width - (padding * 2)) / width,
+          (canvas.height - (padding * 2)) / height,
+        );
+
+        const project = (point) => ({
+          ...point,
+          screenX: padding + ((point.xMeters - minX) * scale),
+          screenY: canvas.height - padding - ((point.yMeters - minY) * scale),
+        });
+
+        return {
+          perimeter: perimeter.map(project),
+          active: active.map(project),
+          obstacles: state.capture.obstacles.map((polygon) => polygon.simplifiedPoints.map(project)),
+          estimate: state.estimate.ok ? project(state.estimate.sample) : null,
+        };
+      }
+
+      function drawMap(state) {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        const mapped = mapGeometryPoints(state);
+        if (!mapped) {
+          context.fillStyle = "#656f60";
+          context.font = "18px Georgia";
+          context.fillText("No geometry yet. Start perimeter capture and drive.", 24, 42);
+          return;
+        }
+
+        drawPolyline(mapped.perimeter, "#255f4a");
+        for (const obstacle of mapped.obstacles) {
+          drawPolyline(obstacle, "#a04f2d");
+        }
+        drawPolyline(mapped.active, "#7b8076", true);
+
+        if (mapped.estimate) {
+          context.save();
+          context.fillStyle = "#175d7a";
+          context.beginPath();
+          context.arc(mapped.estimate.screenX, mapped.estimate.screenY, 5, 0, Math.PI * 2);
+          context.fill();
+          context.restore();
+        }
+      }
+
+      function render(state) {
+        const controller = state.controller;
+        const estimate = state.estimate;
+        const capture = state.capture;
+        const activeCapture = capture.activeCapture;
+
+        setHtml("controllerStatus", badge(
+          controller.connected ? (controller.manualDriveEnabled ? "Live + Armed" : "Live") : "Disconnected",
+          controller.connected ? (controller.manualDriveEnabled ? "warn" : "ok") : "bad",
+        ));
+        $("controllerSummary").textContent = controller.product
+          ? `${controller.product} | speed ${format(controller.speed, 2)} | angle ${format(controller.angleDegrees, 1)} deg`
+          : "Controller unavailable";
+
+        if (estimate.ok) {
+          setHtml("estimateStatus", badge(`x ${format(estimate.sample.xMeters, 2)} y ${format(estimate.sample.yMeters, 2)}`, "ok"));
+          $("estimateSummary").textContent = `heading ${format(estimate.sample.headingDegrees, 1)} deg | speed ${format(estimate.sample.speedMetersPerSecond, 3)} m/s`;
+          $("estimateX").textContent = `${format(estimate.sample.xMeters, 3)} m`;
+          $("estimateY").textContent = `${format(estimate.sample.yMeters, 3)} m`;
+          $("estimateHeading").textContent = `${format(estimate.sample.headingDegrees, 1)} deg`;
+          $("estimateConfidence").textContent = format(estimate.sample.confidence, 2);
+        } else {
+          setHtml("estimateStatus", badge("Unavailable", "bad"));
+          $("estimateSummary").textContent = estimate.error;
+        }
+
+        const activeLabel = activeCapture ? `${activeCapture.kind} ${activeCapture.id}` : "idle";
+        setHtml("captureStatus", badge(activeLabel, activeCapture ? "warn" : "ok"));
+        $("captureSummary").textContent = activeCapture
+          ? `${activeCapture.points.length} active points`
+          : "No active capture";
+
+        $("perimeterPoints").textContent = capture.perimeter ? String(capture.perimeter.rawPoints.length) : "0";
+        $("obstacleCount").textContent = String(capture.obstacles.length);
+        $("activePoints").textContent = activeCapture ? String(activeCapture.points.length) : "0";
+        $("warningCount").textContent = String(capture.warnings.length);
+        $("savedPath").textContent = state.lastSavedSitePath
+          ? `Last saved site: ${state.lastSavedSitePath}`
+          : "No site JSON saved yet";
+
+        const lastRecord = capture.lastRecordResult;
+        $("lastRecord").textContent = lastRecord
+          ? `${lastRecord.recorded ? "Recorded" : "Skipped"} | ${lastRecord.reason}`
+          : "No capture samples recorded yet";
+
+        $("warnings").innerHTML = capture.warnings.length === 0
+          ? "<li>No validation warnings.</li>"
+          : capture.warnings.map((warning) => `<li>${warning.code}: ${warning.message}</li>`).join("");
+
+        $("captureRaw").textContent = JSON.stringify(capture, null, 2);
+        $("notes").innerHTML = state.notes.map((note) => `<li>${note}</li>`).join("");
+        $("sessionPath").textContent = `Session telemetry: ${state.sessionLogPath}`;
+
+        $("startPerimeter").disabled = !!activeCapture;
+        $("finishPerimeter").disabled = activeCapture?.kind !== "perimeter";
+        $("startObstacle").disabled = !!activeCapture || !capture.perimeter;
+        $("finishObstacle").disabled = activeCapture?.kind !== "obstacle";
+        $("undoLastPoint").disabled = !activeCapture || activeCapture.points.length === 0;
+        $("discardCurrentObstacle").disabled = activeCapture?.kind !== "obstacle";
+        $("finishCapture").disabled = !!activeCapture || !capture.perimeter;
+        $("discardCapture").disabled = !capture.perimeter && capture.obstacles.length === 0 && !activeCapture;
+
+        drawMap(state);
+      }
+
+      [
+        ["startPerimeter", "start_perimeter"],
+        ["finishPerimeter", "finish_perimeter"],
+        ["startObstacle", "start_obstacle"],
+        ["finishObstacle", "finish_obstacle"],
+        ["undoLastPoint", "undo_last_point"],
+        ["discardCurrentObstacle", "discard_current_obstacle"],
+        ["finishCapture", "finish_capture"],
+        ["discardCapture", "discard_capture"],
+      ].forEach(([id, action]) => {
+        $(id).addEventListener("click", () => sendAction(action).catch((error) => {
+          $("actionStatus").textContent = `Action failed: ${error instanceof Error ? error.message : String(error)}`;
+        }));
+      });
+
+      const source = new EventSource("/events");
+      source.onmessage = (event) => render(JSON.parse(event.data));
+      source.onerror = () => {
+        $("notes").innerHTML = "<li>Connection lost. Waiting for server...</li>";
+      };
+    </script>
+  </body>
+</html>

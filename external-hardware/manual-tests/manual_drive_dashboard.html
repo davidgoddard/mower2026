@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Mower Manual Drive</title>
+    <style>
+      :root {
+        --bg: #eef0e8;
+        --ink: #1f2820;
+        --muted: #637063;
+        --panel: rgba(255, 255, 255, 0.84);
+        --line: rgba(31, 40, 32, 0.12);
+        --ok: #2b8960;
+        --warn: #c56d28;
+        --bad: #b94b3d;
+        --accent: #175d7a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top right, rgba(23, 93, 122, 0.16), transparent 28%),
+          linear-gradient(180deg, #fbfaf4, #dfe6d8 70%, #d4ddce);
+      }
+      .page {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 16px 12px 36px;
+      }
+      .hero, .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+      }
+      .hero {
+        padding: 22px 18px;
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2rem, 7vw, 3.3rem);
+        line-height: 0.95;
+      }
+      .subtitle, .sub, pre {
+        color: var(--muted);
+      }
+      .subtitle {
+        margin: 0;
+        line-height: 1.5;
+        font-size: 0.98rem;
+      }
+      .grid, .row {
+        display: grid;
+        gap: 12px;
+      }
+      .row {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .card {
+        padding: 14px;
+      }
+      .wide {
+        grid-column: 1 / -1;
+      }
+      .label {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .ok { background: rgba(43, 137, 96, 0.14); color: var(--ok); }
+      .warn { background: rgba(197, 109, 40, 0.14); color: var(--warn); }
+      .bad { background: rgba(185, 75, 61, 0.14); color: var(--bad); }
+      .value {
+        margin-top: 8px;
+        font-size: 1.65rem;
+      }
+      .pair {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .mini {
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.5);
+        border: 1px solid var(--line);
+      }
+      .mini-value {
+        margin-top: 6px;
+        font-size: 1.02rem;
+      }
+      .sub {
+        margin-top: 8px;
+        line-height: 1.45;
+        font-size: 0.94rem;
+      }
+      pre {
+        margin: 10px 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+      ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+      @media (max-width: 760px) {
+        .row, .grid, .pair {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <h1>Manual Drive Live</h1>
+        <p class="subtitle">
+          Controller-driven mower view. Press controller top or right-top to enable drive, and press cross or left-top to stop and disable drive.
+        </p>
+      </section>
+
+      <section class="row">
+        <article class="card">
+          <div class="label">Controller</div>
+          <div class="value" id="controllerStatus">Waiting</div>
+          <div class="sub" id="controllerSummary">No controller state yet</div>
+        </article>
+        <article class="card">
+          <div class="label">Command</div>
+          <div class="value" id="commandStatus">Stopped</div>
+          <div class="sub" id="commandSummary">No wheel command yet</div>
+        </article>
+        <article class="card">
+          <div class="label">Estimate</div>
+          <div class="value" id="estimateStatus">Waiting</div>
+          <div class="sub" id="estimateSummary">No fused estimate yet</div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="label">Controller Demand</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Angle</div>
+              <div class="mini-value" id="controllerAngle">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Speed</div>
+              <div class="mini-value" id="controllerSpeed">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Left Target</div>
+              <div class="mini-value" id="leftTarget">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Right Target</div>
+              <div class="mini-value" id="rightTarget">-</div>
+            </div>
+          </div>
+          <div class="sub" id="buttonEvents">No button events yet</div>
+        </article>
+
+        <article class="card">
+          <div class="label">Motion Feedback</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Left Actual</div>
+              <div class="mini-value" id="leftActual">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Right Actual</div>
+              <div class="mini-value" id="rightActual">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Vehicle Speed</div>
+              <div class="mini-value" id="vehicleSpeed">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Turn Bias</div>
+              <div class="mini-value" id="turnBias">-</div>
+            </div>
+          </div>
+          <div class="sub" id="motorHealth">No motor feedback yet</div>
+        </article>
+
+        <article class="card">
+          <div class="label">GNSS</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Fix</div>
+              <div class="mini-value" id="gnssFix">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Heading</div>
+              <div class="mini-value" id="gnssHeading">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Speed</div>
+              <div class="mini-value" id="gnssSpeed">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Age</div>
+              <div class="mini-value" id="gnssAge">-</div>
+            </div>
+          </div>
+          <div class="sub" id="gnssSummary">No GNSS data yet</div>
+        </article>
+
+        <article class="card">
+          <div class="label">IMU</div>
+          <div class="pair">
+            <div class="mini">
+              <div class="label">Roll</div>
+              <div class="mini-value" id="imuRoll">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Pitch</div>
+              <div class="mini-value" id="imuPitch">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Gyro Z</div>
+              <div class="mini-value" id="imuGyroZ">-</div>
+            </div>
+            <div class="mini">
+              <div class="label">Gravity</div>
+              <div class="mini-value" id="imuGravity">-</div>
+            </div>
+          </div>
+          <div class="sub" id="imuSummary">No IMU data yet</div>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Raw Controller State</div>
+          <pre id="controllerRaw">Waiting for controller packets...</pre>
+        </article>
+
+        <article class="card wide">
+          <div class="label">Notes</div>
+          <ul id="notes"></ul>
+          <div class="sub" id="sessionPath"></div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      function format(value, decimals = 2) {
+        return Number(value).toFixed(decimals);
+      }
+
+      function badge(text, status) {
+        return `<span class="badge ${status}">${text}</span>`;
+      }
+
+      function setHtml(id, html) {
+        $(id).innerHTML = html;
+      }
+
+      function render(state) {
+        const controller = state.controller;
+        const motor = state.motor;
+        const gnss = state.gnss;
+        const imu = state.imu;
+        const estimate = state.estimate;
+
+        setHtml("controllerStatus", badge(controller.connected ? (controller.manualDriveEnabled ? "Live + Armed" : "Live") : "Disconnected", controller.connected ? (controller.manualDriveEnabled ? "warn" : "ok") : "bad"));
+        $("controllerSummary").textContent = controller.product ? `${controller.product} | speed ${format(controller.speed, 2)} | angle ${format(controller.angleDegrees, 1)} deg` : "Controller unavailable";
+
+        setHtml("commandStatus", badge(state.command.mode, state.command.mode === "stopped" ? "bad" : "warn"));
+        $("commandSummary").textContent = `limited L ${format(state.command.limitedLeftMetersPerSecond, 3)} | R ${format(state.command.limitedRightMetersPerSecond, 3)} m/s`;
+
+        if (estimate.ok) {
+          setHtml("estimateStatus", badge(`heading ${format(estimate.sample.headingDegrees, 1)} deg`, "ok"));
+          $("estimateSummary").textContent = `speed ${format(estimate.sample.speedMetersPerSecond, 3)} m/s | confidence ${format(estimate.sample.confidence, 2)}`;
+        } else {
+          setHtml("estimateStatus", badge("Unavailable", "bad"));
+          $("estimateSummary").textContent = estimate.error;
+        }
+
+        $("controllerAngle").textContent = `${format(controller.angleDegrees, 1)} deg`;
+        $("controllerSpeed").textContent = format(controller.speed, 2);
+        $("leftTarget").textContent = `${format(state.command.limitedLeftMetersPerSecond, 3)} m/s`;
+        $("rightTarget").textContent = `${format(state.command.limitedRightMetersPerSecond, 3)} m/s`;
+        $("buttonEvents").textContent = controller.lastButtonEvents.length === 0
+          ? "No button events yet"
+          : controller.lastButtonEvents.map((event) => `${event.label}@${new Date(event.timestampMillis).toLocaleTimeString()}`).join(" | ");
+
+        if (motor.ok) {
+          $("leftActual").textContent = `${format(motor.derived.leftPhysicalMetersPerSecond, 3)} m/s`;
+          $("rightActual").textContent = `${format(motor.derived.rightPhysicalMetersPerSecond, 3)} m/s`;
+          $("vehicleSpeed").textContent = `${format(motor.derived.speedMetersPerSecond, 3)} m/s`;
+          $("turnBias").textContent = `${format(motor.derived.turnBiasMetersPerSecond, 3)} m/s`;
+          $("motorHealth").textContent = `watchdog ${motor.sample.watchdogHealthy ? "healthy" : "expired"} | faultFlags ${motor.sample.faultFlags}`;
+        } else {
+          $("motorHealth").textContent = motor.error;
+        }
+
+        if (gnss.ok) {
+          $("gnssFix").textContent = gnss.sample.fixType;
+          $("gnssHeading").textContent = gnss.sample.headingDegrees == null ? "unavailable" : `${format(gnss.sample.headingDegrees, 1)} deg`;
+          $("gnssSpeed").textContent = `${format(gnss.derived.groundSpeedMetersPerSecond, 3)} m/s`;
+          $("gnssAge").textContent = `${gnss.sample.sampleAgeMillis} ms`;
+          $("gnssSummary").textContent = `x ${format(gnss.sample.xMeters, 3)} | y ${format(gnss.sample.yMeters, 3)} | sats ${gnss.sample.satellitesInUse}`;
+        } else {
+          $("gnssSummary").textContent = gnss.error;
+        }
+
+        if (imu.ok) {
+          $("imuRoll").textContent = `${format(imu.derived.rollDegrees, 1)} deg`;
+          $("imuPitch").textContent = `${format(imu.derived.pitchDegrees, 1)} deg`;
+          $("imuGyroZ").textContent = `${format(imu.sample.angularVelocity.zDegreesPerSecond, 3)} deg/s`;
+          $("imuGravity").textContent = `${format(imu.derived.gravityMagnitude, 3)} m/s^2`;
+          $("imuSummary").textContent = `timestamp ${imu.sample.timestampMillis}`;
+        } else {
+          $("imuSummary").textContent = imu.error;
+        }
+
+        $("controllerRaw").textContent = JSON.stringify({
+          connected: controller.connected,
+          angleDegrees: controller.angleDegrees,
+          speed: controller.speed,
+          buttons: controller.buttons,
+          lastPacketHex: controller.lastPacketHex,
+        }, null, 2);
+
+        $("notes").innerHTML = state.notes.map((note) => `<li>${note}</li>`).join("");
+        $("sessionPath").textContent = `Session telemetry: ${state.sessionLogPath}`;
+      }
+
+      const source = new EventSource("/events");
+      source.onmessage = (event) => render(JSON.parse(event.data));
+      source.onerror = () => {
+        $("notes").innerHTML = "<li>Connection lost. Waiting for server...</li>";
+      };
+    </script>
+  </body>
+</html>
