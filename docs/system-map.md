@@ -10,6 +10,7 @@ This document maps problem domains to candidate files removing the need for Code
   - motor configuration: direction signs for hardware inversion, max wheel speed
   - network configuration: HTTP server defaults, port validation
   - calibration parameters: IMU sample count
+  - turn controller parameters: polling interval (50Hz), settle times, ramp times, learning rate, angle bins
 - Implementation constants (protocol formats, scaling factors, register values) are LOCAL to their modules, not in this global file.
 
 ## Heading and Angle Types
@@ -30,6 +31,33 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/logging/types.ts`: logging entry and API types.
 - `src/logging/index.ts`: logging exports.
 - `test/logger.test.js`: logger unit tests (local timestamp format, scope, transitions, retention).
+
+## Turn Controller
+- `src/control/turnController.ts`: turn execution controller with self-learning brake points
+  - executes on-the-spot turns using IMU heading integration
+  - adaptive brake angle learning per turn angle and direction
+  - emergency stop support during turn execution
+  - tuning sequence runner for comprehensive parameter learning
+- `src/control/turnLearningModel.ts`: turn parameter learning and persistence
+  - angle binning strategy (10° to 180° in 18 bins)
+  - direction-specific learning (CCW vs CW asymmetry)
+  - adaptive brake angle updates based on turn error
+  - JSON persistence at `config/turn-learning-parameters.json`
+- `src/control/turnControllerTypes.ts`: turn controller type definitions
+- `src/server/turnTuningPage.ts`: modern responsive web UI for turn tuning
+  - real-time turn execution and monitoring
+  - results table with error visualization
+  - learning parameter display
+  - prominent STOP button for emergency abort
+- `test/turnController.test.js`: turn controller unit tests
+- API endpoints:
+  - `GET /turn-tuning` - turn tuning web page
+  - `GET /api/turn/status` - controller state and history
+  - `POST /api/turn/execute` - execute single turn
+  - `POST /api/turn/tune` - run full tuning sequence
+  - `POST /api/turn/stop` - emergency stop current turn
+  - `POST /api/turn/clear-history` - clear turn history
+  - `POST /api/turn/reset-learning` - reset parameters to defaults
 
 ## Heading and Position
 - `src/imu/bmi160ImuSensor.ts`: BMI160 gyro access and bias calibration over I2C.

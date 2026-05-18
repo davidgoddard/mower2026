@@ -68,6 +68,7 @@ export function renderHomePage(): string {
         <div class="tabs">
           <button id="tab-primitives" class="active">Primitives</button>
           <button id="tab-status">Status</button>
+          <button id="tab-turns">Turn Tuning</button>
         </div>
         <div class="content">
           <section id="view-primitives">
@@ -76,29 +77,34 @@ export function renderHomePage(): string {
           <section id="view-status" hidden>
             <pre id="status-output">Loading...</pre>
           </section>
+          <section id="view-turns" hidden>
+            <p>Use the dedicated <a href="/turn-tuning" style="color: var(--accent); font-weight: 600;">Turn Tuning Page</a> for full turn controller interface.</p>
+          </section>
         </div>
       </div>
     </main>
     <script>
       const tabs = {
         primitives: document.getElementById('tab-primitives'),
-        status: document.getElementById('tab-status')
+        status: document.getElementById('tab-status'),
+        turns: document.getElementById('tab-turns')
       };
       const views = {
         primitives: document.getElementById('view-primitives'),
-        status: document.getElementById('view-status')
+        status: document.getElementById('view-status'),
+        turns: document.getElementById('view-turns')
       };
 
       function select(name) {
-        const isPrimitives = name === 'primitives';
-        tabs.primitives.classList.toggle('active', isPrimitives);
-        tabs.status.classList.toggle('active', !isPrimitives);
-        views.primitives.hidden = !isPrimitives;
-        views.status.hidden = isPrimitives;
+        Object.keys(tabs).forEach(key => {
+          tabs[key].classList.toggle('active', key === name);
+          views[key].hidden = key !== name;
+        });
       }
 
       tabs.primitives.addEventListener('click', () => select('primitives'));
       tabs.status.addEventListener('click', () => select('status'));
+      tabs.turns.addEventListener('click', () => select('turns'));
 
       async function refresh() {
         const [primitives, health] = await Promise.all([

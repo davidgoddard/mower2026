@@ -200,3 +200,67 @@ export const HTTP_SERVER_HOST_DEFAULT = "0.0.0.0";
  * Maximum valid TCP/UDP port number (system constant)
  */
 export const MAX_PORT_NUMBER = 65535;
+
+// =============================================================================
+// TURN CONTROLLER PARAMETERS - Design decisions
+// =============================================================================
+
+/**
+ * Turn controller polling interval in milliseconds
+ * How often to check heading during turn execution (50Hz)
+ */
+export const TURN_POLLING_INTERVAL_MS = 20;
+
+/**
+ * Settle time after motor ramp-down before reading final heading
+ */
+export const TURN_SETTLE_TIME_MS = 200;
+
+/**
+ * Motor ramp-down time from hardware spec (milliseconds)
+ * Time for motors to decelerate from full speed to zero
+ */
+export const MOTOR_RAMP_DOWN_TIME_MS = 700;
+
+/**
+ * Motor ramp-up time from hardware spec (milliseconds)
+ * Time for motors to accelerate from zero to full speed
+ */
+export const MOTOR_RAMP_UP_TIME_MS = 460;
+
+/**
+ * Small angle threshold - below this, use special handling (degrees)
+ * Small angles require different brake strategy
+ */
+export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 20;
+
+/**
+ * Learning rate for brake angle adaptation (0-1)
+ * Higher = faster learning but less stable
+ */
+export const TURN_LEARNING_RATE = 0.3;
+
+/**
+ * Turn timeout safety multiplier
+ * Timeout = (angle / expected_rotation_rate) * multiplier
+ */
+export const TURN_TIMEOUT_MULTIPLIER = 3.0;
+
+/**
+ * Default angle bins for turn learning (degrees)
+ * Requested angles are mapped to nearest bin
+ */
+export const TURN_ANGLE_BINS = [
+  10, 20, 30, 40, 50, 60, 70, 80, 90,
+  100, 110, 120, 130, 140, 150, 160, 170, 180
+] as const;
+
+/**
+ * Maximum number of turn results to keep in history
+ */
+export const TURN_HISTORY_MAX_SIZE = 100;
+
+/**
+ * Turn learning parameters file path (relative to project root)
+ */
+export const TURN_LEARNING_PARAMETERS_PATH = "config/turn-learning-parameters.json";

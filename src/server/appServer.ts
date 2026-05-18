@@ -1,11 +1,15 @@
 import { createServer } from "node:http";
 import { HidGameController } from "../controller/hidGameController.js";
 import { ManualDriveCoordinator } from "../control/manualDriveCoordinator.js";
+import { TurnController } from "../control/turnController.js";
+import { TurnLearningModel } from "../control/turnLearningModel.js";
 import { SessionLogger } from "../logging/index.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { renderHomePage } from "./homePage.js";
+import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
+import { createRelativeAngle } from "../geometry/headingTypes.js";
 import { MAX_PORT_NUMBER } from "../constants.js";
 
 interface StartMowerServerOptions {
@@ -41,6 +45,18 @@ interface RouteResponse {
   logNotFound: boolean;
 }
 
+function readRequestBody(request: any): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: any[] = [];
+    request.on("data", (chunk: any) => chunks.push(chunk));
+    request.on("end", () => {
+      const buffer = Buffer.concat(chunks);
+      resolve(buffer.toString("utf-8"));
+    });
+    request.on("error", reject);
+  });
+}
+
 function isValidPort(value: string | undefined): boolean {
   if (!value) {
     return false;
@@ -60,12 +76,22 @@ export function routeServerRequest(
   state: AppState,
   appName: string,
   primitives: PrimitiveSnapshot,
+  turnController: TurnController | null,
 ): RouteResponse {
   if (method === "GET" && pathname === "/") {
     return {
       statusCode: 200,
       contentType: "text/html; charset=utf-8",
       body: renderHomePage(),
+      logNotFound: false,
+    };
+  }
+
+  if (method === "GET" && pathname === "/turn-tuning") {
+    return {
+      statusCode: 200,
+      contentType: "text/html; charset=utf-8",
+      body: getTurnTuningPageHtml(),
       logNotFound: false,
     };
   }
@@ -91,6 +117,26 @@ export function routeServerRequest(
       body: encodeJson({
         state,
         primitives,
+      }),
+      logNotFound: false,
+    };
+  }
+
+  if (method === "GET" && pathname === "/api/turn/status") {
+    if (!turnController) {
+      return {
+        statusCode: 503,
+        contentType: "application/json; charset=utf-8",
+        body: encodeJson({ error: "turn_controller_not_available" }),
+        logNotFound: false,
+      };
+    }
+    return {
+      statusCode: 200,
+      contentType: "application/json; charset=utf-8",
+      body: encodeJson({
+        state: turnController.getState(),
+        history: turnController.getTurnHistory(),
       }),
       logNotFound: false,
     };
@@ -123,13 +169,74 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let sensorGateway: SensorHardwareGateway | null = null;
   let sensorController: SensorController | null = null;
   let manualDriveCoordinator: ManualDriveCoordinator | null = null;
+  let turnController: TurnController | null = null;
+  let turnLearningModel: TurnLearningModel | null = null;
   logger.transition("boot", "starting", { port, host });
 
-  const server = createServer((request: any, response: any) => {
+  const server = createServer(async (request: any, response: any) => {
     const method = request.method ?? "GET";
     const baseUrl = `http://${request.headers?.host ?? "localhost"}`;
     const requestUrl = new URL(request.url ?? "/", baseUrl);
-    const routed = routeServerRequest(method, requestUrl.pathname, state, appName, primitives.snapshot());
+
+    // Handle POST endpoints
+    if (method === "POST") {
+      try {
+        const body = await readRequestBody(request);
+
+        // Turn execution
+        if (requestUrl.pathname === "/api/turn/execute" && turnController) {
+          const data = JSON.parse(body);
+          const result = await turnController.executeTurn({
+            targetAngle: createRelativeAngle(data.angleDeg),
+            direction: data.angleDeg >= 0 ? "ccw" : "cw",
+            learningEnabled: data.enableLearning ?? true,
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(result));
+          return;
+        }
+
+        // Turn tuning sequence
+        if (requestUrl.pathname === "/api/turn/tune" && turnController) {
+          const data = JSON.parse(body);
+          const results = await turnController.runTuningSequence(data.iterations, data.anglesToTest);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        // Stop turn
+        if (requestUrl.pathname === "/api/turn/stop" && turnController) {
+          await turnController.stopCurrentTurn();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ stopped: true }));
+          return;
+        }
+
+        // Clear history
+        if (requestUrl.pathname === "/api/turn/clear-history" && turnController) {
+          turnController.clearHistory();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ cleared: true }));
+          return;
+        }
+
+        // Reset learning
+        if (requestUrl.pathname === "/api/turn/reset-learning" && turnLearningModel) {
+          await turnLearningModel.resetToDefaults();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ reset: true }));
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson({ error: message }));
+        return;
+      }
+    }
+
+    const routed = routeServerRequest(method, requestUrl.pathname, state, appName, primitives.snapshot(), turnController);
 
     if (routed.logNotFound) {
       requestLogger.warn("http.not_found", {
@@ -196,6 +303,16 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       });
       manualDriveCoordinator.start();
     }
+
+    // Initialize turn controller
+    turnLearningModel = new TurnLearningModel({ logger });
+    await turnLearningModel.loadParameters();
+    turnController = new TurnController({
+      sensorController,
+      logger,
+      learningModel: turnLearningModel,
+      maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("sensors.start_failed", { error: message });

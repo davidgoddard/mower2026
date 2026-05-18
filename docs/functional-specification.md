@@ -225,3 +225,40 @@ GNSS heading values that use field/navigation convention (clockwise from north) 
 The GNSS heading exposed to application consumers must be this rotated internal heading and normalized to the signed range `[-180, 180]`.
 
 IMU heading integration direction must match this same internal heading convention so that IMU and GNSS heading increases/decreases are aligned.
+
+# Mid level building blocks
+
+## Turning on the spot
+
+An asynchronous turn component that takes on the responsibility of turning the mower.
+
+Input is a single normalised turn angle
+
+In general the code:
+
+- note the start heading from the IMU only
+- starts the motors at full power, 
+- monitor the IMU heading only until the brake point is passed and wait
+- Once at or beyond the brake point zero the motors
+- wait for 2 * the motors configured ramp-down time
+- re-read the IMU heading only
+- compute the arrival error angle
+- use the error angle to adjust the brake angle to improve future turn accuracy
+
+Consideration must be given to the smaller angles where the brake angle is close to the angle to turn to ensure that the motor is asked to power up.  I.e. even if within the braking distance the motors still need to be engaged and the system must be able to turn reasonably small angles this way.
+
+The web server and web app need a dedicated tab that shows requested and achieved angles for all turns between 10, -10, 20, -20 ... and 170, -170, 180, -180 degrees.  A suggestion is to show a table with the requested angles as the column headings and the achieved angle shown in the cell below.
+
+The web page must provide a button to launch into a sequence of test iterations where one iteration goes through all angles to be tested.  
+
+Every turn must feed back the error of the achieved angle to improve the braking angle to attain a zero degree error.
+
+Being able to turn 10 degrees will be tough but consideration should be given to handle this being aware that the braking distance might be greater than the angle to turn and yet the system should engage motors and try to stop on target and so a different implementation might be required for small angles below N.
+
+The control data such as braking distances learned, perhaps for a given angle, must be persisted and picked up the next time the server starts and must also be used by the next turn immediately.
+
+If the system receives a "Stop" request from a user interaction or a failure condition, the turn must be stopped immediately.
+
+## Driving from point to point
+
+TBD
