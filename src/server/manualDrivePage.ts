@@ -388,6 +388,9 @@ export function getManualDrivePageHtml(): string {
     const canvas = $("mapCanvas");
     const ctx = canvas.getContext("2d");
 
+    // Stored paths for rendering
+    let storedPaths = [];
+
     function addPositionToHistory(x, y, heading, timestamp) {
       positionHistory.push({ x, y, heading, timestamp });
 
@@ -411,14 +414,24 @@ export function getManualDrivePageHtml(): string {
       ctx.fillStyle = "#f3f4f6";
       ctx.fillRect(0, 0, width, height);
 
-      // Find bounds
+      // Find bounds (include position history and stored paths)
       let minX = Infinity, maxX = -Infinity;
       let minY = Infinity, maxY = -Infinity;
+
       for (const pos of positionHistory) {
         minX = Math.min(minX, pos.x);
         maxX = Math.max(maxX, pos.x);
         minY = Math.min(minY, pos.y);
         maxY = Math.max(maxY, pos.y);
+      }
+
+      for (const path of storedPaths) {
+        for (const point of path.points) {
+          minX = Math.min(minX, point.xMeters);
+          maxX = Math.max(maxX, point.xMeters);
+          minY = Math.min(minY, point.yMeters);
+          maxY = Math.max(maxY, point.yMeters);
+        }
       }
 
       // Add padding to bounds
@@ -467,7 +480,57 @@ export function getManualDrivePageHtml(): string {
       ctx.fillText("Y (meters)", 0, 0);
       ctx.restore();
 
-      // Draw trail with fading
+      // Draw stored paths first (underneath)
+      const pathColors = [
+        'rgba(16, 185, 129, 0.4)', // green
+        'rgba(245, 158, 11, 0.4)',  // amber
+        'rgba(139, 92, 246, 0.4)',  // purple
+        'rgba(236, 72, 153, 0.4)',  // pink
+        'rgba(14, 165, 233, 0.4)',  // sky
+      ];
+
+      storedPaths.forEach((path, pathIndex) => {
+        const color = pathColors[pathIndex % pathColors.length];
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+
+        ctx.beginPath();
+        for (let i = 0; i < path.points.length; i++) {
+          const point = path.points[i];
+          const x = toCanvasX(point.xMeters);
+          const y = toCanvasY(point.yMeters);
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+
+        // Draw path name at start point
+        if (path.points.length > 0) {
+          const startPoint = path.points[0];
+          const sx = toCanvasX(startPoint.xMeters);
+          const sy = toCanvasY(startPoint.yMeters);
+
+          ctx.fillStyle = color.replace('0.4', '0.9');
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 3;
+          ctx.font = 'bold 14px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.strokeText(path.name, sx, sy - 10);
+          ctx.fillText(path.name, sx, sy - 10);
+
+          // Draw start marker
+          ctx.fillStyle = color.replace('0.4', '0.8');
+          ctx.beginPath();
+          ctx.arc(sx, sy, 6, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      });
+
+      // Draw trail with fading (on top of stored paths)
       const now = positionHistory[positionHistory.length - 1].timestamp;
       ctx.lineWidth = 3;
 
@@ -515,6 +578,23 @@ export function getManualDrivePageHtml(): string {
       // Update stats
       const distance = Math.max(rangeX, rangeY);
       $("mapStats").textContent = \`\${positionHistory.length} points | range: \${format(distance, 2)}m | scale: \${format(1/scale, 3)}m/px | current: (\${format(current.x, 2)}, \${format(current.y, 2)})\`;
+    }
+
+    async function loadStoredPaths() {
+      try {
+        const response = await fetch('/api/paths');
+        const data = await response.json();
+
+        // Load full path data for each path
+        const pathPromises = data.paths.map(async (pathInfo) => {
+          const pathResponse = await fetch(\`/api/paths/\${encodeURIComponent(pathInfo.name)}\`);
+          return await pathResponse.json();
+        });
+
+        storedPaths = await Promise.all(pathPromises);
+      } catch (error) {
+        console.error('Failed to load stored paths:', error);
+      }
     }
 
     async function updateStatus() {
@@ -601,6 +681,10 @@ export function getManualDrivePageHtml(): string {
         console.error('Failed to update status:', error);
       }
     }
+
+    // Load stored paths once at startup, then refresh every 10 seconds
+    loadStoredPaths();
+    setInterval(loadStoredPaths, 10000);
 
     // Poll for updates
     setInterval(updateStatus, 500);

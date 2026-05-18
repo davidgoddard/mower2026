@@ -8,6 +8,7 @@ import { DriveLearningModel } from "../control/driveLearningModel.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { SessionLogger } from "../logging/index.js";
 import { SensorController } from "../sensing/sensorController.js";
+import { PathStore } from "../pathfollowing/pathStore.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { StubSensorGateway } from "../sensing/stubSensorGateway.js";
 import { renderHomePage } from "./homePage.js";
@@ -88,6 +89,7 @@ export function routeServerRequest(
   driveController: DriveController | null,
   driveLearningModel: DriveLearningModel | null,
   poseFusion: PoseFusion | null,
+  pathStore: PathStore | null,
 ): RouteResponse {
   if (method === "GET" && pathname === "/") {
     return {
@@ -204,6 +206,15 @@ export function routeServerRequest(
     };
   }
 
+  if (method === "GET" && pathname === "/api/paths") {
+    return {
+      statusCode: 200,
+      contentType: "application/json; charset=utf-8",
+      body: encodeJson({ paths: [] }), // Will be populated async
+      logNotFound: false,
+    };
+  }
+
   return {
     statusCode: 404,
     contentType: "application/json; charset=utf-8",
@@ -236,12 +247,59 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let poseFusion: PoseFusion | null = null;
   let driveLearningModel: DriveLearningModel | null = null;
   let driveController: DriveController | null = null;
+  let pathStore: PathStore | null = null;
   logger.transition("boot", "starting", { port, host });
 
   const server = createServer(async (request: any, response: any) => {
     const method = request.method ?? "GET";
     const baseUrl = `http://${request.headers?.host ?? "localhost"}`;
     const requestUrl = new URL(request.url ?? "/", baseUrl);
+
+    // Handle async GET endpoints
+    if (method === "GET") {
+      // List all paths
+      if (requestUrl.pathname === "/api/paths" && pathStore) {
+        try {
+          const pathNames = await pathStore.listPaths();
+          const paths = await Promise.all(
+            pathNames.map(async (name) => {
+              const path = await pathStore!.loadPath(name);
+              return {
+                name: path.name,
+                pointCount: path.points.length,
+                totalDistance: path.metadata.totalDistance,
+                createdAt: path.createdAt,
+              };
+            })
+          );
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ paths }));
+          return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: message }));
+          return;
+        }
+      }
+
+      // Load specific path with all points
+      const pathLoadMatch = requestUrl.pathname.match(/^\/api\/paths\/([^\/]+)$/);
+      if (pathLoadMatch && pathStore) {
+        try {
+          const pathName = decodeURIComponent(pathLoadMatch[1]);
+          const path = await pathStore.loadPath(pathName);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(path));
+          return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: message }));
+          return;
+        }
+      }
+    }
 
     // Handle POST endpoints
     if (method === "POST") {
@@ -355,7 +413,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       turnController,
       driveController,
       driveLearningModel,
-      poseFusion
+      poseFusion,
+      pathStore
     );
 
     if (routed.logNotFound) {
@@ -512,6 +571,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       turnController,
       logger,
       learningModel: driveLearningModel,
+    });
+
+    // Initialize path store
+    pathStore = new PathStore({
+      storageDirectory: options.logDir ?? "./logs",
+      logger: logger.child({ context: "paths", source: "PathStore" }),
     });
   }
 
