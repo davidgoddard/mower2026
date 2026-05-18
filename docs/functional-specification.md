@@ -372,3 +372,41 @@ For short drives where full speed is not reached, consider:
 - potentially disabling brake distance learning for these short drives
 - or learning a separate parameter set for short-distance drives
 
+## Path following
+
+There is a need to be able to trace around obstacles using manual driving and then have the mower re-trace that path whilst mowing. 
+
+A path driving component is required which will take an array of path points which may be far apart or very close together and drive that path and return.
+
+### Tracing
+
+The user will be able to use manual driving or simply dragging the mower around an obstacle. The position part only is obtained and logged every time it moves more than 10cm.
+
+The web page will offer a button to open a path tracing page for this purpose.  
+
+A path will be associated with a name which will default to 'Obstacle N' where N is an increasing number based on already stored obstacles.  The user can add new names. For any name, the user can erase which removes it completely or they can 'record' in which case it starts capturing the path as the user moves/drives the mower. And a 'stop and save' button which will persist the array of positions against the name.
+
+### Re-tracing
+
+From the same page as for tracing the obstacle's perimeter, there will be a button to 'Drive'.
+
+The drive button will pre-pend the current position to the path and then start the drive mode.
+
+The drive will perform a smooth line-follower algorithm but only resort to 'turn-on-the-spot' when the direction to the next point requires a turn greater than can be achieved using an arc - arc is preferred.   With one heel stationary the mower will pivot around that wheel so it can produce very tight circles.
+
+A "Stop" button will be prominant on the screen and immediately terminate a drive.
+
+Driving should initially be performed at full speed as this ensures the blades are moving quickly and it overcomes the friction - a slow drive could get stuck.
+
+## Obstructions - retry
+
+The mower has two current meters; one for each motor.  When either the current goes over a threshold (to be defined but start with 2 amps) or the position is effectively stationary whilst the motor feedback indicates movement (wheel slip) or the position is stationary for 1 second and the motors have been engaged, then enter a retry loop.
+
+The retry loop involves driving in reverse to the last known point if it was driving a line and reversing for 2 seconds and then driving forward to continue and hence re-try. This is presumed to get over long or thick grass that causes a jam.  If the retry is failed 3 times then abort the entire session and power off the motors.
+
+The retry loop involves retracing the path backwards for the last 5 waypoints if it was path following to ensure it does not collide with the obstacle.
+
+If turning on the spot, then simply turn the other way for 2 seconds and then retry going forward.  Note that this will require the angles to be managed so that the original target heading is reached even if a back-up and retry occurs.
+
+Logging should indicate that the retry has occured and which condition was detected and the context in which it occured such as line following or turning.
+

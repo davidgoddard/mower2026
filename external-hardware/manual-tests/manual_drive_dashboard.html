@@ -126,6 +126,13 @@
           grid-template-columns: 1fr;
         }
       }
+      #mapCanvas {
+        width: 100%;
+        height: 400px;
+        background: rgba(255, 255, 255, 0.5);
+        border: 1px solid var(--line);
+        display: block;
+      }
     </style>
   </head>
   <body>
@@ -135,6 +142,12 @@
         <p class="subtitle">
           Controller-driven mower view. Press controller top or right-top to enable drive, and press cross or left-top to stop and disable drive.
         </p>
+      </section>
+
+      <section class="card wide">
+        <div class="label">Position Map (Last 10 Minutes)</div>
+        <canvas id="mapCanvas" width="1200" height="800"></canvas>
+        <div class="sub" id="mapStats">Waiting for position data...</div>
       </section>
 
       <section class="row">
@@ -276,6 +289,141 @@
         $(id).innerHTML = html;
       }
 
+      // Position history tracking
+      const positionHistory = [];
+      const MAX_HISTORY_MS = 10 * 60 * 1000; // 10 minutes
+      const canvas = $("mapCanvas");
+      const ctx = canvas.getContext("2d");
+
+      function addPositionToHistory(x, y, heading, timestamp) {
+        positionHistory.push({ x, y, heading, timestamp });
+
+        // Remove old points beyond 10 minutes
+        const cutoff = timestamp - MAX_HISTORY_MS;
+        while (positionHistory.length > 0 && positionHistory[0].timestamp < cutoff) {
+          positionHistory.shift();
+        }
+      }
+
+      function drawMap() {
+        if (positionHistory.length === 0) {
+          return;
+        }
+
+        const width = canvas.width;
+        const height = canvas.height;
+        const padding = 60;
+
+        // Clear canvas
+        ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+        ctx.fillRect(0, 0, width, height);
+
+        // Find bounds
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        for (const pos of positionHistory) {
+          minX = Math.min(minX, pos.x);
+          maxX = Math.max(maxX, pos.x);
+          minY = Math.min(minY, pos.y);
+          maxY = Math.max(maxY, pos.y);
+        }
+
+        // Add padding to bounds
+        const rangeX = maxX - minX || 1;
+        const rangeY = maxY - minY || 1;
+        minX -= rangeX * 0.1;
+        maxX += rangeX * 0.1;
+        minY -= rangeY * 0.1;
+        maxY += rangeY * 0.1;
+
+        // Calculate scale to fit canvas
+        const scaleX = (width - 2 * padding) / (maxX - minX);
+        const scaleY = (height - 2 * padding) / (maxY - minY);
+        const scale = Math.min(scaleX, scaleY);
+
+        // Transform functions
+        const toCanvasX = (x) => padding + (x - minX) * scale;
+        const toCanvasY = (y) => height - padding - (y - minY) * scale;
+
+        // Draw grid
+        ctx.strokeStyle = "rgba(31, 40, 32, 0.1)";
+        ctx.lineWidth = 1;
+        const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(rangeX, rangeY) / 5)));
+
+        for (let x = Math.floor(minX / gridSize) * gridSize; x <= maxX; x += gridSize) {
+          ctx.beginPath();
+          ctx.moveTo(toCanvasX(x), padding);
+          ctx.lineTo(toCanvasX(x), height - padding);
+          ctx.stroke();
+        }
+        for (let y = Math.floor(minY / gridSize) * gridSize; y <= maxY; y += gridSize) {
+          ctx.beginPath();
+          ctx.moveTo(padding, toCanvasY(y));
+          ctx.lineTo(width - padding, toCanvasY(y));
+          ctx.stroke();
+        }
+
+        // Draw axes labels
+        ctx.fillStyle = "#637063";
+        ctx.font = "12px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("X (meters)", width / 2, height - 10);
+        ctx.save();
+        ctx.translate(15, height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText("Y (meters)", 0, 0);
+        ctx.restore();
+
+        // Draw trail with fading
+        const now = positionHistory[positionHistory.length - 1].timestamp;
+        ctx.lineWidth = 2;
+
+        for (let i = 1; i < positionHistory.length; i++) {
+          const prev = positionHistory[i - 1];
+          const curr = positionHistory[i];
+          const age = now - curr.timestamp;
+          const opacity = 1 - (age / MAX_HISTORY_MS);
+
+          ctx.strokeStyle = `rgba(23, 93, 122, ${opacity * 0.6})`;
+          ctx.beginPath();
+          ctx.moveTo(toCanvasX(prev.x), toCanvasY(prev.y));
+          ctx.lineTo(toCanvasX(curr.x), toCanvasY(curr.y));
+          ctx.stroke();
+        }
+
+        // Draw current position as arrow
+        const current = positionHistory[positionHistory.length - 1];
+        const cx = toCanvasX(current.x);
+        const cy = toCanvasY(current.y);
+        const headingRad = (current.heading * Math.PI) / 180;
+        const arrowSize = 20;
+
+        ctx.fillStyle = "#175d7a";
+        ctx.strokeStyle = "#1f2820";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(
+          cx + Math.cos(headingRad) * arrowSize,
+          cy - Math.sin(headingRad) * arrowSize
+        );
+        ctx.lineTo(
+          cx + Math.cos(headingRad + 2.6) * arrowSize * 0.6,
+          cy - Math.sin(headingRad + 2.6) * arrowSize * 0.6
+        );
+        ctx.lineTo(cx, cy);
+        ctx.lineTo(
+          cx + Math.cos(headingRad - 2.6) * arrowSize * 0.6,
+          cy - Math.sin(headingRad - 2.6) * arrowSize * 0.6
+        );
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Update stats
+        const distance = rangeX > rangeY ? rangeX : rangeY;
+        $("mapStats").textContent = `${positionHistory.length} points | range: ${format(distance, 2)}m | scale: ${format(1/scale, 3)}m/px | current: (${format(current.x, 2)}, ${format(current.y, 2)})`;
+      }
+
       function render(state) {
         const controller = state.controller;
         const motor = state.motor;
@@ -292,6 +440,17 @@
         if (estimate.ok) {
           setHtml("estimateStatus", badge(`heading ${format(estimate.sample.headingDegrees, 1)} deg`, "ok"));
           $("estimateSummary").textContent = `speed ${format(estimate.sample.speedMetersPerSecond, 3)} m/s | confidence ${format(estimate.sample.confidence, 2)}`;
+
+          // Add position to map
+          if (estimate.sample.xMeters !== undefined && estimate.sample.yMeters !== undefined) {
+            addPositionToHistory(
+              estimate.sample.xMeters,
+              estimate.sample.yMeters,
+              estimate.sample.headingDegrees,
+              state.serverTimestampMillis
+            );
+            drawMap();
+          }
         } else {
           setHtml("estimateStatus", badge("Unavailable", "bad"));
           $("estimateSummary").textContent = estimate.error;

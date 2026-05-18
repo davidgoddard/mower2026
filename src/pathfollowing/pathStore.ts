@@ -95,8 +95,8 @@ export class PathStore implements IPathStore {
   async listPaths(): Promise<string[]> {
     try {
       const files = await readdir(this.storageDirectory);
-      const pathFiles = files.filter((f) => f.endsWith(".path.json"));
-      const names = pathFiles.map((f) => f.replace(".path.json", ""));
+      const pathFiles = files.filter((f: string) => f.endsWith(".path.json"));
+      const names = pathFiles.map((f: string) => f.replace(".path.json", ""));
 
       this.logger.debug("path_store.list", { count: names.length });
 

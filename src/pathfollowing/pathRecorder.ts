@@ -6,11 +6,13 @@ import { IPathRecorder, PathRecorderOptions, PathPoint, StoredPath, IPathStore }
 import { Pose } from "../geometry/positionTypes.js";
 import { unwrapMeters } from "../geometry/positionTypes.js";
 import { LoggerScope } from "../logging/types.js";
-import { EventEmitter } from "node:events";
 
 export interface PathRecorderDependencies {
   pathStore: IPathStore;
-  poseFusion: EventEmitter; // Emits 'poseUpdate' events
+  poseFusion: {
+    on(event: "poseUpdate", listener: (pose: Pose) => void): void;
+    off(event: "poseUpdate", listener: (pose: Pose) => void): void;
+  };
 }
 
 export class PathRecorder implements IPathRecorder {
@@ -22,6 +24,7 @@ export class PathRecorder implements IPathRecorder {
   private currentPath: PathPoint[] = [];
   private currentPathName: string = "";
   private lastRecordedPosition: { xMeters: number; yMeters: number } | null = null;
+  private boundOnPoseUpdate: ((pose: Pose) => void) | null = null;
 
   constructor(options: PathRecorderOptions, dependencies: PathRecorderDependencies) {
     this.distanceThreshold = options.distanceThreshold;
@@ -41,7 +44,8 @@ export class PathRecorder implements IPathRecorder {
     this.lastRecordedPosition = null;
 
     // Subscribe to pose updates
-    this.deps.poseFusion.on("poseUpdate", this.onPoseUpdate.bind(this));
+    this.boundOnPoseUpdate = this.onPoseUpdate.bind(this);
+    this.deps.poseFusion.on("poseUpdate", this.boundOnPoseUpdate);
 
     this.logger.info("path_recorder.started", {
       pathName,
@@ -57,7 +61,10 @@ export class PathRecorder implements IPathRecorder {
     this.recording = false;
 
     // Unsubscribe from pose updates
-    this.deps.poseFusion.off("poseUpdate", this.onPoseUpdate.bind(this));
+    if (this.boundOnPoseUpdate) {
+      this.deps.poseFusion.off("poseUpdate", this.boundOnPoseUpdate);
+      this.boundOnPoseUpdate = null;
+    }
 
     const pointCount = this.currentPath.length;
 
@@ -94,7 +101,10 @@ export class PathRecorder implements IPathRecorder {
     this.recording = false;
 
     // Unsubscribe from pose updates
-    this.deps.poseFusion.off("poseUpdate", this.onPoseUpdate.bind(this));
+    if (this.boundOnPoseUpdate) {
+      this.deps.poseFusion.off("poseUpdate", this.boundOnPoseUpdate);
+      this.boundOnPoseUpdate = null;
+    }
 
     this.logger.info("path_recorder.cancelled", {
       pathName: this.currentPathName,
