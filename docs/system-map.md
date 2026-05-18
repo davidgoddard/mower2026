@@ -39,6 +39,7 @@ This document maps problem domains to candidate files removing the need for Code
   - adaptive brake angle learning per turn angle and direction
   - emergency stop support during turn execution
   - tuning sequence runner for comprehensive parameter learning
+  - integrates with retry system for obstruction recovery
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - angle binning strategy (10° to 180° in 18 bins)
   - direction-specific learning (CCW vs CW asymmetry)
@@ -60,8 +61,75 @@ This document maps problem domains to candidate files removing the need for Code
   - `POST /api/turn/clear-history` - clear turn history
   - `POST /api/turn/reset-learning` - reset parameters to defaults
 
-## Heading and Position
-- `src/imu/bmi160ImuSensor.ts`: BMI160 gyro access and bias calibration over I2C.
+## Drive Controller
+- `src/control/driveController.ts`: point-to-point driving controller with CTE correction and brake distance learning
+  - executes straight-line drives from current position to target position
+  - automatic turn-to-face-target before driving
+  - continuous cross-track error (CTE) correction during drive
+  - adaptive brake distance learning for arrival accuracy
+  - integrates with retry system for obstruction recovery
+  - creates checkpoints for retry system before each drive
+- Drive sequence: settle → get pose → turn to target → settle → get pose → drive with CTE correction → brake → settle → measure errors → update learning
+- API: `driveToTarget(target)`, `reverseForDuration(ms)` for retry recovery
+
+## Retry System (Obstruction Recovery)
+- `src/retry/retryManager.ts`: **EVENT-DRIVEN RECOVERY SYSTEM** - handles obstruction detection and context-aware recovery
+  - subscribes to `obstructionDetected` events from sensor controller
+  - session tracking: max 3 retry attempts per session before abort
+  - context-aware recovery strategies:
+    - **Line driving**: reverse 2 seconds, retry forward to target
+    - **Path following**: retrace backwards 5 waypoints, resume forward
+    - **Turn on spot**: escape turn opposite direction 2 seconds, retry original heading
+  - emergency abort: powers off motors after max retries exceeded
+  - comprehensive logging at each recovery step with algorithm-specific prefixes
+- `src/retry/checkpointStore.ts`: checkpoint storage for recovery points
+  - maintains circular buffer of last 10 checkpoints
+  - context-specific checkpoint retrieval (line, path, turn)
+  - automatic cleanup of old checkpoints
+- `src/retry/retryTypes.ts`: type definitions for retry system
+  - `ObstructionType`: high_current, wheel_slip, stall
+  - `OperationContext`: line, path, turn
+  - `Checkpoint`: recovery point with pose and context metadata
+- Obstruction detection conditions:
+  - Motor current > 2A threshold (configurable)
+  - Wheel slip: encoder movement but position stationary
+  - Stall: position stationary for 1 second with motors engaged
+
+## Path Following
+- `src/pathfollowing/pathFollowerApi.ts`: **PATH FOLLOWING API** - abstract interface supporting multiple algorithms
+  - `IPathFollower`: interface for path following implementations (Pure Pursuit, Arc Interpolation, etc.)
+  - `IPathRecorder`: interface for recording paths during manual driving
+  - `IPathStore`: interface for persistent path storage
+  - API methods: `followPath()`, `followPathPoints()`, `resumeFromWaypoint()`, `retraceToWaypoint()`, `stop()`
+  - State: current path, waypoint index, distance to target, cross-track error
+- `src/pathfollowing/purePursuitFollower.ts`: **PURE PURSUIT ALGORITHM IMPLEMENTATION**
+  - adaptive lookahead distance (0.5m - 2.0m) based on speed and path curvature
+  - smooth arc following using differential wheel speeds
+  - automatic pivot turns for tight radius (<0.5m) - one wheel stationary
+  - 20Hz control loop (configurable)
+  - curvature calculation: κ = 2 * sin(α) / L (classic Pure Pursuit formula)
+  - integrates with retry system via checkpoint creation
+  - algorithm-specific logging with `pure_pursuit.*` prefixes
+- `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
+  - file format: `{name}.path.json` in configured storage directory
+  - in-memory caching for loaded paths
+  - path metadata: total distance, point count, creation timestamp
+- `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
+  - subscribes to `poseUpdate` events from pose fusion
+  - records position every 10cm (configurable distance threshold)
+  - start/stop recording with named paths
+  - automatic point filtering based on movement threshold
+- `src/geometry/positionTypes.ts`: geometry functions for path following
+  - cross-track error calculation for line/arc following
+  - point-to-line distance calculations
+  - along-track progress measurement
+
+## Sensors and Hardware
+- `src/imu/bmi160ImuSensor.ts`: BMI160 gyro and accelerometer access over I2C.
+  - gyro: Z-axis angular velocity for heading integration
+  - accelerometer: 3-axis (X, Y, Z) for pitch and roll calculation
+  - bias calibration on startup for drift compensation
+  - pitch/roll zeroing to establish level reference on uneven ground
 - `src/imu/bmi160Registers.ts`: BMI160 register/command constants.
 - `src/imu/types.ts`: IMU sample and sensor contracts.
 - `src/gnss/gnssProtocol.ts`: GNSS sample contract used by runtime.
@@ -71,6 +139,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorCodec.ts`: wheel-speed command encoding and motor-feedback payload decoding.
 - `src/motors/motorMapping.ts`: app-facing forward-positive wheel convention mapping to/from raw motor node direction signs.
 - `src/motors/motorNodeClient.ts`: motor command send + feedback polling over framed I2C protocol.
+  - includes motor current sensing data in feedback samples
 - `src/controller/hidGameController.ts`: HID game controller input adapter and button event source.
 - `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
 - `src/control/manualDriveCoordinator.ts`: manual-drive loop; maps controller input to motor commands.
@@ -84,7 +153,14 @@ This document maps problem domains to candidate files removing the need for Code
   - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading)` for absolute heading reset integration.
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
   - IMU yaw integration: uses `addRelativeAngle()` with `RelativeAngle` deltas from gyro samples.
+  - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor API: `setMotorWheelSpeeds(...)` and `stopMotors()` command passthrough to hardware boundary.
+  - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions
+- `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
+  - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU
+  - `GnssPositionUpdateEvent`: position, heading, fix quality from GNSS
+  - `MotorFeedbackUpdateEvent`: wheel speeds, encoder deltas, PWM, current, watchdog/fault state
+  - `ObstructionDetectedEvent`: obstruction type, motor currents, wheel speeds
 - `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers.
 - `src/i2c/types.ts`: I2C transport and queued request types.
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
@@ -96,6 +172,23 @@ This document maps problem domains to candidate files removing the need for Code
 - `test/motorNodeClient.test.js`: motor command priority and feedback-frame decode tests.
 - `test/motorMapping.test.js`: motor direction sign mapping tests.
 - `test/manualDriveProfile.test.js`: manual-drive demand shaping tests.
+
+## Pose Estimation and Sensor Fusion
+- `src/sensing/poseFusion.ts`: **POSE ESTIMATION IS HERE** - combines GNSS, IMU, and encoder feedback for best-estimate pose.
+  - maintains current position (X, Y meters) and heading (InternalHeading)
+  - quality tracking: "gnss" (RTK fixed/float), "dead-reckoning", or "unknown"
+  - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
+  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available
+  - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps
+  - encoder dead-reckoning: integrates motor encoder deltas for position during GNSS gaps
+  - heading reset API: `setHeading()` for external absolute heading corrections
+  - pose API: `getCurrentPose()` returns current position, heading, and quality
+  - emits `poseUpdate` events on every update
+- `src/geometry/positionTypes.ts`: branded types for position and pose.
+  - `Meters`: branded number for type-safe distance values
+  - `Position`: X/Y position in meters
+  - `Pose`: position + heading + quality indicator
+  - geometry functions: `distanceBetween()`, `angleTo()`, `crossTrackError()`, `calculateXError()`
 
 ## Operation And Server Entry
 - `src/server/main.ts`: production server entrypoint (compiled to `dist/server/main.js`).

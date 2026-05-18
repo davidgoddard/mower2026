@@ -30,12 +30,15 @@ Transform a manual push mower into an autonomous system capable of:
 
 ### Navigation & Control
 - ✅ **RTK-GPS positioning** with dual-antenna UM982 receiver (30cm baseline)
-- ✅ **Sensor fusion** combining GNSS, wheel odometry, and IMU (6-axis BMI160)
+- ✅ **Pose fusion** combining GNSS, wheel odometry, and IMU (6-axis BMI160) with automatic quality tracking
 - ✅ **Self-learning turn controller** with direction-specific parameter adaptation
-- ✅ **Self-learning drive controller** for straight-line precision
+- ✅ **Self-learning drive controller** for straight-line precision with CTE correction
+- ✅ **Pure Pursuit path following** with adaptive lookahead and automatic pivot turns
 
 ### Planning & Execution
 - ✅ **Site capture** via manual drive with automatic waypoint sampling
+- ✅ **Path recording** during manual drive with 10cm point sampling
+- ✅ **Path following** with smooth arc navigation and tight turn handling
 - ✅ **Coverage planning** using orientation search and stripe decomposition
 - ✅ **Obstacle avoidance** with polygon clipping
 - ✅ **Mission start selection** from arbitrary mower placement
@@ -45,6 +48,10 @@ Transform a manual push mower into an autonomous system capable of:
 - ✅ **Multi-layer safety**: Software watchdog, hardware timeout, physical e-stop
 - ✅ **Quality gating**: RTK fix requirements, position accuracy thresholds
 - ✅ **Fault monitoring**: Overcurrent detection, stall prevention, encoder validation
+- ✅ **Obstruction recovery**: Event-driven retry system with context-aware recovery strategies
+  - Line driving: reverse and retry forward (max 3 attempts)
+  - Path following: retrace backwards 5 waypoints and resume
+  - Turn recovery: escape turn and retry original heading
 - ✅ **Graceful degradation**: Safe stops on sensor loss or confidence drop
 
 ### Development Infrastructure
