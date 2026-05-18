@@ -3,13 +3,18 @@ import { HidGameController } from "../controller/hidGameController.js";
 import { ManualDriveCoordinator } from "../control/manualDriveCoordinator.js";
 import { TurnController } from "../control/turnController.js";
 import { TurnLearningModel } from "../control/turnLearningModel.js";
+import { DriveController } from "../control/driveController.js";
+import { DriveLearningModel } from "../control/driveLearningModel.js";
+import { PoseFusion } from "../sensing/poseFusion.js";
 import { SessionLogger } from "../logging/index.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
+import { getDriveTuningPageHtml } from "./driveTuningPage.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle } from "../geometry/headingTypes.js";
+import { createPosition } from "../geometry/positionTypes.js";
 import { MAX_PORT_NUMBER } from "../constants.js";
 
 interface StartMowerServerOptions {
@@ -77,6 +82,9 @@ export function routeServerRequest(
   appName: string,
   primitives: PrimitiveSnapshot,
   turnController: TurnController | null,
+  driveController: DriveController | null,
+  driveLearningModel: DriveLearningModel | null,
+  poseFusion: PoseFusion | null,
 ): RouteResponse {
   if (method === "GET" && pathname === "/") {
     return {
@@ -92,6 +100,15 @@ export function routeServerRequest(
       statusCode: 200,
       contentType: "text/html; charset=utf-8",
       body: getTurnTuningPageHtml(),
+      logNotFound: false,
+    };
+  }
+
+  if (method === "GET" && pathname === "/drive-tuning") {
+    return {
+      statusCode: 200,
+      contentType: "text/html; charset=utf-8",
+      body: getDriveTuningPageHtml(),
       logNotFound: false,
     };
   }
@@ -142,6 +159,30 @@ export function routeServerRequest(
     };
   }
 
+  if (method === "GET" && pathname === "/api/drive/status") {
+    if (!driveController || !driveLearningModel || !poseFusion) {
+      return {
+        statusCode: 503,
+        contentType: "application/json; charset=utf-8",
+        body: encodeJson({ error: "drive_controller_not_available" }),
+        logNotFound: false,
+      };
+    }
+    return {
+      statusCode: 200,
+      contentType: "application/json; charset=utf-8",
+      body: encodeJson({
+        state: driveController.getState(),
+        history: driveController.getDriveHistory(),
+        parameters: {
+          ...driveLearningModel.getParameters(),
+          encoderMetersPerTick: poseFusion.getEncoderCalibration(),
+        },
+      }),
+      logNotFound: false,
+    };
+  }
+
   return {
     statusCode: 404,
     contentType: "application/json; charset=utf-8",
@@ -171,6 +212,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let manualDriveCoordinator: ManualDriveCoordinator | null = null;
   let turnController: TurnController | null = null;
   let turnLearningModel: TurnLearningModel | null = null;
+  let poseFusion: PoseFusion | null = null;
+  let driveLearningModel: DriveLearningModel | null = null;
+  let driveController: DriveController | null = null;
   logger.transition("boot", "starting", { port, host });
 
   const server = createServer(async (request: any, response: any) => {
@@ -228,6 +272,51 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           response.end(encodeJson({ reset: true }));
           return;
         }
+
+        // Drive execution
+        if (requestUrl.pathname === "/api/drive/execute" && driveController) {
+          const data = JSON.parse(body);
+          const targetPosition = createPosition(data.targetX, data.targetY);
+          const result = await driveController.executeDrive({
+            targetPosition,
+            learningEnabled: data.learningEnabled ?? true,
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(result));
+          return;
+        }
+
+        // Drive test pattern
+        if (requestUrl.pathname === "/api/drive/test-pattern" && driveController) {
+          const results = await driveController.runTestPattern();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        // Stop drive
+        if (requestUrl.pathname === "/api/drive/stop" && driveController) {
+          await driveController.stopCurrentDrive();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ stopped: true }));
+          return;
+        }
+
+        // Clear drive history
+        if (requestUrl.pathname === "/api/drive/clear-history" && driveController) {
+          driveController.clearHistory();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ cleared: true }));
+          return;
+        }
+
+        // Reset drive learning
+        if (requestUrl.pathname === "/api/drive/reset-learning" && driveLearningModel) {
+          await driveLearningModel.resetToDefaults();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ reset: true }));
+          return;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -236,7 +325,17 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       }
     }
 
-    const routed = routeServerRequest(method, requestUrl.pathname, state, appName, primitives.snapshot(), turnController);
+    const routed = routeServerRequest(
+      method,
+      requestUrl.pathname,
+      state,
+      appName,
+      primitives.snapshot(),
+      turnController,
+      driveController,
+      driveLearningModel,
+      poseFusion
+    );
 
     if (routed.logNotFound) {
       requestLogger.warn("http.not_found", {
@@ -313,6 +412,24 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       learningModel: turnLearningModel,
       maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
     });
+
+    // Initialize pose fusion
+    poseFusion = new PoseFusion({
+      sensorController,
+      logger,
+    });
+    await poseFusion.start();
+
+    // Initialize drive controller
+    driveLearningModel = new DriveLearningModel({ logger });
+    await driveLearningModel.loadParameters();
+    driveController = new DriveController({
+      sensorController,
+      poseFusion,
+      turnController,
+      logger,
+      learningModel: driveLearningModel,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("sensors.start_failed", { error: message });
@@ -384,6 +501,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       });
 
       await manualDriveCoordinator?.stop();
+      await poseFusion?.stop();
       await sensorController?.stop();
       await sensorGateway?.close();
       await logger.flush();

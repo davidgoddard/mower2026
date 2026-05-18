@@ -69,6 +69,7 @@ export function renderHomePage(): string {
           <button id="tab-primitives" class="active">Primitives</button>
           <button id="tab-status">Status</button>
           <button id="tab-turns">Turn Tuning</button>
+          <button id="tab-drives">Drive Tuning</button>
         </div>
         <div class="content">
           <section id="view-primitives">
@@ -80,6 +81,9 @@ export function renderHomePage(): string {
           <section id="view-turns" hidden>
             <p>Use the dedicated <a href="/turn-tuning" style="color: var(--accent); font-weight: 600;">Turn Tuning Page</a> for full turn controller interface.</p>
           </section>
+          <section id="view-drives" hidden>
+            <p>Use the dedicated <a href="/drive-tuning" style="color: var(--accent); font-weight: 600;">Drive Tuning Page</a> for full drive controller interface.</p>
+          </section>
         </div>
       </div>
     </main>
@@ -87,12 +91,14 @@ export function renderHomePage(): string {
       const tabs = {
         primitives: document.getElementById('tab-primitives'),
         status: document.getElementById('tab-status'),
-        turns: document.getElementById('tab-turns')
+        turns: document.getElementById('tab-turns'),
+        drives: document.getElementById('tab-drives')
       };
       const views = {
         primitives: document.getElementById('view-primitives'),
         status: document.getElementById('view-status'),
-        turns: document.getElementById('view-turns')
+        turns: document.getElementById('view-turns'),
+        drives: document.getElementById('view-drives')
       };
 
       function select(name) {
@@ -105,6 +111,7 @@ export function renderHomePage(): string {
       tabs.primitives.addEventListener('click', () => select('primitives'));
       tabs.status.addEventListener('click', () => select('status'));
       tabs.turns.addEventListener('click', () => select('turns'));
+      tabs.drives.addEventListener('click', () => select('drives'));
 
       async function refresh() {
         const [primitives, health] = await Promise.all([
