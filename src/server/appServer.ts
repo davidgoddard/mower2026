@@ -9,6 +9,7 @@ import { PoseFusion } from "../sensing/poseFusion.js";
 import { SessionLogger } from "../logging/index.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
+import { StubSensorGateway } from "../sensing/stubSensorGateway.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -402,37 +403,21 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       });
       manualDriveCoordinator.start();
     }
-
-    // Initialize turn controller
-    turnLearningModel = new TurnLearningModel({ logger });
-    await turnLearningModel.loadParameters();
-    turnController = new TurnController({
-      sensorController,
-      logger,
-      learningModel: turnLearningModel,
-      maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
-    });
-
-    // Initialize pose fusion
-    poseFusion = new PoseFusion({
-      sensorController,
-      logger,
-    });
-    await poseFusion.start();
-
-    // Initialize drive controller
-    driveLearningModel = new DriveLearningModel({ logger });
-    await driveLearningModel.loadParameters();
-    driveController = new DriveController({
-      sensorController,
-      poseFusion,
-      turnController,
-      logger,
-      learningModel: driveLearningModel,
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("sensors.start_failed", { error: message });
+    logger.warn("sensors.using_stub", { reason: "Hardware initialization failed, using stub gateway" });
+
+    // Use stub gateway when hardware fails so controllers can still be created
+    sensorGateway = new StubSensorGateway();
+    sensorController = new SensorController({
+      logger,
+      primitivesStore: primitives,
+      gateway: sensorGateway,
+      pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
+    });
+    await sensorController.start();
+
     primitives.update({
       sensorController: {
         status: "error",
@@ -474,6 +459,37 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         watchdogHealthy: null,
         faultFlags: null,
       },
+    });
+  }
+
+  // Initialize controllers (they work even with stub sensors)
+  if (sensorController) {
+    // Initialize turn controller
+    turnLearningModel = new TurnLearningModel({ logger });
+    await turnLearningModel.loadParameters();
+    turnController = new TurnController({
+      sensorController,
+      logger,
+      learningModel: turnLearningModel,
+      maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
+    });
+
+    // Initialize pose fusion
+    poseFusion = new PoseFusion({
+      sensorController,
+      logger,
+    });
+    await poseFusion.start();
+
+    // Initialize drive controller
+    driveLearningModel = new DriveLearningModel({ logger });
+    await driveLearningModel.loadParameters();
+    driveController = new DriveController({
+      sensorController,
+      poseFusion,
+      turnController,
+      logger,
+      learningModel: driveLearningModel,
     });
   }
 
