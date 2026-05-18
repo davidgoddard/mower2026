@@ -66,38 +66,27 @@ export function getDriveTuningPageHtml(): string {
       justify-content: space-between;
       align-items: center;
       gap: 1rem;
-      flex-wrap: wrap;
     }
 
     .header-left {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
+      flex: 1;
     }
 
-    .back-button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      border-radius: 0.5rem;
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-color);
-      color: var(--text-primary);
+    .back-link {
+      color: var(--primary-color);
       text-decoration: none;
-      font-size: 1.25rem;
+      font-weight: 500;
+      font-size: 0.875rem;
       transition: all 0.2s;
     }
 
-    .back-button:hover {
-      background: var(--bg-tertiary);
-      border-color: var(--primary-color);
-      transform: translateX(-2px);
+    .back-link:hover {
+      color: var(--primary-hover);
+      text-decoration: underline;
     }
 
     h1 {
-      font-size: 1.5rem;
+      font-size: 1.875rem;
       font-weight: 700;
       color: var(--text-primary);
     }
@@ -505,13 +494,13 @@ export function getDriveTuningPageHtml(): string {
   <div class="header">
     <div class="header-content">
       <div class="header-left">
-        <a href="/" class="back-button" title="Back to Dashboard">←</a>
         <h1>🎯 Drive Tuning</h1>
       </div>
       <div class="status-badge" id="controllerStatus">
         <span class="status-dot"></span>
         <span>Idle</span>
       </div>
+      <a href="/" class="back-link">← Back to Dashboard</a>
     </div>
   </div>
 
