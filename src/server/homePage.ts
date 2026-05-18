@@ -505,6 +505,10 @@ export function renderHomePage(): string {
             <span class="nav-button-icon">🗺️</span>
             <span>Path Tracing</span>
           </a>
+          <a href="/manual-drive" class="nav-button" title="Live controller view with position tracking">
+            <span class="nav-button-icon">🎮</span>
+            <span>Manual Drive</span>
+          </a>
         </div>
       </div>
     </div>
