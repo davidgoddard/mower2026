@@ -265,3 +265,67 @@ export const TURN_HISTORY_MAX_SIZE = 100;
  * Turn learning parameters file path (relative to project root)
  */
 export const TURN_LEARNING_PARAMETERS_PATH = "config/turn-learning-parameters.json";
+
+// =============================================================================
+// DRIVE CONTROLLER PARAMETERS - Design decisions
+// =============================================================================
+
+/**
+ * Settle time after turn before starting drive
+ */
+export const DRIVE_SETTLE_TIME_MS = 200;
+
+/**
+ * Initial turn threshold - if heading error exceeds this, turn before driving (degrees)
+ */
+export const DRIVE_INITIAL_TURN_THRESHOLD_DEG = 5;
+
+/**
+ * Drive timeout safety multiplier
+ * Timeout = (distance / expected_speed) * multiplier
+ */
+export const DRIVE_TIMEOUT_MULTIPLIER = 3.0;
+
+/**
+ * Maximum number of drive results to keep in history
+ */
+export const DRIVE_HISTORY_MAX_SIZE = 50;
+
+/**
+ * Default full speed motor command (dimensionless, range [-1, 1])
+ * 1.0 = full forward speed
+ */
+export const DRIVE_FULL_SPEED_COMMAND_DEFAULT = 1.0;
+
+/**
+ * Default brake distance for full-speed drives (meters)
+ */
+export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 2.0;
+
+/**
+ * Default CTE correction proportional gain
+ * Higher = more aggressive correction
+ */
+export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
+
+/**
+ * Minimum drive distance for learning (meters)
+ * Drives shorter than this may not reach full speed and are excluded from learning
+ */
+export const DRIVE_MIN_DISTANCE_FOR_LEARNING_METERS = 3.0;
+
+/**
+ * Default encoder meters per tick for dead-reckoning
+ */
+export const ENCODER_METERS_PER_TICK_DEFAULT = 0.001;
+
+/**
+ * Target CTE for tuning (meters)
+ * 5cm - learning algorithm tries to achieve this
+ */
+export const DRIVE_TARGET_CTE_METERS = 0.05;
+
+/**
+ * Data directory for persistent files
+ */
+export const DATA_DIR = "data";

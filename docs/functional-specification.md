@@ -261,4 +261,57 @@ If the system receives a "Stop" request from a user interaction or a failure con
 
 ## Driving from point to point
 
-TBD
+An asynchronous component that is responsble for moving the mower from one position(current) to a target position in the X/Y plane.
+
+The input is a single target position
+
+The goal is to turn to face the target and then drive as straight a line as possible arriving as close to the target as possible.
+
+To control this the drive component will learn how to keep CTE small or zero and keep X/Y arrival errors small or zero.  In priority terms, X is more important than Y but Y should naturally be small if CTE is tuned well.
+
+The logical sequence of steps is:
+ 
+- get current pose
+- calculate angle to target
+- call the turn component with that angle
+- get current pose 
+- calculate line to target
+- apply power to motors
+- monitor and correct CTE and monitor remaining distance.
+- when at or beyond the braking distance stop the motors.
+- wait for twice the configured motor ramp down time for things to settle
+- get current pose
+- use current pose to compute final X/Y errors 
+- update configuration paraemters to improve the next CTE and X/Y and braking
+- produce summary for web page
+- return
+
+Using events for all sensor value inputs.
+
+Ideally the heading is known at all times.  When GNSS is "fixed" and the current GNSS heading is within tolerance for the time since the last one (i.e. no sudden turns in fractions of a second) then use this GNSS heading as the system wide current heading updating the IMU base heading.  When the GNSS gives a silly value or loses fix quality a form of dead-reckoning is achieved by using the IMU heading (which was updated from the last good GNSS value).  Likewise for position, use GNSS when good fix but if fix is lost, then use a dead-reckoning using the motor feedback.  This will require a calibrated motor feedback tick to distance value.
+
+It is suggested that the above fusion of values to make sensor readings is encapsulated into one place and can be called everytime a current pose is required.  The turn controller will directly hook the IMU and will not use this component.
+
+Drives should use full speed.
+When the start and end positions are obtained using good quality GNSS fixes, the code can optionally update the motor feedback tick to distance configuration value to improve dead-reckoning performance.
+
+### Braking distance learning
+
+Once the mower reaches full speed, the braking distance should stabilize and be roughly constant for all distances driven on level ground.  The system should learn a single brake distance parameter that applies to all drives once at full speed.
+
+For very short drives where the mower does not reach full speed (due to motor ramp-up time), a different braking strategy may be required.  These short drives should still engage motors and attempt to reach the target, but may need separate learning parameters or a different control approach.
+
+The brake distance may vary depending on terrain slope (uphill vs downhill).  Future enhancements could incorporate IMU pitch angle to adjust brake distance dynamically, but the initial implementation should focus on learning a single brake distance for level ground operation.
+
+The learning algorithm should:
+- maintain one primary brake distance parameter (in meters) for full-speed drives
+- update this parameter after each drive based on X-axis arrival error
+- if overshot target (positive X error): increase brake distance
+- if undershot target (negative X error): decrease brake distance
+- converge quickly since all full-speed stops should behave similarly
+
+For short drives where full speed is not reached, consider:
+- a minimum drive distance threshold (e.g. 3 meters) below which different control may be needed
+- potentially disabling brake distance learning for these short drives
+- or learning a separate parameter set for short-distance drives
+
