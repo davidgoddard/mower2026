@@ -49,12 +49,31 @@ export interface MotorFeedbackUpdateEvent {
 }
 
 /**
+ * Obstruction detection event types
+ */
+export type ObstructionType = "high_current" | "wheel_slip" | "stall";
+
+/**
+ * Obstruction detected event
+ * Emitted when obstruction conditions are detected
+ */
+export interface ObstructionDetectedEvent {
+  readonly type: ObstructionType;
+  readonly timestampMillis: number;
+  readonly leftMotorCurrentAmps: number;
+  readonly rightMotorCurrentAmps: number;
+  readonly leftWheelSpeedMetersPerSecond: number;
+  readonly rightWheelSpeedMetersPerSecond: number;
+}
+
+/**
  * Type-safe event map for SensorController
  */
 export interface SensorControllerEvents {
   imuHeadingUpdate: ImuHeadingUpdateEvent;
   gnssPositionUpdate: GnssPositionUpdateEvent;
   motorFeedbackUpdate: MotorFeedbackUpdateEvent;
+  obstructionDetected: ObstructionDetectedEvent;
 }
 
 /**
@@ -64,4 +83,5 @@ export const SENSOR_EVENTS = {
   IMU_HEADING_UPDATE: "imuHeadingUpdate" as const,
   GNSS_POSITION_UPDATE: "gnssPositionUpdate" as const,
   MOTOR_FEEDBACK_UPDATE: "motorFeedbackUpdate" as const,
+  OBSTRUCTION_DETECTED: "obstructionDetected" as const,
 };
