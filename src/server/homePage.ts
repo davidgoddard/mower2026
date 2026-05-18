@@ -501,6 +501,10 @@ export function renderHomePage(): string {
             <span class="nav-button-icon">🎯</span>
             <span>Drive Tuning</span>
           </a>
+          <a href="/path-tracing" class="nav-button" title="Record and follow paths for obstacle navigation">
+            <span class="nav-button-icon">🗺️</span>
+            <span>Path Tracing</span>
+          </a>
         </div>
       </div>
     </div>

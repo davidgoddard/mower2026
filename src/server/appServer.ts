@@ -13,6 +13,7 @@ import { StubSensorGateway } from "../sensing/stubSensorGateway.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
+import { renderPathTracingPage } from "./pathTracingPage.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition } from "../geometry/positionTypes.js";
@@ -110,6 +111,15 @@ export function routeServerRequest(
       statusCode: 200,
       contentType: "text/html; charset=utf-8",
       body: getDriveTuningPageHtml(),
+      logNotFound: false,
+    };
+  }
+
+  if (method === "GET" && pathname === "/path-tracing") {
+    return {
+      statusCode: 200,
+      contentType: "text/html; charset=utf-8",
+      body: renderPathTracingPage(),
       logNotFound: false,
     };
   }
