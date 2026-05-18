@@ -9,6 +9,8 @@ export interface PrimitiveSnapshot {
     status: "idle" | "starting" | "running" | "error";
     error: string | null;
     headingDeg: number | null;
+    pitchDeg: number | null;
+    rollDeg: number | null;
   };
   gnss: {
     status: "idle" | "running" | "error";
@@ -90,6 +92,8 @@ export class PrimitivesStore {
         status: "idle",
         error: null,
         headingDeg: null,
+        pitchDeg: null,
+        rollDeg: null,
       },
       gnss: {
         status: "idle",

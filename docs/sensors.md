@@ -56,7 +56,9 @@ Current sensor-related shape:
   "imu": {
     "status": "running",
     "error": null,
-    "headingDeg": 42.1
+    "headingDeg": 42.1,
+    "pitchDeg": 2.3,
+    "rollDeg": -1.5
   },
   "gnss": {
     "status": "running",
@@ -114,16 +116,41 @@ GNSS heading from field/navigation convention (`0° = north`, clockwise positive
 
 ## IMU Integration Details
 
-Source:
+### Data Sources
 
-- BMI160 gyro Z angular velocity (`zDegreesPerSecond`)
+The IMU sensor provides:
 
-Integration:
+- **BMI160 gyroscope**: Z-axis angular velocity (`zDegreesPerSecond`) for heading integration
+- **BMI160 accelerometer**: 3-axis acceleration (X, Y, Z in m/s²) for pitch and roll calculation
+
+### Heading Integration
 
 - `heading += yawRateDegPerSec * deltaSeconds`
 - first sample sets timestamp reference only
 - subsequent samples integrate using sample-to-sample timestamp delta
 - heading always normalized to `(-180, 180]`
+
+### Pitch and Roll Calculation
+
+Pitch and roll are derived from accelerometer readings using the gravity vector:
+
+- **Pitch** (rotation around Y-axis, tilt front-to-back):
+  - `pitch = atan2(-ax, sqrt(ay² + az²)) * 180/π`
+  - Positive pitch = nose up, negative pitch = nose down
+  
+- **Roll** (rotation around X-axis, tilt side-to-side):
+  - `roll = atan2(ay, az) * 180/π`
+  - Positive roll = right side down, negative roll = left side down
+
+### Calibration and Zeroing
+
+At startup, the IMU performs calibration by sampling sensor noise:
+
+1. **Gyroscope bias calibration**: Averages Z-axis gyro readings over N samples while stationary to determine drift offset
+2. **Pitch/roll zeroing**: Averages pitch and roll calculations over N samples to establish level reference
+3. All subsequent readings subtract these calibrated offsets
+
+This allows the mower to zero its tilt reference on uneven ground during startup.
 
 ## GNSS I2C/Protocol
 

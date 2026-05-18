@@ -93,6 +93,8 @@ export class SensorController extends EventEmitter {
         status: "starting",
         error: null,
         headingDeg: unwrapInternalHeading(this.imuHeading),
+        pitchDeg: null,
+        rollDeg: null,
       },
       gnss: {
         status: "idle",
@@ -242,17 +244,27 @@ export class SensorController extends EventEmitter {
       }
       this.previousImuSampleMillis = sample.timestampMillis;
 
+      // Calculate pitch and roll from accelerometer
+      const { xMetersPerSecondSquared: ax, yMetersPerSecondSquared: ay, zMetersPerSecondSquared: az } = sample.acceleration;
+      const g = 9.80665;
+      const pitchDeg = Math.atan2(-ax / g, Math.sqrt((ay * ay + az * az) / (g * g))) * (180 / Math.PI);
+      const rollDeg = Math.atan2(ay / g, az / g) * (180 / Math.PI);
+
       this.primitivesStore.update({
         imu: {
           status: "running",
           error: null,
           headingDeg: unwrapInternalHeading(this.imuHeading),
+          pitchDeg,
+          rollDeg,
         },
       });
 
       // Emit heading update event
       this.emit(SENSOR_EVENTS.IMU_HEADING_UPDATE, {
         heading: this.imuHeading,
+        pitchDeg,
+        rollDeg,
         timestampMillis: sample.timestampMillis,
       });
     } catch (error) {
@@ -262,6 +274,8 @@ export class SensorController extends EventEmitter {
           status: "error",
           error: message,
           headingDeg: unwrapInternalHeading(this.imuHeading),
+          pitchDeg: null,
+          rollDeg: null,
         },
       });
       this.logger.error("sensor.imu.poll_failed", { error: message });

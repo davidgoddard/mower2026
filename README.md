@@ -52,6 +52,9 @@ Transform a manual push mower into an autonomous system capable of:
 - ✅ **Transport portability**: I2C now, CAN-ready architecture
 - ✅ **Telemetry logging**: JSONL session logs
 - ✅ **Web dashboard**: Real-time monitoring at `http://<pi-ip>:8090`
+  - Visual sensor displays: compass headings, pitch/roll level indicators
+  - Motor current VU meters with peak hold
+  - Turn and drive tuning interfaces with live results
 - ✅ **Unit test coverage**: Protocol codecs, geometry, control algorithms
 
 ---

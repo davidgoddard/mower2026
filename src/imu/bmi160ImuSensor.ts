@@ -5,12 +5,18 @@ import { ImuSample, ImuSensor } from "./types.js";
 import { I2C_ADDRESS_BMI160_DEFAULT, IMU_DEFAULT_CALIBRATION_SAMPLES } from "../constants.js";
 
 // BMI160 hardware timing constants (implementation details from datasheet)
+const IMU_ACC_INIT_DELAY_MS = 10;
+const IMU_ACC_RANGE_DELAY_MS = 10;
 const IMU_GYRO_INIT_DELAY_MS = 80;
 const IMU_GYRO_RANGE_DELAY_MS = 10;
 const IMU_CALIBRATION_SAMPLE_DELAY_MS = 4;
 
 // BMI160 register values (implementation details)
+const BMI160_ACC_RANGE_2G = 0x03;
 const BMI160_GYRO_RANGE_2000DPS = 0x00;
+
+// Physical constant
+const GRAVITY_METERS_PER_SECOND_SQUARED = 9.80665;
 
 // 16-bit integer conversion constants (implementation details)
 const INT16_MAX = 0x7fff;
@@ -37,6 +43,8 @@ export class Bmi160ImuSensor implements ImuSensor {
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private gyroBiasDps = 0;
+  private pitchOffsetDeg = 0;
+  private rollOffsetDeg = 0;
 
   constructor(controller: I2cBusController, options: Bmi160ImuSensorOptions = {}) {
     this.controller = controller;
@@ -51,6 +59,15 @@ export class Bmi160ImuSensor implements ImuSensor {
       throw new Error(`Unexpected BMI160 chip id 0x${chipId.toString(16)} at address 0x${this.address.toString(16)}`);
     }
 
+    // Initialize accelerometer
+    await this.writeRegister(BMI160.registers.command, BMI160.commands.accNormalMode);
+    await this.sleep(IMU_ACC_INIT_DELAY_MS);
+
+    // Set accelerometer range to +/- 2g (16384 LSB/g)
+    await this.writeRegister(BMI160.registers.accRange, BMI160_ACC_RANGE_2G);
+    await this.sleep(IMU_ACC_RANGE_DELAY_MS);
+
+    // Initialize gyroscope
     await this.writeRegister(BMI160.registers.command, BMI160.commands.gyroNormalMode);
     await this.sleep(IMU_GYRO_INIT_DELAY_MS);
 
@@ -62,29 +79,57 @@ export class Bmi160ImuSensor implements ImuSensor {
   async calibrateGyro(sampleCount = IMU_DEFAULT_CALIBRATION_SAMPLES): Promise<void> {
     if (sampleCount <= 0) {
       this.gyroBiasDps = 0;
+      this.pitchOffsetDeg = 0;
+      this.rollOffsetDeg = 0;
       return;
     }
 
-    let sum = 0;
+    let gyroSum = 0;
+    let pitchSum = 0;
+    let rollSum = 0;
     let measured = 0;
+
     for (let index = 0; index < sampleCount; index += 1) {
-      const raw = await this.readGyroZRaw();
-      sum += raw / BMI160.gyroLsbPerDpsAt2000;
+      const gyroRaw = await this.readGyroZRaw();
+      gyroSum += gyroRaw / BMI160.gyroLsbPerDpsAt2000;
+
+      const [accX, accY, accZ] = await this.readAccelerometerRaw();
+      const pitch = this.calculatePitchDeg(accX, accY, accZ);
+      const roll = this.calculateRollDeg(accY, accZ);
+      pitchSum += pitch;
+      rollSum += roll;
+
       measured += 1;
       await this.sleep(IMU_CALIBRATION_SAMPLE_DELAY_MS);
     }
 
-    this.gyroBiasDps = measured === 0 ? 0 : (sum / measured);
+    this.gyroBiasDps = measured === 0 ? 0 : (gyroSum / measured);
+    this.pitchOffsetDeg = measured === 0 ? 0 : (pitchSum / measured);
+    this.rollOffsetDeg = measured === 0 ? 0 : (rollSum / measured);
   }
 
   async read(): Promise<ImuSample> {
-    const raw = await this.readGyroZRaw();
-    const zDegreesPerSecond = (raw / BMI160.gyroLsbPerDpsAt2000) - this.gyroBiasDps;
+    const gyroRaw = await this.readGyroZRaw();
+    const zDegreesPerSecond = (gyroRaw / BMI160.gyroLsbPerDpsAt2000) - this.gyroBiasDps;
+
+    const [accX, accY, accZ] = await this.readAccelerometerRaw();
+    const pitchDeg = this.calculatePitchDeg(accX, accY, accZ) - this.pitchOffsetDeg;
+    const rollDeg = this.calculateRollDeg(accY, accZ) - this.rollOffsetDeg;
+
+    // Convert from G to m/s^2
+    const xMetersPerSecondSquared = (accX / BMI160.accLsbPerGAt2g) * GRAVITY_METERS_PER_SECOND_SQUARED;
+    const yMetersPerSecondSquared = (accY / BMI160.accLsbPerGAt2g) * GRAVITY_METERS_PER_SECOND_SQUARED;
+    const zMetersPerSecondSquared = (accZ / BMI160.accLsbPerGAt2g) * GRAVITY_METERS_PER_SECOND_SQUARED;
 
     return {
       timestampMillis: this.nowMillis(),
       angularVelocity: {
         zDegreesPerSecond,
+      },
+      acceleration: {
+        xMetersPerSecondSquared,
+        yMetersPerSecondSquared,
+        zMetersPerSecondSquared,
       },
     };
   }
@@ -124,5 +169,40 @@ export class Bmi160ImuSensor implements ImuSensor {
     });
 
     return decodeSignedInt16(response[0] ?? 0, response[1] ?? 0);
+  }
+
+  private async readAccelerometerRaw(): Promise<[number, number, number]> {
+    const response = await this.controller.queueRead({
+      key: "imu.read_accelerometer",
+      priority: I2C_PRIORITY.imuRead,
+      address: this.address,
+      requestPayload: new Uint8Array([BMI160.registers.accXLsb]),
+      responseLength: 6,
+    });
+
+    const accX = decodeSignedInt16(response[0] ?? 0, response[1] ?? 0);
+    const accY = decodeSignedInt16(response[2] ?? 0, response[3] ?? 0);
+    const accZ = decodeSignedInt16(response[4] ?? 0, response[5] ?? 0);
+
+    return [accX, accY, accZ];
+  }
+
+  private calculatePitchDeg(accX: number, accY: number, accZ: number): number {
+    // Convert raw values to G
+    const ax = accX / BMI160.accLsbPerGAt2g;
+    const ay = accY / BMI160.accLsbPerGAt2g;
+    const az = accZ / BMI160.accLsbPerGAt2g;
+
+    // Calculate pitch (rotation around Y axis)
+    return Math.atan2(-ax, Math.sqrt(ay * ay + az * az)) * (180 / Math.PI);
+  }
+
+  private calculateRollDeg(accY: number, accZ: number): number {
+    // Convert raw values to G
+    const ay = accY / BMI160.accLsbPerGAt2g;
+    const az = accZ / BMI160.accLsbPerGAt2g;
+
+    // Calculate roll (rotation around X axis)
+    return Math.atan2(ay, az) * (180 / Math.PI);
   }
 }

@@ -428,6 +428,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         status: "error",
         error: message,
         headingDeg: null,
+        pitchDeg: null,
+        rollDeg: null,
       },
       gnss: {
         status: "error",

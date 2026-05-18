@@ -3,6 +3,11 @@ export interface ImuSample {
   angularVelocity: {
     zDegreesPerSecond: number;
   };
+  acceleration: {
+    xMetersPerSecondSquared: number;
+    yMetersPerSecondSquared: number;
+    zMetersPerSecondSquared: number;
+  };
 }
 
 export interface ImuSensor {

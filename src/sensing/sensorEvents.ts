@@ -10,6 +10,8 @@ import { InternalHeading } from "../geometry/headingTypes.js";
  */
 export interface ImuHeadingUpdateEvent {
   readonly heading: InternalHeading;
+  readonly pitchDeg: number;
+  readonly rollDeg: number;
   readonly timestampMillis: number;
 }
 

@@ -108,18 +108,55 @@ The user will interact with the controller through a web page.  A server will pr
 
 A HID games controller interface shall be supported for manual driving.
 
-#### Primitives Viewer
+#### Dashboard Home Page
 
-The web page must feature a tabbed content area one tab of which is the "Primitives" view.  This will be for showing raw low level data from the sensors.
+The web page home page provides a real-time dashboard view showing the current state of all sensors with graphical and numerical displays:
 
-The primitives JSON should expose sensor domains as distinct sections:
-- `imu`
-- `gnss`
-- `motors`
+**IMU Widget:**
+- Compass display showing heading (navigation convention: 0° = north, clockwise positive)
+- Numeric heading value in degrees
+- Pitch indicator: circular level meter showing front-to-back tilt angle
+- Roll indicator: circular level meter showing side-to-side tilt angle
+- Status indicator (running/error/idle)
 
-For motors, primitives should include both:
+**GNSS Widget:**
+- Compass display showing GNSS heading (navigation convention)
+- Position coordinates (X, Y in meters)
+- Fix type (none/single/float/fixed)
+- Position accuracy in meters
+- Satellite count
+- Numeric heading value
+- Status indicator
+
+**Motors Widget:**
+- Left and right wheel speeds (m/s)
+- VU meter displays for motor current draw:
+  - Real-time current level shown as gradient bar (green → yellow → red)
+  - Peak hold indicator (holds maximum for 2 seconds)
+  - Numeric display: current / peak in amps
+  - Scale: 0-10A maximum
+- PWM percentage for each motor
+- Watchdog health status
+- Fault flags (hexadecimal)
+- Status indicator
+
+**Navigation:**
+- Header menu buttons for Turn Tuning and Drive Tuning pages
+- Back buttons on tuning pages return to dashboard
+
+**Heading Display Convention:**
+All compass displays and heading values shown on the web interface use navigation/field heading convention (0° = north, clockwise positive). The internal system uses a different convention (0° = east, counterclockwise positive) which is converted for display purposes.
+
+#### Primitives API
+
+The primitives JSON API (`/api/primitives`) exposes sensor domains as distinct sections:
+- `imu` - heading, pitch, roll
+- `gnss` - position, heading, fix quality
+- `motors` - speeds, currents, PWM, watchdog, faults
+
+For motors, primitives include both:
 - last commanded wheel speeds
-- latest feedback sample (wheel speeds, encoder deltas, watchdog/fault state)
+- latest feedback sample (wheel speeds, encoder deltas, PWM, current, watchdog/fault state)
 
 ### Sensor Interface
 
@@ -180,13 +217,33 @@ If controller connectivity is lost while manual drive is armed, manual drive sha
 
 #### IMU interface
 
-The sensor controller must maintain a IMU based heading angle integrating the yaw values from the IMU.
+The sensor controller must maintain IMU-based orientation, integrating yaw values and calculating tilt from the IMU.
 
-The IMU primitive exposed to application consumers should be heading-focused.  The application should request heading and receive heading, without requiring raw yaw rate or raw sample timestamps in the external sensor API.
+**BMI160 IMU Sensor:**
+- Gyroscope: Z-axis angular velocity for heading integration
+- Accelerometer: 3-axis acceleration (X, Y, Z) for pitch and roll calculation
 
-The sensor controller shall support an external absolute heading update (for example from GNSS) which resets the maintained IMU heading to that supplied value.  After reset, yaw integration continues from the new heading baseline.
+**Orientation Data Provided:**
+- **Heading**: Integrated from gyro Z-axis, normalized to signed range `[-180, 180]`
+- **Pitch**: Tilt front-to-back (rotation around Y-axis), calculated from accelerometer
+  - Positive pitch = nose up, negative = nose down
+  - Formula: `pitch = atan2(-ax, sqrt(ay² + az²)) * 180/π`
+- **Roll**: Tilt side-to-side (rotation around X-axis), calculated from accelerometer
+  - Positive roll = right side down, negative = left side down
+  - Formula: `roll = atan2(ay, az) * 180/π`
 
-The externally exposed IMU heading must be normalized to the signed range `[-180, 180]`.
+**Calibration and Zeroing:**
+At startup, the IMU performs calibration:
+1. Gyroscope bias: Averages Z-axis readings while stationary to determine drift offset
+2. Pitch/roll zeroing: Averages tilt calculations to establish level reference
+
+This allows the mower to zero its orientation on uneven ground during startup. All subsequent readings subtract these calibrated offsets.
+
+**Heading Reset:**
+The sensor controller shall support an external absolute heading update (for example from GNSS) which resets the maintained IMU heading to the supplied value. After reset, yaw integration continues from the new heading baseline.
+
+**Internal Heading Convention:**
+IMU heading uses internal convention (0° = east, counterclockwise positive). The web interface converts this to navigation convention (0° = north, clockwise positive) for display.
 
 #### GNSS interface
 

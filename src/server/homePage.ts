@@ -51,6 +51,14 @@ export function renderHomePage(): string {
         max-width: 1400px;
         margin: 0 auto;
         padding: 0 1.5rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 2rem;
+      }
+
+      .header-left {
+        flex: 1;
       }
 
       h1 {
@@ -65,74 +73,56 @@ export function renderHomePage(): string {
         font-size: 0.875rem;
       }
 
+      .header-nav {
+        display: flex;
+        gap: 0.75rem;
+      }
+
+      .nav-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.625rem 1.25rem;
+        background: var(--primary-color);
+        color: white;
+        text-decoration: none;
+        border-radius: 0.5rem;
+        font-weight: 500;
+        font-size: 0.875rem;
+        transition: all 0.2s;
+        box-shadow: var(--shadow-sm);
+        gap: 0.5rem;
+      }
+
+      .nav-button:hover {
+        background: var(--primary-hover);
+        box-shadow: var(--shadow-md);
+        transform: translateY(-1px);
+      }
+
+      .nav-button-icon {
+        font-size: 1.125rem;
+      }
+
       .container {
         max-width: 1400px;
         margin: 0 auto;
-        padding: 2rem 1.5rem;
+        padding: 1.5rem 1.5rem;
         flex: 1;
-      }
-
-      .action-cards {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 1.5rem;
-        margin-bottom: 2rem;
-      }
-
-      .action-card {
-        background: var(--bg-primary);
-        border: 1px solid var(--border-color);
-        border-radius: 0.75rem;
-        padding: 1.5rem;
-        box-shadow: var(--shadow-sm);
-        transition: all 0.2s;
-        cursor: pointer;
-        text-decoration: none;
-        color: inherit;
-        display: block;
-      }
-
-      .action-card:hover {
-        box-shadow: var(--shadow-md);
-        transform: translateY(-2px);
-        border-color: var(--primary-color);
-      }
-
-      .action-card-icon {
-        width: 48px;
-        height: 48px;
-        background: linear-gradient(135deg, var(--primary-color), var(--primary-hover));
-        border-radius: 0.5rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.5rem;
-        margin-bottom: 1rem;
-      }
-
-      .action-card-title {
-        font-size: 1.125rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-      }
-
-      .action-card-description {
-        color: var(--text-secondary);
-        font-size: 0.875rem;
       }
 
       .dashboard-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        grid-template-columns: repeat(3, 1fr);
         gap: 1.5rem;
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
       }
 
       .sensor-card {
         background: var(--bg-primary);
         border: 1px solid var(--border-color);
         border-radius: 0.75rem;
-        padding: 1.5rem;
+        padding: 1.25rem;
         box-shadow: var(--shadow-sm);
       }
 
@@ -140,8 +130,8 @@ export function renderHomePage(): string {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        margin-bottom: 1rem;
-        padding-bottom: 1rem;
+        margin-bottom: 0.875rem;
+        padding-bottom: 0.875rem;
         border-bottom: 1px solid var(--border-color);
       }
 
@@ -194,14 +184,14 @@ export function renderHomePage(): string {
       }
 
       .metric-value {
-        font-size: 1.5rem;
+        font-size: 1.25rem;
         font-weight: 600;
         color: var(--text-primary);
         font-variant-numeric: tabular-nums;
       }
 
       .metric-value.large {
-        font-size: 2rem;
+        font-size: 1.5rem;
       }
 
       .metric-unit {
@@ -211,8 +201,8 @@ export function renderHomePage(): string {
       }
 
       .compass {
-        width: 120px;
-        height: 120px;
+        width: 100px;
+        height: 100px;
         margin: 0 auto;
         position: relative;
       }
@@ -263,12 +253,146 @@ export function renderHomePage(): string {
       .compass-label.s { bottom: 8px; left: 50%; transform: translateX(-50%); }
       .compass-label.w { left: 8px; top: 50%; transform: translateY(-50%); }
 
+      .tilt-indicators {
+        display: flex;
+        justify-content: space-around;
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+
+      .tilt-indicator {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .tilt-circle {
+        width: 80px;
+        height: 80px;
+        border: 3px solid var(--border-color);
+        border-radius: 50%;
+        position: relative;
+        background: radial-gradient(circle, var(--bg-secondary) 0%, var(--bg-primary) 70%);
+      }
+
+      .tilt-line {
+        position: absolute;
+        top: 50%;
+        left: 10%;
+        right: 10%;
+        height: 3px;
+        background: var(--primary-color);
+        transform-origin: center center;
+        transform: translateY(-50%) rotate(var(--tilt-deg, 0deg));
+        border-radius: 2px;
+        transition: transform 0.3s ease-out;
+      }
+
+      .tilt-center {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 8px;
+        height: 8px;
+        background: var(--text-primary);
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 0 2px var(--bg-primary);
+      }
+
+      .tilt-label {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .tilt-value {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .vu-meter-container {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .vu-meter-label {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .vu-meter-values {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+      }
+
+      .vu-meter-track {
+        width: 100%;
+        height: 24px;
+        background: var(--bg-tertiary);
+        border-radius: 4px;
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--border-color);
+      }
+
+      .vu-meter-bar {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        background: linear-gradient(to right, var(--success-color) 0%, var(--success-color) 60%, var(--warning-color) 80%, var(--danger-color) 100%);
+        width: 0%;
+        transition: width 0.2s ease-out;
+        border-radius: 3px 0 0 3px;
+      }
+
+      .vu-meter-peak {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--danger-color);
+        box-shadow: 0 0 4px rgba(239, 68, 68, 0.6);
+        left: 0%;
+        transition: left 0.1s ease-out;
+      }
+
+      .vu-meter-scale {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        pointer-events: none;
+      }
+
+      .vu-meter-tick {
+        flex: 1;
+        border-right: 1px solid rgba(0, 0, 0, 0.1);
+      }
+
+      .vu-meter-tick:last-child {
+        border-right: none;
+      }
+
       .position-display {
         text-align: center;
-        padding: 1rem;
+        padding: 0.75rem;
         background: var(--bg-tertiary);
         border-radius: 0.5rem;
-        margin-top: 1rem;
+        margin-top: 0.75rem;
       }
 
       .coordinates {
@@ -330,13 +454,24 @@ export function renderHomePage(): string {
         gap: 0.5rem;
       }
 
-      @media (max-width: 768px) {
-        .action-cards {
-          grid-template-columns: 1fr;
-        }
-
+      @media (max-width: 1024px) {
         .dashboard-grid {
           grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .header-content {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .header-nav {
+          width: 100%;
+        }
+
+        .nav-button {
+          flex: 1;
         }
 
         .metric-grid {
@@ -353,31 +488,24 @@ export function renderHomePage(): string {
   <body>
     <div class="header">
       <div class="header-content">
-        <h1>🚜 Mower Control Dashboard</h1>
-        <div class="subtitle">Autonomous Lawn Mower Control System</div>
+        <div class="header-left">
+          <h1>🚜 Mower Control Dashboard</h1>
+          <div class="subtitle">Autonomous Lawn Mower Control System</div>
+        </div>
+        <div class="header-nav">
+          <a href="/turn-tuning" class="nav-button" title="Configure and test autonomous turning with self-learning brake points">
+            <span class="nav-button-icon">🔄</span>
+            <span>Turn Tuning</span>
+          </a>
+          <a href="/drive-tuning" class="nav-button" title="Test point-to-point navigation with CTE correction and waypoint patterns">
+            <span class="nav-button-icon">🎯</span>
+            <span>Drive Tuning</span>
+          </a>
+        </div>
       </div>
     </div>
 
     <div class="container">
-      <!-- Action Cards -->
-      <div class="action-cards">
-        <a href="/turn-tuning" class="action-card">
-          <div class="action-card-icon">🔄</div>
-          <div class="action-card-title">Turn Tuning</div>
-          <div class="action-card-description">
-            Configure and test autonomous turning with self-learning brake points
-          </div>
-        </a>
-
-        <a href="/drive-tuning" class="action-card">
-          <div class="action-card-icon">🎯</div>
-          <div class="action-card-title">Drive Tuning</div>
-          <div class="action-card-description">
-            Test point-to-point navigation with CTE correction and waypoint patterns
-          </div>
-        </a>
-      </div>
-
       <!-- Sensor Dashboard -->
       <div class="dashboard-grid">
         <!-- IMU Card -->
@@ -400,6 +528,24 @@ export function renderHomePage(): string {
             <div class="metric-label">Heading</div>
             <div class="metric-value large" id="imu-heading">—</div>
           </div>
+          <div class="tilt-indicators">
+            <div class="tilt-indicator">
+              <div class="tilt-circle" id="pitch-indicator">
+                <div class="tilt-line"></div>
+                <div class="tilt-center"></div>
+              </div>
+              <div class="tilt-label">Pitch</div>
+              <div class="tilt-value" id="imu-pitch">—</div>
+            </div>
+            <div class="tilt-indicator">
+              <div class="tilt-circle" id="roll-indicator">
+                <div class="tilt-line"></div>
+                <div class="tilt-center"></div>
+              </div>
+              <div class="tilt-label">Roll</div>
+              <div class="tilt-value" id="imu-roll">—</div>
+            </div>
+          </div>
           <div id="imu-error" class="error-message" style="display: none;"></div>
         </div>
 
@@ -409,7 +555,17 @@ export function renderHomePage(): string {
             <div class="sensor-title">GNSS Position</div>
             <span class="status-dot" id="gnss-status"></span>
           </div>
-          <div class="coordinates">
+          <div class="compass" id="gnss-compass">
+            <div class="compass-circle">
+              <div class="compass-label n">N</div>
+              <div class="compass-label e">E</div>
+              <div class="compass-label s">S</div>
+              <div class="compass-label w">W</div>
+              <div class="compass-needle"></div>
+              <div class="compass-center"></div>
+            </div>
+          </div>
+          <div class="coordinates" style="margin-top: 0.75rem;">
             <div class="coordinate">
               <div class="coordinate-label">X</div>
               <div class="coordinate-value" id="gnss-x">—</div>
@@ -446,7 +602,7 @@ export function renderHomePage(): string {
             <div class="sensor-title">Motor Status</div>
             <span class="status-dot" id="motor-status"></span>
           </div>
-          <div class="metric-grid">
+          <div class="metric-grid" style="grid-template-columns: repeat(2, 1fr);">
             <div class="metric">
               <div class="metric-label">Left Speed</div>
               <div class="metric-value" id="motor-left">—</div>
@@ -455,6 +611,47 @@ export function renderHomePage(): string {
               <div class="metric-label">Right Speed</div>
               <div class="metric-value" id="motor-right">—</div>
             </div>
+          </div>
+
+          <!-- VU Meters for Current -->
+          <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+            <div class="vu-meter-container">
+              <div class="vu-meter-label">
+                <span>Left Motor Current</span>
+                <span class="vu-meter-values"><span id="motor-left-current">—</span> / <span id="motor-left-peak">—</span></span>
+              </div>
+              <div class="vu-meter-track">
+                <div class="vu-meter-scale">
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                </div>
+                <div class="vu-meter-bar" id="motor-left-vu-bar"></div>
+                <div class="vu-meter-peak" id="motor-left-vu-peak"></div>
+              </div>
+            </div>
+            <div class="vu-meter-container">
+              <div class="vu-meter-label">
+                <span>Right Motor Current</span>
+                <span class="vu-meter-values"><span id="motor-right-current">—</span> / <span id="motor-right-peak">—</span></span>
+              </div>
+              <div class="vu-meter-track">
+                <div class="vu-meter-scale">
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                  <div class="vu-meter-tick"></div>
+                </div>
+                <div class="vu-meter-bar" id="motor-right-vu-bar"></div>
+                <div class="vu-meter-peak" id="motor-right-vu-peak"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="metric-grid" style="margin-top: 1rem;">
             <div class="metric">
               <div class="metric-label">Left PWM</div>
               <div class="metric-value" style="font-size: 1rem;" id="motor-left-pwm">—</div>
@@ -498,6 +695,57 @@ export function renderHomePage(): string {
         return value.toFixed(1) + '°';
       }
 
+      // Convert internal heading (0° = east, counterclockwise) to navigation heading (0° = north, clockwise)
+      // Convert internal heading (0° = east, counterclockwise) to navigation heading (0° = north, clockwise)
+      function internalToNavigationHeading(internalDeg) {
+        if (internalDeg === null || internalDeg === undefined) return null;
+        let navHeading = 90 - internalDeg;
+        // Normalize to [0, 360)
+        while (navHeading < 0) navHeading += 360;
+        while (navHeading >= 360) navHeading -= 360;
+        return navHeading;
+      }
+
+      // Peak tracking for motor current VU meters
+      const MOTOR_CURRENT_MAX_AMPS = 10.0; // Maximum expected current for scale
+      const PEAK_HOLD_TIME_MS = 2000; // Hold peak for 2 seconds
+      let leftMotorPeakAmps = 0;
+      let rightMotorPeakAmps = 0;
+      let leftPeakTimestamp = 0;
+      let rightPeakTimestamp = 0;
+
+      function updateVUMeter(currentAmps, peakAmps, barId, peakId, currentTextId, peakTextId) {
+        const now = Date.now();
+        const barElement = document.getElementById(barId);
+        const peakElement = document.getElementById(peakId);
+        const currentText = document.getElementById(currentTextId);
+        const peakText = document.getElementById(peakTextId);
+
+        if (currentAmps === null || currentAmps === undefined) {
+          barElement.style.width = '0%';
+          peakElement.style.left = '0%';
+          currentText.textContent = '—';
+          peakText.textContent = '—';
+          return 0;
+        }
+
+        // Update current level
+        const currentPercent = Math.min(100, (currentAmps / MOTOR_CURRENT_MAX_AMPS) * 100);
+        barElement.style.width = currentPercent + '%';
+        currentText.textContent = currentAmps.toFixed(2) + 'A';
+
+        // Update peak
+        let newPeak = peakAmps;
+        if (currentAmps > peakAmps) {
+          newPeak = currentAmps;
+        }
+        const peakPercent = Math.min(100, (newPeak / MOTOR_CURRENT_MAX_AMPS) * 100);
+        peakElement.style.left = peakPercent + '%';
+        peakText.textContent = newPeak.toFixed(2) + 'A';
+
+        return newPeak;
+      }
+
       async function updateDashboard() {
         try {
           const [primitives, health] = await Promise.all([
@@ -514,15 +762,35 @@ export function renderHomePage(): string {
             document.getElementById('imu-error').textContent = imu.error;
             document.getElementById('imu-error').style.display = 'block';
             document.getElementById('imu-heading').textContent = '—';
+            document.getElementById('imu-pitch').textContent = '—';
+            document.getElementById('imu-roll').textContent = '—';
           } else {
             document.getElementById('imu-error').style.display = 'none';
             if (imu.headingDeg !== null) {
-              document.getElementById('imu-heading').textContent = formatDegrees(imu.headingDeg);
-              // Update compass needle
+              const navHeading = internalToNavigationHeading(imu.headingDeg);
+              document.getElementById('imu-heading').textContent = formatDegrees(navHeading);
+              // Update compass needle (use navigation heading for display)
               const compass = document.getElementById('compass');
-              compass.style.setProperty('--heading-deg', imu.headingDeg + 'deg');
+              compass.style.setProperty('--heading-deg', navHeading + 'deg');
             } else {
               document.getElementById('imu-heading').textContent = '—';
+            }
+
+            // Update pitch and roll indicators
+            if (imu.pitchDeg !== null) {
+              document.getElementById('imu-pitch').textContent = formatDegrees(imu.pitchDeg);
+              const pitchIndicator = document.getElementById('pitch-indicator');
+              pitchIndicator.style.setProperty('--tilt-deg', imu.pitchDeg + 'deg');
+            } else {
+              document.getElementById('imu-pitch').textContent = '—';
+            }
+
+            if (imu.rollDeg !== null) {
+              document.getElementById('imu-roll').textContent = formatDegrees(imu.rollDeg);
+              const rollIndicator = document.getElementById('roll-indicator');
+              rollIndicator.style.setProperty('--tilt-deg', imu.rollDeg + 'deg');
+            } else {
+              document.getElementById('imu-roll').textContent = '—';
             }
           }
 
@@ -547,7 +815,17 @@ export function renderHomePage(): string {
           document.getElementById('gnss-sats').textContent = gnss.satellitesInUse !== null
             ? gnss.satellitesInUse
             : '—';
-          document.getElementById('gnss-heading').textContent = formatDegrees(gnss.headingDeg);
+
+          // Convert GNSS heading from internal to navigation for display
+          if (gnss.headingDeg !== null) {
+            const navHeading = internalToNavigationHeading(gnss.headingDeg);
+            document.getElementById('gnss-heading').textContent = formatDegrees(navHeading);
+            // Update GNSS compass needle (use navigation heading for display)
+            const gnssCompass = document.getElementById('gnss-compass');
+            gnssCompass.style.setProperty('--heading-deg', navHeading + 'deg');
+          } else {
+            document.getElementById('gnss-heading').textContent = '—';
+          }
 
           // Update Motors
           const motors = primitives.primitives.motors;
@@ -567,6 +845,42 @@ export function renderHomePage(): string {
           document.getElementById('motor-right').textContent = motors.rightWheelSpeedMetersPerSecond !== null
             ? formatMeters(motors.rightWheelSpeedMetersPerSecond).replace(' m', ' m/s')
             : '—';
+
+          // Update VU meters with peak tracking
+          const now = Date.now();
+
+          // Left motor current
+          if (now - leftPeakTimestamp > PEAK_HOLD_TIME_MS) {
+            leftMotorPeakAmps = 0;
+          }
+          leftMotorPeakAmps = updateVUMeter(
+            motors.leftMotorCurrentAmps,
+            leftMotorPeakAmps,
+            'motor-left-vu-bar',
+            'motor-left-vu-peak',
+            'motor-left-current',
+            'motor-left-peak'
+          );
+          if (motors.leftMotorCurrentAmps !== null && motors.leftMotorCurrentAmps > leftMotorPeakAmps - 0.01) {
+            leftPeakTimestamp = now;
+          }
+
+          // Right motor current
+          if (now - rightPeakTimestamp > PEAK_HOLD_TIME_MS) {
+            rightMotorPeakAmps = 0;
+          }
+          rightMotorPeakAmps = updateVUMeter(
+            motors.rightMotorCurrentAmps,
+            rightMotorPeakAmps,
+            'motor-right-vu-bar',
+            'motor-right-vu-peak',
+            'motor-right-current',
+            'motor-right-peak'
+          );
+          if (motors.rightMotorCurrentAmps !== null && motors.rightMotorCurrentAmps > rightMotorPeakAmps - 0.01) {
+            rightPeakTimestamp = now;
+          }
+
           document.getElementById('motor-left-pwm').textContent = motors.leftPwmAppliedPercent !== null
             ? motors.leftPwmAppliedPercent.toFixed(1) + '%'
             : '—';
