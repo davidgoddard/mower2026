@@ -21,11 +21,11 @@ import {
 } from "./turnControllerTypes.js";
 import {
   MAX_WHEEL_SPEED_MPS_DEFAULT,
-  TURN_POLLING_INTERVAL_MS,
   TURN_SETTLE_TIME_MS,
   TURN_TIMEOUT_MULTIPLIER,
   TURN_HISTORY_MAX_SIZE,
 } from "../constants.js";
+import { SENSOR_EVENTS, ImuHeadingUpdateEvent } from "../sensing/sensorEvents.js";
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -36,7 +36,6 @@ export interface TurnControllerOptions {
   logger: SessionLogger;
   learningModel: TurnLearningModel;
   maxWheelSpeedMetersPerSecond?: number;
-  pollingIntervalMs?: number;
   settleTimeMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
@@ -47,7 +46,6 @@ export class TurnController {
   private readonly sensorController: SensorController;
   private readonly learningModel: TurnLearningModel;
   private readonly maxWheelSpeed: number;
-  private readonly pollingIntervalMs: number;
   private readonly settleTimeMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
@@ -55,176 +53,262 @@ export class TurnController {
   private status: TurnStatus = "idle";
   private currentTurn: TurnRequest | null = null;
   private stopRequested = false;
-  private running = true;
   private turnHistory: TurnResult[] = [];
   private turnsCompleted = 0;
   private totalErrorDeg = 0;
+
+  // Event-driven turn state
+  private turnStartHeading: InternalHeading | null = null;
+  private turnStartTime: number = 0;
+  private turnBrakeAngle: RelativeAngle | null = null;
+  private turnResolve: ((result: TurnResult) => void) | null = null;
+  private turnIsSmallAngle: boolean = false;
 
   constructor(options: TurnControllerOptions) {
     this.logger = options.logger.child({ context: "control", source: "TurnController" });
     this.sensorController = options.sensorController;
     this.learningModel = options.learningModel;
     this.maxWheelSpeed = options.maxWheelSpeedMetersPerSecond ?? MAX_WHEEL_SPEED_MPS_DEFAULT;
-    this.pollingIntervalMs = options.pollingIntervalMs ?? TURN_POLLING_INTERVAL_MS;
     this.settleTimeMs = options.settleTimeMs ?? TURN_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
+
+    // Bind event handler to maintain 'this' context
+    this.onHeadingUpdate = this.onHeadingUpdate.bind(this);
   }
 
   /**
-   * Execute a turn maneuver
+   * Execute a turn maneuver (event-driven)
    */
   async executeTurn(request: TurnRequest): Promise<TurnResult> {
-    // 1. STARTING - Record initial state
-    this.currentTurn = request;
-    this.status = "starting";
-    const startHeading = this.sensorController.getHeading();
-    const startTime = this.nowMillis();
+    return new Promise<TurnResult>(async (resolve) => {
+      let subscribed = false;
 
-    this.logger.info("turn.started", {
-      targetAngle: unwrapRelativeAngle(request.targetAngle),
-      direction: request.direction,
-    });
+      try {
+        // 1. STARTING - Record initial state
+        this.currentTurn = request;
+        this.status = "starting";
+        this.turnStartHeading = this.sensorController.getHeading();
+        this.turnStartTime = this.nowMillis();
+        this.turnResolve = resolve;
 
-    // 2. Get predicted brake angle from learning model
-    const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
-    const brakeAngle = this.learningModel.getBrakeAngle(absAngle, request.direction);
+        this.logger.info("turn.started", {
+          targetAngle: unwrapRelativeAngle(request.targetAngle),
+          direction: request.direction,
+        });
 
-    // 3. Check if this is a "small angle" case
-    const isSmallAngle = absAngle < this.learningModel.getSmallAngleThreshold();
+        // 2. Get predicted brake angle from learning model
+        const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
+        this.turnBrakeAngle = this.learningModel.getBrakeAngle(absAngle, request.direction);
 
-    // 4. TURNING - Engage motors at full speed
-    this.status = "turning";
-    const wheelSpeed = this.maxWheelSpeed;
-    if (request.direction === "ccw") {
-      await this.sensorController.setMotorWheelSpeeds(-wheelSpeed, wheelSpeed);
-    } else {
-      await this.sensorController.setMotorWheelSpeeds(wheelSpeed, -wheelSpeed);
-    }
+        // 3. Check if this is a "small angle" case
+        this.turnIsSmallAngle = absAngle < this.learningModel.getSmallAngleThreshold();
 
-    // 5. Monitor heading until brake point
-    let currentHeading = startHeading;
-    let angularProgress = createRelativeAngle(0);
+        // 4. Subscribe to IMU heading update events
+        this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+        subscribed = true;
 
-    while (this.running) {
-      await this.sleep(this.pollingIntervalMs);
-
-      // Check for emergency stop
-      if (this.stopRequested) {
-        await this.sensorController.stopMotors();
-        this.status = "stopped";
-        this.currentTurn = null;
-        this.stopRequested = false;
-        this.logger.warn("turn.stopped", { durationMs: this.nowMillis() - startTime });
-        return {
-          requestedAngle: request.targetAngle,
-          achievedAngle: createRelativeAngle(0),
-          errorAngle: createRelativeAngle(0),
-          durationMs: this.nowMillis() - startTime,
-          brakeAngleUsed: brakeAngle,
-          motorEngaged: false,
-          status: "stopped",
-          errorMessage: "Turn stopped by user request",
-          timestamp: new Date().toISOString(),
-        };
-      }
-
-      currentHeading = this.sensorController.getHeading();
-      angularProgress = headingDifference(startHeading, currentHeading);
-
-      const absProgress = Math.abs(unwrapRelativeAngle(angularProgress));
-
-      // For small angles, engage motors briefly even if brake angle is large
-      if (isSmallAngle && absProgress >= absAngle * 0.5) {
-        break; // Brake at halfway point for small angles
-      }
-
-      // Normal case: brake when we reach the brake angle
-      if (absProgress >= unwrapRelativeAngle(brakeAngle)) {
-        break;
-      }
-
-      // Safety: timeout after reasonable duration
-      if (this.nowMillis() - startTime > this.calculateTimeout(absAngle)) {
+        // 5. TURNING - Engage motors at full speed
+        this.status = "turning";
+        const wheelSpeed = this.maxWheelSpeed;
+        if (request.direction === "ccw") {
+          await this.sensorController.setMotorWheelSpeeds(-wheelSpeed, wheelSpeed);
+        } else {
+          await this.sensorController.setMotorWheelSpeeds(wheelSpeed, -wheelSpeed);
+        }
+      } catch (error) {
+        // Cleanup on error
+        if (subscribed) {
+          this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+        }
         this.status = "idle";
         this.currentTurn = null;
-        this.logger.error("turn.timeout", { absAngle, durationMs: this.nowMillis() - startTime });
-        const timeoutError = createRelativeAngle(
-          unwrapRelativeAngle(angularProgress) - unwrapRelativeAngle(request.targetAngle)
-        );
-        return {
+
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.logger.error("turn.error", { error: errorMessage });
+
+        resolve({
           requestedAngle: request.targetAngle,
-          achievedAngle: angularProgress,
-          errorAngle: timeoutError,
-          durationMs: this.nowMillis() - startTime,
-          brakeAngleUsed: brakeAngle,
-          motorEngaged: true,
-          status: "timeout",
-          errorMessage: "Turn execution timeout",
+          achievedAngle: createRelativeAngle(0),
+          errorAngle: request.targetAngle,
+          durationMs: this.nowMillis() - this.turnStartTime,
+          brakeAngleUsed: this.turnBrakeAngle ?? createRelativeAngle(0),
+          motorEngaged: false,
+          status: "error",
+          errorMessage,
           timestamp: new Date().toISOString(),
-        };
+        });
       }
+    });
+  }
+
+  /**
+   * Event handler for IMU heading updates (called at 30Hz by sensor controller)
+   */
+  private async onHeadingUpdate(event: ImuHeadingUpdateEvent): Promise<void> {
+    if (this.status !== "turning" || !this.turnStartHeading || !this.turnBrakeAngle || !this.currentTurn) {
+      return;
     }
 
-    // 6. BRAKING - Command motors to zero
-    this.status = "braking";
-    await this.sensorController.stopMotors();
-    const brakeTime = this.nowMillis();
+    // Check for emergency stop
+    if (this.stopRequested) {
+      this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+      await this.sensorController.stopMotors();
+      this.status = "stopped";
+      const stoppedTurn = this.currentTurn;
+      this.currentTurn = null;
+      this.stopRequested = false;
+      this.logger.warn("turn.stopped", { durationMs: this.nowMillis() - this.turnStartTime });
+      this.turnResolve?.({
+        requestedAngle: stoppedTurn.targetAngle,
+        achievedAngle: createRelativeAngle(0),
+        errorAngle: createRelativeAngle(0),
+        durationMs: this.nowMillis() - this.turnStartTime,
+        brakeAngleUsed: this.turnBrakeAngle,
+        motorEngaged: false,
+        status: "stopped",
+        errorMessage: "Turn stopped by user request",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
 
-    // 7. Wait for motor ramp-down (2x ramp-down time per spec)
-    const rampDownTime = this.learningModel.getMotorRampDownTime();
-    await this.sleep(2 * rampDownTime);
+    // Calculate angular progress
+    const angularProgress = headingDifference(this.turnStartHeading, event.heading);
+    const absProgress = Math.abs(unwrapRelativeAngle(angularProgress));
+    const absAngle = Math.abs(unwrapRelativeAngle(this.currentTurn.targetAngle));
 
-    // 8. SETTLING - Additional settle for stability
-    this.status = "settling";
-    await this.sleep(this.settleTimeMs);
+    // Check for brake condition
+    let shouldBrake = false;
 
-    // 9. MEASURING - Read final heading
-    this.status = "measuring";
-    const finalHeading = this.sensorController.getHeading();
-    const achievedAngle = headingDifference(startHeading, finalHeading);
-    const errorAngle = createRelativeAngle(
-      unwrapRelativeAngle(achievedAngle) - unwrapRelativeAngle(request.targetAngle)
-    );
+    // For small angles, brake at halfway point
+    if (this.turnIsSmallAngle && absProgress >= absAngle * 0.5) {
+      shouldBrake = true;
+    }
 
-    this.logger.info("turn.completed", {
-      requestedAngle: unwrapRelativeAngle(request.targetAngle),
-      achievedAngle: unwrapRelativeAngle(achievedAngle),
-      errorAngle: unwrapRelativeAngle(errorAngle),
-      durationMs: this.nowMillis() - startTime,
-    });
+    // Normal case: brake when we reach the brake angle
+    if (absProgress >= unwrapRelativeAngle(this.turnBrakeAngle)) {
+      shouldBrake = true;
+    }
 
-    // 10. LEARNING - Update model if enabled
-    if (request.learningEnabled !== false) {
-      this.status = "learning";
-      await this.learningModel.updateFromTurn({
+    // Safety: timeout after reasonable duration
+    if (this.nowMillis() - this.turnStartTime > this.calculateTimeout(absAngle)) {
+      this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+      this.status = "idle";
+      const timeoutError = createRelativeAngle(
+        unwrapRelativeAngle(angularProgress) - unwrapRelativeAngle(this.currentTurn.targetAngle)
+      );
+      this.logger.error("turn.timeout", { absAngle, durationMs: this.nowMillis() - this.turnStartTime });
+      this.turnResolve?.({
+        requestedAngle: this.currentTurn.targetAngle,
+        achievedAngle: angularProgress,
+        errorAngle: timeoutError,
+        durationMs: this.nowMillis() - this.turnStartTime,
+        brakeAngleUsed: this.turnBrakeAngle,
+        motorEngaged: true,
+        status: "timeout",
+        errorMessage: "Turn execution timeout",
+        timestamp: new Date().toISOString(),
+      });
+      this.currentTurn = null;
+      return;
+    }
+
+    // If brake condition met, complete the turn
+    if (shouldBrake) {
+      this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+      await this.completeTurn(this.currentTurn);
+    }
+  }
+
+  /**
+   * Complete turn after brake point reached
+   */
+  private async completeTurn(request: TurnRequest): Promise<void> {
+    if (!this.turnStartHeading || !this.turnBrakeAngle) {
+      return;
+    }
+
+    try {
+      // 6. BRAKING - Command motors to zero
+      this.status = "braking";
+      await this.sensorController.stopMotors();
+
+      // 7. Wait for motor ramp-down (2x ramp-down time per spec)
+      const rampDownTime = this.learningModel.getMotorRampDownTime();
+      await this.sleep(2 * rampDownTime);
+
+      // 8. SETTLING - Additional settle for stability
+      this.status = "settling";
+      await this.sleep(this.settleTimeMs);
+
+      // 9. MEASURING - Read final heading
+      this.status = "measuring";
+      const finalHeading = this.sensorController.getHeading();
+      const achievedAngle = headingDifference(this.turnStartHeading, finalHeading);
+      const errorAngle = createRelativeAngle(
+        unwrapRelativeAngle(achievedAngle) - unwrapRelativeAngle(request.targetAngle)
+      );
+
+      this.logger.info("turn.completed", {
+        requestedAngle: unwrapRelativeAngle(request.targetAngle),
+        achievedAngle: unwrapRelativeAngle(achievedAngle),
+        errorAngle: unwrapRelativeAngle(errorAngle),
+        durationMs: this.nowMillis() - this.turnStartTime,
+      });
+
+      // 10. LEARNING - Update model if enabled
+      if (request.learningEnabled !== false) {
+        this.status = "learning";
+        await this.learningModel.updateFromTurn({
+          requestedAngle: request.targetAngle,
+          achievedAngle,
+          errorAngle,
+          brakeAngleUsed: this.turnBrakeAngle,
+          direction: request.direction,
+        });
+      }
+
+      // 11. Return to idle and resolve promise
+      this.status = "idle";
+      this.currentTurn = null;
+
+      const result: TurnResult = {
         requestedAngle: request.targetAngle,
         achievedAngle,
         errorAngle,
-        brakeAngleUsed: brakeAngle,
-        direction: request.direction,
+        durationMs: this.nowMillis() - this.turnStartTime,
+        brakeAngleUsed: this.turnBrakeAngle,
+        motorEngaged: true,
+        status: "success",
+        timestamp: new Date().toISOString(),
+      };
+
+      // Update history
+      this.addToHistory(result);
+
+      // Resolve the promise
+      this.turnResolve?.(result);
+    } catch (error) {
+      // Error during completion - ensure cleanup
+      this.status = "idle";
+      this.currentTurn = null;
+
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error("turn.completion_error", { error: errorMessage });
+
+      this.turnResolve?.({
+        requestedAngle: request.targetAngle,
+        achievedAngle: createRelativeAngle(0),
+        errorAngle: request.targetAngle,
+        durationMs: this.nowMillis() - this.turnStartTime,
+        brakeAngleUsed: this.turnBrakeAngle,
+        motorEngaged: false,
+        status: "error",
+        errorMessage,
+        timestamp: new Date().toISOString(),
       });
     }
-
-    // 11. Return to idle and return result
-    this.status = "idle";
-    this.currentTurn = null;
-
-    const result: TurnResult = {
-      requestedAngle: request.targetAngle,
-      achievedAngle,
-      errorAngle,
-      durationMs: this.nowMillis() - startTime,
-      brakeAngleUsed: brakeAngle,
-      motorEngaged: true,
-      status: "success",
-      timestamp: new Date().toISOString(),
-    };
-
-    // Update history
-    this.addToHistory(result);
-
-    return result;
   }
 
   /**

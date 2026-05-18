@@ -91,7 +91,7 @@ IDLE → STARTING → TURNING → BRAKING → SETTLING → MEASURING → IDLE
 
 **Emergency Stop Behavior:**
 - User or system can call `stopCurrentTurn()` at any time
-- Stop is checked during polling loop in TURNING state
+- Stop is checked during polling loop in TURNING state (every 33ms)
 - Motors stopped immediately, no learning occurs
 - Result returned with status="stopped"
 - Controller returns to IDLE state
@@ -488,8 +488,9 @@ Add to `src/constants.ts`:
 /**
  * Turn controller polling interval in milliseconds
  * How often to check heading during turn execution
+ * Matches sensor polling rate - no benefit to polling faster than sensor updates
  */
-export const TURN_POLLING_INTERVAL_MS = 20; // 50Hz
+export const TURN_POLLING_INTERVAL_MS = 33; // 30Hz
 
 /**
  * Settle time after motor ramp-down before reading final heading

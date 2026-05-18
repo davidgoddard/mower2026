@@ -1,8 +1,10 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { TurnController } from "../dist/control/turnController.js";
 import { TurnLearningModel } from "../dist/control/turnLearningModel.js";
 import { createRelativeAngle, createInternalHeading, unwrapRelativeAngle } from "../dist/geometry/headingTypes.js";
+import { SENSOR_EVENTS } from "../dist/sensing/sensorEvents.js";
 
 describe("TurnController", () => {
   function createMockLogger() {
@@ -21,8 +23,10 @@ describe("TurnController", () => {
     let heading = createInternalHeading(0);
     let wheelSpeedLeft = 0;
     let wheelSpeedRight = 0;
+    const emitter = new EventEmitter();
 
-    return {
+    // Create mock that extends EventEmitter behavior
+    const controller = {
       getHeading: () => heading,
       setHeading: (h) => { heading = h; },
       setMotorWheelSpeeds: mock.fn(async (left, right) => {
@@ -35,7 +39,22 @@ describe("TurnController", () => {
       }),
       _testSetHeading: (h) => { heading = h; },
       _testGetWheelSpeeds: () => ({ left: wheelSpeedLeft, right: wheelSpeedRight }),
+
+      // EventEmitter methods
+      on: (event, listener) => emitter.on(event, listener),
+      off: (event, listener) => emitter.off(event, listener),
+      emit: (event, data) => emitter.emit(event, data),
+
+      // Test helper to simulate sensor updates
+      _testEmitHeadingUpdate: (headingValue, timestampMillis) => {
+        emitter.emit(SENSOR_EVENTS.IMU_HEADING_UPDATE, {
+          heading: headingValue,
+          timestampMillis,
+        });
+      },
     };
+
+    return controller;
   }
 
   function createMockLearningModel() {
@@ -67,19 +86,22 @@ describe("TurnController", () => {
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
-        // Simulate turn progress
-        if (elapsed >= 100 && elapsed < 1500) {
-          const progress = (elapsed - 100) / 1400 * 90;
-          mockSensor._testSetHeading(createInternalHeading(progress));
-        }
       },
     });
 
-    const result = await controller.executeTurn({
+    // Start turn and simulate heading updates
+    const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(90),
       direction: "ccw",
       learningEnabled: true,
     });
+
+    // Simulate heading updates at brake angle (63 degrees = 90 * 0.7)
+    await new Promise(resolve => setTimeout(resolve, 10));
+    mockSensor._testSetHeading(createInternalHeading(63));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(63), 1000);
+
+    const result = await turnPromise;
 
     assert.equal(result.status, "success");
     assert.equal(mockSensor.setMotorWheelSpeeds.mock.calls.length > 0, true);
@@ -100,18 +122,21 @@ describe("TurnController", () => {
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
-        if (elapsed >= 50 && elapsed < 300) {
-          const progress = (elapsed - 50) / 250 * 10;
-          mockSensor._testSetHeading(createInternalHeading(progress));
-        }
       },
     });
 
-    const result = await controller.executeTurn({
+    const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(10),
       direction: "ccw",
       learningEnabled: true,
     });
+
+    // Small angle brakes at 50% (5 degrees)
+    await new Promise(resolve => setTimeout(resolve, 10));
+    mockSensor._testSetHeading(createInternalHeading(5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(5), 500);
+
+    const result = await turnPromise;
 
     assert.equal(result.status, "success");
     assert.equal(result.motorEngaged, true);
@@ -123,7 +148,6 @@ describe("TurnController", () => {
     const mockLearning = createMockLearningModel();
 
     let elapsed = 0;
-    let sleepCount = 0;
     const controller = new TurnController({
       sensorController: mockSensor,
       logger: mockLogger,
@@ -131,23 +155,21 @@ describe("TurnController", () => {
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
-        sleepCount++;
-        // Call stop after second sleep (during turning phase)
-        if (sleepCount === 2) {
-          await controller.stopCurrentTurn();
-        }
-        // Simulate partial turn
-        if (elapsed >= 100) {
-          mockSensor._testSetHeading(createInternalHeading(45));
-        }
       },
     });
 
-    const result = await controller.executeTurn({
+    const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(180),
       direction: "ccw",
       learningEnabled: true,
     });
+
+    // Request stop, then emit heading update to trigger the stop handler
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await controller.stopCurrentTurn();
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(45), 500);
+
+    const result = await turnPromise;
 
     assert.equal(result.status, "stopped");
     assert.equal(result.errorMessage, "Turn stopped by user request");
@@ -167,17 +189,20 @@ describe("TurnController", () => {
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
-        if (elapsed >= 50) {
-          mockSensor._testSetHeading(createInternalHeading(90));
-        }
       },
     });
 
-    await controller.executeTurn({
+    const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(90),
       direction: "ccw",
       learningEnabled: true,
     });
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    mockSensor._testSetHeading(createInternalHeading(63));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(63), 1000);
+
+    await turnPromise;
 
     const history = controller.getTurnHistory();
     assert.equal(history.length, 1);
@@ -199,10 +224,16 @@ describe("TurnController", () => {
       sleep: async () => {},
     });
 
-    await controller.executeTurn({
+    const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(45),
       direction: "ccw",
     });
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    mockSensor._testSetHeading(createInternalHeading(31.5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(31.5), 500);
+
+    await turnPromise;
 
     controller.clearHistory();
     const history = controller.getTurnHistory();

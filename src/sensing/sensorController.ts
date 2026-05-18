@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { PrimitivesStore } from "../server/primitivesStore.js";
@@ -12,6 +13,10 @@ import {
   unwrapInternalHeading,
 } from "../geometry/headingTypes.js";
 import { SENSOR_POLL_INTERVAL_MS } from "../constants.js";
+import {
+  SensorControllerEvents,
+  SENSOR_EVENTS,
+} from "./sensorEvents.js";
 
 // Time conversion constant (implementation detail)
 const MS_PER_SECOND = 1000;
@@ -30,7 +35,7 @@ function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-export class SensorController {
+export class SensorController extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly primitivesStore: PrimitivesStore;
   private readonly gateway: SensorHardwareGateway;
@@ -45,7 +50,24 @@ export class SensorController {
   private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
 
+  // Type-safe event subscription methods
+  declare on: <K extends keyof SensorControllerEvents>(
+    event: K,
+    listener: (data: SensorControllerEvents[K]) => void
+  ) => this;
+
+  declare off: <K extends keyof SensorControllerEvents>(
+    event: K,
+    listener: (data: SensorControllerEvents[K]) => void
+  ) => this;
+
+  declare emit: <K extends keyof SensorControllerEvents>(
+    event: K,
+    data: SensorControllerEvents[K]
+  ) => boolean;
+
   constructor(options: SensorControllerOptions) {
+    super();
     this.logger = options.logger.child({ context: "sensors", source: "SensorController" });
     this.primitivesStore = options.primitivesStore;
     this.gateway = options.gateway;
@@ -227,6 +249,12 @@ export class SensorController {
           headingDeg: unwrapInternalHeading(this.imuHeading),
         },
       });
+
+      // Emit heading update event
+      this.emit(SENSOR_EVENTS.IMU_HEADING_UPDATE, {
+        heading: this.imuHeading,
+        timestampMillis: sample.timestampMillis,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.primitivesStore.update({
@@ -245,9 +273,10 @@ export class SensorController {
       const sample = await this.gateway.readGnss();
 
       let internalHeadingDeg: number | null = null;
+      let internalHeading: InternalHeading | null = null;
       if (sample.headingDegrees != null) {
         const fieldHeading = sample.headingDegrees as FieldHeading;
-        const internalHeading = fieldToInternal(fieldHeading);
+        internalHeading = fieldToInternal(fieldHeading);
         internalHeadingDeg = unwrapInternalHeading(internalHeading);
       }
 
@@ -264,6 +293,18 @@ export class SensorController {
           satellitesInUse: sample.satellitesInUse,
           sampleAgeMillis: sample.sampleAgeMillis,
         },
+      });
+
+      // Emit GNSS position update event
+      this.emit(SENSOR_EVENTS.GNSS_POSITION_UPDATE, {
+        xMeters: sample.xMeters,
+        yMeters: sample.yMeters,
+        heading: internalHeading,
+        positionAccuracyMeters: sample.positionAccuracyMeters,
+        headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
+        fixType: sample.fixType,
+        satellitesInUse: sample.satellitesInUse,
+        timestampMillis: sample.timestampMillis,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -301,6 +342,21 @@ export class SensorController {
           watchdogHealthy: sample.watchdogHealthy,
           faultFlags: sample.faultFlags,
         },
+      });
+
+      // Emit motor feedback update event
+      this.emit(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, {
+        leftWheelSpeedMetersPerSecond: sample.leftWheelActualMetersPerSecond,
+        rightWheelSpeedMetersPerSecond: sample.rightWheelActualMetersPerSecond,
+        leftEncoderDelta: sample.leftEncoderDelta,
+        rightEncoderDelta: sample.rightEncoderDelta,
+        leftPwmAppliedPercent: sample.leftPwmApplied,
+        rightPwmAppliedPercent: sample.rightPwmApplied,
+        leftMotorCurrentAmps: sample.leftMotorCurrentAmps ?? null,
+        rightMotorCurrentAmps: sample.rightMotorCurrentAmps ?? null,
+        watchdogHealthy: sample.watchdogHealthy,
+        faultFlags: sample.faultFlags,
+        timestampMillis: this.nowMillis(),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

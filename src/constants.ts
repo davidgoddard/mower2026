@@ -207,9 +207,10 @@ export const MAX_PORT_NUMBER = 65535;
 
 /**
  * Turn controller polling interval in milliseconds
- * How often to check heading during turn execution (50Hz)
+ * How often to check heading during turn execution
+ * Matches sensor polling rate (30Hz) - no benefit to polling faster than sensor updates
  */
-export const TURN_POLLING_INTERVAL_MS = 20;
+export const TURN_POLLING_INTERVAL_MS = 33;
 
 /**
  * Settle time after motor ramp-down before reading final heading

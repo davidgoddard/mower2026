@@ -35,6 +35,7 @@ This document maps problem domains to candidate files removing the need for Code
 ## Turn Controller
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
   - executes on-the-spot turns using IMU heading integration
+  - polls heading at 30Hz (matches sensor controller update rate)
   - adaptive brake angle learning per turn angle and direction
   - emergency stop support during turn execution
   - tuning sequence runner for comprehensive parameter learning
