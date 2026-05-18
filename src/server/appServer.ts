@@ -6,6 +6,7 @@ import { SensorController } from "../sensing/sensorController.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { renderHomePage } from "./homePage.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
+import { MAX_PORT_NUMBER } from "../constants.js";
 
 interface StartMowerServerOptions {
   appName?: string;
@@ -46,7 +47,7 @@ function isValidPort(value: string | undefined): boolean {
   }
 
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535;
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_PORT_NUMBER;
 }
 
 function encodeJson(payload: unknown): string {

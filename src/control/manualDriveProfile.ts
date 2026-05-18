@@ -1,3 +1,24 @@
+import {
+  MANUAL_TURN_DEADBAND_DEGREES,
+  MANUAL_TURN_FULL_LOCK_DEGREES,
+  MANUAL_SPEED_DEADBAND,
+  MANUAL_TURN_DEADBAND,
+  MANUAL_DRIVE_SPIN_THRESHOLD,
+  MANUAL_DRIVE_SPIN_SPEED_THRESHOLD,
+  MANUAL_DRIVE_MAX_INNER_WHEEL_TRIM,
+  MANUAL_DRIVE_ARC_RESPONSE_EXPONENT,
+  MANUAL_DRIVE_MIN_SPIN_SPEED_SCALE,
+  MANUAL_DRIVE_MAX_SPIN_SPEED_SCALE,
+  MANUAL_DRIVE_ARC_STRAIGHT_THRESHOLD,
+  MANUAL_TURN_RESPONSE_EXPONENT,
+} from "../constants.js";
+
+// Normalized range constants (implementation details)
+const NORMALIZED_MIN = 0;
+const NORMALIZED_MAX = 1;
+const SIGNED_NORMALIZED_MIN = -1;
+const SIGNED_NORMALIZED_MAX = 1;
+
 interface ManualDriveDemandInput {
   readonly speedDemand: number;
   readonly turnDemand: number;
@@ -10,13 +31,6 @@ export interface ManualDriveDemand {
   readonly requestedRightMetersPerSecond: number;
 }
 
-const MANUAL_DRIVE_SPIN_THRESHOLD = 0.995;
-const MANUAL_DRIVE_SPIN_SPEED_DEMAND_THRESHOLD = 0.15;
-const MANUAL_DRIVE_MAX_INNER_WHEEL_TRIM = 0.50;
-const MANUAL_DRIVE_ARC_RESPONSE_EXPONENT = 1.15;
-const MANUAL_DRIVE_MIN_SPIN_SPEED_SCALE = 0.22;
-const MANUAL_DRIVE_MAX_SPIN_SPEED_SCALE = 0.65;
-
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -26,32 +40,33 @@ function normalize(value: number, min: number, max: number): number {
     return 1;
   }
 
-  return clamp((value - min) / (max - min), 0, 1);
+  return clamp((value - min) / (max - min), NORMALIZED_MIN, NORMALIZED_MAX);
 }
 
 export function normalizeManualTurnDemand(angleDegrees: number): number {
-  const deadbandDegrees = 6;
-  const fullLockDegrees = 84;
   const magnitudeDegrees = Math.abs(angleDegrees);
 
-  if (magnitudeDegrees <= deadbandDegrees) {
+  if (magnitudeDegrees <= MANUAL_TURN_DEADBAND_DEGREES) {
     return 0;
   }
 
   const normalizedMagnitude = Math.max(
-    0,
-    Math.min((magnitudeDegrees - deadbandDegrees) / (fullLockDegrees - deadbandDegrees), 1),
+    NORMALIZED_MIN,
+    Math.min(
+      (magnitudeDegrees - MANUAL_TURN_DEADBAND_DEGREES) / (MANUAL_TURN_FULL_LOCK_DEGREES - MANUAL_TURN_DEADBAND_DEGREES),
+      NORMALIZED_MAX,
+    ),
   );
 
-  return Math.sign(angleDegrees) * Math.pow(normalizedMagnitude, 2);
+  return Math.sign(angleDegrees) * Math.pow(normalizedMagnitude, MANUAL_TURN_RESPONSE_EXPONENT);
 }
 
 export function computeManualDriveDemand(input: ManualDriveDemandInput): ManualDriveDemand {
-  const speedDemand = clamp(input.speedDemand, -1, 1);
-  const turnDemand = clamp(input.turnDemand, -1, 1);
+  const speedDemand = clamp(input.speedDemand, SIGNED_NORMALIZED_MIN, SIGNED_NORMALIZED_MAX);
+  const turnDemand = clamp(input.turnDemand, SIGNED_NORMALIZED_MIN, SIGNED_NORMALIZED_MAX);
   const maxWheelSpeed = input.maxWheelSpeedMetersPerSecond;
 
-  if (Math.abs(speedDemand) < 0.05 && Math.abs(turnDemand) < 0.05) {
+  if (Math.abs(speedDemand) < MANUAL_SPEED_DEADBAND && Math.abs(turnDemand) < MANUAL_TURN_DEADBAND) {
     return {
       mode: "stopped",
       requestedLeftMetersPerSecond: 0,
@@ -62,9 +77,9 @@ export function computeManualDriveDemand(input: ManualDriveDemandInput): ManualD
   const turnMagnitude = Math.abs(turnDemand);
   if (
     turnMagnitude >= MANUAL_DRIVE_SPIN_THRESHOLD
-    && Math.abs(speedDemand) <= MANUAL_DRIVE_SPIN_SPEED_DEMAND_THRESHOLD
+    && Math.abs(speedDemand) <= MANUAL_DRIVE_SPIN_SPEED_THRESHOLD
   ) {
-    const spinBlend = normalize(turnMagnitude, MANUAL_DRIVE_SPIN_THRESHOLD, 1);
+    const spinBlend = normalize(turnMagnitude, MANUAL_DRIVE_SPIN_THRESHOLD, NORMALIZED_MAX);
     const spinScale =
       MANUAL_DRIVE_MIN_SPIN_SPEED_SCALE
       + (MANUAL_DRIVE_MAX_SPIN_SPEED_SCALE - MANUAL_DRIVE_MIN_SPIN_SPEED_SCALE) * spinBlend;
@@ -83,14 +98,14 @@ export function computeManualDriveDemand(input: ManualDriveDemandInput): ManualD
 
   if (turnDemand >= 0) {
     return {
-      mode: turnMagnitude > 0.12 ? "arc" : "straight",
+      mode: turnMagnitude > MANUAL_DRIVE_ARC_STRAIGHT_THRESHOLD ? "arc" : "straight",
       requestedLeftMetersPerSecond: innerWheelSpeed,
       requestedRightMetersPerSecond: baseSpeed,
     };
   }
 
   return {
-    mode: turnMagnitude > 0.12 ? "arc" : "straight",
+    mode: turnMagnitude > MANUAL_DRIVE_ARC_STRAIGHT_THRESHOLD ? "arc" : "straight",
     requestedLeftMetersPerSecond: baseSpeed,
     requestedRightMetersPerSecond: innerWheelSpeed,
   };

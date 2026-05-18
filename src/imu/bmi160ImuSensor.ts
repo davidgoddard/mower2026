@@ -2,6 +2,19 @@ import { I2cBusController } from "../i2c/i2cBusController.js";
 import { I2C_PRIORITY } from "../i2c/priorities.js";
 import { BMI160 } from "./bmi160Registers.js";
 import { ImuSample, ImuSensor } from "./types.js";
+import { I2C_ADDRESS_BMI160_DEFAULT, IMU_DEFAULT_CALIBRATION_SAMPLES } from "../constants.js";
+
+// BMI160 hardware timing constants (implementation details from datasheet)
+const IMU_GYRO_INIT_DELAY_MS = 80;
+const IMU_GYRO_RANGE_DELAY_MS = 10;
+const IMU_CALIBRATION_SAMPLE_DELAY_MS = 4;
+
+// BMI160 register values (implementation details)
+const BMI160_GYRO_RANGE_2000DPS = 0x00;
+
+// 16-bit integer conversion constants (implementation details)
+const INT16_MAX = 0x7fff;
+const UINT16_WRAP = 0x10000;
 
 interface Bmi160ImuSensorOptions {
   address?: number;
@@ -11,7 +24,7 @@ interface Bmi160ImuSensorOptions {
 
 function decodeSignedInt16(lsb: number, msb: number): number {
   const combined = (msb << 8) | lsb;
-  return combined > 0x7fff ? combined - 0x10000 : combined;
+  return combined > INT16_MAX ? combined - UINT16_WRAP : combined;
 }
 
 function defaultSleep(delayMs: number): Promise<void> {
@@ -27,7 +40,7 @@ export class Bmi160ImuSensor implements ImuSensor {
 
   constructor(controller: I2cBusController, options: Bmi160ImuSensorOptions = {}) {
     this.controller = controller;
-    this.address = options.address ?? BMI160.defaultAddress;
+    this.address = options.address ?? I2C_ADDRESS_BMI160_DEFAULT;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
   }
@@ -39,14 +52,14 @@ export class Bmi160ImuSensor implements ImuSensor {
     }
 
     await this.writeRegister(BMI160.registers.command, BMI160.commands.gyroNormalMode);
-    await this.sleep(80);
+    await this.sleep(IMU_GYRO_INIT_DELAY_MS);
 
     // Set gyro range to +/- 2000 dps (16.4 LSB/dps) to keep conversion stable.
-    await this.writeRegister(BMI160.registers.gyroRange, 0x00);
-    await this.sleep(10);
+    await this.writeRegister(BMI160.registers.gyroRange, BMI160_GYRO_RANGE_2000DPS);
+    await this.sleep(IMU_GYRO_RANGE_DELAY_MS);
   }
 
-  async calibrateGyro(sampleCount = 60): Promise<void> {
+  async calibrateGyro(sampleCount = IMU_DEFAULT_CALIBRATION_SAMPLES): Promise<void> {
     if (sampleCount <= 0) {
       this.gyroBiasDps = 0;
       return;
@@ -58,7 +71,7 @@ export class Bmi160ImuSensor implements ImuSensor {
       const raw = await this.readGyroZRaw();
       sum += raw / BMI160.gyroLsbPerDpsAt2000;
       measured += 1;
-      await this.sleep(4);
+      await this.sleep(IMU_CALIBRATION_SAMPLE_DELAY_MS);
     }
 
     this.gyroBiasDps = measured === 0 ? 0 : (sum / measured);

@@ -1,16 +1,25 @@
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
 import { decodeOptionalUint16 } from "../protocols/codecPrimitives.js";
 
+// Motor protocol payload lengths (implementation details)
 const WHEEL_SPEED_COMMAND_LENGTH = 15;
 const MOTOR_FEEDBACK_SAMPLE_LENGTH = 26;
+
+// Motor codec scaling factors (implementation details)
+const VELOCITY_SCALE_MMS_TO_MS = 1000;
+const ACCELERATION_SCALE_MILLI_TO_UNIT = 1000;
+const CURRENT_SCALE_DECIAMP_TO_AMP = 10;
+
+// Optional field sentinel values (implementation details)
 const OPTIONAL_UINT16_SENTINEL = 0xffff;
+const OPTIONAL_UINT16_MAX_VALUE = 0xfffe;
 
 function encodeOptionalUint16(value: number | undefined, scale: number): number {
   if (value == null) {
     return OPTIONAL_UINT16_SENTINEL;
   }
 
-  return Math.max(0, Math.min(OPTIONAL_UINT16_SENTINEL - 1, Math.round(value * scale)));
+  return Math.max(0, Math.min(OPTIONAL_UINT16_MAX_VALUE, Math.round(value * scale)));
 }
 
 export function wheelSpeedCommandLength(): number {
@@ -26,12 +35,12 @@ export function encodeWheelSpeedCommand(command: WheelSpeedCommand): Uint8Array 
   const view = new DataView(payload.buffer);
 
   view.setUint32(0, command.timestampMillis, true);
-  view.setInt16(4, Math.round(command.leftWheelTargetMetersPerSecond * 1000), true);
-  view.setInt16(6, Math.round(command.rightWheelTargetMetersPerSecond * 1000), true);
+  view.setInt16(4, Math.round(command.leftWheelTargetMetersPerSecond * VELOCITY_SCALE_MMS_TO_MS), true);
+  view.setInt16(6, Math.round(command.rightWheelTargetMetersPerSecond * VELOCITY_SCALE_MMS_TO_MS), true);
   view.setUint8(8, command.enableDrive ? 1 : 0);
   view.setUint16(9, command.commandTimeoutMillis, true);
-  view.setUint16(11, encodeOptionalUint16(command.maxAccelerationMetersPerSecondSquared, 1000), true);
-  view.setUint16(13, encodeOptionalUint16(command.maxDecelerationMetersPerSecondSquared, 1000), true);
+  view.setUint16(11, encodeOptionalUint16(command.maxAccelerationMetersPerSecondSquared, ACCELERATION_SCALE_MILLI_TO_UNIT), true);
+  view.setUint16(13, encodeOptionalUint16(command.maxDecelerationMetersPerSecondSquared, ACCELERATION_SCALE_MILLI_TO_UNIT), true);
 
   return payload;
 }
@@ -42,13 +51,13 @@ export function decodeMotorFeedbackSample(payload: Uint8Array): MotorFeedbackSam
   }
 
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  const leftMotorCurrentAmps = decodeOptionalUint16(view, 18, 10);
-  const rightMotorCurrentAmps = decodeOptionalUint16(view, 20, 10);
+  const leftMotorCurrentAmps = decodeOptionalUint16(view, 18, CURRENT_SCALE_DECIAMP_TO_AMP);
+  const rightMotorCurrentAmps = decodeOptionalUint16(view, 20, CURRENT_SCALE_DECIAMP_TO_AMP);
 
   return {
     timestampMillis: view.getUint32(0, true),
-    leftWheelActualMetersPerSecond: view.getInt16(4, true) / 1000,
-    rightWheelActualMetersPerSecond: view.getInt16(6, true) / 1000,
+    leftWheelActualMetersPerSecond: view.getInt16(4, true) / VELOCITY_SCALE_MMS_TO_MS,
+    rightWheelActualMetersPerSecond: view.getInt16(6, true) / VELOCITY_SCALE_MMS_TO_MS,
     leftEncoderDelta: view.getInt32(8, true),
     rightEncoderDelta: view.getInt32(12, true),
     leftPwmApplied: view.getInt8(16),

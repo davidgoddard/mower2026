@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import { LogEntry, LOG_LEVELS, LoggerScope, LogLevel, SessionLoggerOptions } from "./types.js";
 
+// Log level priority values (implementation details)
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
   debug: 10,
   info: 20,

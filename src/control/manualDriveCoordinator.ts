@@ -3,6 +3,7 @@ import { LoggerScope } from "../logging/types.js";
 import { HidGameController, HidGameControllerSnapshot } from "../controller/hidGameController.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { computeManualDriveDemand, normalizeManualTurnDemand } from "./manualDriveProfile.js";
+import { MANUAL_DRIVE_LOOP_INTERVAL_MS, MAX_WHEEL_SPEED_MPS_DEFAULT } from "../constants.js";
 
 interface ManualDriveCoordinatorOptions {
   logger: SessionLogger;
@@ -50,8 +51,8 @@ export class ManualDriveCoordinator {
     this.logger = options.logger.child({ context: "control", source: "ManualDriveCoordinator" });
     this.sensorController = options.sensorController;
     this.hidController = options.hidController;
-    this.controlIntervalMs = options.controlIntervalMs ?? 100;
-    this.maxWheelSpeedMetersPerSecond = options.maxWheelSpeedMetersPerSecond ?? 0.75;
+    this.controlIntervalMs = options.controlIntervalMs ?? MANUAL_DRIVE_LOOP_INTERVAL_MS;
+    this.maxWheelSpeedMetersPerSecond = options.maxWheelSpeedMetersPerSecond ?? MAX_WHEEL_SPEED_MPS_DEFAULT;
     this.sleep = options.sleep ?? defaultSleep;
   }
 

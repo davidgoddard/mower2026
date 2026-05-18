@@ -4,6 +4,10 @@ import { I2C_PRIORITY } from "../i2c/priorities.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 import { decodeGnssSample, gnssPayloadLength } from "./gnssCodec.js";
 import type { GnssSample } from "./gnssProtocol.js";
+import { GNSS_DEFAULT_MAX_ATTEMPTS, GNSS_RETRY_DELAY_MS } from "../constants.js";
+
+// Protocol sequence wrapping (implementation detail)
+const PROTOCOL_SEQUENCE_MASK = 0xffff;
 
 interface GnssNodeClientOptions {
   address: number;
@@ -27,8 +31,8 @@ export class GnssNodeClient {
   constructor(controller: I2cBusController, options: GnssNodeClientOptions) {
     this.controller = controller;
     this.address = options.address;
-    this.maxAttempts = options.maxAttempts ?? 3;
-    this.retryDelayMs = options.retryDelayMs ?? 20;
+    this.maxAttempts = options.maxAttempts ?? GNSS_DEFAULT_MAX_ATTEMPTS;
+    this.retryDelayMs = options.retryDelayMs ?? GNSS_RETRY_DELAY_MS;
     this.sleep = options.sleep ?? defaultSleep;
   }
 
@@ -47,7 +51,7 @@ export class GnssNodeClient {
           },
           new Uint8Array(0),
         );
-        this.sequence = (this.sequence + 1) & 0xffff;
+        this.sequence = (this.sequence + 1) & PROTOCOL_SEQUENCE_MASK;
 
         const responseFrame = await this.controller.queueRead({
           key: "gnss.sample",

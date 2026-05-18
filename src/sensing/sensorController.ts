@@ -2,6 +2,19 @@ import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { PrimitivesStore } from "../server/primitivesStore.js";
 import { SensorHardwareGateway } from "./sensorHardwareGateway.js";
+import {
+  InternalHeading,
+  FieldHeading,
+  createInternalHeading,
+  fieldToInternal,
+  addRelativeAngle,
+  createRelativeAngle,
+  unwrapInternalHeading,
+} from "../geometry/headingTypes.js";
+import { SENSOR_POLL_INTERVAL_MS } from "../constants.js";
+
+// Time conversion constant (implementation detail)
+const MS_PER_SECOND = 1000;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
@@ -11,21 +24,6 @@ interface SensorControllerOptions {
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
   maxLoopCount?: number;
-}
-
-function normalizeHeadingDegrees(heading: number): number {
-  let normalized = heading;
-  while (normalized <= -180) {
-    normalized += 360;
-  }
-  while (normalized > 180) {
-    normalized -= 360;
-  }
-  return normalized;
-}
-
-function convertFieldHeadingToInternalDegrees(fieldHeadingDegrees: number): number {
-  return normalizeHeadingDegrees(90 - fieldHeadingDegrees);
 }
 
 function defaultSleep(delayMs: number): Promise<void> {
@@ -44,14 +42,14 @@ export class SensorController {
   private running = false;
   private loopPromise: Promise<void> | null = null;
 
-  private imuHeadingDegrees = 0;
+  private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
 
   constructor(options: SensorControllerOptions) {
     this.logger = options.logger.child({ context: "sensors", source: "SensorController" });
     this.primitivesStore = options.primitivesStore;
     this.gateway = options.gateway;
-    this.pollIntervalMs = options.pollIntervalMs ?? 33;
+    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_POLL_INTERVAL_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
     this.maxLoopCount = options.maxLoopCount ?? null;
@@ -72,7 +70,7 @@ export class SensorController {
       imu: {
         status: "starting",
         error: null,
-        headingDeg: this.imuHeadingDegrees,
+        headingDeg: unwrapInternalHeading(this.imuHeading),
       },
       gnss: {
         status: "idle",
@@ -138,18 +136,18 @@ export class SensorController {
     });
   }
 
-  getHeadingDegrees(): number {
-    return this.imuHeadingDegrees;
+  getHeading(): InternalHeading {
+    return this.imuHeading;
   }
 
-  setHeadingDegrees(headingDegrees: number): void {
-    this.imuHeadingDegrees = normalizeHeadingDegrees(headingDegrees);
+  setHeading(heading: InternalHeading): void {
+    this.imuHeading = heading;
     this.previousImuSampleMillis = null;
     const currentImu = this.primitivesStore.snapshot().imu;
     this.primitivesStore.update({
       imu: {
         ...currentImu,
-        headingDeg: this.imuHeadingDegrees,
+        headingDeg: unwrapInternalHeading(this.imuHeading),
       },
     });
   }
@@ -216,10 +214,9 @@ export class SensorController {
     try {
       const sample = await this.gateway.readImu();
       if (this.previousImuSampleMillis != null) {
-        const deltaSeconds = Math.max(0, sample.timestampMillis - this.previousImuSampleMillis) / 1000;
-        this.imuHeadingDegrees = normalizeHeadingDegrees(
-          this.imuHeadingDegrees + (sample.angularVelocity.zDegreesPerSecond * deltaSeconds),
-        );
+        const deltaSeconds = Math.max(0, sample.timestampMillis - this.previousImuSampleMillis) / MS_PER_SECOND;
+        const yawDelta = createRelativeAngle(sample.angularVelocity.zDegreesPerSecond * deltaSeconds);
+        this.imuHeading = addRelativeAngle(this.imuHeading, yawDelta);
       }
       this.previousImuSampleMillis = sample.timestampMillis;
 
@@ -227,7 +224,7 @@ export class SensorController {
         imu: {
           status: "running",
           error: null,
-          headingDeg: this.imuHeadingDegrees,
+          headingDeg: unwrapInternalHeading(this.imuHeading),
         },
       });
     } catch (error) {
@@ -236,7 +233,7 @@ export class SensorController {
         imu: {
           status: "error",
           error: message,
-          headingDeg: this.imuHeadingDegrees,
+          headingDeg: unwrapInternalHeading(this.imuHeading),
         },
       });
       this.logger.error("sensor.imu.poll_failed", { error: message });
@@ -246,15 +243,21 @@ export class SensorController {
   private async pollGnss(): Promise<void> {
     try {
       const sample = await this.gateway.readGnss();
+
+      let internalHeadingDeg: number | null = null;
+      if (sample.headingDegrees != null) {
+        const fieldHeading = sample.headingDegrees as FieldHeading;
+        const internalHeading = fieldToInternal(fieldHeading);
+        internalHeadingDeg = unwrapInternalHeading(internalHeading);
+      }
+
       this.primitivesStore.update({
         gnss: {
           status: "running",
           error: null,
           xMeters: sample.xMeters,
           yMeters: sample.yMeters,
-          headingDeg: sample.headingDegrees == null
-            ? null
-            : convertFieldHeadingToInternalDegrees(sample.headingDegrees),
+          headingDeg: internalHeadingDeg,
           positionAccuracyMeters: sample.positionAccuracyMeters,
           headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
           fixType: sample.fixType,

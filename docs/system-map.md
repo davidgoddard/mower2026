@@ -2,6 +2,28 @@
 
 This document maps problem domains to candidate files removing the need for Codex to scan files looking for where logic etc. is located
 
+## Constants
+- `src/constants.ts`: system-wide DESIGN DECISION constants (see `docs/CONSTANTS-ARCHITECTURE.md`).
+  - timing design decisions: sensor poll intervals (30Hz), manual drive loop rate, retry policies
+  - I2C hardware addresses: GNSS (0x52), motor (0x66), IMU (0x69) - system topology
+  - manual drive tuning: 12 parameters for joystick response, deadbands, spin thresholds
+  - motor configuration: direction signs for hardware inversion, max wheel speed
+  - network configuration: HTTP server defaults, port validation
+  - calibration parameters: IMU sample count
+- Implementation constants (protocol formats, scaling factors, register values) are LOCAL to their modules, not in this global file.
+
+## Heading and Angle Types
+- `src/geometry/headingTypes.ts`: branded types for heading representations to prevent mixing incompatible angle conventions at compile time.
+  - `FieldHeading`: GNSS/navigation heading, clockwise from north, range [0, 360)
+  - `InternalHeading`: Cartesian heading, counterclockwise from +X axis, range (-180, 180]
+  - `RelativeAngle`: signed angular difference for turns/errors, range (-180, 180]
+  - `RawAngle`: unnormalized angle marker type
+  - conversion functions: `fieldToInternal()`, `internalToField()`
+  - angle operations: `headingDifference()`, `addRelativeAngle()`
+  - normalization: `normalizeAngleTo180()`, `normalizeAngleTo360()`
+- `test/headingTypes.test.js`: comprehensive tests for heading type system including edge cases and real-world scenarios.
+- `docs/heading-types-guide.md`: developer guide for using branded heading types safely.
+
 ## Logging
 - `src/logging/sessionLogger.ts`: public async logger API and session lifecycle management.
 - `src/logging/logWriterWorker.ts`: dedicated worker-thread JSONL writer.
@@ -30,8 +52,9 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
 - `src/bus/crc.ts`: CRC16-CCITT implementation.
 - `src/sensing/sensorController.ts`: single 30Hz sensor polling controller and latest sensor state integration.
-  - heading API: `getHeadingDegrees()` and `setHeadingDegrees(...)` for absolute heading reset integration.
-  - heading convention: internal signed degrees `(-180, 180]`; GNSS field heading rotated via `90 - heading`.
+  - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading)` for absolute heading reset integration.
+  - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
+  - IMU yaw integration: uses `addRelativeAngle()` with `RelativeAngle` deltas from gyro samples.
   - motor API: `setMotorWheelSpeeds(...)` and `stopMotors()` command passthrough to hardware boundary.
 - `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers.
 - `src/i2c/types.ts`: I2C transport and queued request types.
@@ -65,5 +88,5 @@ This document maps problem domains to candidate files removing the need for Code
   - `lint`: runs static validation via TypeScript (`npm run typecheck`)
   - `typecheck`: strict type validation (`node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json`)
 - `tsconfig.json`: TypeScript compiler and project type-check settings.
-- `src/index.ts`: skeletal runtime module compiled into `dist/`.
-- `test/index.test.js`: unit tests executed by Node's built-in test runner.
+- `src/index.ts`: main module exports including heading type system for external consumers.
+- `test/index.test.js`: basic runtime module tests including heading normalization.

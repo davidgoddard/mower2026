@@ -165,9 +165,10 @@ test('SensorController allows heading reset and continues integration from new b
 
     await controller.start();
     await delay(4);
-    controller.setHeadingDegrees(200);
+    const { createInternalHeading, unwrapInternalHeading } = await import('../dist/index.js');
+    controller.setHeading(createInternalHeading(200));
     await delay(20);
-    const headingAfterReset = controller.getHeadingDegrees();
+    const headingAfterReset = unwrapInternalHeading(controller.getHeading());
     assert.equal(headingAfterReset <= 180, true);
     assert.equal(headingAfterReset > -180, true);
 

@@ -1,19 +1,33 @@
 import { startMowerServer, resolveServerPort } from "./appServer.js";
+import {
+  HTTP_SERVER_HOST_DEFAULT,
+  HTTP_SERVER_PORT_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_ADDRESS_MOTOR_DEFAULT,
+  MOTOR_LEFT_FORWARD_SIGN_DEFAULT,
+  MOTOR_RIGHT_FORWARD_SIGN_DEFAULT,
+  SENSOR_POLL_INTERVAL_MS,
+  CONTROLLER_STEERING_SIGN_DEFAULT,
+  CONTROLLER_SPEED_SIGN_DEFAULT,
+  MANUAL_DRIVE_LOOP_INTERVAL_MS,
+  MAX_WHEEL_SPEED_MPS_DEFAULT,
+} from "../constants.js";
 
-const host = process.env.MOWER_CORE_APP_HOST ?? "0.0.0.0";
-const port = resolveServerPort(process.env.MOWER_CORE_APP_PORT, 8090);
+const host = process.env.MOWER_CORE_APP_HOST ?? HTTP_SERVER_HOST_DEFAULT;
+const port = resolveServerPort(process.env.MOWER_CORE_APP_PORT, HTTP_SERVER_PORT_DEFAULT);
 const logDir = process.env.MOWER_LOG_DIR;
-const i2cBusNumber = Number(process.env.MOWER_I2C_BUS_NUMBER ?? 1);
-const gnssI2cAddress = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? 0x52);
-const motorI2cAddress = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? 0x66);
-const leftMotorForwardSign = Number(process.env.MOWER_LEFT_MOTOR_FORWARD_SIGN ?? -1);
-const rightMotorForwardSign = Number(process.env.MOWER_RIGHT_MOTOR_FORWARD_SIGN ?? -1);
-const sensorPollingIntervalMs = Number(process.env.MOWER_SENSOR_POLL_INTERVAL_MS ?? 33);
+const i2cBusNumber = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
+const gnssI2cAddress = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? I2C_ADDRESS_GNSS_DEFAULT);
+const motorI2cAddress = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? I2C_ADDRESS_MOTOR_DEFAULT);
+const leftMotorForwardSign = Number(process.env.MOWER_LEFT_MOTOR_FORWARD_SIGN ?? MOTOR_LEFT_FORWARD_SIGN_DEFAULT);
+const rightMotorForwardSign = Number(process.env.MOWER_RIGHT_MOTOR_FORWARD_SIGN ?? MOTOR_RIGHT_FORWARD_SIGN_DEFAULT);
+const sensorPollingIntervalMs = Number(process.env.MOWER_SENSOR_POLL_INTERVAL_MS ?? SENSOR_POLL_INTERVAL_MS);
 const controllerEnabled = (process.env.MOWER_CONTROLLER_ENABLED ?? "1") !== "0";
-const controllerSteeringSign = Number(process.env.MOWER_CONTROLLER_STEERING_SIGN ?? -1);
-const controllerSpeedSign = Number(process.env.MOWER_CONTROLLER_SPEED_SIGN ?? 1);
-const manualDriveLoopMs = Number(process.env.MOWER_MANUAL_DRIVE_LOOP_MS ?? 100);
-const maxWheelSpeedMetersPerSecond = Number(process.env.MOWER_MAX_WHEEL_SPEED_MPS ?? 0.75);
+const controllerSteeringSign = Number(process.env.MOWER_CONTROLLER_STEERING_SIGN ?? CONTROLLER_STEERING_SIGN_DEFAULT);
+const controllerSpeedSign = Number(process.env.MOWER_CONTROLLER_SPEED_SIGN ?? CONTROLLER_SPEED_SIGN_DEFAULT);
+const manualDriveLoopMs = Number(process.env.MOWER_MANUAL_DRIVE_LOOP_MS ?? MANUAL_DRIVE_LOOP_INTERVAL_MS);
+const maxWheelSpeedMetersPerSecond = Number(process.env.MOWER_MAX_WHEEL_SPEED_MPS ?? MAX_WHEEL_SPEED_MPS_DEFAULT);
 
 const runningServer = await startMowerServer({
   appName: "mower-core",

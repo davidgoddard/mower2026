@@ -1,6 +1,7 @@
 import { crc16Ccitt } from "./crc.js";
 import { FrameHeader, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 
+// Protocol frame format constants (implementation details)
 const START_OF_FRAME = 0x4d;
 const HEADER_SIZE = 9;
 const CRC_SIZE = 2;

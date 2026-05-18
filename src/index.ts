@@ -1,15 +1,24 @@
-export function normalizeHeadingDegrees(heading: number): number {
-  let normalized = heading;
-  while (normalized <= -180) {
-    normalized += 360;
-  }
-  while (normalized > 180) {
-    normalized -= 360;
-  }
-  return normalized;
-}
+export {
+  InternalHeading,
+  FieldHeading,
+  RelativeAngle,
+  RawAngle,
+  createInternalHeading,
+  createFieldHeading,
+  createRelativeAngle,
+  fieldToInternal,
+  internalToField,
+  headingDifference,
+  addRelativeAngle,
+  unwrapInternalHeading,
+  unwrapFieldHeading,
+  unwrapRelativeAngle,
+} from "./geometry/headingTypes.js";
 
 export { SessionLogger } from "./logging/index.js";
+
+// Export all constants for external use
+export * from "./constants.js";
 export { routeServerRequest, startMowerServer, resolveServerPort } from "./server/appServer.js";
 export { PrimitivesStore } from "./server/primitivesStore.js";
 export { I2cBusController } from "./i2c/i2cBusController.js";
