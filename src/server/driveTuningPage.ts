@@ -559,6 +559,12 @@ export function getDriveTuningPageHtml(): string {
       </div>
     </div>
 
+    <!-- Test Pattern Status -->
+    <div id="testPatternStatus" style="display: none; margin: 1.5rem 0; padding: 1rem; background: var(--bg-tertiary); border-radius: 0.5rem; border-left: 4px solid var(--primary-color);">
+      <div style="font-weight: 600; margin-bottom: 0.5rem;">Test Pattern Progress</div>
+      <div id="testPatternMessage" style="color: var(--text-secondary);"></div>
+    </div>
+
     <!-- Results Table -->
     <div class="results-section">
       <div class="section-header">
@@ -573,17 +579,18 @@ export function getDriveTuningPageHtml(): string {
           <thead>
             <tr>
               <th>Time</th>
-              <th>Target (x,y)</th>
-              <th>Final (x,y)</th>
+              <th>Distance</th>
+              <th>Initial Turn</th>
+              <th>Avg CTE</th>
+              <th>Max CTE</th>
               <th>Error X</th>
               <th>Error Y</th>
-              <th>Max CTE</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody id="resultsTableBody">
             <tr>
-              <td colspan="7">
+              <td colspan="8">
                 <div class="empty-state">
                   <div class="empty-icon">📊</div>
                   <div>No drive results yet. Execute a drive to see results here.</div>
@@ -670,22 +677,33 @@ export function getDriveTuningPageHtml(): string {
         if (data.history && data.history.length > 0) {
           resultsCount.textContent = \`\${data.history.length} drive\${data.history.length !== 1 ? 's' : ''}\`;
 
-          tbody.innerHTML = data.history.slice().reverse().slice(0, 50).map(result => \`
-            <tr class="\${result.status}">
-              <td>\${formatTime(result.timestamp)}</td>
-              <td class="position-cell">(\${result.targetPosition.xMeters.toFixed(3)}, \${result.targetPosition.yMeters.toFixed(3)})</td>
-              <td class="position-cell">(\${result.finalPosition.xMeters.toFixed(3)}, \${result.finalPosition.yMeters.toFixed(3)})</td>
-              <td class="error-cell \${getErrorClass(result.errorX)}">\${formatMeters(result.errorX)}</td>
-              <td class="error-cell \${getErrorClass(result.errorY)}">\${formatMeters(result.errorY)}</td>
-              <td>\${formatMeters(result.maxCteMeters)}</td>
-              <td><span class="status-cell status-\${result.status}">\${result.status}</span></td>
-            </tr>
-          \`).join('');
+          tbody.innerHTML = data.history.slice().reverse().slice(0, 50).map(result => {
+            // Calculate distance from start to target
+            const dx = result.targetPosition.xMeters - result.startPosition.xMeters;
+            const dy = result.targetPosition.yMeters - result.startPosition.yMeters;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            // Calculate initial heading turn required
+            const initialTurn = Math.atan2(dy, dx) * 180 / Math.PI;
+
+            return \`
+              <tr class="\${result.status}">
+                <td>\${formatTime(result.timestamp)}</td>
+                <td>\${formatMeters(distance)}</td>
+                <td>\${initialTurn.toFixed(1)}°</td>
+                <td>\${formatMeters(result.avgCteMeters)}</td>
+                <td>\${formatMeters(result.maxCteMeters)}</td>
+                <td class="error-cell \${getErrorClass(result.errorX)}">\${formatMeters(result.errorX)}</td>
+                <td class="error-cell \${getErrorClass(result.errorY)}">\${formatMeters(result.errorY)}</td>
+                <td><span class="status-cell status-\${result.status}">\${result.status}</span></td>
+              </tr>
+            \`;
+          }).join('');
         } else {
           resultsCount.textContent = '0 drives';
           tbody.innerHTML = \`
             <tr>
-              <td colspan="7">
+              <td colspan="8">
                 <div class="empty-state">
                   <div class="empty-icon">📊</div>
                   <div>No drive results yet. Execute a drive to see results here.</div>
@@ -725,14 +743,35 @@ export function getDriveTuningPageHtml(): string {
     // Run test pattern
     document.getElementById('runTestPattern').addEventListener('click', async () => {
       const button = document.getElementById('runTestPattern');
+      const statusDiv = document.getElementById('testPatternStatus');
+      const messageDiv = document.getElementById('testPatternMessage');
+
       button.disabled = true;
       button.innerHTML = '<span class="spinner"></span> Running Pattern...';
+      statusDiv.style.display = 'block';
+      messageDiv.textContent = 'Phase 1: Collecting waypoints by driving forward (7 waypoints, ~2.5s each)...';
 
       try {
-        await fetch('/api/drive/test-pattern', { method: 'POST' });
+        // Start test pattern (this will take time)
+        const response = await fetch('/api/drive/test-pattern', { method: 'POST' });
+        const results = await response.json();
+
+        messageDiv.textContent = \`Test pattern complete! Collected waypoints and ran \${results.length} test drives.\`;
+
         await updateStatus();
+
+        // Hide status after a few seconds
+        setTimeout(() => {
+          statusDiv.style.display = 'none';
+        }, 5000);
       } catch (error) {
-        alert('Failed to run test pattern: ' + error.message);
+        messageDiv.textContent = 'Failed: ' + error.message;
+        statusDiv.style.borderColor = 'var(--danger-color)';
+
+        setTimeout(() => {
+          statusDiv.style.display = 'none';
+          statusDiv.style.borderColor = 'var(--primary-color)';
+        }, 5000);
       } finally {
         button.disabled = false;
         button.innerHTML = 'Run Test Pattern';

@@ -486,43 +486,128 @@ export class DriveController {
   }
 
   /**
-   * Run test pattern through multiple target positions
+   * Run test pattern: collect waypoints by driving forward, then test random drives
+   *
+   * Pattern:
+   * 1. Collect 7 waypoints by driving forward 2-3 seconds each
+   * 2. Pick random non-nearest waypoint
+   * 3. Drive to it and measure performance
+   * 4. Repeat step 2-3 for multiple test drives
    */
-  async runTestPattern(targetPositions?: Position[]): Promise<DriveResult[]> {
-    const defaultPattern = [
-      createPosition(5, 0),
-      createPosition(0, 5),
-      createPosition(-5, 0),
-      createPosition(0, -5),
-      createPosition(10, 0),
-      createPosition(0, 10),
-      createPosition(-10, 0),
-      createPosition(0, -10),
-    ];
-
-    const targets = targetPositions ?? defaultPattern;
+  async runTestPattern(options?: { waypointCount?: number; testDrives?: number }): Promise<DriveResult[]> {
+    const waypointCount = options?.waypointCount ?? 7;
+    const testDriveCount = options?.testDrives ?? 5;
+    const driveTimeMs = 2500; // 2.5 seconds per waypoint collection
     const results: DriveResult[] = [];
 
-    this.logger.info("drive.test_pattern.started", { targetCount: targets.length });
+    this.logger.info("drive.test_pattern.started", {
+      waypointCount,
+      testDriveCount,
+      phase: "collecting_waypoints"
+    });
 
-    for (const target of targets) {
+    // Phase 1: Collect waypoints by driving forward
+    const waypoints: Position[] = [];
+
+    for (let i = 0; i < waypointCount; i++) {
       if (this.stopRequested) {
-        this.logger.warn("drive.test_pattern.stopped", { completed: results.length });
+        this.logger.warn("drive.test_pattern.stopped", { phase: "waypoint_collection", waypoints: waypoints.length });
         this.stopRequested = false;
         return results;
       }
 
-      const result = await this.executeDrive({
-        targetPosition: target,
-        learningEnabled: true,
-      });
-      results.push(result);
+      // Get current pose
+      const currentPose = this.poseFusion.getCurrentPose();
+      waypoints.push(currentPose.position);
 
-      // Small pause between drives
-      await this.sleep(500);
+      this.logger.info("drive.test_pattern.waypoint_collected", {
+        waypoint: i + 1,
+        position: {
+          x: unwrapMeters(currentPose.position.xMeters),
+          y: unwrapMeters(currentPose.position.yMeters),
+        },
+        heading: unwrapInternalHeading(currentPose.heading),
+      });
+
+      // Drive forward for 2-3 seconds (except on last waypoint)
+      if (i < waypointCount - 1) {
+        await this.sensorController.setMotorWheelSpeeds(this.fullSpeedCommand, this.fullSpeedCommand);
+        await this.sleep(driveTimeMs);
+        await this.sensorController.stopMotors();
+
+        // Wait for motors to settle
+        const rampDownTime = this.learningModel.getMotorRampDownTime();
+        await this.sleep(2 * rampDownTime + this.settleTimeMs);
+      }
     }
 
-    this.logger.info("drive.test_pattern.completed", { totalDrives: results.length });
+    this.logger.info("drive.test_pattern.waypoints_complete", {
+      totalWaypoints: waypoints.length,
+      phase: "test_drives"
+    });
+
+    // Phase 2: Pick random waypoints and drive to them
+    for (let testNum = 0; testNum < testDriveCount; testNum++) {
+      if (this.stopRequested) {
+        this.logger.warn("drive.test_pattern.stopped", {
+          phase: "test_drives",
+          completed: results.length
+        });
+        this.stopRequested = false;
+        return results;
+      }
+
+      // Get current position
+      const currentPose = this.poseFusion.getCurrentPose();
+      const currentPos = currentPose.position;
+
+      // Find waypoints that aren't the nearest (must be further than nearest + 1 meter)
+      const waypointsWithDistance = waypoints.map(wp => ({
+        position: wp,
+        distance: distanceBetween(currentPos, wp),
+      }));
+
+      waypointsWithDistance.sort((a, b) => unwrapMeters(a.distance) - unwrapMeters(b.distance));
+
+      // Filter out nearest waypoint and any within 1m of it
+      const minDistance = unwrapMeters(waypointsWithDistance[0].distance) + 1.0;
+      const eligibleWaypoints = waypointsWithDistance.filter(
+        wp => unwrapMeters(wp.distance) > minDistance
+      );
+
+      if (eligibleWaypoints.length === 0) {
+        this.logger.warn("drive.test_pattern.no_eligible_waypoints", { testNum: testNum + 1 });
+        break;
+      }
+
+      // Pick random eligible waypoint
+      const randomIndex = Math.floor(Math.random() * eligibleWaypoints.length);
+      const targetWaypoint = eligibleWaypoints[randomIndex];
+
+      this.logger.info("drive.test_pattern.test_drive_starting", {
+        testNum: testNum + 1,
+        of: testDriveCount,
+        targetDistance: unwrapMeters(targetWaypoint.distance),
+        eligibleWaypoints: eligibleWaypoints.length,
+      });
+
+      // Execute test drive
+      const result = await this.executeDrive({
+        targetPosition: targetWaypoint.position,
+        learningEnabled: true,
+      });
+
+      results.push(result);
+
+      // Small pause between test drives
+      await this.sleep(1000);
+    }
+
+    this.logger.info("drive.test_pattern.completed", {
+      totalWaypoints: waypoints.length,
+      testDrives: results.length
+    });
+
     return results;
   }
 
