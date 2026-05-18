@@ -41,9 +41,28 @@ export function getManualDrivePageHtml(): string {
     }
 
     .container {
-      max-width: 1400px;
+      max-width: 1600px;
       margin: 0 auto;
       padding: 1rem;
+    }
+
+    .main-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    .left-column {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .right-column {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
     }
 
     .header {
@@ -130,15 +149,14 @@ export function getManualDrivePageHtml(): string {
 
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      grid-template-columns: 1fr;
       gap: 1rem;
-      margin-bottom: 1.5rem;
     }
 
     .stat-card {
       background: var(--bg-primary);
       border-radius: 0.75rem;
-      padding: 1.25rem;
+      padding: 1rem;
       box-shadow: var(--shadow-sm);
     }
 
@@ -152,14 +170,14 @@ export function getManualDrivePageHtml(): string {
     }
 
     .stat-value {
-      font-size: 1.5rem;
+      font-size: 1.25rem;
       font-weight: 700;
       color: var(--text-primary);
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.25rem;
     }
 
     .stat-detail {
-      font-size: 0.875rem;
+      font-size: 0.8125rem;
       color: var(--text-secondary);
     }
 
@@ -186,16 +204,10 @@ export function getManualDrivePageHtml(): string {
       color: #991b1b;
     }
 
-    .details-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 1rem;
-    }
-
     .detail-card {
       background: var(--bg-primary);
       border-radius: 0.75rem;
-      padding: 1.25rem;
+      padding: 1rem;
       box-shadow: var(--shadow-sm);
     }
 
@@ -224,12 +236,22 @@ export function getManualDrivePageHtml(): string {
       color: var(--text-primary);
     }
 
+    @media (max-width: 1024px) {
+      .main-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .right-column {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
     @media (max-width: 768px) {
       h1 {
         font-size: 1.25rem;
       }
 
-      .stats-grid {
+      .right-column {
         grid-template-columns: 1fr;
       }
 
@@ -255,120 +277,125 @@ export function getManualDrivePageHtml(): string {
   </div>
 
   <div class="container">
-    <!-- Position Map -->
-    <div class="map-section">
-      <div class="section-title">Position Map (Last 10 Minutes)</div>
-      <canvas id="mapCanvas" width="1200" height="800"></canvas>
-      <div class="map-stats" id="mapStats">Waiting for position data...</div>
-    </div>
+    <div class="main-layout">
+      <!-- Left Column: Map + Primary Stats -->
+      <div class="left-column">
+        <!-- Position Map -->
+        <div class="map-section">
+          <div class="section-title">Position Map (Last 10 Minutes)</div>
+          <canvas id="mapCanvas" width="1200" height="800"></canvas>
+          <div class="map-stats" id="mapStats">Waiting for position data...</div>
+        </div>
 
-    <!-- Primary Stats -->
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Controller</div>
-        <div class="stat-value" id="controllerStatus">Waiting...</div>
-        <div class="stat-detail" id="controllerDetail">No controller state yet</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Command</div>
-        <div class="stat-value" id="commandStatus">Stopped</div>
-        <div class="stat-detail" id="commandDetail">No wheel command yet</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Position Estimate</div>
-        <div class="stat-value" id="estimateStatus">Waiting...</div>
-        <div class="stat-detail" id="estimateDetail">No fused estimate yet</div>
-      </div>
-    </div>
-
-    <!-- Controller Details -->
-    <div class="details-grid">
-      <div class="detail-card">
-        <div class="stat-label">Controller Demand</div>
-        <div class="detail-row">
-          <div class="detail-item">
-            <div class="detail-item-label">Angle</div>
-            <div class="detail-item-value" id="controllerAngle">—</div>
+        <!-- Primary Stats -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Controller</div>
+            <div class="stat-value" id="controllerStatus">Waiting...</div>
+            <div class="stat-detail" id="controllerDetail">No controller state yet</div>
           </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Speed</div>
-            <div class="detail-item-value" id="controllerSpeed">—</div>
+
+          <div class="stat-card">
+            <div class="stat-label">Command</div>
+            <div class="stat-value" id="commandStatus">Stopped</div>
+            <div class="stat-detail" id="commandDetail">No wheel command yet</div>
           </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Left Target</div>
-            <div class="detail-item-value" id="leftTarget">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Right Target</div>
-            <div class="detail-item-value" id="rightTarget">—</div>
+
+          <div class="stat-card">
+            <div class="stat-label">Position Estimate</div>
+            <div class="stat-value" id="estimateStatus">Waiting...</div>
+            <div class="stat-detail" id="estimateDetail">No fused estimate yet</div>
           </div>
         </div>
       </div>
 
-      <div class="detail-card">
-        <div class="stat-label">Motion Feedback</div>
-        <div class="detail-row">
-          <div class="detail-item">
-            <div class="detail-item-label">Left Actual</div>
-            <div class="detail-item-value" id="leftActual">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Right Actual</div>
-            <div class="detail-item-value" id="rightActual">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Vehicle Speed</div>
-            <div class="detail-item-value" id="vehicleSpeed">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Turn Bias</div>
-            <div class="detail-item-value" id="turnBias">—</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="detail-card">
-        <div class="stat-label">GNSS</div>
-        <div class="detail-row">
-          <div class="detail-item">
-            <div class="detail-item-label">Fix Type</div>
-            <div class="detail-item-value" id="gnssFix">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Heading</div>
-            <div class="detail-item-value" id="gnssHeading">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Speed</div>
-            <div class="detail-item-value" id="gnssSpeed">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Sample Age</div>
-            <div class="detail-item-value" id="gnssAge">—</div>
+      <!-- Right Column: Sensor Details (2x2 Grid) -->
+      <div class="right-column">
+        <div class="detail-card">
+          <div class="stat-label">Controller Demand</div>
+          <div class="detail-row">
+            <div class="detail-item">
+              <div class="detail-item-label">Angle</div>
+              <div class="detail-item-value" id="controllerAngle">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Speed</div>
+              <div class="detail-item-value" id="controllerSpeed">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Left Target</div>
+              <div class="detail-item-value" id="leftTarget">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Right Target</div>
+              <div class="detail-item-value" id="rightTarget">—</div>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="detail-card">
-        <div class="stat-label">IMU</div>
-        <div class="detail-row">
-          <div class="detail-item">
-            <div class="detail-item-label">Roll</div>
-            <div class="detail-item-value" id="imuRoll">—</div>
+        <div class="detail-card">
+          <div class="stat-label">Motion Feedback</div>
+          <div class="detail-row">
+            <div class="detail-item">
+              <div class="detail-item-label">Left Actual</div>
+              <div class="detail-item-value" id="leftActual">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Right Actual</div>
+              <div class="detail-item-value" id="rightActual">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Vehicle Speed</div>
+              <div class="detail-item-value" id="vehicleSpeed">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Turn Bias</div>
+              <div class="detail-item-value" id="turnBias">—</div>
+            </div>
           </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Pitch</div>
-            <div class="detail-item-value" id="imuPitch">—</div>
+        </div>
+
+        <div class="detail-card">
+          <div class="stat-label">GNSS</div>
+          <div class="detail-row">
+            <div class="detail-item">
+              <div class="detail-item-label">Fix Type</div>
+              <div class="detail-item-value" id="gnssFix">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Heading</div>
+              <div class="detail-item-value" id="gnssHeading">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Speed</div>
+              <div class="detail-item-value" id="gnssSpeed">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Sample Age</div>
+              <div class="detail-item-value" id="gnssAge">—</div>
+            </div>
           </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Gyro Z</div>
-            <div class="detail-item-value" id="imuGyroZ">—</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-item-label">Gravity</div>
-            <div class="detail-item-value" id="imuGravity">—</div>
+        </div>
+
+        <div class="detail-card">
+          <div class="stat-label">IMU</div>
+          <div class="detail-row">
+            <div class="detail-item">
+              <div class="detail-item-label">Roll</div>
+              <div class="detail-item-value" id="imuRoll">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Pitch</div>
+              <div class="detail-item-value" id="imuPitch">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Gyro Z</div>
+              <div class="detail-item-value" id="imuGyroZ">—</div>
+            </div>
+            <div class="detail-item">
+              <div class="detail-item-label">Gravity</div>
+              <div class="detail-item-value" id="imuGravity">—</div>
+            </div>
           </div>
         </div>
       </div>
