@@ -182,6 +182,12 @@ export const CONTROLLER_SPEED_SIGN_DEFAULT = 1;
  */
 export const MAX_WHEEL_SPEED_MPS_DEFAULT = 0.75;
 
+/**
+ * Default maximum wheel output command (normalized range [-1, 1])
+ * 1.0 = full forward output
+ */
+export const MAX_WHEEL_OUTPUT_PERCENT_DEFAULT = 1.0;
+
 // =============================================================================
 // NETWORK DEFAULTS
 // =============================================================================

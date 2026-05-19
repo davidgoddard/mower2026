@@ -14,26 +14,25 @@ test('computeManualDriveDemand produces stopped, arc, and spin modes', () => {
   const stopped = computeManualDriveDemand({
     speedDemand: 0,
     turnDemand: 0,
-    maxWheelSpeedMetersPerSecond: 0.75,
+    maxWheelOutputPercent: 1,
   });
   assert.equal(stopped.mode, 'stopped');
-  assert.equal(stopped.requestedLeftMetersPerSecond, 0);
-  assert.equal(stopped.requestedRightMetersPerSecond, 0);
+  assert.equal(stopped.requestedLeftWheelOutputPercent, 0);
+  assert.equal(stopped.requestedRightWheelOutputPercent, 0);
 
   const arc = computeManualDriveDemand({
     speedDemand: 0.6,
     turnDemand: 0.5,
-    maxWheelSpeedMetersPerSecond: 0.75,
+    maxWheelOutputPercent: 1,
   });
   assert.equal(arc.mode, 'arc');
-  assert.equal(arc.requestedRightMetersPerSecond > arc.requestedLeftMetersPerSecond, true);
+  assert.equal(arc.requestedRightWheelOutputPercent > arc.requestedLeftWheelOutputPercent, true);
 
   const spin = computeManualDriveDemand({
     speedDemand: 0.01,
     turnDemand: 1,
-    maxWheelSpeedMetersPerSecond: 0.75,
+    maxWheelOutputPercent: 1,
   });
   assert.equal(spin.mode, 'spin');
-  assert.equal(Math.round(spin.requestedLeftMetersPerSecond + spin.requestedRightMetersPerSecond), 0);
+  assert.equal(Math.round(spin.requestedLeftWheelOutputPercent + spin.requestedRightWheelOutputPercent), 0);
 });
-

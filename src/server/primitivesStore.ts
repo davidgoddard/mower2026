@@ -27,8 +27,8 @@ export interface PrimitiveSnapshot {
   motors: {
     status: "idle" | "running" | "error";
     error: string | null;
-    commandedLeftWheelSpeedMetersPerSecond: number | null;
-    commandedRightWheelSpeedMetersPerSecond: number | null;
+    commandedLeftWheelOutputPercent: number | null;
+    commandedRightWheelOutputPercent: number | null;
     leftWheelSpeedMetersPerSecond: number | null;
     rightWheelSpeedMetersPerSecond: number | null;
     leftRpm: number | null;
@@ -110,8 +110,8 @@ export class PrimitivesStore {
       motors: {
         status: "idle",
         error: null,
-        commandedLeftWheelSpeedMetersPerSecond: null,
-        commandedRightWheelSpeedMetersPerSecond: null,
+        commandedLeftWheelOutputPercent: null,
+        commandedRightWheelOutputPercent: null,
         leftWheelSpeedMetersPerSecond: null,
         rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,

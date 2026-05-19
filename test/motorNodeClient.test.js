@@ -29,20 +29,18 @@ function encodeFrame(messageType, sequence, payload) {
 }
 
 function encodeFeedbackPayload() {
-  const payload = new Uint8Array(26);
+  const payload = new Uint8Array(22);
   const view = new DataView(payload.buffer);
   view.setUint32(0, 1000, true);
-  view.setInt16(4, 250, true);
-  view.setInt16(6, -300, true);
-  view.setInt32(8, 123, true);
-  view.setInt32(12, -456, true);
-  view.setInt8(16, 40);
-  view.setInt8(17, -42);
-  view.setUint16(18, 15, true);
-  view.setUint16(20, 17, true);
-  view.setUint8(22, 1);
-  view.setUint16(23, 0x0004, true);
-  view.setUint8(25, 0);
+  view.setInt32(4, 123, true);
+  view.setInt32(8, -456, true);
+  view.setInt8(12, 40);
+  view.setInt8(13, -42);
+  view.setUint16(14, 15, true);
+  view.setUint16(16, 17, true);
+  view.setUint8(18, 1);
+  view.setUint16(19, 0x0004, true);
+  view.setUint8(21, 0);
   return payload;
 }
 
@@ -71,6 +69,12 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   assert.equal(writes[1].key, 'motor.stop');
   assert.equal(writes[1].priority, I2C_PRIORITY.stop);
 
+  const commandView = new DataView(writes[0].payload.buffer, writes[0].payload.byteOffset, writes[0].payload.byteLength);
+  assert.equal(commandView.getInt16(13, true), 500);
+  assert.equal(commandView.getInt16(15, true), -500);
+  assert.equal(commandView.getUint16(20, true), 1000);
+  assert.equal(commandView.getUint16(22, true), 1000);
+
   // Motor wheel-speed command frame type.
   assert.equal(writes[0].payload[3], 0x21);
   assert.equal(writes[1].payload[3], 0x21);
@@ -93,18 +97,15 @@ test('MotorNodeClient decodes motor feedback sample frame', async () => {
   const feedback = await client.refreshFeedback();
   assert.equal(queueReadCalls.length, 1);
   assert.equal(queueReadCalls[0].priority, I2C_PRIORITY.motorSpeed);
-  assert.equal(queueReadCalls[0].responseLength, 37);
+  assert.equal(queueReadCalls[0].responseLength, 33);
 
   assert.equal(feedback.timestampMillis, 1000);
-  assert.equal(feedback.leftWheelActualMetersPerSecond, 0.25);
-  assert.equal(feedback.rightWheelActualMetersPerSecond, -0.3);
   assert.equal(feedback.leftEncoderDelta, 123);
   assert.equal(feedback.rightEncoderDelta, -456);
-  assert.equal(feedback.leftPwmApplied, 40);
-  assert.equal(feedback.rightPwmApplied, -42);
+  assert.equal(feedback.leftPwmAppliedPercent, 40);
+  assert.equal(feedback.rightPwmAppliedPercent, -42);
   assert.equal(feedback.leftMotorCurrentAmps, 1.5);
   assert.equal(feedback.rightMotorCurrentAmps, 1.7);
   assert.equal(feedback.watchdogHealthy, true);
   assert.equal(feedback.faultFlags, 4);
 });
-

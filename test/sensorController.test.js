@@ -55,19 +55,17 @@ test('SensorController polls IMU and stores latest integrated heading state', as
       async readMotorFeedback() {
         return {
           timestampMillis: now,
-          leftWheelActualMetersPerSecond: 0.2,
-          rightWheelActualMetersPerSecond: 0.21,
-          leftEncoderDelta: 10,
-          rightEncoderDelta: 11,
-          leftPwmApplied: 42,
-          rightPwmApplied: 43,
+          leftEncoderDelta: 200,
+          rightEncoderDelta: 210,
+          leftPwmAppliedPercent: 42,
+          rightPwmAppliedPercent: 43,
           leftMotorCurrentAmps: 1.2,
           rightMotorCurrentAmps: 1.3,
           watchdogHealthy: true,
           faultFlags: 0,
         };
       },
-      async setMotorWheelSpeeds() {},
+      async setMotorWheelOutputs() {},
       async stopMotors() {},
       async close() {},
     };
@@ -136,17 +134,15 @@ test('SensorController allows heading reset and continues integration from new b
       async readMotorFeedback() {
         return {
           timestampMillis: now,
-          leftWheelActualMetersPerSecond: 0,
-          rightWheelActualMetersPerSecond: 0,
           leftEncoderDelta: 0,
           rightEncoderDelta: 0,
-          leftPwmApplied: 0,
-          rightPwmApplied: 0,
+          leftPwmAppliedPercent: 0,
+          rightPwmAppliedPercent: 0,
           watchdogHealthy: true,
           faultFlags: 0,
         };
       },
-      async setMotorWheelSpeeds() {},
+      async setMotorWheelOutputs() {},
       async stopMotors() {},
       async close() {},
     };
@@ -212,17 +208,15 @@ test('SensorController requires an active motor operation for speed commands and
       async readMotorFeedback() {
         return {
           timestampMillis: 0,
-          leftWheelActualMetersPerSecond: 0,
-          rightWheelActualMetersPerSecond: 0,
           leftEncoderDelta: 0,
           rightEncoderDelta: 0,
-          leftPwmApplied: 0,
-          rightPwmApplied: 0,
+          leftPwmAppliedPercent: 0,
+          rightPwmAppliedPercent: 0,
           watchdogHealthy: true,
           faultFlags: 0,
         };
       },
-      async setMotorWheelSpeeds(left, right) {
+      async setMotorWheelOutputs(left, right) {
         calls.push({ type: 'speed', left, right });
       },
       async stopMotors() {
@@ -243,20 +237,20 @@ test('SensorController requires an active motor operation for speed commands and
     });
 
     await assert.rejects(
-      controller.setMotorWheelSpeeds(0.5, -0.5),
+      controller.setMotorWheelOutputs(0.5, -0.5),
       /motor operation not active/,
     );
 
     controller.beginMotorOperation();
-    await controller.setMotorWheelSpeeds(0.5, -0.5);
+    await controller.setMotorWheelOutputs(0.5, -0.5);
     const afterSpeedCommand = primitivesStore.snapshot();
-    assert.equal(afterSpeedCommand.motors.commandedLeftWheelSpeedMetersPerSecond, 0.5);
-    assert.equal(afterSpeedCommand.motors.commandedRightWheelSpeedMetersPerSecond, -0.5);
+    assert.equal(afterSpeedCommand.motors.commandedLeftWheelOutputPercent, 0.5);
+    assert.equal(afterSpeedCommand.motors.commandedRightWheelOutputPercent, -0.5);
     await controller.stopMotors();
     await controller.endMotorOperation();
     const afterStop = primitivesStore.snapshot();
-    assert.equal(afterStop.motors.commandedLeftWheelSpeedMetersPerSecond, 0);
-    assert.equal(afterStop.motors.commandedRightWheelSpeedMetersPerSecond, 0);
+    assert.equal(afterStop.motors.commandedLeftWheelOutputPercent, 0);
+    assert.equal(afterStop.motors.commandedRightWheelOutputPercent, 0);
 
     assert.deepEqual(calls, [
       { type: 'speed', left: 0.5, right: -0.5 },

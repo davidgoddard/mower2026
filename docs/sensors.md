@@ -75,8 +75,8 @@ Current sensor-related shape:
   "motors": {
     "status": "idle",
     "error": null,
-    "commandedLeftWheelSpeedMetersPerSecond": null,
-    "commandedRightWheelSpeedMetersPerSecond": null,
+    "commandedLeftWheelOutputPercent": null,
+    "commandedRightWheelOutputPercent": null,
     "leftWheelSpeedMetersPerSecond": null,
     "rightWheelSpeedMetersPerSecond": null,
     "leftRpm": null,
@@ -97,10 +97,11 @@ Current sensor-related shape:
 
 The controller exposes motor command methods:
 
-- `setMotorWheelSpeeds(leftWheelTargetMetersPerSecond, rightWheelTargetMetersPerSecond)`
+- `setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent)` for controller-level motion requests
 - `stopMotors()`
 
-`stopMotors()` maps to a dedicated stop command with higher I2C priority than normal speed commands.
+`stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands.
+The motor node command payload sent over I2C uses normalized percentages, where `1.0` is full output and `0.0` is stop.
 
 ## Heading Convention
 
@@ -224,7 +225,7 @@ Both decode to the same application `GnssSample` shape.
   - `MOWER_LEFT_MOTOR_FORWARD_SIGN` (default `-1`)
   - `MOWER_RIGHT_MOTOR_FORWARD_SIGN` (default `-1`)
 
-Runtime convention is application-facing forward-positive wheel speeds. Direction-sign inversion is applied in the motor hardware gateway when converting:
+Runtime convention is application-facing forward-positive normalized wheel output (`-1..1`, where `1` is full forward output). Direction-sign inversion is applied in the motor hardware gateway when converting:
 - app command -> raw motor command
 - raw motor feedback -> app-facing feedback
 
@@ -234,32 +235,32 @@ The same common frame contract is used.
 
 Motor message types:
 
-- `0x21`: wheel speed command
+- `0x21`: wheel output command
 - `0x22`: motor feedback sample
 
-### Wheel speed command payload (`15` bytes)
+### Wheel output command payload (`15` bytes)
 
 - `timestampMillis` (`uint32`)
-- `leftWheelTargetMetersPerSecond` (`int16`, scale `1/1000`)
-- `rightWheelTargetMetersPerSecond` (`int16`, scale `1/1000`)
+- `leftWheelTargetPercent` (`int16`, scale `1/1000`)
+- `rightWheelTargetPercent` (`int16`, scale `1/1000`)
 - `enableDrive` (`uint8`, `1` enabled / `0` stop)
 - `commandTimeoutMillis` (`uint16`)
-- `maxAccelerationMetersPerSecondSquared` (`uint16`, optional, `0xffff` sentinel, scale `1/1000`)
-- `maxDecelerationMetersPerSecondSquared` (`uint16`, optional, `0xffff` sentinel, scale `1/1000`)
+- `maxAccelerationPercentPerSecond` (`uint16`, optional, `0xffff` sentinel, scale `1/1000`)
+- `maxDecelerationPercentPerSecond` (`uint16`, optional, `0xffff` sentinel, scale `1/1000`)
 
-### Motor feedback payload (`26` bytes)
+### Motor feedback payload (`22` bytes)
 
 - `timestampMillis` (`uint32`)
-- `leftWheelActualMetersPerSecond` (`int16`, scale `1/1000`)
-- `rightWheelActualMetersPerSecond` (`int16`, scale `1/1000`)
 - `leftEncoderDelta` (`int32`)
 - `rightEncoderDelta` (`int32`)
-- `leftPwmApplied` (`int8`)
-- `rightPwmApplied` (`int8`)
+- `leftPwmAppliedPercent` (`int8`)
+- `rightPwmAppliedPercent` (`int8`)
 - `leftMotorCurrentAmps` (optional `uint16`, `0xffff` sentinel, scale `1/10`)
 - `rightMotorCurrentAmps` (optional `uint16`, `0xffff` sentinel, scale `1/10`)
 - `watchdogHealthy` (`uint8`)
 - `faultFlags` (`uint16`)
+
+The ESP32 motor node now sends raw encoder deltas only. The Pi-side sensor controller converts those deltas into wheel speed estimates using the persisted encoder calibration in `config/pose-calibration.json`.
 
 For control/odometry purposes the most important motor feedback value is encoder delta per sample (`leftEncoderDelta`, `rightEncoderDelta`), which is intended to be integrated over time.
 

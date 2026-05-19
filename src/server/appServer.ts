@@ -22,7 +22,7 @@ import { getManualDrivePageHtml } from "./manualDrivePage.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition } from "../geometry/positionTypes.js";
-import { MAX_PORT_NUMBER } from "../constants.js";
+import { MAX_PORT_NUMBER, MAX_WHEEL_OUTPUT_PERCENT_DEFAULT } from "../constants.js";
 
 interface StartMowerServerOptions {
   appName?: string;
@@ -39,7 +39,7 @@ interface StartMowerServerOptions {
   controllerSteeringSign?: number;
   controllerSpeedSign?: number;
   manualDriveLoopMs?: number;
-  maxWheelSpeedMetersPerSecond?: number;
+  maxWheelOutputPercent?: number;
 }
 
 export interface RunningMowerServer {
@@ -483,6 +483,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger,
       primitivesStore: primitives,
       gateway: sensorGateway,
+      poseCalibration: poseCalibration!,
       pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
     });
     await sensorController.start();
@@ -497,7 +498,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         sensorController,
         hidController,
         controlIntervalMs: options.manualDriveLoopMs ?? 100,
-        maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
+        maxWheelOutputPercent: options.maxWheelOutputPercent ?? MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
       });
       manualDriveCoordinator.start();
     }
@@ -512,6 +513,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger,
       primitivesStore: primitives,
       gateway: sensorGateway,
+      poseCalibration: poseCalibration!,
       pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
     });
     await sensorController.start();
@@ -544,8 +546,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       motors: {
         status: "error",
         error: message,
-        commandedLeftWheelSpeedMetersPerSecond: null,
-        commandedRightWheelSpeedMetersPerSecond: null,
+        commandedLeftWheelOutputPercent: null,
+        commandedRightWheelOutputPercent: null,
         leftWheelSpeedMetersPerSecond: null,
         rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
@@ -572,7 +574,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger,
       learningModel: turnLearningModel,
       motorCalibration: motorCalibration!,
-      maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
+      maxWheelOutputPercent: options.maxWheelOutputPercent ?? MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
     });
 
     // Initialize pose fusion

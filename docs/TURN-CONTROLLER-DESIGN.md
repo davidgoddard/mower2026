@@ -103,7 +103,7 @@ interface TurnControllerOptions {
   sensorController: SensorController;
   logger: SessionLogger;
   learningModel: TurnLearningModel;
-  maxWheelSpeedMetersPerSecond?: number;
+  maxWheelOutputPercent?: number;
   pollingIntervalMs?: number;
   settleTimeMs?: number;
   nowMillis?: () => number;
@@ -158,9 +158,9 @@ async executeTurn(request: TurnRequest): Promise<TurnResult> {
   this.status = "turning";
   const wheelSpeed = this.maxWheelSpeed;
   if (request.direction === "ccw") {
-    await this.sensorController.setMotorWheelSpeeds(-wheelSpeed, wheelSpeed);
+    await this.sensorController.setMotorWheelOutputs(-wheelSpeed, wheelSpeed);
   } else {
-    await this.sensorController.setMotorWheelSpeeds(wheelSpeed, -wheelSpeed);
+    await this.sensorController.setMotorWheelOutputs(wheelSpeed, -wheelSpeed);
   }
   
   // 5. Monitor heading until brake point

@@ -190,7 +190,7 @@ export class DriveController {
 
         // 8. Engage motors at full speed
         this.status = "driving";
-        await this.sensorController.setMotorWheelSpeeds(this.fullSpeedCommand, this.fullSpeedCommand);
+        await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
 
         this.logger.info("drive.driving", {
           startPosition: {
@@ -401,7 +401,7 @@ export class DriveController {
     leftSpeed = Math.max(0, Math.min(this.fullSpeedCommand, leftSpeed));
     rightSpeed = Math.max(0, Math.min(this.fullSpeedCommand, rightSpeed));
 
-    await this.sensorController.setMotorWheelSpeeds(leftSpeed, rightSpeed);
+    await this.sensorController.setMotorWheelOutputs(leftSpeed, rightSpeed);
   }
 
   /**
@@ -621,7 +621,7 @@ export class DriveController {
       if (i < waypointCount - 1) {
         this.beginMotorOperation();
         try {
-          await this.sensorController.setMotorWheelSpeeds(this.fullSpeedCommand, this.fullSpeedCommand);
+          await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
           const driveCompleted = await this.sleepWithStopChecks(driveTimeMs);
           if (!driveCompleted || this.stopRequested || systemStop.isStopped()) {
             await this.sensorController.stopMotors();

@@ -5,9 +5,14 @@ export interface MotorDirectionMapping {
   readonly rightMotorForwardSign: 1 | -1;
 }
 
-export interface PhysicalWheelTargets {
-  readonly leftMetersPerSecond: number;
-  readonly rightMetersPerSecond: number;
+export interface WheelOutputTargets {
+  readonly leftPercent: number;
+  readonly rightPercent: number;
+}
+
+export interface NormalizedWheelTargets {
+  readonly leftPercent: number;
+  readonly rightPercent: number;
 }
 
 function normalizeDirectionSign(sign: number): 1 | -1 {
@@ -24,28 +29,34 @@ export function buildMotorDirectionMapping(
   };
 }
 
-export function mapPhysicalWheelTargetsToRaw(
-  mapping: MotorDirectionMapping,
-  physical: PhysicalWheelTargets,
-): PhysicalWheelTargets {
+export function clampNormalizedWheelTargets(
+  wheelOutputs: WheelOutputTargets,
+): NormalizedWheelTargets {
   return {
-    leftMetersPerSecond: physical.leftMetersPerSecond * mapping.leftMotorForwardSign,
-    rightMetersPerSecond: physical.rightMetersPerSecond * mapping.rightMotorForwardSign,
+    leftPercent: Math.max(-1, Math.min(1, wheelOutputs.leftPercent)),
+    rightPercent: Math.max(-1, Math.min(1, wheelOutputs.rightPercent)),
   };
 }
 
-export function mapRawMotorFeedbackToPhysical(
+export function mapNormalizedWheelTargetsToRaw(
+  mapping: MotorDirectionMapping,
+  normalized: NormalizedWheelTargets,
+): NormalizedWheelTargets {
+  return {
+    leftPercent: normalized.leftPercent * mapping.leftMotorForwardSign,
+    rightPercent: normalized.rightPercent * mapping.rightMotorForwardSign,
+  };
+}
+
+export function mapRawMotorFeedbackToAppConvention(
   mapping: MotorDirectionMapping,
   raw: MotorFeedbackSample,
 ): MotorFeedbackSample {
   return {
     ...raw,
-    leftWheelActualMetersPerSecond: raw.leftWheelActualMetersPerSecond * mapping.leftMotorForwardSign,
-    rightWheelActualMetersPerSecond: raw.rightWheelActualMetersPerSecond * mapping.rightMotorForwardSign,
     leftEncoderDelta: raw.leftEncoderDelta * mapping.leftMotorForwardSign,
     rightEncoderDelta: raw.rightEncoderDelta * mapping.rightMotorForwardSign,
-    leftPwmApplied: raw.leftPwmApplied * mapping.leftMotorForwardSign,
-    rightPwmApplied: raw.rightPwmApplied * mapping.rightMotorForwardSign,
+    leftPwmAppliedPercent: raw.leftPwmAppliedPercent * mapping.leftMotorForwardSign,
+    rightPwmAppliedPercent: raw.rightPwmAppliedPercent * mapping.rightMotorForwardSign,
   };
 }
-

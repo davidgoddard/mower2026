@@ -50,6 +50,15 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/purePursuitFollower.ts`: path-following stop checks and stop handling.
 
+## Motor Control
+- `src/motors/motorProtocol.ts`: normalized motor command frame contract and raw motor feedback telemetry types.
+- `src/motors/motorCodec.ts`: motor command/feedback frame encoding and decoding.
+- `src/motors/motorNodeClient.ts`: Pi-side motor I2C client, including ramp timing injection and percent-based command transmission.
+- `src/sensing/sensorController.ts`: converts raw motor encoder deltas into wheel-speed estimates using persisted calibration.
+- `src/sensing/sensorHardwareGateway.ts`: clamps normalized wheel outputs (`-1..1`) and applies direction mapping before sending to the motor client.
+- `external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino`: ESP32 motor controller firmware and ramp logic; treats wheel targets as percentages of full output.
+- `src/motors/motorMapping.ts`: motor sign mapping and normalized wheel-output clamp helpers.
+
 ## Turn Controller
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
   - executes on-the-spot turns using IMU heading integration
@@ -175,7 +184,7 @@ This document maps problem domains to candidate files removing the need for Code
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
   - IMU yaw integration: uses `addRelativeAngle()` with `RelativeAngle` deltas from gyro samples.
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
-  - motor API: `setMotorWheelSpeeds(...)` and `stopMotors()` command passthrough to hardware boundary.
+  - motor API: `setMotorWheelOutputs(...)` and `stopMotors()` command passthrough to hardware boundary.
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU

@@ -29,8 +29,9 @@ export { createPiSensorHardwareGateway } from "./sensing/sensorHardwareGateway.j
 export { MotorNodeClient } from "./motors/motorNodeClient.js";
 export {
   buildMotorDirectionMapping,
-  mapPhysicalWheelTargetsToRaw,
-  mapRawMotorFeedbackToPhysical,
+  clampNormalizedWheelTargets,
+  mapNormalizedWheelTargetsToRaw,
+  mapRawMotorFeedbackToAppConvention,
 } from "./motors/motorMapping.js";
 export { HidGameController } from "./controller/hidGameController.js";
 export { computeManualDriveDemand, normalizeManualTurnDemand } from "./control/manualDriveProfile.js";

@@ -1,17 +1,17 @@
 {
   "version": 1,
   "smallAngleThresholdDeg": 30,
-  "largeTurnBrakeCcwDeg": 40.719648170732164,
-  "largeTurnBrakeCwDeg": 40.303030487805465,
+  "largeTurnBrakeCcwDeg": 43.34741951219555,
+  "largeTurnBrakeCwDeg": 43.19074573170788,
   "smallTurnBrakeFractionCcw": 0.08885999999999987,
   "smallTurnBrakeFractionCw": 0.5,
-  "largeTurnSampleCountCcw": 76,
-  "largeTurnSampleCountCw": 72,
+  "largeTurnSampleCountCcw": 88,
+  "largeTurnSampleCountCw": 85,
   "smallTurnSampleCountCcw": 44,
   "smallTurnSampleCountCw": 0,
-  "lastLargeErrorCcwDeg": -0.2215731707319719,
-  "lastLargeErrorCwDeg": -0.28302845528443754,
+  "lastLargeErrorCcwDeg": -2.943475609756206,
+  "lastLargeErrorCwDeg": -4.01807113821144,
   "lastSmallErrorCcwDeg": 2.1700000000000017,
   "lastSmallErrorCwDeg": 0,
-  "lastUpdated": "2026-05-18T17:53:28.862Z"
+  "lastUpdated": "2026-05-19T12:12:51.661Z"
 }
