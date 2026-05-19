@@ -29,11 +29,12 @@ import {
   unwrapMeters,
 } from "../geometry/positionTypes.js";
 import { ENCODER_METERS_PER_TICK_DEFAULT } from "../constants.js";
+import { PoseCalibration } from "../config/poseCalibration.js";
 
 export interface PoseFusionOptions {
   sensorController: SensorController;
   logger: SessionLogger;
-  encoderMetersPerTick?: number;
+  poseCalibration?: PoseCalibration;
 }
 
 export interface PoseFusionEvents {
@@ -43,6 +44,7 @@ export interface PoseFusionEvents {
 export class PoseFusion extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly sensorController: SensorController;
+  private readonly poseCalibration: PoseCalibration | null;
 
   private running = false;
 
@@ -78,7 +80,8 @@ export class PoseFusion extends EventEmitter {
     super();
     this.logger = options.logger.child({ context: "sensing", source: "PoseFusion" });
     this.sensorController = options.sensorController;
-    this.encoderMetersPerTick = options.encoderMetersPerTick ?? ENCODER_METERS_PER_TICK_DEFAULT;
+    this.poseCalibration = options.poseCalibration ?? null;
+    this.encoderMetersPerTick = options.poseCalibration?.getEncoderCalibration() ?? ENCODER_METERS_PER_TICK_DEFAULT;
 
     // Bind event handlers to maintain 'this' context
     this.onGnssPositionUpdate = this.onGnssPositionUpdate.bind(this);
@@ -135,8 +138,12 @@ export class PoseFusion extends EventEmitter {
     });
   }
 
-  setEncoderCalibration(metersPerTick: number): void {
+  async setEncoderCalibration(metersPerTick: number): Promise<void> {
     this.encoderMetersPerTick = metersPerTick;
+    if (this.poseCalibration) {
+      this.poseCalibration.setEncoderCalibration(metersPerTick);
+      await this.poseCalibration.saveParameters();
+    }
     this.logger.info("pose_fusion.encoder_calibration_set", { metersPerTick });
   }
 

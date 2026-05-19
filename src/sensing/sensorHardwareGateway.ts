@@ -7,6 +7,7 @@ import { MotorNodeClient } from "../motors/motorNodeClient.js";
 import { MotorFeedbackSample } from "../motors/motorProtocol.js";
 import { Bmi160ImuSensor } from "../imu/bmi160ImuSensor.js";
 import { ImuSample } from "../imu/types.js";
+import { MotorCalibration } from "../config/motorCalibration.js";
 
 export interface SensorHardwareGateway {
   initialise(): Promise<void>;
@@ -24,6 +25,7 @@ interface PiSensorHardwareGatewayOptions {
   motorAddress: number;
   leftMotorForwardSign: number;
   rightMotorForwardSign: number;
+  motorCalibration: MotorCalibration;
 }
 
 class PiSensorHardwareGateway implements SensorHardwareGateway {
@@ -31,6 +33,7 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
   private readonly gnssAddress: number;
   private readonly motorAddress: number;
   private readonly motorMapping: MotorDirectionMapping;
+  private readonly motorCalibration: MotorCalibration;
   private controller: I2cBusController | null = null;
   private imuSensor: Bmi160ImuSensor | null = null;
   private gnssClient: GnssNodeClient | null = null;
@@ -41,6 +44,7 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     this.gnssAddress = options.gnssAddress;
     this.motorAddress = options.motorAddress;
     this.motorMapping = buildMotorDirectionMapping(options.leftMotorForwardSign, options.rightMotorForwardSign);
+    this.motorCalibration = options.motorCalibration;
   }
 
   async initialise(): Promise<void> {
@@ -48,7 +52,10 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     this.controller = new I2cBusController(transport);
     this.imuSensor = new Bmi160ImuSensor(this.controller);
     this.gnssClient = new GnssNodeClient(this.controller, { address: this.gnssAddress });
-    this.motorClient = new MotorNodeClient(this.controller, { address: this.motorAddress });
+    this.motorClient = new MotorNodeClient(this.controller, {
+      address: this.motorAddress,
+      motorCalibration: this.motorCalibration,
+    });
 
     await this.imuSensor.initialise();
     await this.imuSensor.calibrateGyro();
@@ -123,7 +130,8 @@ export async function createPiSensorHardwareGateway(
     motorAddress?: number;
     leftMotorForwardSign?: number;
     rightMotorForwardSign?: number;
-  } = {},
+    motorCalibration: MotorCalibration;
+  },
 ): Promise<SensorHardwareGateway> {
   const gateway = new PiSensorHardwareGateway({
     busNumber,
@@ -131,6 +139,7 @@ export async function createPiSensorHardwareGateway(
     motorAddress: options.motorAddress ?? 0x66,
     leftMotorForwardSign: options.leftMotorForwardSign ?? -1,
     rightMotorForwardSign: options.rightMotorForwardSign ?? -1,
+    motorCalibration: options.motorCalibration,
   });
   await gateway.initialise();
   return gateway;

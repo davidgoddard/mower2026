@@ -1,8 +1,6 @@
 {
-  "version": 3,
+  "version": 1,
   "smallAngleThresholdDeg": 30,
-  "motorRampDownTimeMs": 700,
-  "motorRampUpTimeMs": 600,
   "largeTurnBrakeCcwDeg": 40.719648170732164,
   "largeTurnBrakeCwDeg": 40.303030487805465,
   "smallTurnBrakeFractionCcw": 0.08885999999999987,

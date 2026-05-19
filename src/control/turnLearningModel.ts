@@ -16,10 +16,9 @@ import {
   TurnLearningInput,
   TurnLearningParameters,
   TurnDirection,
+  TurnLearningBin,
 } from "./turnControllerTypes.js";
 import {
-  MOTOR_RAMP_DOWN_TIME_MS,
-  MOTOR_RAMP_UP_TIME_MS,
   TURN_SMALL_ANGLE_THRESHOLD_DEG,
   TURN_LEARNING_RATE,
   TURN_LEARNING_PARAMETERS_PATH,
@@ -33,8 +32,6 @@ export interface TurnLearningModelOptions {
 interface LegacyTurnLearningParametersV2 {
   version?: unknown;
   smallAngleThresholdDeg?: unknown;
-  motorRampDownTimeMs?: unknown;
-  motorRampUpTimeMs?: unknown;
   largeTurnBrakeCcwDeg?: unknown;
   largeTurnBrakeCwDeg?: unknown;
   largeTurnSampleCountCcw?: unknown;
@@ -72,11 +69,15 @@ export class TurnLearningModel {
           path: this.parametersPath,
           using: "defaults",
         });
+        this.parameters = this.createDefaultParameters();
+        await this.saveParameters();
       } else {
         this.logger.warn("turn.learning.load_failed", {
           error: String(error),
           using: "defaults",
         });
+        this.parameters = this.createDefaultParameters();
+        await this.saveParameters();
       }
     }
   }
@@ -154,6 +155,12 @@ export class TurnLearningModel {
     return createRelativeAngle(brakeDistanceDeg);
   }
 
+  getBrakeAngle(requestedAngleDeg: number, direction: TurnDirection): RelativeAngle {
+    const requested = Math.abs(requestedAngleDeg);
+    const brakeDistance = unwrapRelativeAngle(this.getBrakeDistance(direction));
+    return createRelativeAngle(Math.max(1, Math.min(requested, brakeDistance)));
+  }
+
   getSmallTurnBrakeFraction(direction: TurnDirection): number {
     return direction === "ccw"
       ? this.parameters.smallTurnBrakeFractionCcw
@@ -164,16 +171,20 @@ export class TurnLearningModel {
     return this.parameters.smallAngleThresholdDeg;
   }
 
-  getMotorRampDownTime(): number {
-    return this.parameters.motorRampDownTimeMs;
-  }
-
-  getMotorRampUpTime(): number {
-    return this.parameters.motorRampUpTimeMs;
-  }
-
   getParameters(): TurnLearningParameters {
-    return this.parameters;
+    const parameters: TurnLearningBin[] = [];
+    for (let requestedAngleDeg = 10; requestedAngleDeg <= 180; requestedAngleDeg += 10) {
+      parameters.push({
+        requestedAngleDeg,
+        brakeDistanceDeg: unwrapRelativeAngle(this.getBrakeDistance("ccw")),
+        direction: "ccw",
+      });
+    }
+
+    return {
+      ...this.parameters,
+      parameters,
+    };
   }
 
   async resetToDefaults(): Promise<void> {
@@ -191,10 +202,8 @@ export class TurnLearningModel {
 
     if (typeof raw.smallTurnBrakeFractionCcw === "number" && typeof raw.smallTurnBrakeFractionCw === "number") {
       return {
-        version: this.readNumber(raw.version, 3),
+        version: 1,
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
-        motorRampDownTimeMs: this.readNumber(raw.motorRampDownTimeMs, MOTOR_RAMP_DOWN_TIME_MS),
-        motorRampUpTimeMs: this.readNumber(raw.motorRampUpTimeMs, MOTOR_RAMP_UP_TIME_MS),
         largeTurnBrakeCcwDeg: this.readNumber(raw.largeTurnBrakeCcwDeg, 15),
         largeTurnBrakeCwDeg: this.readNumber(raw.largeTurnBrakeCwDeg, 15),
         smallTurnBrakeFractionCcw: this.readNumber(raw.smallTurnBrakeFractionCcw, 0.5),
@@ -214,10 +223,8 @@ export class TurnLearningModel {
     if (typeof raw.largeTurnBrakeCcwDeg === "number" && typeof raw.largeTurnBrakeCwDeg === "number") {
       const legacy = raw as LegacyTurnLearningParametersV2;
       return {
-        version: 3,
+        version: 1,
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
-        motorRampDownTimeMs: this.readNumber(legacy.motorRampDownTimeMs, MOTOR_RAMP_DOWN_TIME_MS),
-        motorRampUpTimeMs: this.readNumber(legacy.motorRampUpTimeMs, MOTOR_RAMP_UP_TIME_MS),
         largeTurnBrakeCcwDeg: this.readNumber(legacy.largeTurnBrakeCcwDeg, 15),
         largeTurnBrakeCwDeg: this.readNumber(legacy.largeTurnBrakeCwDeg, 15),
         smallTurnBrakeFractionCcw: 0.5,
@@ -239,10 +246,8 @@ export class TurnLearningModel {
 
   private createDefaultParameters(): TurnLearningParameters {
     return {
-      version: 3,
+      version: 1,
       smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
-      motorRampDownTimeMs: MOTOR_RAMP_DOWN_TIME_MS,
-      motorRampUpTimeMs: MOTOR_RAMP_UP_TIME_MS,
       largeTurnBrakeCcwDeg: 15,
       largeTurnBrakeCwDeg: 15,
       smallTurnBrakeFractionCcw: 0.5,

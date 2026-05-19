@@ -2,7 +2,6 @@
  * Drive learning model - adaptive parameter tuning for drive controller
  */
 
-import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
@@ -11,17 +10,16 @@ import {
   DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
   DRIVE_CTE_GAIN_DEFAULT,
   DRIVE_MIN_DISTANCE_FOR_LEARNING_METERS,
-  MOTOR_RAMP_DOWN_TIME_MS,
   DRIVE_TARGET_CTE_METERS,
-  DATA_DIR,
+  DRIVE_LEARNING_PARAMETERS_PATH,
 } from "../constants.js";
+import { readJsonFile, writeJsonFile } from "../config/jsonFileStore.js";
 
 export interface DriveParameters {
   version: number;
   brakeDistanceMeters: number; // Single value for full-speed drives
   cteGain: number; // Proportional gain for CTE correction
   minDriveDistanceForLearning: number; // Threshold for short drives (meters)
-  motorRampDownTimeMs: number; // From hardware spec
   updatedAt: string;
 }
 
@@ -44,12 +42,13 @@ export interface DriveLearningModelOptions {
 export class DriveLearningModel {
   private readonly logger: LoggerScope;
   private readonly parametersPath: string;
+  private readonly legacyParametersPath: string;
   private parameters: DriveParameters;
 
   constructor(options: DriveLearningModelOptions) {
     this.logger = options.logger.child({ context: "control", source: "DriveLearningModel" });
-    this.parametersPath =
-      options.parametersPath ?? path.join(DATA_DIR, "drive-learning-params.json");
+    this.parametersPath = options.parametersPath ?? DRIVE_LEARNING_PARAMETERS_PATH;
+    this.legacyParametersPath = path.join("data", "drive-learning-params.json");
 
     // Initialize with defaults
     this.parameters = this.createDefaultParameters();
@@ -57,11 +56,29 @@ export class DriveLearningModel {
 
   async loadParameters(): Promise<void> {
     try {
-      const content = await fs.readFile(this.parametersPath, "utf8");
-      this.parameters = JSON.parse(content);
+      const raw = await readJsonFile(this.parametersPath);
+      this.parameters = this.normalizeParameters(raw);
       this.logger.info("drive.learning.parameters_loaded", { path: this.parametersPath });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        try {
+          const legacyRaw = await readJsonFile(this.legacyParametersPath);
+          this.parameters = this.normalizeParameters(legacyRaw);
+          this.logger.info("drive.learning.parameters_migrated", {
+            from: this.legacyParametersPath,
+            to: this.parametersPath,
+          });
+          await this.saveParameters();
+          return;
+        } catch (legacyError) {
+          if ((legacyError as NodeJS.ErrnoException).code !== "ENOENT") {
+            this.logger.warn("drive.learning.legacy_load_failed", {
+              path: this.legacyParametersPath,
+              error: legacyError instanceof Error ? legacyError.message : String(legacyError),
+            });
+          }
+        }
+
         this.logger.info("drive.learning.parameters_not_found", {
           path: this.parametersPath,
           usingDefaults: true,
@@ -73,6 +90,7 @@ export class DriveLearningModel {
           error: error instanceof Error ? error.message : String(error),
         });
         this.parameters = this.createDefaultParameters();
+        await this.saveParameters();
       }
     }
   }
@@ -80,7 +98,7 @@ export class DriveLearningModel {
   async saveParameters(): Promise<void> {
     try {
       this.parameters.updatedAt = new Date().toISOString();
-      await fs.writeFile(this.parametersPath, JSON.stringify(this.parameters, null, 2), "utf8");
+      await writeJsonFile(this.parametersPath, this.parameters);
       this.logger.info("drive.learning.parameters_saved", { path: this.parametersPath });
     } catch (error) {
       this.logger.error("drive.learning.save_failed", {
@@ -95,10 +113,6 @@ export class DriveLearningModel {
 
   getCteGain(): number {
     return this.parameters.cteGain;
-  }
-
-  getMotorRampDownTime(): number {
-    return this.parameters.motorRampDownTimeMs;
   }
 
   getParameters(): DriveParameters {
@@ -175,8 +189,32 @@ export class DriveLearningModel {
       brakeDistanceMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
       cteGain: DRIVE_CTE_GAIN_DEFAULT,
       minDriveDistanceForLearning: DRIVE_MIN_DISTANCE_FOR_LEARNING_METERS,
-      motorRampDownTimeMs: MOTOR_RAMP_DOWN_TIME_MS,
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  private normalizeParameters(raw: unknown): DriveParameters {
+    if (!this.isRecord(raw)) {
+      return this.createDefaultParameters();
+    }
+
+    return {
+      version: 1,
+      brakeDistanceMeters: this.readNumber(raw.brakeDistanceMeters, DRIVE_BRAKE_DISTANCE_DEFAULT_METERS),
+      cteGain: this.readNumber(raw.cteGain, DRIVE_CTE_GAIN_DEFAULT),
+      minDriveDistanceForLearning: this.readNumber(
+        raw.minDriveDistanceForLearning,
+        DRIVE_MIN_DISTANCE_FOR_LEARNING_METERS,
+      ),
+      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
+    };
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+  }
+
+  private readNumber(value: unknown, fallback: number): number {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
   }
 }

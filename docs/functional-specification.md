@@ -59,6 +59,43 @@ A Systemctl registered file must be available that will start the main applicati
 sudo systemctl restart mower
 ```
 
+## Configuration
+
+The system shall store persistent configuration in the `config/` folder, split by concern:
+
+- `config/motor-calibration.json`
+  - motor ramp-up time
+  - motor ramp-down time
+  - motor-specific calibration values
+- `config/pose-calibration.json`
+  - encoder meters-per-tick calibration
+- `config/turn-learning-parameters.json`
+  - turn brake distances and turn learning history
+- `config/drive-learning-params.json`
+  - drive brake distance and CTE learning history
+
+The application shall:
+- load these files at startup
+- create them with defaults when missing
+- persist updates back to the same file
+- keep hardware calibration separate from operational learning
+
+## Stop Behaviour
+
+The system shall maintain a global stop state that can be raised by:
+- user action, such as pressing the stop button or calling the stop API
+- execution failure, timeout, or other runtime safety condition
+
+When stop is set:
+- all active loops shall check the stop state and return or exit promptly
+- the sensor controller loop shall continue to send zero wheel speed commands with motor disable asserted until stop is cleared
+- active operations shall not continue silently in the background
+
+The stop state shall be cleared only when:
+- the user requests a new operation
+- the system restarts
+
+Stop requests and clears shall be logged centrally, including the source that raised or cleared the state.
 
 ## Primitives
 
@@ -415,4 +452,3 @@ The retry loop involves retracing the path backwards for the last 5 waypoints if
 If turning on the spot, then simply turn the other way for 2 seconds and then retry going forward.  Note that this will require the angles to be managed so that the original target heading is reached even if a back-up and retry occurs.
 
 Logging should indicate that the retry has occured and which condition was detected and the context in which it occured such as line following or turning.
-

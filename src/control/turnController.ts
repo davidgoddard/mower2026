@@ -6,6 +6,7 @@ import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { TurnLearningModel } from "./turnLearningModel.js";
+import { MotorCalibration } from "../config/motorCalibration.js";
 import {
   InternalHeading,
   RelativeAngle,
@@ -24,6 +25,7 @@ import {
   MAX_WHEEL_SPEED_MPS_DEFAULT,
   TURN_SETTLE_TIME_MS,
   TURN_HISTORY_MAX_SIZE,
+  MOTOR_RAMP_DOWN_TIME_MS,
   TURN_SMALL_CRAWL_SPEED_FACTOR,
 } from "../constants.js";
 import { SENSOR_EVENTS, ImuHeadingUpdateEvent } from "../sensing/sensorEvents.js";
@@ -37,6 +39,7 @@ export interface TurnControllerOptions {
   sensorController: SensorController;
   logger: SessionLogger;
   learningModel: TurnLearningModel;
+  motorCalibration?: MotorCalibration;
   maxWheelSpeedMetersPerSecond?: number;
   settleTimeMs?: number;
   nowMillis?: () => number;
@@ -47,6 +50,7 @@ export class TurnController {
   private readonly logger: LoggerScope;
   private readonly sensorController: SensorController;
   private readonly learningModel: TurnLearningModel;
+  private readonly motorCalibration: MotorCalibration | null;
   private readonly maxWheelSpeed: number;
   private readonly settleTimeMs: number;
   private readonly nowMillis: () => number;
@@ -73,6 +77,7 @@ export class TurnController {
     this.logger = options.logger.child({ context: "control", source: "TurnController" });
     this.sensorController = options.sensorController;
     this.learningModel = options.learningModel;
+    this.motorCalibration = options.motorCalibration ?? null;
     this.maxWheelSpeed = options.maxWheelSpeedMetersPerSecond ?? MAX_WHEEL_SPEED_MPS_DEFAULT;
     this.settleTimeMs = options.settleTimeMs ?? TURN_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
@@ -108,15 +113,27 @@ export class TurnController {
 
         // 2. Get predicted brake angle from learning model
         const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
-        this.turnBrakeDistance = this.learningModel.getBrakeDistance(request.direction);
+        if (typeof (this.learningModel as any).getBrakeAngle === "function") {
+          this.turnBrakeDistance = (this.learningModel as any).getBrakeAngle(
+            Math.abs(unwrapRelativeAngle(request.targetAngle)),
+            request.direction,
+          );
+        } else {
+          this.turnBrakeDistance = this.learningModel.getBrakeDistance(request.direction);
+        }
 
         // 3. Check if this is a "small angle" case
         this.turnIsSmallAngle = absAngle < this.learningModel.getSmallAngleThreshold();
+        const brakeDistance = this.turnBrakeDistance ?? createRelativeAngle(0);
+        const smallTurnBrakeFraction = typeof (this.learningModel as any).getSmallTurnBrakeFraction === "function"
+          ? (this.learningModel as any).getSmallTurnBrakeFraction(request.direction)
+          : 0.5;
 
         this.logger.info("turn.brake_plan", {
           requestedAngle: absAngle,
-          largeBrakeDistanceDeg: unwrapRelativeAngle(this.turnBrakeDistance),
+          largeBrakeDistanceDeg: unwrapRelativeAngle(brakeDistance),
           smallCrawlSpeedMetersPerSecond: this.maxWheelSpeed * TURN_SMALL_CRAWL_SPEED_FACTOR,
+          smallTurnBrakeFraction,
           smallAngleThreshold: this.learningModel.getSmallAngleThreshold(),
           turnIsSmallAngle: this.turnIsSmallAngle,
         });
@@ -165,7 +182,12 @@ export class TurnController {
    * Event handler for IMU heading updates (called at 30Hz by sensor controller)
    */
   private async onHeadingUpdate(event: ImuHeadingUpdateEvent): Promise<void> {
-    if (this.status !== "turning" || !this.turnStartHeading || !this.turnBrakeDistance || !this.currentTurn) {
+    if (
+      this.status !== "turning" ||
+      this.turnStartHeading === null ||
+      this.turnBrakeDistance === null ||
+      !this.currentTurn
+    ) {
       return;
     }
 
@@ -208,7 +230,11 @@ export class TurnController {
     let shouldBrake = false;
 
     // For small angles, stop at the target using crawl speed and a hard halt.
-    if (this.turnIsSmallAngle && absProgress >= absAngle) {
+    const smallTurnBrakeFraction = typeof (this.learningModel as any).getSmallTurnBrakeFraction === "function"
+      ? (this.learningModel as any).getSmallTurnBrakeFraction(this.currentTurn.direction)
+      : 0.5;
+    const smallTurnBrakeProgress = absAngle * smallTurnBrakeFraction;
+    if (this.turnIsSmallAngle && absProgress >= smallTurnBrakeProgress) {
       shouldBrake = true;
     }
 
@@ -230,7 +256,7 @@ export class TurnController {
    * Complete turn after brake point reached
    */
   private async completeTurn(request: TurnRequest): Promise<void> {
-    if (!this.turnStartHeading || !this.turnBrakeDistance) {
+    if (this.turnStartHeading === null || this.turnBrakeDistance === null) {
       return;
     }
 
@@ -253,7 +279,7 @@ export class TurnController {
         await this.sensorController.setMotorWheelSpeeds(0, 0);
 
         // 7. Wait for motor ramp-down (2x ramp-down time per spec)
-        const rampDownTime = this.learningModel.getMotorRampDownTime();
+        const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
         this.logger.info("turn.ramp_down_wait", {
           durationMs: 2 * rampDownTime,
         });
@@ -472,15 +498,16 @@ export class TurnController {
    * Sleep in short chunks so stop requests can interrupt long waits.
    */
   private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    const endTime = this.nowMillis() + delayMs;
+    let remainingMs = delayMs;
 
-    while (this.nowMillis() < endTime) {
+    while (remainingMs > 0) {
       if (this.stopRequested || this.tuningStopRequested || systemStop.isStopped()) {
         return false;
       }
 
-      const remaining = endTime - this.nowMillis();
-      await this.sleep(Math.min(50, Math.max(0, remaining)));
+      const chunkMs = Math.min(50, remainingMs);
+      await this.sleep(chunkMs);
+      remainingMs -= chunkMs;
     }
 
     return true;
@@ -528,7 +555,10 @@ export class TurnController {
     }
 
     this.motorOperationActive = true;
-    this.sensorController.beginMotorOperation();
+    const beginMotorOperation = (this.sensorController as any).beginMotorOperation;
+    if (typeof beginMotorOperation === "function") {
+      beginMotorOperation.call(this.sensorController);
+    }
   }
 
   private async endMotorOperation(): Promise<void> {
@@ -537,6 +567,15 @@ export class TurnController {
     }
 
     this.motorOperationActive = false;
-    await this.sensorController.endMotorOperation();
+    const endMotorOperation = (this.sensorController as any).endMotorOperation;
+    if (typeof endMotorOperation === "function") {
+      await endMotorOperation.call(this.sensorController);
+      return;
+    }
+
+    const stopMotors = (this.sensorController as any).stopMotors;
+    if (typeof stopMotors === "function") {
+      await stopMotors.call(this.sensorController);
+    }
   }
 }

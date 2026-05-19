@@ -3,7 +3,7 @@ export interface ImuSample {
   angularVelocity: {
     zDegreesPerSecond: number;
   };
-  acceleration: {
+  acceleration?: {
     xMetersPerSecondSquared: number;
     yMetersPerSecondSquared: number;
     zMetersPerSecondSquared: number;

@@ -12,6 +12,8 @@ import { systemStop } from "../control/systemStop.js";
 import { PathStore } from "../pathfollowing/pathStore.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { StubSensorGateway } from "../sensing/stubSensorGateway.js";
+import { MotorCalibration } from "../config/motorCalibration.js";
+import { PoseCalibration } from "../config/poseCalibration.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -90,6 +92,7 @@ export function routeServerRequest(
   driveController: DriveController | null,
   driveLearningModel: DriveLearningModel | null,
   poseFusion: PoseFusion | null,
+  motorCalibration: MotorCalibration | null,
   pathStore: PathStore | null,
 ): RouteResponse {
   if (method === "GET" && pathname === "/") {
@@ -184,7 +187,7 @@ export function routeServerRequest(
   }
 
   if (method === "GET" && pathname === "/api/drive/status") {
-    if (!driveController || !driveLearningModel || !poseFusion) {
+    if (!driveController || !driveLearningModel || !poseFusion || !motorCalibration) {
       return {
         statusCode: 503,
         contentType: "application/json; charset=utf-8",
@@ -201,6 +204,8 @@ export function routeServerRequest(
         parameters: {
           ...driveLearningModel.getParameters(),
           encoderMetersPerTick: poseFusion.getEncoderCalibration(),
+          motorRampDownTimeMs: motorCalibration.getRampDownTime(),
+          motorRampUpTimeMs: motorCalibration.getRampUpTime(),
         },
       }),
       logNotFound: false,
@@ -249,6 +254,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let poseFusion: PoseFusion | null = null;
   let driveLearningModel: DriveLearningModel | null = null;
   let driveController: DriveController | null = null;
+  let motorCalibration: MotorCalibration | null = null;
+  let poseCalibration: PoseCalibration | null = null;
   let pathStore: PathStore | null = null;
   logger.transition("boot", "starting", { port, host });
 
@@ -418,6 +425,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       driveController,
       driveLearningModel,
       poseFusion,
+      motorCalibration,
       pathStore
     );
 
@@ -455,6 +463,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   const boundPort = typeof boundAddress?.port === "number" ? boundAddress.port : port;
 
   try {
+    motorCalibration = new MotorCalibration({ logger });
+    await motorCalibration.loadParameters();
+
+    poseCalibration = new PoseCalibration({ logger });
+    await poseCalibration.loadParameters();
+
     sensorGateway = await createPiSensorHardwareGateway(
       options.i2cBusNumber ?? 1,
       {
@@ -462,6 +476,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         motorAddress: options.motorI2cAddress ?? 0x66,
         leftMotorForwardSign: options.leftMotorForwardSign ?? -1,
         rightMotorForwardSign: options.rightMotorForwardSign ?? -1,
+        motorCalibration: motorCalibration!,
       },
     );
     sensorController = new SensorController({
@@ -556,6 +571,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       sensorController,
       logger,
       learningModel: turnLearningModel,
+      motorCalibration: motorCalibration!,
       maxWheelSpeedMetersPerSecond: options.maxWheelSpeedMetersPerSecond ?? 0.75,
     });
 
@@ -563,6 +579,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     poseFusion = new PoseFusion({
       sensorController,
       logger,
+      poseCalibration: poseCalibration!,
     });
     await poseFusion.start();
 
@@ -575,6 +592,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       turnController,
       logger,
       learningModel: driveLearningModel,
+      motorCalibration: motorCalibration!,
     });
 
     // Initialize path store

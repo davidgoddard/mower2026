@@ -49,11 +49,15 @@ export interface TurnLearningInput {
   readonly direction: TurnDirection;
 }
 
+export interface TurnLearningBin {
+  requestedAngleDeg: number;
+  brakeDistanceDeg: number;
+  direction: TurnDirection;
+}
+
 export interface TurnLearningParameters {
   version: number;
   smallAngleThresholdDeg: number;
-  motorRampDownTimeMs: number;
-  motorRampUpTimeMs: number;
   largeTurnBrakeCcwDeg: number;
   largeTurnBrakeCwDeg: number;
   smallTurnBrakeFractionCcw: number;
@@ -67,4 +71,5 @@ export interface TurnLearningParameters {
   lastSmallErrorCcwDeg: number;
   lastSmallErrorCwDeg: number;
   lastUpdated: string;
+  parameters?: TurnLearningBin[];
 }

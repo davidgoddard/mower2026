@@ -493,6 +493,10 @@ export function renderHomePage(): string {
           <div class="subtitle">Autonomous Lawn Mower Control System</div>
         </div>
         <div class="header-nav">
+          <a href="/#primitives" class="nav-button" title="Jump to the live primitives dashboard">
+            <span class="nav-button-icon">📡</span>
+            <span>Primitives</span>
+          </a>
           <a href="/turn-tuning" class="nav-button" title="Configure and test autonomous turning with self-learning brake points">
             <span class="nav-button-icon">🔄</span>
             <span>Turn Tuning</span>

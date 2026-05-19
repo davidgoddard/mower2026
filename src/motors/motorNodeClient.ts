@@ -1,12 +1,15 @@
 import { decodeFrame, encodeFrame, frameLengthForPayload } from "../bus/frameCodec.js";
 import { I2cBusController } from "../i2c/i2cBusController.js";
 import { I2C_PRIORITY } from "../i2c/priorities.js";
+import { MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS } from "../constants.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 import { decodeMotorFeedbackSample, encodeWheelSpeedCommand, motorFeedbackSampleLength } from "./motorCodec.js";
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
+import { MotorCalibration } from "../config/motorCalibration.js";
 
 interface MotorNodeClientOptions {
   address: number;
+  motorCalibration?: MotorCalibration;
   nowMillis?: () => number;
   commandTimeoutMillis?: number;
   maxReadAttempts?: number;
@@ -22,6 +25,7 @@ export class MotorNodeClient {
   private sequence = 0;
   private readonly controller: I2cBusController;
   private readonly address: number;
+  private readonly motorCalibration: MotorCalibration | null;
   private readonly nowMillis: () => number;
   private readonly commandTimeoutMillis: number;
   private readonly maxReadAttempts: number;
@@ -31,6 +35,7 @@ export class MotorNodeClient {
   constructor(controller: I2cBusController, options: MotorNodeClientOptions) {
     this.controller = controller;
     this.address = options.address;
+    this.motorCalibration = options.motorCalibration ?? null;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.commandTimeoutMillis = options.commandTimeoutMillis ?? 300;
     this.maxReadAttempts = options.maxReadAttempts ?? 3;
@@ -41,10 +46,6 @@ export class MotorNodeClient {
   async sendWheelSpeedCommand(
     leftWheelTargetMetersPerSecond: number,
     rightWheelTargetMetersPerSecond: number,
-    options: {
-      maxAccelerationMetersPerSecondSquared?: number;
-      maxDecelerationMetersPerSecondSquared?: number;
-    } = {},
   ): Promise<void> {
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
@@ -52,7 +53,8 @@ export class MotorNodeClient {
       rightWheelTargetMetersPerSecond,
       enableDrive: true,
       commandTimeoutMillis: this.commandTimeoutMillis,
-      ...options,
+      maxAccelerationMetersPerSecondSquared: (this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS) / 1000,
+      maxDecelerationMetersPerSecondSquared: (this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS) / 1000,
     };
 
     await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
@@ -133,4 +135,3 @@ export class MotorNodeClient {
     });
   }
 }
-
