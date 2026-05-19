@@ -221,13 +221,13 @@ export const TURN_SETTLE_TIME_MS = 200;
  * Motor ramp-down time from hardware spec (milliseconds)
  * Time for motors to decelerate from full speed to zero
  */
-export const MOTOR_RAMP_DOWN_TIME_MS = 700;
+export const MOTOR_RAMP_DOWN_TIME_MS = 1000;
 
 /**
  * Motor ramp-up time from hardware spec (milliseconds)
  * Time for motors to accelerate from zero to full speed
  */
-export const MOTOR_RAMP_UP_TIME_MS = 600;
+export const MOTOR_RAMP_UP_TIME_MS = 1000;
 
 /**
  * Small angle threshold - below this, use special handling (degrees)
@@ -262,6 +262,21 @@ export const TURN_HISTORY_MAX_SIZE = 100;
  * Turn learning parameters file path (relative to project root)
  */
 export const TURN_LEARNING_PARAMETERS_PATH = "config/turn-learning-parameters.json";
+
+/**
+ * Drive learning parameters file path (relative to project root)
+ */
+export const DRIVE_LEARNING_PARAMETERS_PATH = "config/drive-learning-params.json";
+
+/**
+ * Motor calibration file path (relative to project root)
+ */
+export const MOTOR_CALIBRATION_PATH = "config/motor-calibration.json";
+
+/**
+ * Pose calibration file path (relative to project root)
+ */
+export const POSE_CALIBRATION_PATH = "config/pose-calibration.json";
 
 // =============================================================================
 // DRIVE CONTROLLER PARAMETERS - Design decisions
@@ -321,8 +336,3 @@ export const ENCODER_METERS_PER_TICK_DEFAULT = 0.001;
  * 5cm - learning algorithm tries to achieve this
  */
 export const DRIVE_TARGET_CTE_METERS = 0.05;
-
-/**
- * Data directory for persistent files
- */
-export const DATA_DIR = "data";

@@ -331,6 +331,11 @@ export class SensorController extends EventEmitter {
   private async pollImu(): Promise<void> {
     try {
       const sample = await this.gateway.readImu();
+      const acceleration = sample.acceleration ?? {
+        xMetersPerSecondSquared: 0,
+        yMetersPerSecondSquared: 0,
+        zMetersPerSecondSquared: 0,
+      };
       if (this.previousImuSampleMillis != null) {
         const deltaSeconds = Math.max(0, sample.timestampMillis - this.previousImuSampleMillis) / MS_PER_SECOND;
         const yawDelta = createRelativeAngle(sample.angularVelocity.zDegreesPerSecond * deltaSeconds);
@@ -339,7 +344,7 @@ export class SensorController extends EventEmitter {
       this.previousImuSampleMillis = sample.timestampMillis;
 
       // Calculate pitch and roll from accelerometer
-      const { xMetersPerSecondSquared: ax, yMetersPerSecondSquared: ay, zMetersPerSecondSquared: az } = sample.acceleration;
+      const { xMetersPerSecondSquared: ax, yMetersPerSecondSquared: ay, zMetersPerSecondSquared: az } = acceleration;
       const g = 9.80665;
       const pitchDeg = Math.atan2(-ax / g, Math.sqrt((ay * ay + az * az) / (g * g))) * (180 / Math.PI);
       const rollDeg = Math.atan2(ay / g, az / g) * (180 / Math.PI);

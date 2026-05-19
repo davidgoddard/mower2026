@@ -7,6 +7,8 @@
 - If `node`, `npm`, or the repo build command is unavailable in this session, do not keep retrying those commands.
 - When tooling is unavailable, switch to source inspection, code edits, and a clear note that build/test verification could not be run here.
 - Do not assume a missing command will become available later in the same session.
+- `gh` is not reliable in this workspace shell, so do not depend on it for PR creation or auth. Use git and the GitHub web UI if PR work is needed.
+- `nvm`, `node`, and `npm` are available here on Node 20 and can be used for build/test work.
 - Never edit files in the dist folder.  Request the user does a "npm run build".
 
 

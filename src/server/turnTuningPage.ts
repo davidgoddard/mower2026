@@ -689,7 +689,7 @@ export function getTurnTuningPageHtml(): string {
 
     // Reset learning
     document.getElementById('resetLearning').addEventListener('click', async () => {
-      if (confirm('Reset all learned parameters to defaults?')) {
+      if (confirm('Reset turn learning parameters to defaults?')) {
         try {
           await fetch('/api/turn/reset-learning', { method: 'POST' });
           await updateStatus();

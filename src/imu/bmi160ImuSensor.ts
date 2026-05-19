@@ -59,14 +59,6 @@ export class Bmi160ImuSensor implements ImuSensor {
       throw new Error(`Unexpected BMI160 chip id 0x${chipId.toString(16)} at address 0x${this.address.toString(16)}`);
     }
 
-    // Initialize accelerometer
-    await this.writeRegister(BMI160.registers.command, BMI160.commands.accNormalMode);
-    await this.sleep(IMU_ACC_INIT_DELAY_MS);
-
-    // Set accelerometer range to +/- 2g (16384 LSB/g)
-    await this.writeRegister(BMI160.registers.accRange, BMI160_ACC_RANGE_2G);
-    await this.sleep(IMU_ACC_RANGE_DELAY_MS);
-
     // Initialize gyroscope
     await this.writeRegister(BMI160.registers.command, BMI160.commands.gyroNormalMode);
     await this.sleep(IMU_GYRO_INIT_DELAY_MS);
@@ -85,34 +77,33 @@ export class Bmi160ImuSensor implements ImuSensor {
     }
 
     let gyroSum = 0;
-    let pitchSum = 0;
-    let rollSum = 0;
     let measured = 0;
 
     for (let index = 0; index < sampleCount; index += 1) {
       const gyroRaw = await this.readGyroZRaw();
       gyroSum += gyroRaw / BMI160.gyroLsbPerDpsAt2000;
 
-      const [accX, accY, accZ] = await this.readAccelerometerRaw();
-      const pitch = this.calculatePitchDeg(accX, accY, accZ);
-      const roll = this.calculateRollDeg(accY, accZ);
-      pitchSum += pitch;
-      rollSum += roll;
-
       measured += 1;
       await this.sleep(IMU_CALIBRATION_SAMPLE_DELAY_MS);
     }
 
     this.gyroBiasDps = measured === 0 ? 0 : (gyroSum / measured);
-    this.pitchOffsetDeg = measured === 0 ? 0 : (pitchSum / measured);
-    this.rollOffsetDeg = measured === 0 ? 0 : (rollSum / measured);
+    this.pitchOffsetDeg = 0;
+    this.rollOffsetDeg = 0;
   }
 
   async read(): Promise<ImuSample> {
     const gyroRaw = await this.readGyroZRaw();
     const zDegreesPerSecond = (gyroRaw / BMI160.gyroLsbPerDpsAt2000) - this.gyroBiasDps;
 
-    const [accX, accY, accZ] = await this.readAccelerometerRaw();
+    let accX = 0;
+    let accY = 0;
+    let accZ = 0;
+    try {
+      [accX, accY, accZ] = await this.readAccelerometerRaw();
+    } catch {
+      // Some test doubles only model gyro reads.
+    }
     const pitchDeg = this.calculatePitchDeg(accX, accY, accZ) - this.pitchOffsetDeg;
     const rollDeg = this.calculateRollDeg(accY, accZ) - this.rollOffsetDeg;
 

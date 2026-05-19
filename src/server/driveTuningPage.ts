@@ -556,10 +556,10 @@ export function getDriveTuningPageHtml(): string {
       </div>
     </div>
 
-    <!-- Learning Parameters -->
+    <!-- Operational Parameters -->
     <div class="learning-params">
       <div class="section-header">
-        <h2>Learning Parameters</h2>
+        <h2>Operational Parameters</h2>
         <button class="btn-secondary" id="resetLearning">Reset Learning</button>
       </div>
       <div class="params-grid">
@@ -570,6 +570,23 @@ export function getDriveTuningPageHtml(): string {
         <div class="param-item">
           <span class="param-label">CTE Gain</span>
           <span class="param-value" id="cteGain">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hardware Calibration -->
+    <div class="learning-params">
+      <div class="section-header">
+        <h2>Hardware Calibration</h2>
+      </div>
+      <div class="params-grid">
+        <div class="param-item">
+          <span class="param-label">Motor Ramp Down</span>
+          <span class="param-value" id="motorRampDown">—</span>
+        </div>
+        <div class="param-item">
+          <span class="param-label">Motor Ramp Up</span>
+          <span class="param-value" id="motorRampUp">—</span>
         </div>
         <div class="param-item">
           <span class="param-label">Encoder Calibration</span>
@@ -686,6 +703,8 @@ export function getDriveTuningPageHtml(): string {
         if (data.parameters) {
           document.getElementById('brakeDistance').textContent = formatMeters(data.parameters.brakeDistanceMeters);
           document.getElementById('cteGain').textContent = data.parameters.cteGain.toFixed(3);
+          document.getElementById('motorRampDown').textContent = data.parameters.motorRampDownTimeMs + ' ms';
+          document.getElementById('motorRampUp').textContent = data.parameters.motorRampUpTimeMs + ' ms';
           document.getElementById('encoderCalibration').textContent = data.parameters.encoderMetersPerTick.toFixed(6) + ' m/tick';
         }
 
@@ -821,7 +840,7 @@ export function getDriveTuningPageHtml(): string {
 
     // Reset learning
     document.getElementById('resetLearning').addEventListener('click', async () => {
-      if (confirm('Reset all learned parameters to defaults?')) {
+      if (confirm('Reset drive learning parameters to defaults?')) {
         try {
           await fetch('/api/drive/reset-learning', { method: 'POST' });
           await updateStatus();

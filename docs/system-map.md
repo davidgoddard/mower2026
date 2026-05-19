@@ -10,8 +10,17 @@ This document maps problem domains to candidate files removing the need for Code
   - motor configuration: direction signs for hardware inversion, max wheel speed
   - network configuration: HTTP server defaults, port validation
   - calibration parameters: IMU sample count
-  - turn controller parameters: polling interval (50Hz), settle times, ramp times, learning rate, angle bins
+  - turn controller parameters: polling interval, settle times, learning rate, angle handling
 - Implementation constants (protocol formats, scaling factors, register values) are LOCAL to their modules, not in this global file.
+
+## Configuration
+- `src/config/jsonFileStore.ts`: shared JSON persistence helper for config files.
+- `src/config/motorCalibration.ts`: motor ramp calibration and persistence.
+- `src/config/poseCalibration.ts`: encoder calibration persistence.
+- `config/motor-calibration.json`: persisted motor calibration values.
+- `config/pose-calibration.json`: persisted pose calibration values.
+- `config/drive-learning-params.json`: persisted drive learning values.
+- `config/turn-learning-parameters.json`: persisted turn learning values.
 
 ## Heading and Angle Types
 - `src/geometry/headingTypes.ts`: branded types for heading representations to prevent mixing incompatible angle conventions at compile time.
@@ -32,6 +41,15 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/logging/index.ts`: logging exports.
 - `test/logger.test.js`: logger unit tests (local timestamp format, scope, transitions, retention).
 
+## Stop State
+- `src/control/systemStop.ts`: global stop latch for user actions, timeouts, and runtime safety faults.
+- `src/server/appServer.ts`: stop API entry points and operation reset wiring.
+- `src/sensing/sensorController.ts`: sensor loop stop checks and stop-command keepalive while stopped.
+- `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
+- `src/control/turnController.ts`: turn stop checks and stop handling.
+- `src/control/driveController.ts`: drive stop checks and stop handling.
+- `src/pathfollowing/purePursuitFollower.ts`: path-following stop checks and stop handling.
+
 ## Turn Controller
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
   - executes on-the-spot turns using IMU heading integration
@@ -41,7 +59,6 @@ This document maps problem domains to candidate files removing the need for Code
   - tuning sequence runner for comprehensive parameter learning
   - integrates with retry system for obstruction recovery
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
-  - angle binning strategy (10° to 180° in 18 bins)
   - direction-specific learning (CCW vs CW asymmetry)
   - adaptive brake angle updates based on turn error
   - JSON persistence at `config/turn-learning-parameters.json`
@@ -69,6 +86,10 @@ This document maps problem domains to candidate files removing the need for Code
   - adaptive brake distance learning for arrival accuracy
   - integrates with retry system for obstruction recovery
   - creates checkpoints for retry system before each drive
+- `src/control/driveLearningModel.ts`: drive parameter learning and persistence
+  - brake distance learning from final X error
+  - CTE gain adaptation from maximum cross-track error
+  - JSON persistence at `config/drive-learning-params.json`
 - Drive sequence: settle → get pose → turn to target → settle → get pose → drive with CTE correction → brake → settle → measure errors → update learning
 - API: `driveToTarget(target)`, `reverseForDuration(ms)` for retry recovery
 
@@ -183,6 +204,7 @@ This document maps problem domains to candidate files removing the need for Code
   - encoder dead-reckoning: integrates motor encoder deltas for position during GNSS gaps
   - heading reset API: `setHeading()` for external absolute heading corrections
   - pose API: `getCurrentPose()` returns current position, heading, and quality
+  - encoder calibration is persisted via `src/config/poseCalibration.ts`
   - emits `poseUpdate` events on every update
 - `src/geometry/positionTypes.ts`: branded types for position and pose.
   - `Meters`: branded number for type-safe distance values

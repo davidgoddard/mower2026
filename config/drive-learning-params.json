@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "brakeDistanceMeters": 2,
+  "cteGain": 0.3,
+  "minDriveDistanceForLearning": 3,
+  "updatedAt": "2026-05-19T00:00:00.000Z"
+}

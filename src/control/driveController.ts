@@ -8,6 +8,7 @@ import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { TurnController } from "./turnController.js";
 import { DriveLearningModel } from "./driveLearningModel.js";
+import { MotorCalibration } from "../config/motorCalibration.js";
 import {
   InternalHeading,
   RelativeAngle,
@@ -40,6 +41,7 @@ import {
   DRIVE_TIMEOUT_MULTIPLIER,
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
+  MOTOR_RAMP_DOWN_TIME_MS,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
 
@@ -53,6 +55,7 @@ export interface DriveControllerOptions {
   turnController: TurnController;
   logger: SessionLogger;
   learningModel: DriveLearningModel;
+  motorCalibration?: MotorCalibration;
   fullSpeedCommand?: number;
   settleTimeMs?: number;
   nowMillis?: () => number;
@@ -65,6 +68,7 @@ export class DriveController {
   private readonly poseFusion: PoseFusion;
   private readonly turnController: TurnController;
   private readonly learningModel: DriveLearningModel;
+  private readonly motorCalibration: MotorCalibration | null;
   private readonly fullSpeedCommand: number;
   private readonly settleTimeMs: number;
   private readonly nowMillis: () => number;
@@ -97,6 +101,7 @@ export class DriveController {
     this.poseFusion = options.poseFusion;
     this.turnController = options.turnController;
     this.learningModel = options.learningModel;
+    this.motorCalibration = options.motorCalibration ?? null;
     this.fullSpeedCommand = options.fullSpeedCommand ?? DRIVE_FULL_SPEED_COMMAND_DEFAULT;
     this.settleTimeMs = options.settleTimeMs ?? DRIVE_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
@@ -239,10 +244,10 @@ export class DriveController {
   private async onPoseUpdate(pose: Pose): Promise<void> {
     if (
       this.status !== "driving" ||
-      !this.driveStartPosition ||
-      !this.driveTargetPosition ||
-      !this.driveLineStart ||
-      !this.driveLineEnd
+      this.driveStartPosition === null ||
+      this.driveTargetPosition === null ||
+      this.driveLineStart === null ||
+      this.driveLineEnd === null
     ) {
       return;
     }
@@ -316,14 +321,15 @@ export class DriveController {
     this.cteSamples.push(cte);
 
     // Calculate remaining distance
-    const remainingDistance = distanceBetween(currentPosition, this.driveTargetPosition);
+    const alongTrackError = calculateXError(currentPosition, this.driveLineStart, this.driveLineEnd);
+    const remainingAlongTrackDistance = Math.abs(unwrapMeters(alongTrackError));
 
     // Apply CTE correction
     await this.applyCteCorrection(cte);
 
     // Check brake condition
     const brakeDistance = this.learningModel.getBrakeDistance();
-    if (unwrapMeters(remainingDistance) <= unwrapMeters(brakeDistance)) {
+    if (remainingAlongTrackDistance <= unwrapMeters(brakeDistance)) {
       // Unsubscribe BEFORE completing
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       await this.completeDrive();
@@ -402,7 +408,12 @@ export class DriveController {
    * Complete drive after brake point reached
    */
   private async completeDrive(): Promise<void> {
-    if (!this.driveStartPosition || !this.driveTargetPosition || !this.driveLineStart || !this.driveLineEnd) {
+    if (
+      this.driveStartPosition === null ||
+      this.driveTargetPosition === null ||
+      this.driveLineStart === null ||
+      this.driveLineEnd === null
+    ) {
       return;
     }
 
@@ -414,7 +425,7 @@ export class DriveController {
       this.logger.info("drive.braking", {});
 
       // Wait for motor ramp-down (2x ramp-down time per spec)
-      const rampDownTime = this.learningModel.getMotorRampDownTime();
+      const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
       const rampDownCompleted = await this.sleepWithStopChecks(2 * rampDownTime);
       if (!rampDownCompleted || this.stopRequested || systemStop.isStopped()) {
         await this.finishStoppedDrive("Drive stopped during ramp-down");
@@ -483,7 +494,7 @@ export class DriveController {
             const measuredMetersPerTick = unwrapMeters(actualDistance) / this.totalEncoderTicks;
             const currentCalibration = this.poseFusion.getEncoderCalibration();
             const newCalibration = 0.9 * currentCalibration + 0.1 * measuredMetersPerTick;
-            this.poseFusion.setEncoderCalibration(newCalibration);
+            await this.poseFusion.setEncoderCalibration(newCalibration);
             this.logger.info("drive.encoder_calibrated", {
               actualDistance: unwrapMeters(actualDistance),
               encoderTicks: this.totalEncoderTicks,
@@ -551,7 +562,10 @@ export class DriveController {
     if (this.currentDrive) {
       this.stopRequested = true;
       systemStop.requestStop("drive", "drive_stop_requested");
-      void this.turnController.stopCurrentTurn();
+      const stopCurrentTurn = (this.turnController as any).stopCurrentTurn;
+      if (typeof stopCurrentTurn === "function") {
+        void stopCurrentTurn.call(this.turnController);
+      }
     }
   }
 
@@ -619,7 +633,7 @@ export class DriveController {
         }
 
         // Wait for motors to settle
-        const rampDownTime = this.learningModel.getMotorRampDownTime();
+        const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
         const settleCompleted = await this.sleepWithStopChecks(2 * rampDownTime + this.settleTimeMs);
         if (!settleCompleted || systemStop.isStopped()) {
           return results;
@@ -738,7 +752,7 @@ export class DriveController {
    * Calculate timeout for drive
    */
   private calculateTimeout(): number {
-    if (!this.driveStartPosition || !this.driveTargetPosition) {
+    if (this.driveStartPosition === null || this.driveTargetPosition === null) {
       return 60000; // 1 minute default
     }
 
@@ -786,15 +800,16 @@ export class DriveController {
   }
 
   private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    const endTime = this.nowMillis() + delayMs;
+    let remainingMs = delayMs;
 
-    while (this.nowMillis() < endTime) {
+    while (remainingMs > 0) {
       if (this.stopRequested || systemStop.isStopped()) {
         return false;
       }
 
-      const remaining = endTime - this.nowMillis();
-      await this.sleep(Math.min(50, Math.max(0, remaining)));
+      const chunkMs = Math.min(50, remainingMs);
+      await this.sleep(chunkMs);
+      remainingMs -= chunkMs;
     }
 
     return true;
@@ -844,7 +859,10 @@ export class DriveController {
     }
 
     this.motorOperationActive = true;
-    this.sensorController.beginMotorOperation();
+    const beginMotorOperation = (this.sensorController as any).beginMotorOperation;
+    if (typeof beginMotorOperation === "function") {
+      beginMotorOperation.call(this.sensorController);
+    }
   }
 
   private async endMotorOperation(): Promise<void> {
@@ -853,6 +871,15 @@ export class DriveController {
     }
 
     this.motorOperationActive = false;
-    await this.sensorController.endMotorOperation();
+    const endMotorOperation = (this.sensorController as any).endMotorOperation;
+    if (typeof endMotorOperation === "function") {
+      await endMotorOperation.call(this.sensorController);
+      return;
+    }
+
+    const stopMotors = (this.sensorController as any).stopMotors;
+    if (typeof stopMotors === "function") {
+      await stopMotors.call(this.sensorController);
+    }
   }
 }
