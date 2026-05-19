@@ -15,7 +15,6 @@ import {
 import {
   TurnLearningInput,
   TurnLearningParameters,
-  TurnParameterEntry,
   TurnDirection,
 } from "./turnControllerTypes.js";
 import {
@@ -23,7 +22,6 @@ import {
   MOTOR_RAMP_UP_TIME_MS,
   TURN_SMALL_ANGLE_THRESHOLD_DEG,
   TURN_LEARNING_RATE,
-  TURN_ANGLE_BINS,
   TURN_LEARNING_PARAMETERS_PATH,
 } from "../constants.js";
 
@@ -32,27 +30,41 @@ export interface TurnLearningModelOptions {
   parametersPath?: string;
 }
 
+interface LegacyTurnLearningParametersV2 {
+  version?: unknown;
+  smallAngleThresholdDeg?: unknown;
+  motorRampDownTimeMs?: unknown;
+  motorRampUpTimeMs?: unknown;
+  largeTurnBrakeCcwDeg?: unknown;
+  largeTurnBrakeCwDeg?: unknown;
+  largeTurnSampleCountCcw?: unknown;
+  largeTurnSampleCountCw?: unknown;
+  lastErrorCcwDeg?: unknown;
+  lastErrorCwDeg?: unknown;
+  lastUpdated?: unknown;
+}
+
 export class TurnLearningModel {
   private readonly logger: LoggerScope;
   private readonly parametersPath: string;
   private parameters: TurnLearningParameters;
+  private readonly learningRate: number;
 
   constructor(options: TurnLearningModelOptions) {
     this.logger = options.logger.child({ context: "control", source: "TurnLearningModel" });
     this.parametersPath = options.parametersPath ?? TURN_LEARNING_PARAMETERS_PATH;
     this.parameters = this.createDefaultParameters();
+    this.learningRate = TURN_LEARNING_RATE;
   }
 
-  /**
-   * Load parameters from disk, or use defaults if file doesn't exist
-   */
   async loadParameters(): Promise<void> {
     try {
       const json = await readFile(this.parametersPath, "utf-8");
-      this.parameters = JSON.parse(json);
+      const parsed = JSON.parse(json) as unknown;
+      this.parameters = this.normalizeParameters(parsed);
       this.logger.info("turn.learning.loaded", {
-        bins: this.parameters.parameters.length,
         version: this.parameters.version,
+        smallAngleThresholdDeg: this.parameters.smallAngleThresholdDeg,
       });
     } catch (error) {
       if ((error as any)?.code === "ENOENT") {
@@ -69,17 +81,11 @@ export class TurnLearningModel {
     }
   }
 
-  /**
-   * Save current parameters to disk
-   */
   async saveParameters(): Promise<void> {
     try {
-      // Ensure directory exists
       const dir = dirname(this.parametersPath);
       await mkdir(dir, { recursive: true });
-
-      const json = JSON.stringify(this.parameters, null, 2);
-      await writeFile(this.parametersPath, json, "utf-8");
+      await writeFile(this.parametersPath, JSON.stringify(this.parameters, null, 2), "utf-8");
     } catch (error) {
       this.logger.error("turn.learning.save_failed", {
         error: String(error),
@@ -89,157 +95,175 @@ export class TurnLearningModel {
   }
 
   /**
-   * Update learning parameters based on turn result
+   * Update learning based on a completed turn.
+   *
+   * Large turns learn the remaining brake distance.
+   * Small turns use a fixed crawl-and-halt strategy and do not learn.
    */
   async updateFromTurn(result: TurnLearningInput): Promise<void> {
-    const absAngle = Math.abs(unwrapRelativeAngle(result.requestedAngle));
-    const bin = this.getBinForAngle(absAngle);
-    const entry = this.getOrCreateEntry(bin);
+    const requestedAbs = Math.abs(unwrapRelativeAngle(result.requestedAngle));
+    const achievedAbs = Math.abs(unwrapRelativeAngle(result.achievedAngle));
 
-    const errorDeg = unwrapRelativeAngle(result.errorAngle);
-    const currentBrake = result.direction === "ccw"
-      ? entry.brakeAngleCcwDeg
-      : entry.brakeAngleCwDeg;
-
-    // Adaptive update: reduce brake angle if we overshot, increase if undershot
-    // Error > 0 means we went too far → reduce brake angle
-    // Error < 0 means we didn't go far enough → increase brake angle
-    const adjustment = -errorDeg * this.parameters.learningRate;
-    const newBrake = currentBrake + adjustment;
-
-    // Clamp brake angle to reasonable bounds
-    const minBrake = bin * 0.3;  // At least 30% of turn angle
-    const maxBrake = bin * 0.95; // At most 95% of turn angle
-    const clampedBrake = Math.max(minBrake, Math.min(maxBrake, newBrake));
-
-    // Update parameters
-    if (result.direction === "ccw") {
-      entry.brakeAngleCcwDeg = clampedBrake;
-      entry.sampleCountCcw++;
-      entry.lastErrorCcwDeg = errorDeg;
-    } else {
-      entry.brakeAngleCwDeg = clampedBrake;
-      entry.sampleCountCw++;
-      entry.lastErrorCwDeg = errorDeg;
+    if (requestedAbs < this.parameters.smallAngleThresholdDeg) {
+      this.logger.info("turn.learning.skipped_small", {
+        direction: result.direction,
+        requestedAngleDeg: requestedAbs,
+        achievedAngleDeg: achievedAbs,
+        mode: "crawl_and_halt",
+        storedFraction: result.direction === "ccw"
+          ? this.parameters.smallTurnBrakeFractionCcw
+          : this.parameters.smallTurnBrakeFractionCw,
+      });
+      return;
     }
 
-    entry.lastUpdated = new Date().toISOString();
+    const currentBrakeDistance = result.direction === "ccw"
+      ? this.parameters.largeTurnBrakeCcwDeg
+      : this.parameters.largeTurnBrakeCwDeg;
 
-    this.logger.info("turn.learning.updated", {
-      bin,
+    const errorDeg = achievedAbs - requestedAbs;
+    const adjustment = errorDeg * this.learningRate;
+    const clampedBrakeDistance = Math.max(5, Math.min(90, currentBrakeDistance + adjustment));
+
+    if (result.direction === "ccw") {
+      this.parameters.largeTurnBrakeCcwDeg = clampedBrakeDistance;
+      this.parameters.largeTurnSampleCountCcw += 1;
+      this.parameters.lastLargeErrorCcwDeg = errorDeg;
+    } else {
+      this.parameters.largeTurnBrakeCwDeg = clampedBrakeDistance;
+      this.parameters.largeTurnSampleCountCw += 1;
+      this.parameters.lastLargeErrorCwDeg = errorDeg;
+    }
+
+    this.parameters.lastUpdated = new Date().toISOString();
+    this.logger.info("turn.learning.updated_large", {
       direction: result.direction,
+      requestedAngleDeg: requestedAbs,
+      achievedAngleDeg: achievedAbs,
       errorDeg,
       adjustment,
-      newBrake: clampedBrake,
-      sampleCount: result.direction === "ccw" ? entry.sampleCountCcw : entry.sampleCountCw,
+      newBrakeDistanceDeg: clampedBrakeDistance,
     });
-
-    // Persist to disk immediately
     await this.saveParameters();
   }
 
-  /**
-   * Get brake angle for requested turn angle and direction
-   */
-  getBrakeAngle(absAngleDeg: number, direction: TurnDirection): RelativeAngle {
-    const bin = this.getBinForAngle(absAngleDeg);
-    const entry = this.getOrCreateEntry(bin);
-    const brakeAngleDeg = direction === "ccw"
-      ? entry.brakeAngleCcwDeg
-      : entry.brakeAngleCwDeg;
-    return createRelativeAngle(brakeAngleDeg);
+  getBrakeDistance(direction: TurnDirection): RelativeAngle {
+    const brakeDistanceDeg = direction === "ccw"
+      ? this.parameters.largeTurnBrakeCcwDeg
+      : this.parameters.largeTurnBrakeCwDeg;
+    return createRelativeAngle(brakeDistanceDeg);
   }
 
-  /**
-   * Get motor ramp-down time
-   */
-  getMotorRampDownTime(): number {
-    return this.parameters.motorRampDownTimeMs;
+  getSmallTurnBrakeFraction(direction: TurnDirection): number {
+    return direction === "ccw"
+      ? this.parameters.smallTurnBrakeFractionCcw
+      : this.parameters.smallTurnBrakeFractionCw;
   }
 
-  /**
-   * Get motor ramp-up time
-   */
-  getMotorRampUpTime(): number {
-    return this.parameters.motorRampUpTimeMs;
-  }
-
-  /**
-   * Get small angle threshold
-   */
   getSmallAngleThreshold(): number {
     return this.parameters.smallAngleThresholdDeg;
   }
 
-  /**
-   * Get all learning parameters
-   */
+  getMotorRampDownTime(): number {
+    return this.parameters.motorRampDownTimeMs;
+  }
+
+  getMotorRampUpTime(): number {
+    return this.parameters.motorRampUpTimeMs;
+  }
+
   getParameters(): TurnLearningParameters {
     return this.parameters;
   }
 
-  /**
-   * Reset to default parameters
-   */
   async resetToDefaults(): Promise<void> {
     this.parameters = this.createDefaultParameters();
     await this.saveParameters();
-    this.logger.info("turn.learning.reset", { bins: this.parameters.parameters.length });
+    this.logger.info("turn.learning.reset", {
+      smallAngleThresholdDeg: this.parameters.smallAngleThresholdDeg,
+    });
   }
 
-  /**
-   * Map requested angle to nearest bin
-   */
-  private getBinForAngle(angleDeg: number): number {
-    const bins = [...TURN_ANGLE_BINS];
-    return bins.reduce((prev, curr) =>
-      Math.abs(curr - angleDeg) < Math.abs(prev - angleDeg) ? curr : prev
-    );
-  }
-
-  /**
-   * Get or create parameter entry for angle bin
-   */
-  private getOrCreateEntry(bin: number): TurnParameterEntry {
-    let entry = this.parameters.parameters.find(p => p.requestedAngleDeg === bin);
-    if (!entry) {
-      entry = {
-        requestedAngleDeg: bin,
-        brakeAngleCcwDeg: bin * 0.70,
-        brakeAngleCwDeg: bin * 0.70,
-        sampleCountCcw: 0,
-        sampleCountCw: 0,
-        lastErrorCcwDeg: 0,
-        lastErrorCwDeg: 0,
-        lastUpdated: new Date().toISOString(),
-      };
-      this.parameters.parameters.push(entry);
+  private normalizeParameters(raw: unknown): TurnLearningParameters {
+    if (!this.isRecord(raw)) {
+      return this.createDefaultParameters();
     }
-    return entry;
+
+    if (typeof raw.smallTurnBrakeFractionCcw === "number" && typeof raw.smallTurnBrakeFractionCw === "number") {
+      return {
+        version: this.readNumber(raw.version, 3),
+        smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
+        motorRampDownTimeMs: this.readNumber(raw.motorRampDownTimeMs, MOTOR_RAMP_DOWN_TIME_MS),
+        motorRampUpTimeMs: this.readNumber(raw.motorRampUpTimeMs, MOTOR_RAMP_UP_TIME_MS),
+        largeTurnBrakeCcwDeg: this.readNumber(raw.largeTurnBrakeCcwDeg, 15),
+        largeTurnBrakeCwDeg: this.readNumber(raw.largeTurnBrakeCwDeg, 15),
+        smallTurnBrakeFractionCcw: this.readNumber(raw.smallTurnBrakeFractionCcw, 0.5),
+        smallTurnBrakeFractionCw: this.readNumber(raw.smallTurnBrakeFractionCw, 0.5),
+        largeTurnSampleCountCcw: this.readNumber(raw.largeTurnSampleCountCcw, 0),
+        largeTurnSampleCountCw: this.readNumber(raw.largeTurnSampleCountCw, 0),
+        smallTurnSampleCountCcw: this.readNumber(raw.smallTurnSampleCountCcw, 0),
+        smallTurnSampleCountCw: this.readNumber(raw.smallTurnSampleCountCw, 0),
+        lastLargeErrorCcwDeg: this.readNumber(raw.lastLargeErrorCcwDeg, 0),
+        lastLargeErrorCwDeg: this.readNumber(raw.lastLargeErrorCwDeg, 0),
+        lastSmallErrorCcwDeg: this.readNumber(raw.lastSmallErrorCcwDeg, 0),
+        lastSmallErrorCwDeg: this.readNumber(raw.lastSmallErrorCwDeg, 0),
+        lastUpdated: typeof raw.lastUpdated === "string" ? raw.lastUpdated : new Date().toISOString(),
+      };
+    }
+
+    if (typeof raw.largeTurnBrakeCcwDeg === "number" && typeof raw.largeTurnBrakeCwDeg === "number") {
+      const legacy = raw as LegacyTurnLearningParametersV2;
+      return {
+        version: 3,
+        smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
+        motorRampDownTimeMs: this.readNumber(legacy.motorRampDownTimeMs, MOTOR_RAMP_DOWN_TIME_MS),
+        motorRampUpTimeMs: this.readNumber(legacy.motorRampUpTimeMs, MOTOR_RAMP_UP_TIME_MS),
+        largeTurnBrakeCcwDeg: this.readNumber(legacy.largeTurnBrakeCcwDeg, 15),
+        largeTurnBrakeCwDeg: this.readNumber(legacy.largeTurnBrakeCwDeg, 15),
+        smallTurnBrakeFractionCcw: 0.5,
+        smallTurnBrakeFractionCw: 0.5,
+        largeTurnSampleCountCcw: this.readNumber(legacy.largeTurnSampleCountCcw, 0),
+        largeTurnSampleCountCw: this.readNumber(legacy.largeTurnSampleCountCw, 0),
+        smallTurnSampleCountCcw: 0,
+        smallTurnSampleCountCw: 0,
+        lastLargeErrorCcwDeg: this.readNumber(legacy.lastErrorCcwDeg, 0),
+        lastLargeErrorCwDeg: this.readNumber(legacy.lastErrorCwDeg, 0),
+        lastSmallErrorCcwDeg: 0,
+        lastSmallErrorCwDeg: 0,
+        lastUpdated: typeof legacy.lastUpdated === "string" ? legacy.lastUpdated : new Date().toISOString(),
+      };
+    }
+
+    return this.createDefaultParameters();
   }
 
-  /**
-   * Create default conservative parameters
-   */
   private createDefaultParameters(): TurnLearningParameters {
-    const bins = [...TURN_ANGLE_BINS];
     return {
-      version: 1,
+      version: 3,
+      smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
       motorRampDownTimeMs: MOTOR_RAMP_DOWN_TIME_MS,
       motorRampUpTimeMs: MOTOR_RAMP_UP_TIME_MS,
-      smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
-      learningRate: TURN_LEARNING_RATE,
-      parameters: bins.map(angle => ({
-        requestedAngleDeg: angle,
-        // Start conservatively - brake earlier than target
-        brakeAngleCcwDeg: angle * 0.70,
-        brakeAngleCwDeg: angle * 0.70,
-        sampleCountCcw: 0,
-        sampleCountCw: 0,
-        lastErrorCcwDeg: 0,
-        lastErrorCwDeg: 0,
-        lastUpdated: new Date().toISOString(),
-      })),
+      largeTurnBrakeCcwDeg: 15,
+      largeTurnBrakeCwDeg: 15,
+      smallTurnBrakeFractionCcw: 0.5,
+      smallTurnBrakeFractionCw: 0.5,
+      largeTurnSampleCountCcw: 0,
+      largeTurnSampleCountCw: 0,
+      smallTurnSampleCountCcw: 0,
+      smallTurnSampleCountCw: 0,
+      lastLargeErrorCcwDeg: 0,
+      lastLargeErrorCwDeg: 0,
+      lastSmallErrorCcwDeg: 0,
+      lastSmallErrorCwDeg: 0,
+      lastUpdated: new Date().toISOString(),
     };
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+  }
+
+  private readNumber(value: unknown, fallback: number): number {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
   }
 }

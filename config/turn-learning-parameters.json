@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "smallAngleThresholdDeg": 30,
+  "motorRampDownTimeMs": 700,
+  "motorRampUpTimeMs": 600,
+  "largeTurnBrakeCcwDeg": 40.719648170732164,
+  "largeTurnBrakeCwDeg": 40.303030487805465,
+  "smallTurnBrakeFractionCcw": 0.08885999999999987,
+  "smallTurnBrakeFractionCw": 0.5,
+  "largeTurnSampleCountCcw": 76,
+  "largeTurnSampleCountCw": 72,
+  "smallTurnSampleCountCcw": 44,
+  "smallTurnSampleCountCw": 0,
+  "lastLargeErrorCcwDeg": -0.2215731707319719,
+  "lastLargeErrorCwDeg": -0.28302845528443754,
+  "lastSmallErrorCcwDeg": 2.1700000000000017,
+  "lastSmallErrorCwDeg": 0,
+  "lastUpdated": "2026-05-18T17:53:28.862Z"
+}

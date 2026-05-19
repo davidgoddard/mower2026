@@ -449,7 +449,7 @@ export function getTurnTuningPageHtml(): string {
       <div class="controls-grid">
         <div class="control-group">
           <label for="testAngle">Test Angle (degrees)</label>
-          <input type="number" id="testAngle" min="-180" max="180" step="10" value="90">
+          <input type="number" id="testAngle" min="-180" max="180" step="10" value="50">
         </div>
 
         <div class="control-group">
@@ -511,7 +511,7 @@ export function getTurnTuningPageHtml(): string {
               <th>Achieved</th>
               <th>Error</th>
               <th>Duration</th>
-              <th>Brake Angle</th>
+              <th>Brake Distance</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -599,7 +599,7 @@ export function getTurnTuningPageHtml(): string {
               <td class="angle-cell">\${formatAngle(result.achievedAngle)}</td>
               <td class="error-cell \${getErrorClass(result.errorAngle)}">\${formatAngle(result.errorAngle)}</td>
               <td>\${result.durationMs}ms</td>
-              <td>\${formatAngle(result.brakeAngleUsed)}</td>
+              <td>\${formatAngle(result.brakeDistanceUsed)}</td>
               <td><span class="status-cell status-\${result.status}">\${result.status}</span></td>
             </tr>
           \`).join('');

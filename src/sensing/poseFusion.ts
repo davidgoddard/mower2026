@@ -150,7 +150,13 @@ export class PoseFusion extends EventEmitter {
     }
 
     // Check GNSS quality
-    const isGoodFix = event.fixType === "rtk-fixed" || event.fixType === "rtk-float";
+    // The live GNSS protocol publishes `fixed` / `float` / `single` / `none`.
+    // Keep a small compatibility window for older RTK-labelled fixtures too.
+    const isGoodFix =
+      event.fixType === "fixed" ||
+      event.fixType === "float" ||
+      event.fixType === "rtk-fixed" ||
+      event.fixType === "rtk-float";
     const isGoodAccuracy = event.positionAccuracyMeters !== null && event.positionAccuracyMeters < 0.1;
 
     if (isGoodFix && isGoodAccuracy) {

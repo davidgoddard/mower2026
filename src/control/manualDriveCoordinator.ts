@@ -46,6 +46,8 @@ export class ManualDriveCoordinator {
   private manualDriveEnabled = false;
   private snapshot: HidGameControllerSnapshot = disconnectedSnapshot();
   private drivingActive = false;
+  private lastCommandedLeftMetersPerSecond: number | null = null;
+  private lastCommandedRightMetersPerSecond: number | null = null;
 
   constructor(options: ManualDriveCoordinatorOptions) {
     this.logger = options.logger.child({ context: "control", source: "ManualDriveCoordinator" });
@@ -82,6 +84,8 @@ export class ManualDriveCoordinator {
     this.hidController.close();
     this.manualDriveEnabled = false;
     this.drivingActive = false;
+    this.lastCommandedLeftMetersPerSecond = null;
+    this.lastCommandedRightMetersPerSecond = null;
     try {
       await this.sensorController.stopMotors();
     } catch (error) {
@@ -139,14 +143,24 @@ export class ManualDriveCoordinator {
         if (demand.mode === "stopped") {
           if (this.drivingActive) {
             this.drivingActive = false;
+            this.lastCommandedLeftMetersPerSecond = null;
+            this.lastCommandedRightMetersPerSecond = null;
             await this.sensorController.stopMotors();
           }
         } else {
-          this.drivingActive = true;
-          await this.sensorController.setMotorWheelSpeeds(
-            demand.requestedLeftMetersPerSecond,
-            demand.requestedRightMetersPerSecond,
-          );
+          const left = demand.requestedLeftMetersPerSecond;
+          const right = demand.requestedRightMetersPerSecond;
+          const commandChanged =
+            !this.drivingActive ||
+            this.lastCommandedLeftMetersPerSecond !== left ||
+            this.lastCommandedRightMetersPerSecond !== right;
+
+          if (commandChanged) {
+            this.drivingActive = true;
+            this.lastCommandedLeftMetersPerSecond = left;
+            this.lastCommandedRightMetersPerSecond = right;
+            await this.sensorController.setMotorWheelSpeeds(left, right);
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -157,4 +171,3 @@ export class ManualDriveCoordinator {
     }
   }
 }
-

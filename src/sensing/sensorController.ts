@@ -35,6 +35,16 @@ function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+type MotorCommand =
+  | {
+      kind: "speed";
+      leftWheelTargetMetersPerSecond: number;
+      rightWheelTargetMetersPerSecond: number;
+    }
+  | {
+      kind: "stop";
+    };
+
 export class SensorController extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly primitivesStore: PrimitivesStore;
@@ -46,6 +56,7 @@ export class SensorController extends EventEmitter {
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
+  private lastMotorCommand: MotorCommand | null = null;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
@@ -83,6 +94,7 @@ export class SensorController extends EventEmitter {
     }
 
     this.running = true;
+    this.lastMotorCommand = null;
     this.primitivesStore.update({
       sensorController: {
         status: "starting",
@@ -177,6 +189,16 @@ export class SensorController extends EventEmitter {
   }
 
   async setMotorWheelSpeeds(leftWheelTargetMetersPerSecond: number, rightWheelTargetMetersPerSecond: number): Promise<void> {
+    this.logger.info("motors.commanded", {
+      leftWheelTargetMetersPerSecond,
+      rightWheelTargetMetersPerSecond,
+      callStack: this.captureCallStack(),
+    });
+    this.lastMotorCommand = {
+      kind: "speed",
+      leftWheelTargetMetersPerSecond,
+      rightWheelTargetMetersPerSecond,
+    };
     await this.gateway.setMotorWheelSpeeds(leftWheelTargetMetersPerSecond, rightWheelTargetMetersPerSecond);
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
@@ -189,6 +211,14 @@ export class SensorController extends EventEmitter {
   }
 
   async stopMotors(): Promise<void> {
+    this.logger.warn("motors.stop_requested", {
+      currentCommandedLeftWheelSpeedMetersPerSecond: this.primitivesStore.snapshot().motors.commandedLeftWheelSpeedMetersPerSecond,
+      currentCommandedRightWheelSpeedMetersPerSecond: this.primitivesStore.snapshot().motors.commandedRightWheelSpeedMetersPerSecond,
+      callStack: this.captureCallStack(),
+    });
+    this.lastMotorCommand = {
+      kind: "stop",
+    };
     await this.gateway.stopMotors();
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
@@ -200,6 +230,22 @@ export class SensorController extends EventEmitter {
     });
   }
 
+  /**
+   * Capture a short stack trace for motor control diagnostics.
+   */
+  private captureCallStack(): string {
+    const stack = new Error().stack;
+    if (!stack) {
+      return "stack_unavailable";
+    }
+
+    return stack
+      .split("\n")
+      .slice(2, 8)
+      .map((line) => line.trim())
+      .join("\n");
+  }
+
   private async runLoop(): Promise<void> {
     let nextTickMillis = this.nowMillis();
     let loopCount = 0;
@@ -207,6 +253,7 @@ export class SensorController extends EventEmitter {
     while (this.running) {
       const loopStartedMillis = this.nowMillis();
       await this.pollAllSensors();
+      await this.replayLastMotorCommand();
       const loopDurationMs = this.nowMillis() - loopStartedMillis;
 
       this.primitivesStore.update({
@@ -383,6 +430,34 @@ export class SensorController extends EventEmitter {
         },
       });
       this.logger.error("sensor.motors.poll_failed", { error: message });
+    }
+  }
+
+  /**
+   * Re-send the last motor instruction so the motor node keeps receiving it
+   * until some newer command supersedes it.
+   */
+  private async replayLastMotorCommand(): Promise<void> {
+    const command = this.lastMotorCommand;
+    if (!command) {
+      return;
+    }
+
+    try {
+      if (command.kind === "speed") {
+        await this.gateway.setMotorWheelSpeeds(
+          command.leftWheelTargetMetersPerSecond,
+          command.rightWheelTargetMetersPerSecond,
+        );
+      } else {
+        await this.gateway.stopMotors();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error("sensor.motors.replay_failed", {
+        error: message,
+        commandKind: command.kind,
+      });
     }
   }
 }

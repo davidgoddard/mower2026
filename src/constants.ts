@@ -227,13 +227,19 @@ export const MOTOR_RAMP_DOWN_TIME_MS = 700;
  * Motor ramp-up time from hardware spec (milliseconds)
  * Time for motors to accelerate from zero to full speed
  */
-export const MOTOR_RAMP_UP_TIME_MS = 460;
+export const MOTOR_RAMP_UP_TIME_MS = 600;
 
 /**
  * Small angle threshold - below this, use special handling (degrees)
  * Small angles require different brake strategy
  */
-export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 20;
+export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 30;
+
+/**
+ * Crawl speed factor used for small-angle turns
+ * A lower-than-full-speed turn that still keeps enough momentum to avoid stalls.
+ */
+export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.45;
 
 /**
  * Learning rate for brake angle adaptation (0-1)
@@ -246,15 +252,6 @@ export const TURN_LEARNING_RATE = 0.3;
  * Timeout = (angle / expected_rotation_rate) * multiplier
  */
 export const TURN_TIMEOUT_MULTIPLIER = 3.0;
-
-/**
- * Default angle bins for turn learning (degrees)
- * Requested angles are mapped to nearest bin
- */
-export const TURN_ANGLE_BINS = [
-  10, 20, 30, 40, 50, 60, 70, 80, 90,
-  100, 110, 120, 130, 140, 150, 160, 170, 180
-] as const;
 
 /**
  * Maximum number of turn results to keep in history

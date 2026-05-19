@@ -479,6 +479,7 @@ export class DriveController {
   async stopCurrentDrive(): Promise<void> {
     if (this.currentDrive) {
       this.stopRequested = true;
+      void this.turnController.stopCurrentTurn();
       this.logger.warn("drive.stop_requested", {
         currentDrive: this.currentDrive,
       });
