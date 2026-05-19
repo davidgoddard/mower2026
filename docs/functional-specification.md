@@ -166,7 +166,7 @@ The web page home page provides a real-time dashboard view showing the current s
 - Status indicator
 
 **Motors Widget:**
-- Left and right wheel speeds (m/s)
+- Left and right wheel speeds (m/s) derived on the Pi from raw encoder feedback only
 - VU meter displays for motor current draw:
   - Real-time current level shown as gradient bar (green → yellow → red)
   - Peak hold indicator (holds maximum for 2 seconds)
@@ -192,8 +192,8 @@ The primitives JSON API (`/api/primitives`) exposes sensor domains as distinct s
 - `motors` - speeds, currents, PWM, watchdog, faults
 
 For motors, primitives include both:
-- last commanded wheel speeds
-- latest feedback sample (wheel speeds, encoder deltas, PWM, current, watchdog/fault state)
+- last commanded wheel output percentages
+- latest feedback sample (derived wheel speed, encoder deltas, PWM, current, watchdog/fault state)
 
 ### Sensor Interface
 
@@ -216,8 +216,11 @@ The Sensor Controller should expose a snapshot/read API for the latest sensor st
 The sensor controller shall poll motor feedback each loop and expose the latest motor state in primitives.
 
 The sensor controller shall expose motor command methods for:
-- setting left and right wheel target speeds
+- setting left and right wheel target percentages, where 1.0 is full output and 0.0 is stop
 - issuing a stop command
+
+The Pi-to-motor-node command protocol shall use normalized percentages rather than metres-per-second targets.
+The ESP32 motor controller shall treat the requested target percentage as the top-of-ramp destination and apply ramp-up/ramp-down over the configured duration.
 
 Motor stop commands must use the highest bus priority (`1`) and motor speed commands use priority (`2`).
 
@@ -228,9 +231,11 @@ Application-level motor command convention shall be:
 Where hardware wiring/motor node direction differs, inversion shall be applied only at the hardware adapter boundary, not in application control logic.
 
 Motor feedback shall include, at minimum:
-- left and right wheel speeds in meters per second
 - encoder pulse delta per wheel since the previous sample
 - watchdog health and fault flags
+
+The ESP32 motor node shall send raw encoder pulse deltas and PWM/current telemetry only.
+The Pi-side sensor controller shall convert encoder deltas into wheel speed estimates using the persisted encoder calibration.
 
 Encoder pulse deltas are required so higher level components can integrate distance over time.
 

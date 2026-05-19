@@ -3,9 +3,9 @@
 #include "driver/ledc.h"
 
 // Second-generation motor controller for ESP32.
-// It accepts explicit left/right wheel speed targets over I2C and returns
-// a coherent feedback snapshot with FG pulse deltas, estimated wheel speeds,
-// applied PWM, and watchdog/fault state.
+// It accepts explicit left/right wheel percentage targets over I2C and returns
+// a coherent feedback snapshot with FG pulse deltas, applied PWM, and
+// watchdog/fault state.
 
 // ===== I2C / protocol =====
 static const uint8_t I2C_SLAVE_ADDRESS = 0x66;
@@ -18,7 +18,7 @@ static const uint8_t MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
 static const size_t FRAME_HEADER_SIZE = 9;
 static const size_t FRAME_CRC_SIZE = 2;
 static const size_t WHEEL_COMMAND_PAYLOAD_SIZE = 15;
-static const size_t MOTOR_FEEDBACK_PAYLOAD_SIZE = 26;
+static const size_t MOTOR_FEEDBACK_PAYLOAD_SIZE = 22;
 static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + MOTOR_FEEDBACK_PAYLOAD_SIZE + FRAME_CRC_SIZE;
 
 // ===== Pins =====
@@ -44,30 +44,28 @@ static const ledc_channel_t LEFT_CHANNEL = LEDC_CHANNEL_0;
 static const ledc_channel_t RIGHT_CHANNEL = LEDC_CHANNEL_1;
 static const int PWM_MAX_DUTY = 255;
 
+// ===== Feedback scaling =====
+// Provisional pulse-rate baseline for "full output" normalization used by the
+// local assist controller. This is intentionally pulse-domain only so physical
+// m/s conversion remains a Pi-side concern.
+static const float DEFAULT_FULL_OUTPUT_PULSES_PER_SECOND = 1735.7f;
+
 // ===== Control / reporting =====
 static const uint32_t CONTROL_PERIOD_MS = 10;      // 100 Hz
 static const uint32_t FEEDBACK_PERIOD_MS = 50;     // 20 Hz
 static const uint32_t DEFAULT_TIMEOUT_MS = 250;
 static const uint32_t DEFAULT_RAMP_UP_MS = 460;
 static const uint32_t DEFAULT_RAMP_DOWN_MS = 700;
-static const float DEFAULT_MAX_WHEEL_SPEED_MPS = 0.75f;
-static const float DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS = 0.025f;
-static const float DEFAULT_SPEED_KP = 60.0f;       // PWM percent per m/s error
-static const float DEFAULT_ENCODER_FAULT_SPEED_THRESHOLD = 0.20f;
-static const float DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD = 0.02f;
+static const float DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT = 0.025f;
+static const float DEFAULT_SPEED_KP = 60.0f;       // PWM percent per output-percent error
+static const float DEFAULT_ENCODER_FAULT_OUTPUT_THRESHOLD_PERCENT = 0.20f;
+static const float DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD_PERCENT = 0.02f;
 static const uint32_t ENCODER_FAULT_DELAY_MS = 500;
 static const float CURRENT_SENSOR_SUPPLY_VOLTS = 3.3f;
 static const float CURRENT_SENSOR_VOLTS_PER_AMP = 0.185f;  // ACS712ELC-05B typical sensitivity
 static const float CURRENT_SENSOR_FILTER_ALPHA = 0.2f;
 static const uint16_t CURRENT_SENSOR_CALIBRATION_SAMPLES = 128;
 static const uint16_t ADC_MAX_COUNT = 4095;
-
-// ===== Geometry / scaling =====
-static const float DEFAULT_WHEEL_CIRCUMFERENCE_METERS = 0.70f;
-// Provisional FG scaling. Current motor documentation suggests a 12-pulse FG
-// output per motor revolution, but absolute wheel speed still depends on the
-// real motor-to-wheel gear ratio. Keep this configurable until measured.
-static const int32_t DEFAULT_FEEDBACK_PULSES_PER_WHEEL_REV = 1620;
 
 // ===== Fault bits =====
 static const uint16_t MOTOR_FAULT_WATCHDOG_EXPIRED = (1u << 0);
@@ -79,20 +77,18 @@ static const uint16_t MOTOR_FAULT_OVERCURRENT = (1u << 5);
 
 struct WheelSpeedCommand {
   uint32_t timestampMillis;
-  float leftWheelTargetMetersPerSecond;
-  float rightWheelTargetMetersPerSecond;
+  float leftWheelTargetPercent;
+  float rightWheelTargetPercent;
   bool enableDrive;
   uint16_t commandTimeoutMillis;
   bool hasAccelLimit;
-  float maxAccelerationMetersPerSecondSquared;
+  float maxAccelerationPercentPerSecond;
   bool hasDecelLimit;
-  float maxDecelerationMetersPerSecondSquared;
+  float maxDecelerationPercentPerSecond;
 };
 
 struct FeedbackSnapshot {
   uint32_t timestampMillis;
-  float leftWheelActualMetersPerSecond;
-  float rightWheelActualMetersPerSecond;
   int32_t leftEncoderDelta;
   int32_t rightEncoderDelta;
   int8_t leftPwmAppliedPercent;
@@ -113,9 +109,9 @@ struct MotorState {
   int8_t requestedPwmPercent;
   int8_t currentDirectionSign;
   bool directionChangePending;
-  float targetMetersPerSecond;
-  float rampedTargetMetersPerSecond;
-  float actualMetersPerSecond;
+  float targetPercent;
+  float rampedTargetPercent;
+  float measuredWheelOutputPercent;
   uint32_t encoderFaultSinceMillis;
 };
 
@@ -135,7 +131,7 @@ MotorState g_leftMotor = { "left", LEFT_CHANNEL, LEFT_PWM_PIN, LEFT_DIR_PIN, fal
 MotorState g_rightMotor = { "right", RIGHT_CHANNEL, RIGHT_PWM_PIN, RIGHT_DIR_PIN, true, 0, 0, 1, false, 0.0f, 0.0f, 0.0f, 0 };
 
 WheelSpeedCommand g_latestCommand = { 0, 0.0f, 0.0f, false, DEFAULT_TIMEOUT_MS, false, 0.0f, false, 0.0f };
-FeedbackSnapshot g_latestFeedback = { 0, 0.0f, 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, false, 0 };
+FeedbackSnapshot g_latestFeedback = { 0, 0, 0, 0, 0, 0.0f, 0.0f, false, 0 };
 CurrentSensorState g_leftCurrentSensor = { LEFT_CURRENT_SENSE_PIN, CURRENT_SENSOR_SUPPLY_VOLTS / 2.0f, 0.0f };
 CurrentSensorState g_rightCurrentSensor = { RIGHT_CURRENT_SENSE_PIN, CURRENT_SENSOR_SUPPLY_VOLTS / 2.0f, 0.0f };
 
@@ -210,7 +206,7 @@ int8_t clampPercent(int value) {
   return static_cast<int8_t>(value);
 }
 
-int8_t estimateOpenLoopPwm(float targetMetersPerSecond, float actualMetersPerSecond);
+int8_t estimateOpenLoopPwm(float targetPercent, float measuredWheelOutputPercent);
 
 float clampFloat(float value, float minValue, float maxValue) {
   if (value < minValue) return minValue;
@@ -287,34 +283,32 @@ bool decodeWheelSpeedCommandPayload(const uint8_t *payload, uint16_t payloadLeng
   }
 
   command.timestampMillis = readU32LE(&payload[0]);
-  command.leftWheelTargetMetersPerSecond = static_cast<float>(readI16LE(&payload[4])) / 1000.0f;
-  command.rightWheelTargetMetersPerSecond = static_cast<float>(readI16LE(&payload[6])) / 1000.0f;
+  command.leftWheelTargetPercent = static_cast<float>(readI16LE(&payload[4])) / 1000.0f;
+  command.rightWheelTargetPercent = static_cast<float>(readI16LE(&payload[6])) / 1000.0f;
   command.enableDrive = payload[8] == 1;
   command.commandTimeoutMillis = readU16LE(&payload[9]);
 
   uint16_t accelRaw = readU16LE(&payload[11]);
   command.hasAccelLimit = accelRaw != 0xFFFF;
-  command.maxAccelerationMetersPerSecondSquared = command.hasAccelLimit ? static_cast<float>(accelRaw) / 1000.0f : 0.0f;
+  command.maxAccelerationPercentPerSecond = command.hasAccelLimit ? static_cast<float>(accelRaw) / 1000.0f : 0.0f;
 
   uint16_t decelRaw = readU16LE(&payload[13]);
   command.hasDecelLimit = decelRaw != 0xFFFF;
-  command.maxDecelerationMetersPerSecondSquared = command.hasDecelLimit ? static_cast<float>(decelRaw) / 1000.0f : 0.0f;
+  command.maxDecelerationPercentPerSecond = command.hasDecelLimit ? static_cast<float>(decelRaw) / 1000.0f : 0.0f;
   return true;
 }
 
 void encodeMotorFeedbackPayload(const FeedbackSnapshot &feedback, uint8_t *payloadOut) {
   writeU32LE(&payloadOut[0], feedback.timestampMillis);
-  writeI16LE(&payloadOut[4], static_cast<int16_t>(feedback.leftWheelActualMetersPerSecond * 1000.0f));
-  writeI16LE(&payloadOut[6], static_cast<int16_t>(feedback.rightWheelActualMetersPerSecond * 1000.0f));
-  writeI32LE(&payloadOut[8], feedback.leftEncoderDelta);
-  writeI32LE(&payloadOut[12], feedback.rightEncoderDelta);
-  payloadOut[16] = static_cast<uint8_t>(feedback.leftPwmAppliedPercent);
-  payloadOut[17] = static_cast<uint8_t>(feedback.rightPwmAppliedPercent);
-  writeU16LE(&payloadOut[18], encodeCurrentTenths(feedback.leftMotorCurrentAmps));
-  writeU16LE(&payloadOut[20], encodeCurrentTenths(feedback.rightMotorCurrentAmps));
-  payloadOut[22] = feedback.watchdogHealthy ? 1 : 0;
-  writeU16LE(&payloadOut[23], feedback.faultFlags);
-  payloadOut[25] = 0;
+  writeI32LE(&payloadOut[4], feedback.leftEncoderDelta);
+  writeI32LE(&payloadOut[8], feedback.rightEncoderDelta);
+  payloadOut[12] = static_cast<uint8_t>(feedback.leftPwmAppliedPercent);
+  payloadOut[13] = static_cast<uint8_t>(feedback.rightPwmAppliedPercent);
+  writeU16LE(&payloadOut[14], encodeCurrentTenths(feedback.leftMotorCurrentAmps));
+  writeU16LE(&payloadOut[16], encodeCurrentTenths(feedback.rightMotorCurrentAmps));
+  payloadOut[18] = feedback.watchdogHealthy ? 1 : 0;
+  writeU16LE(&payloadOut[19], feedback.faultFlags);
+  payloadOut[21] = 0;
 }
 
 // ===== Low-level motor output =====
@@ -331,53 +325,52 @@ void forceMotorStop(MotorState &motor) {
   motor.requestedPwmPercent = 0;
   motor.appliedPwmPercent = 0;
   motor.currentDirectionSign = 0;
-  motor.targetMetersPerSecond = 0.0f;
-  motor.rampedTargetMetersPerSecond = 0.0f;
+  motor.targetPercent = 0.0f;
+  motor.rampedTargetPercent = 0.0f;
   applyMotorHardware(motor);
 }
 
 void stepWheelTargetTowardCommand(MotorState &motor, uint32_t elapsedMs, uint32_t rampUpMs, uint32_t rampDownMs) {
-  float deltaMetersPerSecond = motor.targetMetersPerSecond - motor.rampedTargetMetersPerSecond;
-  float activeRampMs = fabs(motor.targetMetersPerSecond) > fabs(motor.rampedTargetMetersPerSecond)
+  float deltaPercent = motor.targetPercent - motor.rampedTargetPercent;
+  float activeRampMs = fabs(motor.targetPercent) > fabs(motor.rampedTargetPercent)
     ? static_cast<float>(rampUpMs)
     : static_cast<float>(rampDownMs);
-  float maxStepMetersPerSecond =
-    DEFAULT_MAX_WHEEL_SPEED_MPS * (static_cast<float>(elapsedMs) / max(1.0f, activeRampMs));
+  float maxStepPercent = static_cast<float>(elapsedMs) / max(1.0f, activeRampMs);
 
-  if (fabs(deltaMetersPerSecond) <= maxStepMetersPerSecond) {
-    motor.rampedTargetMetersPerSecond = motor.targetMetersPerSecond;
+  if (fabs(deltaPercent) <= maxStepPercent) {
+    motor.rampedTargetPercent = motor.targetPercent;
   } else {
-    motor.rampedTargetMetersPerSecond += (deltaMetersPerSecond > 0.0f ? 1.0f : -1.0f) * maxStepMetersPerSecond;
+    motor.rampedTargetPercent += (deltaPercent > 0.0f ? 1.0f : -1.0f) * maxStepPercent;
   }
 
   if (
-    motor.targetMetersPerSecond == 0.0f
-    && fabs(motor.rampedTargetMetersPerSecond) < DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS
+    motor.targetPercent == 0.0f
+    && fabs(motor.rampedTargetPercent) < DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT
   ) {
-    motor.rampedTargetMetersPerSecond = 0.0f;
+    motor.rampedTargetPercent = 0.0f;
   }
 
   // A non-zero command should not get stuck forever below the effective-motion
-  // floor. Promote startup immediately to the minimum effective wheel speed,
+  // floor. Promote startup immediately to the minimum effective output,
   // then continue ramping from there.
   if (
-    motor.targetMetersPerSecond != 0.0f
-    && fabs(motor.rampedTargetMetersPerSecond) < DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS
+    motor.targetPercent != 0.0f
+    && fabs(motor.rampedTargetPercent) < DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT
   ) {
-    motor.rampedTargetMetersPerSecond =
-      (motor.targetMetersPerSecond > 0.0f ? 1.0f : -1.0f) * DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS;
+    motor.rampedTargetPercent =
+      (motor.targetPercent > 0.0f ? 1.0f : -1.0f) * DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT;
   }
 }
 
 void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t rampUpMs, uint32_t rampDownMs) {
   // The Pi sends intent changes immediately. Keep a single interruptible slew
   // layer here by ramping only the applied PWM toward the latest target.
-  motor.rampedTargetMetersPerSecond = motor.targetMetersPerSecond;
+  motor.rampedTargetPercent = motor.targetPercent;
 
-  if (fabs(motor.rampedTargetMetersPerSecond) < DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS) {
+  if (fabs(motor.rampedTargetPercent) < DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT) {
     motor.requestedPwmPercent = 0;
   } else {
-    motor.requestedPwmPercent = estimateOpenLoopPwm(motor.rampedTargetMetersPerSecond, motor.actualMetersPerSecond);
+    motor.requestedPwmPercent = estimateOpenLoopPwm(motor.rampedTargetPercent, motor.measuredWheelOutputPercent);
   }
 
   int targetSign = motor.requestedPwmPercent >= 0 ? 1 : -1;
@@ -406,11 +399,11 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
 
   int minimumMovingPwmPercent = max(
     1,
-    static_cast<int>((DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS / DEFAULT_MAX_WHEEL_SPEED_MPS) * 100.0f)
+    static_cast<int>(DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT * 100.0f)
   );
   int appliedMagnitude = abs(motor.appliedPwmPercent);
   bool effectiveMoveRequested = targetMagnitude > 0
-    && fabs(motor.rampedTargetMetersPerSecond) >= DEFAULT_MIN_EFFECTIVE_WHEEL_SPEED_MPS;
+    && fabs(motor.rampedTargetPercent) >= DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT;
   if (effectiveMoveRequested && appliedMagnitude > 0 && appliedMagnitude < minimumMovingPwmPercent) {
     motor.appliedPwmPercent = clampPercent(targetSign * minimumMovingPwmPercent);
   } else if (targetMagnitude == 0 && appliedMagnitude < minimumMovingPwmPercent) {
@@ -427,19 +420,15 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
   applyMotorHardware(motor);
 }
 
-uint32_t rampMillisFromAcceleration(float maxWheelSpeedMetersPerSecond, float accelerationMetersPerSecondSquared, uint32_t fallbackRampMs) {
-  if (accelerationMetersPerSecondSquared <= 0.0f) {
+uint32_t rampMillisFromRate(float percentPerSecond, uint32_t fallbackRampMs) {
+  if (percentPerSecond <= 0.0f) {
     return fallbackRampMs;
   }
-  float rampMillis = (maxWheelSpeedMetersPerSecond / accelerationMetersPerSecondSquared) * 1000.0f;
+  float rampMillis = (1.0f / percentPerSecond) * 1000.0f;
   return max<uint32_t>(1, static_cast<uint32_t>(rampMillis));
 }
 
 // ===== Control / feedback =====
-float pulsesToMeters(int32_t pulses) {
-  return (static_cast<float>(pulses) / static_cast<float>(DEFAULT_FEEDBACK_PULSES_PER_WHEEL_REV)) * DEFAULT_WHEEL_CIRCUMFERENCE_METERS;
-}
-
 float adcCountToVolts(int rawCount) {
   return (static_cast<float>(rawCount) / static_cast<float>(ADC_MAX_COUNT)) * CURRENT_SENSOR_SUPPLY_VOLTS;
 }
@@ -467,8 +456,8 @@ float readCurrentSensor(CurrentSensorState &sensor) {
 }
 
 void updateEncoderFault(MotorState &motor, bool leftMotor, uint32_t nowMillis) {
-  bool commandedToMove = fabs(motor.targetMetersPerSecond) >= DEFAULT_ENCODER_FAULT_SPEED_THRESHOLD;
-  bool measuredMoving = fabs(motor.actualMetersPerSecond) >= DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD;
+  bool commandedToMove = fabs(motor.targetPercent) >= DEFAULT_ENCODER_FAULT_OUTPUT_THRESHOLD_PERCENT;
+  bool measuredMoving = fabs(motor.measuredWheelOutputPercent) >= DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD_PERCENT;
   bool unexpectedIdleMotion = !commandedToMove && measuredMoving;
 
   if ((commandedToMove && !measuredMoving) || unexpectedIdleMotion) {
@@ -487,10 +476,19 @@ void updateEncoderFault(MotorState &motor, bool leftMotor, uint32_t nowMillis) {
   }
 }
 
-int8_t estimateOpenLoopPwm(float targetMetersPerSecond, float actualMetersPerSecond) {
-  float normalizedFeedForward = (targetMetersPerSecond / DEFAULT_MAX_WHEEL_SPEED_MPS) * 100.0f;
-  float speedError = targetMetersPerSecond - actualMetersPerSecond;
-  float assist = speedError * DEFAULT_SPEED_KP;
+float pulsesToOutputPercent(int32_t pulses, float elapsedSeconds) {
+  if (elapsedSeconds <= 0.0f) {
+    return 0.0f;
+  }
+
+  float pulsesPerSecond = static_cast<float>(pulses) / elapsedSeconds;
+  return clampFloat(pulsesPerSecond / DEFAULT_FULL_OUTPUT_PULSES_PER_SECOND, -1.0f, 1.0f);
+}
+
+int8_t estimateOpenLoopPwm(float targetPercent, float measuredWheelOutputPercent) {
+  float normalizedFeedForward = targetPercent * 100.0f;
+  float outputError = targetPercent - measuredWheelOutputPercent;
+  float assist = outputError * DEFAULT_SPEED_KP;
   return clampPercent(static_cast<int>(normalizedFeedForward + assist));
 }
 
@@ -517,12 +515,10 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   int32_t signedRightPulses = rightDriven ? (rightPulses * g_rightMotor.currentDirectionSign) : 0;
   float elapsedSeconds = static_cast<float>(elapsedMs) / 1000.0f;
 
-  g_leftMotor.actualMetersPerSecond = pulsesToMeters(signedLeftPulses) / elapsedSeconds;
-  g_rightMotor.actualMetersPerSecond = pulsesToMeters(signedRightPulses) / elapsedSeconds;
+  g_leftMotor.measuredWheelOutputPercent = pulsesToOutputPercent(signedLeftPulses, elapsedSeconds);
+  g_rightMotor.measuredWheelOutputPercent = pulsesToOutputPercent(signedRightPulses, elapsedSeconds);
 
   g_latestFeedback.timestampMillis = nowMillis;
-  g_latestFeedback.leftWheelActualMetersPerSecond = g_leftMotor.actualMetersPerSecond;
-  g_latestFeedback.rightWheelActualMetersPerSecond = g_rightMotor.actualMetersPerSecond;
   g_latestFeedback.leftEncoderDelta = signedLeftPulses;
   g_latestFeedback.rightEncoderDelta = signedRightPulses;
   g_latestFeedback.leftPwmAppliedPercent = g_leftMotor.appliedPwmPercent;
@@ -552,10 +548,10 @@ void runControlStep(uint32_t nowMillis) {
   bool commandFresh = g_lastAcceptedCommandMillis != 0 && (nowMillis - g_lastAcceptedCommandMillis) <= g_latestCommand.commandTimeoutMillis;
   bool allowDrive = commandFresh && g_latestCommand.enableDrive;
 
-  float leftTarget = allowDrive ? g_latestCommand.leftWheelTargetMetersPerSecond : 0.0f;
-  float rightTarget = allowDrive ? g_latestCommand.rightWheelTargetMetersPerSecond : 0.0f;
-  g_leftMotor.targetMetersPerSecond = leftTarget;
-  g_rightMotor.targetMetersPerSecond = rightTarget;
+  float leftTarget = allowDrive ? g_latestCommand.leftWheelTargetPercent : 0.0f;
+  float rightTarget = allowDrive ? g_latestCommand.rightWheelTargetPercent : 0.0f;
+  g_leftMotor.targetPercent = leftTarget;
+  g_rightMotor.targetPercent = rightTarget;
 
   if (!allowDrive) {
     forceMotorStop(g_leftMotor);
@@ -571,10 +567,10 @@ void runControlStep(uint32_t nowMillis) {
   lastStepMillis = nowMillis;
 
   uint32_t rampUpMs = g_latestCommand.hasAccelLimit
-    ? rampMillisFromAcceleration(DEFAULT_MAX_WHEEL_SPEED_MPS, g_latestCommand.maxAccelerationMetersPerSecondSquared, DEFAULT_RAMP_UP_MS)
+    ? rampMillisFromRate(g_latestCommand.maxAccelerationPercentPerSecond, DEFAULT_RAMP_UP_MS)
     : DEFAULT_RAMP_UP_MS;
   uint32_t rampDownMs = g_latestCommand.hasDecelLimit
-    ? rampMillisFromAcceleration(DEFAULT_MAX_WHEEL_SPEED_MPS, g_latestCommand.maxDecelerationMetersPerSecondSquared, DEFAULT_RAMP_DOWN_MS)
+    ? rampMillisFromRate(g_latestCommand.maxDecelerationPercentPerSecond, DEFAULT_RAMP_DOWN_MS)
     : DEFAULT_RAMP_DOWN_MS;
 
   stepMotorTowardRequested(g_leftMotor, elapsedMs, rampUpMs, rampDownMs);

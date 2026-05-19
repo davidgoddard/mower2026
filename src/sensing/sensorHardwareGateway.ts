@@ -2,7 +2,7 @@ import { I2cBusController } from "../i2c/i2cBusController.js";
 import { LiveI2cTransport } from "../i2c/liveI2cTransport.js";
 import { GnssNodeClient } from "../gnss/gnssNodeClient.js";
 import { GnssSample } from "../gnss/gnssProtocol.js";
-import { buildMotorDirectionMapping, mapPhysicalWheelTargetsToRaw, mapRawMotorFeedbackToPhysical, MotorDirectionMapping } from "../motors/motorMapping.js";
+import { buildMotorDirectionMapping, clampNormalizedWheelTargets, mapNormalizedWheelTargetsToRaw, mapRawMotorFeedbackToAppConvention, MotorDirectionMapping } from "../motors/motorMapping.js";
 import { MotorNodeClient } from "../motors/motorNodeClient.js";
 import { MotorFeedbackSample } from "../motors/motorProtocol.js";
 import { Bmi160ImuSensor } from "../imu/bmi160ImuSensor.js";
@@ -14,7 +14,7 @@ export interface SensorHardwareGateway {
   readImu(): Promise<ImuSample>;
   readGnss(): Promise<GnssSample>;
   readMotorFeedback(): Promise<MotorFeedbackSample>;
-  setMotorWheelSpeeds(leftWheelTargetMetersPerSecond: number, rightWheelTargetMetersPerSecond: number): Promise<void>;
+  setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void>;
   stopMotors(): Promise<void>;
   close(): Promise<void>;
 }
@@ -83,20 +83,21 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     }
 
     const raw = await this.motorClient.refreshFeedback();
-    return mapRawMotorFeedbackToPhysical(this.motorMapping, raw);
+    return mapRawMotorFeedbackToAppConvention(this.motorMapping, raw);
   }
 
-  async setMotorWheelSpeeds(leftWheelTargetMetersPerSecond: number, rightWheelTargetMetersPerSecond: number): Promise<void> {
+  async setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void> {
     if (!this.motorClient) {
       throw new Error("sensor gateway not initialised");
     }
 
-    const raw = mapPhysicalWheelTargetsToRaw(this.motorMapping, {
-      leftMetersPerSecond: leftWheelTargetMetersPerSecond,
-      rightMetersPerSecond: rightWheelTargetMetersPerSecond,
+    const normalized = clampNormalizedWheelTargets({
+      leftPercent: leftWheelOutputPercent,
+      rightPercent: rightWheelOutputPercent,
     });
+    const raw = mapNormalizedWheelTargetsToRaw(this.motorMapping, normalized);
 
-    await this.motorClient.sendWheelSpeedCommand(raw.leftMetersPerSecond, raw.rightMetersPerSecond);
+    await this.motorClient.sendWheelSpeedCommand(raw.leftPercent, raw.rightPercent);
   }
 
   async stopMotors(): Promise<void> {

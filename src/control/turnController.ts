@@ -22,7 +22,7 @@ import {
   TurnStatus,
 } from "./turnControllerTypes.js";
 import {
-  MAX_WHEEL_SPEED_MPS_DEFAULT,
+  DRIVE_FULL_SPEED_COMMAND_DEFAULT,
   TURN_SETTLE_TIME_MS,
   TURN_HISTORY_MAX_SIZE,
   MOTOR_RAMP_DOWN_TIME_MS,
@@ -40,7 +40,7 @@ export interface TurnControllerOptions {
   logger: SessionLogger;
   learningModel: TurnLearningModel;
   motorCalibration?: MotorCalibration;
-  maxWheelSpeedMetersPerSecond?: number;
+  maxWheelOutputPercent?: number;
   settleTimeMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
@@ -51,7 +51,7 @@ export class TurnController {
   private readonly sensorController: SensorController;
   private readonly learningModel: TurnLearningModel;
   private readonly motorCalibration: MotorCalibration | null;
-  private readonly maxWheelSpeed: number;
+  private readonly maxWheelOutputPercent: number;
   private readonly settleTimeMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
@@ -78,7 +78,7 @@ export class TurnController {
     this.sensorController = options.sensorController;
     this.learningModel = options.learningModel;
     this.motorCalibration = options.motorCalibration ?? null;
-    this.maxWheelSpeed = options.maxWheelSpeedMetersPerSecond ?? MAX_WHEEL_SPEED_MPS_DEFAULT;
+    this.maxWheelOutputPercent = options.maxWheelOutputPercent ?? DRIVE_FULL_SPEED_COMMAND_DEFAULT;
     this.settleTimeMs = options.settleTimeMs ?? TURN_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
@@ -132,7 +132,7 @@ export class TurnController {
         this.logger.info("turn.brake_plan", {
           requestedAngle: absAngle,
           largeBrakeDistanceDeg: unwrapRelativeAngle(brakeDistance),
-          smallCrawlSpeedMetersPerSecond: this.maxWheelSpeed * TURN_SMALL_CRAWL_SPEED_FACTOR,
+          smallCrawlWheelOutputPercent: this.maxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR,
           smallTurnBrakeFraction,
           smallAngleThreshold: this.learningModel.getSmallAngleThreshold(),
           turnIsSmallAngle: this.turnIsSmallAngle,
@@ -144,11 +144,11 @@ export class TurnController {
 
         // 5. TURNING - Engage motors at the configured turn speed
         this.status = "turning";
-        const wheelSpeed = this.turnIsSmallAngle
-          ? this.maxWheelSpeed * TURN_SMALL_CRAWL_SPEED_FACTOR
-          : this.maxWheelSpeed;
-        const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelSpeed);
-        await this.sensorController.setMotorWheelSpeeds(initialSpeeds.left, initialSpeeds.right);
+        const wheelOutputPercent = this.turnIsSmallAngle
+          ? this.maxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR
+          : this.maxWheelOutputPercent;
+        const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelOutputPercent);
+        await this.sensorController.setMotorWheelOutputs(initialSpeeds.left, initialSpeeds.right);
       } catch (error) {
         systemStop.requestStop("turn", "turn_error");
         await this.endMotorOperation();
@@ -269,14 +269,14 @@ export class TurnController {
         requestedAngle: unwrapRelativeAngle(request.targetAngle),
         brakeDistanceUsed: unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0)),
         mode: this.turnIsSmallAngle ? "small_crawl_halt" : "large_zero_speed",
-        leftWheelTargetMetersPerSecond: 0,
-        rightWheelTargetMetersPerSecond: 0,
+        leftWheelOutputPercent: 0,
+        rightWheelOutputPercent: 0,
         driveEnabled: !this.turnIsSmallAngle,
       });
       if (this.turnIsSmallAngle) {
         await this.sensorController.stopMotors();
       } else {
-        await this.sensorController.setMotorWheelSpeeds(0, 0);
+        await this.sensorController.setMotorWheelOutputs(0, 0);
 
         // 7. Wait for motor ramp-down (2x ramp-down time per spec)
         const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
@@ -543,10 +543,10 @@ export class TurnController {
   /**
    * Map a turn direction to wheel speeds.
    */
-  private getTurnWheelSpeeds(direction: "ccw" | "cw", wheelSpeed: number): { left: number; right: number } {
+  private getTurnWheelSpeeds(direction: "ccw" | "cw", wheelOutputPercent: number): { left: number; right: number } {
     return direction === "ccw"
-      ? { left: -wheelSpeed, right: wheelSpeed }
-      : { left: wheelSpeed, right: -wheelSpeed };
+      ? { left: -wheelOutputPercent, right: wheelOutputPercent }
+      : { left: wheelOutputPercent, right: -wheelOutputPercent };
   }
 
   private beginMotorOperation(): void {

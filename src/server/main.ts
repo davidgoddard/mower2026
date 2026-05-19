@@ -11,7 +11,7 @@ import {
   CONTROLLER_STEERING_SIGN_DEFAULT,
   CONTROLLER_SPEED_SIGN_DEFAULT,
   MANUAL_DRIVE_LOOP_INTERVAL_MS,
-  MAX_WHEEL_SPEED_MPS_DEFAULT,
+  MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
 } from "../constants.js";
 
 const host = process.env.MOWER_CORE_APP_HOST ?? HTTP_SERVER_HOST_DEFAULT;
@@ -27,7 +27,7 @@ const controllerEnabled = (process.env.MOWER_CONTROLLER_ENABLED ?? "1") !== "0";
 const controllerSteeringSign = Number(process.env.MOWER_CONTROLLER_STEERING_SIGN ?? CONTROLLER_STEERING_SIGN_DEFAULT);
 const controllerSpeedSign = Number(process.env.MOWER_CONTROLLER_SPEED_SIGN ?? CONTROLLER_SPEED_SIGN_DEFAULT);
 const manualDriveLoopMs = Number(process.env.MOWER_MANUAL_DRIVE_LOOP_MS ?? MANUAL_DRIVE_LOOP_INTERVAL_MS);
-const maxWheelSpeedMetersPerSecond = Number(process.env.MOWER_MAX_WHEEL_SPEED_MPS ?? MAX_WHEEL_SPEED_MPS_DEFAULT);
+const maxWheelOutputPercent = Number(process.env.MOWER_MAX_WHEEL_OUTPUT_PERCENT ?? MAX_WHEEL_OUTPUT_PERCENT_DEFAULT);
 
 const runningServer = await startMowerServer({
   appName: "mower-core",
@@ -44,7 +44,7 @@ const runningServer = await startMowerServer({
   controllerSteeringSign,
   controllerSpeedSign,
   manualDriveLoopMs,
-  maxWheelSpeedMetersPerSecond,
+  maxWheelOutputPercent,
 });
 
 console.log(`mower-core server listening on http://${runningServer.host}:${runningServer.port}`);

@@ -22,13 +22,13 @@ const SIGNED_NORMALIZED_MAX = 1;
 interface ManualDriveDemandInput {
   readonly speedDemand: number;
   readonly turnDemand: number;
-  readonly maxWheelSpeedMetersPerSecond: number;
+  readonly maxWheelOutputPercent: number;
 }
 
 export interface ManualDriveDemand {
   readonly mode: "stopped" | "straight" | "arc" | "spin";
-  readonly requestedLeftMetersPerSecond: number;
-  readonly requestedRightMetersPerSecond: number;
+  readonly requestedLeftWheelOutputPercent: number;
+  readonly requestedRightWheelOutputPercent: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -64,13 +64,13 @@ export function normalizeManualTurnDemand(angleDegrees: number): number {
 export function computeManualDriveDemand(input: ManualDriveDemandInput): ManualDriveDemand {
   const speedDemand = clamp(input.speedDemand, SIGNED_NORMALIZED_MIN, SIGNED_NORMALIZED_MAX);
   const turnDemand = clamp(input.turnDemand, SIGNED_NORMALIZED_MIN, SIGNED_NORMALIZED_MAX);
-  const maxWheelSpeed = input.maxWheelSpeedMetersPerSecond;
+  const maxWheelOutputPercent = clamp(input.maxWheelOutputPercent, SIGNED_NORMALIZED_MIN, SIGNED_NORMALIZED_MAX);
 
   if (Math.abs(speedDemand) < MANUAL_SPEED_DEADBAND && Math.abs(turnDemand) < MANUAL_TURN_DEADBAND) {
     return {
       mode: "stopped",
-      requestedLeftMetersPerSecond: 0,
-      requestedRightMetersPerSecond: 0,
+      requestedLeftWheelOutputPercent: 0,
+      requestedRightWheelOutputPercent: 0,
     };
   }
 
@@ -83,31 +83,30 @@ export function computeManualDriveDemand(input: ManualDriveDemandInput): ManualD
     const spinScale =
       MANUAL_DRIVE_MIN_SPIN_SPEED_SCALE
       + (MANUAL_DRIVE_MAX_SPIN_SPEED_SCALE - MANUAL_DRIVE_MIN_SPIN_SPEED_SCALE) * spinBlend;
-    const spinSpeed = Math.sign(turnDemand) * maxWheelSpeed * spinScale;
+    const spinOutputPercent = Math.sign(turnDemand) * maxWheelOutputPercent * spinScale;
     return {
       mode: "spin",
-      requestedLeftMetersPerSecond: -spinSpeed,
-      requestedRightMetersPerSecond: spinSpeed,
+      requestedLeftWheelOutputPercent: -spinOutputPercent,
+      requestedRightWheelOutputPercent: spinOutputPercent,
     };
   }
 
-  const baseSpeed = speedDemand * maxWheelSpeed;
+  const baseOutputPercent = speedDemand * maxWheelOutputPercent;
   const gentleTurn = turnMagnitude / MANUAL_DRIVE_SPIN_THRESHOLD;
   const innerWheelTrimFraction = MANUAL_DRIVE_MAX_INNER_WHEEL_TRIM * Math.pow(gentleTurn, MANUAL_DRIVE_ARC_RESPONSE_EXPONENT);
-  const innerWheelSpeed = baseSpeed * (1 - innerWheelTrimFraction);
+  const innerWheelOutputPercent = baseOutputPercent * (1 - innerWheelTrimFraction);
 
   if (turnDemand >= 0) {
     return {
       mode: turnMagnitude > MANUAL_DRIVE_ARC_STRAIGHT_THRESHOLD ? "arc" : "straight",
-      requestedLeftMetersPerSecond: innerWheelSpeed,
-      requestedRightMetersPerSecond: baseSpeed,
+      requestedLeftWheelOutputPercent: innerWheelOutputPercent,
+      requestedRightWheelOutputPercent: baseOutputPercent,
     };
   }
 
   return {
     mode: turnMagnitude > MANUAL_DRIVE_ARC_STRAIGHT_THRESHOLD ? "arc" : "straight",
-    requestedLeftMetersPerSecond: baseSpeed,
-    requestedRightMetersPerSecond: innerWheelSpeed,
+    requestedLeftWheelOutputPercent: baseOutputPercent,
+    requestedRightWheelOutputPercent: innerWheelOutputPercent,
   };
 }
-

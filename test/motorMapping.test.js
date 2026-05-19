@@ -2,41 +2,42 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildMotorDirectionMapping,
-  mapPhysicalWheelTargetsToRaw,
-  mapRawMotorFeedbackToPhysical,
+  clampNormalizedWheelTargets,
+  mapNormalizedWheelTargetsToRaw,
+  mapRawMotorFeedbackToAppConvention,
 } from "../dist/index.js";
 
-test("motor mapping converts app forward-positive wheel targets to raw motor signs", () => {
+test("motor mapping converts normalized app wheel outputs to raw signs", () => {
   const mapping = buildMotorDirectionMapping(-1, -1);
-  const raw = mapPhysicalWheelTargetsToRaw(mapping, {
-    leftMetersPerSecond: 0.4,
-    rightMetersPerSecond: 0.5,
-  });
+  const normalized = clampNormalizedWheelTargets({ leftPercent: 0.4, rightPercent: 0.5 });
+  const raw = mapNormalizedWheelTargetsToRaw(mapping, normalized);
 
-  assert.equal(raw.leftMetersPerSecond, -0.4);
-  assert.equal(raw.rightMetersPerSecond, -0.5);
+  assert.equal(raw.leftPercent, -0.4);
+  assert.equal(raw.rightPercent, -0.5);
+});
+
+test("motor mapping clamps wheel outputs to normalized bounds", () => {
+  const normalized = clampNormalizedWheelTargets({ leftPercent: -1.4, rightPercent: 2.1 });
+  assert.equal(normalized.leftPercent, -1);
+  assert.equal(normalized.rightPercent, 1);
 });
 
 test("motor mapping converts raw feedback to app forward-positive convention", () => {
   const mapping = buildMotorDirectionMapping(-1, -1);
-  const physical = mapRawMotorFeedbackToPhysical(mapping, {
+  const physical = mapRawMotorFeedbackToAppConvention(mapping, {
     timestampMillis: 1000,
-    leftWheelActualMetersPerSecond: -0.2,
-    rightWheelActualMetersPerSecond: -0.3,
     leftEncoderDelta: -12,
     rightEncoderDelta: -15,
-    leftPwmApplied: -40,
-    rightPwmApplied: -45,
+    leftPwmAppliedPercent: -40,
+    rightPwmAppliedPercent: -45,
     leftMotorCurrentAmps: 1.2,
     rightMotorCurrentAmps: 1.3,
     watchdogHealthy: true,
     faultFlags: 0,
   });
 
-  assert.equal(physical.leftWheelActualMetersPerSecond, 0.2);
-  assert.equal(physical.rightWheelActualMetersPerSecond, 0.3);
   assert.equal(physical.leftEncoderDelta, 12);
   assert.equal(physical.rightEncoderDelta, 15);
-  assert.equal(physical.leftPwmApplied, 40);
-  assert.equal(physical.rightPwmApplied, 45);
+  assert.equal(physical.leftPwmAppliedPercent, 40);
+  assert.equal(physical.rightPwmAppliedPercent, 45);
 });

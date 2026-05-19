@@ -312,7 +312,7 @@ async executeDrive(request: DriveRequest): Promise<DriveResult> {
       // 8. Engage motors at full speed
       this.status = "driving";
       const fullSpeed = this.fullSpeedCommand; // 1.0 by default
-      await this.sensorController.setMotorWheelSpeeds(fullSpeed, fullSpeed);
+      await this.sensorController.setMotorWheelOutputs(fullSpeed, fullSpeed);
       
       // Event handler will monitor and complete drive
       
@@ -422,7 +422,7 @@ private async applyCteCorrection(cte: Meters): Promise<void> {
   leftSpeed = Math.max(0, Math.min(this.fullSpeedCommand, leftSpeed));
   rightSpeed = Math.max(0, Math.min(this.fullSpeedCommand, rightSpeed));
   
-  await this.sensorController.setMotorWheelSpeeds(leftSpeed, rightSpeed);
+  await this.sensorController.setMotorWheelOutputs(leftSpeed, rightSpeed);
 }
 ```
 

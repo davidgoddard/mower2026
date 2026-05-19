@@ -4,6 +4,7 @@ import { LoggerScope } from "../logging/types.js";
 import { PrimitivesStore } from "../server/primitivesStore.js";
 import { SensorHardwareGateway } from "./sensorHardwareGateway.js";
 import { systemStop } from "../control/systemStop.js";
+import { PoseCalibration } from "../config/poseCalibration.js";
 import {
   InternalHeading,
   FieldHeading,
@@ -13,7 +14,7 @@ import {
   createRelativeAngle,
   unwrapInternalHeading,
 } from "../geometry/headingTypes.js";
-import { SENSOR_POLL_INTERVAL_MS } from "../constants.js";
+import { ENCODER_METERS_PER_TICK_DEFAULT, SENSOR_POLL_INTERVAL_MS } from "../constants.js";
 import {
   SensorControllerEvents,
   SENSOR_EVENTS,
@@ -26,6 +27,7 @@ interface SensorControllerOptions {
   logger: SessionLogger;
   primitivesStore: PrimitivesStore;
   gateway: SensorHardwareGateway;
+  poseCalibration?: PoseCalibration;
   pollIntervalMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
@@ -38,9 +40,9 @@ function defaultSleep(delayMs: number): Promise<void> {
 
 type MotorCommand =
   | {
-      kind: "speed";
-      leftWheelTargetMetersPerSecond: number;
-      rightWheelTargetMetersPerSecond: number;
+      kind: "output";
+      leftWheelOutputPercent: number;
+      rightWheelOutputPercent: number;
     }
   | {
       kind: "stop";
@@ -50,6 +52,7 @@ export class SensorController extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly primitivesStore: PrimitivesStore;
   private readonly gateway: SensorHardwareGateway;
+  private readonly poseCalibration: PoseCalibration | null;
   private readonly pollIntervalMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
@@ -59,6 +62,7 @@ export class SensorController extends EventEmitter {
   private loopPromise: Promise<void> | null = null;
   private lastMotorCommand: MotorCommand | null = null;
   private motorOperationDepth = 0;
+  private previousMotorFeedbackTimestampMillis: number | null = null;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
@@ -84,6 +88,7 @@ export class SensorController extends EventEmitter {
     this.logger = options.logger.child({ context: "sensors", source: "SensorController" });
     this.primitivesStore = options.primitivesStore;
     this.gateway = options.gateway;
+    this.poseCalibration = options.poseCalibration ?? null;
     this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_POLL_INTERVAL_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
@@ -98,6 +103,7 @@ export class SensorController extends EventEmitter {
     this.running = true;
     systemStop.clearStop("sensor-controller-start");
     this.lastMotorCommand = null;
+    this.previousMotorFeedbackTimestampMillis = null;
     this.primitivesStore.update({
       sensorController: {
         status: "starting",
@@ -126,8 +132,8 @@ export class SensorController extends EventEmitter {
       motors: {
         status: "idle",
         error: null,
-        commandedLeftWheelSpeedMetersPerSecond: null,
-        commandedRightWheelSpeedMetersPerSecond: null,
+        commandedLeftWheelOutputPercent: null,
+        commandedRightWheelOutputPercent: null,
         leftWheelSpeedMetersPerSecond: null,
         rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
@@ -191,28 +197,28 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  async setMotorWheelSpeeds(leftWheelTargetMetersPerSecond: number, rightWheelTargetMetersPerSecond: number): Promise<void> {
+  async setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void> {
     if (this.motorOperationDepth === 0) {
       throw new Error("motor operation not active");
     }
 
     this.logger.info("motors.commanded", {
-      leftWheelTargetMetersPerSecond,
-      rightWheelTargetMetersPerSecond,
+      leftWheelOutputPercent,
+      rightWheelOutputPercent,
       callStack: this.captureCallStack(),
     });
     this.lastMotorCommand = {
-      kind: "speed",
-      leftWheelTargetMetersPerSecond,
-      rightWheelTargetMetersPerSecond,
+      kind: "output",
+      leftWheelOutputPercent,
+      rightWheelOutputPercent,
     };
-    await this.gateway.setMotorWheelSpeeds(leftWheelTargetMetersPerSecond, rightWheelTargetMetersPerSecond);
+    await this.gateway.setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent);
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
         ...current,
-        commandedLeftWheelSpeedMetersPerSecond: leftWheelTargetMetersPerSecond,
-        commandedRightWheelSpeedMetersPerSecond: rightWheelTargetMetersPerSecond,
+        commandedLeftWheelOutputPercent: leftWheelOutputPercent,
+        commandedRightWheelOutputPercent: rightWheelOutputPercent,
       },
     });
   }
@@ -242,8 +248,8 @@ export class SensorController extends EventEmitter {
 
   async stopMotors(): Promise<void> {
     this.logger.warn("motors.stop_requested", {
-      currentCommandedLeftWheelSpeedMetersPerSecond: this.primitivesStore.snapshot().motors.commandedLeftWheelSpeedMetersPerSecond,
-      currentCommandedRightWheelSpeedMetersPerSecond: this.primitivesStore.snapshot().motors.commandedRightWheelSpeedMetersPerSecond,
+      currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
+      currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
       callStack: this.captureCallStack(),
     });
     this.lastMotorCommand = {
@@ -259,8 +265,8 @@ export class SensorController extends EventEmitter {
     this.primitivesStore.update({
       motors: {
         ...current,
-        commandedLeftWheelSpeedMetersPerSecond: 0,
-        commandedRightWheelSpeedMetersPerSecond: 0,
+        commandedLeftWheelOutputPercent: 0,
+        commandedRightWheelOutputPercent: 0,
       },
     });
     if (stopError) {
@@ -436,20 +442,24 @@ export class SensorController extends EventEmitter {
   private async pollMotors(): Promise<void> {
     try {
       const sample = await this.gateway.readMotorFeedback();
+      const metersPerTick = this.poseCalibration?.getEncoderCalibration() ?? ENCODER_METERS_PER_TICK_DEFAULT;
+      const wheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.leftEncoderDelta, metersPerTick);
+      const rightWheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.rightEncoderDelta, metersPerTick);
+      this.previousMotorFeedbackTimestampMillis = sample.timestampMillis;
       const current = this.primitivesStore.snapshot().motors;
       this.primitivesStore.update({
         motors: {
           ...current,
           status: "running",
           error: null,
-          leftWheelSpeedMetersPerSecond: sample.leftWheelActualMetersPerSecond,
-          rightWheelSpeedMetersPerSecond: sample.rightWheelActualMetersPerSecond,
+          leftWheelSpeedMetersPerSecond: wheelSpeed,
+          rightWheelSpeedMetersPerSecond: rightWheelSpeed,
           leftRpm: null,
           rightRpm: null,
           leftEncoderDelta: sample.leftEncoderDelta,
           rightEncoderDelta: sample.rightEncoderDelta,
-          leftPwmAppliedPercent: sample.leftPwmApplied,
-          rightPwmAppliedPercent: sample.rightPwmApplied,
+          leftPwmAppliedPercent: sample.leftPwmAppliedPercent,
+          rightPwmAppliedPercent: sample.rightPwmAppliedPercent,
           leftMotorCurrentAmps: sample.leftMotorCurrentAmps ?? null,
           rightMotorCurrentAmps: sample.rightMotorCurrentAmps ?? null,
           watchdogHealthy: sample.watchdogHealthy,
@@ -459,17 +469,17 @@ export class SensorController extends EventEmitter {
 
       // Emit motor feedback update event
       this.emit(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, {
-        leftWheelSpeedMetersPerSecond: sample.leftWheelActualMetersPerSecond,
-        rightWheelSpeedMetersPerSecond: sample.rightWheelActualMetersPerSecond,
+        leftWheelSpeedMetersPerSecond: wheelSpeed,
+        rightWheelSpeedMetersPerSecond: rightWheelSpeed,
         leftEncoderDelta: sample.leftEncoderDelta,
         rightEncoderDelta: sample.rightEncoderDelta,
-        leftPwmAppliedPercent: sample.leftPwmApplied,
-        rightPwmAppliedPercent: sample.rightPwmApplied,
+        leftPwmAppliedPercent: sample.leftPwmAppliedPercent,
+        rightPwmAppliedPercent: sample.rightPwmAppliedPercent,
         leftMotorCurrentAmps: sample.leftMotorCurrentAmps ?? null,
         rightMotorCurrentAmps: sample.rightMotorCurrentAmps ?? null,
         watchdogHealthy: sample.watchdogHealthy,
         faultFlags: sample.faultFlags,
-        timestampMillis: this.nowMillis(),
+        timestampMillis: sample.timestampMillis,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -485,6 +495,24 @@ export class SensorController extends EventEmitter {
     }
   }
 
+  private computeWheelSpeedMetersPerSecond(
+    timestampMillis: number,
+    encoderDelta: number,
+    metersPerTick: number,
+  ): number {
+    if (this.previousMotorFeedbackTimestampMillis === null) {
+      return 0;
+    }
+
+    const elapsedMillis = timestampMillis - this.previousMotorFeedbackTimestampMillis;
+    if (elapsedMillis <= 0) {
+      return 0;
+    }
+
+    const elapsedSeconds = elapsedMillis / 1000;
+    return (encoderDelta * metersPerTick) / elapsedSeconds;
+  }
+
   /**
    * Re-send the last motor instruction so the motor node keeps receiving it
    * until some newer command supersedes it.
@@ -496,10 +524,10 @@ export class SensorController extends EventEmitter {
     }
 
     try {
-      if (command.kind === "speed") {
-        await this.gateway.setMotorWheelSpeeds(
-          command.leftWheelTargetMetersPerSecond,
-          command.rightWheelTargetMetersPerSecond,
+      if (command.kind === "output") {
+        await this.gateway.setMotorWheelOutputs(
+          command.leftWheelOutputPercent,
+          command.rightWheelOutputPercent,
         );
       } else {
         await this.gateway.stopMotors();

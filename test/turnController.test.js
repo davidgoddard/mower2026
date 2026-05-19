@@ -29,7 +29,7 @@ describe("TurnController", () => {
     const controller = {
       getHeading: () => heading,
       setHeading: (h) => { heading = h; },
-      setMotorWheelSpeeds: mock.fn(async (left, right) => {
+      setMotorWheelOutputs: mock.fn(async (left, right) => {
         wheelSpeedLeft = left;
         wheelSpeedRight = right;
       }),
@@ -104,7 +104,7 @@ describe("TurnController", () => {
     const result = await turnPromise;
 
     assert.equal(result.status, "success");
-    assert.equal(mockSensor.setMotorWheelSpeeds.mock.calls.length > 0, true);
+    assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
     assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
     assert.equal(mockLearning.updateFromTurn.mock.calls.length, 1);
   });

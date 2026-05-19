@@ -21,6 +21,18 @@ function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function rampSecondsFromMillis(rampMillis: number): number {
+  return Math.max(0.001, rampMillis / 1000);
+}
+
+function ratePerSecondFromRampMillis(rampMillis: number): number {
+  return 1 / rampSecondsFromMillis(rampMillis);
+}
+
+function clampNormalizedTarget(target: number): number {
+  return Math.max(-1, Math.min(1, target));
+}
+
 export class MotorNodeClient {
   private sequence = 0;
   private readonly controller: I2cBusController;
@@ -44,17 +56,17 @@ export class MotorNodeClient {
   }
 
   async sendWheelSpeedCommand(
-    leftWheelTargetMetersPerSecond: number,
-    rightWheelTargetMetersPerSecond: number,
+    leftWheelTargetPercent: number,
+    rightWheelTargetPercent: number,
   ): Promise<void> {
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
-      leftWheelTargetMetersPerSecond,
-      rightWheelTargetMetersPerSecond,
+      leftWheelTargetPercent: clampNormalizedTarget(leftWheelTargetPercent),
+      rightWheelTargetPercent: clampNormalizedTarget(rightWheelTargetPercent),
       enableDrive: true,
       commandTimeoutMillis: this.commandTimeoutMillis,
-      maxAccelerationMetersPerSecondSquared: (this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS) / 1000,
-      maxDecelerationMetersPerSecondSquared: (this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS) / 1000,
+      maxAccelerationPercentPerSecond: ratePerSecondFromRampMillis(this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS),
+      maxDecelerationPercentPerSecond: ratePerSecondFromRampMillis(this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS),
     };
 
     await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
@@ -63,8 +75,8 @@ export class MotorNodeClient {
   async stop(): Promise<void> {
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
-      leftWheelTargetMetersPerSecond: 0,
-      rightWheelTargetMetersPerSecond: 0,
+      leftWheelTargetPercent: 0,
+      rightWheelTargetPercent: 0,
       enableDrive: false,
       commandTimeoutMillis: this.commandTimeoutMillis,
     };

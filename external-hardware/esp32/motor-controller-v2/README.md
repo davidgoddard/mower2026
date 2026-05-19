@@ -11,7 +11,7 @@ File:
 ## What it does
 
 - runs as I2C slave at address `0x66`
-- accepts explicit left/right wheel-speed commands
+- accepts explicit left/right wheel output commands (`-1.0..1.0`, where `1.0` is full output)
 - enforces watchdog timeout
 - preserves asymmetric ramp-up / ramp-down behavior
 - preserves stop-before-reverse behavior
@@ -113,7 +113,7 @@ The direct mode script is intended for confirming left/right inversion and mirro
 Expected result for a healthy idle run:
 
 - `PASS`
-- zero wheel speeds and zero encoder deltas for the full run
+- zero encoder deltas for the full run
 - `watchdogHealthy: false` and watchdog `faultFlags` may still appear while idle if the firmware is simply timing out at zero command
 
 ## Before flashing
@@ -121,7 +121,5 @@ Expected result for a healthy idle run:
 Check and adjust in the sketch if needed:
 
 - inversion flags for left/right motors
-- wheel circumference
-- FG pulses-per-revolution scaling and gear ratio assumptions
-- max wheel speed estimate
+- full-output pulses-per-second estimate
 - PWM pins and tach pins
