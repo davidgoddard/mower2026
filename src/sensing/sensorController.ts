@@ -3,6 +3,7 @@ import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { PrimitivesStore } from "../server/primitivesStore.js";
 import { SensorHardwareGateway } from "./sensorHardwareGateway.js";
+import { systemStop } from "../control/systemStop.js";
 import {
   InternalHeading,
   FieldHeading,
@@ -57,6 +58,7 @@ export class SensorController extends EventEmitter {
   private running = false;
   private loopPromise: Promise<void> | null = null;
   private lastMotorCommand: MotorCommand | null = null;
+  private motorOperationDepth = 0;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
@@ -94,6 +96,7 @@ export class SensorController extends EventEmitter {
     }
 
     this.running = true;
+    systemStop.clearStop("sensor-controller-start");
     this.lastMotorCommand = null;
     this.primitivesStore.update({
       sensorController: {
@@ -189,6 +192,10 @@ export class SensorController extends EventEmitter {
   }
 
   async setMotorWheelSpeeds(leftWheelTargetMetersPerSecond: number, rightWheelTargetMetersPerSecond: number): Promise<void> {
+    if (this.motorOperationDepth === 0) {
+      throw new Error("motor operation not active");
+    }
+
     this.logger.info("motors.commanded", {
       leftWheelTargetMetersPerSecond,
       rightWheelTargetMetersPerSecond,
@@ -210,6 +217,29 @@ export class SensorController extends EventEmitter {
     });
   }
 
+  beginMotorOperation(): void {
+    this.motorOperationDepth += 1;
+  }
+
+  async endMotorOperation(): Promise<void> {
+    if (this.motorOperationDepth === 0) {
+      this.logger.warn("motors.operation_end_without_start", {
+        callStack: this.captureCallStack(),
+      });
+      return;
+    }
+
+    this.motorOperationDepth -= 1;
+    if (this.motorOperationDepth === 0 && this.lastMotorCommand?.kind !== "stop") {
+      try {
+        await this.stopMotors();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("motors.operation_stop_failed", { error: message });
+      }
+    }
+  }
+
   async stopMotors(): Promise<void> {
     this.logger.warn("motors.stop_requested", {
       currentCommandedLeftWheelSpeedMetersPerSecond: this.primitivesStore.snapshot().motors.commandedLeftWheelSpeedMetersPerSecond,
@@ -219,7 +249,12 @@ export class SensorController extends EventEmitter {
     this.lastMotorCommand = {
       kind: "stop",
     };
-    await this.gateway.stopMotors();
+    let stopError: unknown = null;
+    try {
+      await this.gateway.stopMotors();
+    } catch (error) {
+      stopError = error;
+    }
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
@@ -228,6 +263,9 @@ export class SensorController extends EventEmitter {
         commandedRightWheelSpeedMetersPerSecond: 0,
       },
     });
+    if (stopError) {
+      throw stopError instanceof Error ? stopError : new Error(String(stopError));
+    }
   }
 
   /**
@@ -253,7 +291,16 @@ export class SensorController extends EventEmitter {
     while (this.running) {
       const loopStartedMillis = this.nowMillis();
       await this.pollAllSensors();
-      await this.replayLastMotorCommand();
+      if (systemStop.isStopped()) {
+        try {
+          await this.stopMotors();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn("sensor.motors.stop_during_global_stop_failed", { error: message });
+        }
+      } else {
+        await this.replayLastMotorCommand();
+      }
       const loopDurationMs = this.nowMillis() - loopStartedMillis;
 
       this.primitivesStore.update({

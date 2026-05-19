@@ -3,6 +3,7 @@ import { LoggerScope } from "../logging/types.js";
 import { HidGameController, HidGameControllerSnapshot } from "../controller/hidGameController.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { computeManualDriveDemand, normalizeManualTurnDemand } from "./manualDriveProfile.js";
+import { systemStop } from "./systemStop.js";
 import { MANUAL_DRIVE_LOOP_INTERVAL_MS, MAX_WHEEL_SPEED_MPS_DEFAULT } from "../constants.js";
 
 interface ManualDriveCoordinatorOptions {
@@ -48,6 +49,7 @@ export class ManualDriveCoordinator {
   private drivingActive = false;
   private lastCommandedLeftMetersPerSecond: number | null = null;
   private lastCommandedRightMetersPerSecond: number | null = null;
+  private motorOperationActive = false;
 
   constructor(options: ManualDriveCoordinatorOptions) {
     this.logger = options.logger.child({ context: "control", source: "ManualDriveCoordinator" });
@@ -82,16 +84,7 @@ export class ManualDriveCoordinator {
     }
 
     this.hidController.close();
-    this.manualDriveEnabled = false;
-    this.drivingActive = false;
-    this.lastCommandedLeftMetersPerSecond = null;
-    this.lastCommandedRightMetersPerSecond = null;
-    try {
-      await this.sensorController.stopMotors();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn("control.manual_drive.stop_failed", { error: message });
-    }
+    await this.disableManualDrive();
     this.logger.transition("running", "stopped");
   }
 
@@ -99,21 +92,21 @@ export class ManualDriveCoordinator {
     this.hidController.on("update", (snapshot: HidGameControllerSnapshot) => {
       this.snapshot = snapshot;
       if (!snapshot.connected && this.manualDriveEnabled) {
-        this.manualDriveEnabled = false;
         this.logger.warn("control.manual_drive.disarmed_controller_disconnected");
-        void this.sensorController.stopMotors();
+        void this.disableManualDrive();
       }
     });
 
     this.hidController.on("right-top", () => {
+      systemStop.clearStop("manual-drive-armed");
+      this.beginMotorOperation();
       this.manualDriveEnabled = true;
       this.logger.info("control.manual_drive.armed");
     });
 
     this.hidController.on("left-top", () => {
-      this.manualDriveEnabled = false;
       this.logger.info("control.manual_drive.disarmed");
-      void this.sensorController.stopMotors();
+      void this.disableManualDrive();
     });
 
     this.hidController.on("error", (error: unknown) => {
@@ -125,6 +118,15 @@ export class ManualDriveCoordinator {
   private async runLoop(): Promise<void> {
     while (this.running) {
       try {
+        if (systemStop.isStopped()) {
+          if (this.drivingActive) {
+            this.drivingActive = false;
+            await this.sensorController.stopMotors();
+          }
+          await this.sleep(this.controlIntervalMs);
+          continue;
+        }
+
         if (!this.manualDriveEnabled || !this.snapshot.connected) {
           if (this.drivingActive) {
             this.drivingActive = false;
@@ -168,6 +170,60 @@ export class ManualDriveCoordinator {
       }
 
       await this.sleep(this.controlIntervalMs);
+    }
+  }
+
+  private beginMotorOperation(): void {
+    if (this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = true;
+    this.sensorController.beginMotorOperation();
+  }
+
+  private async endMotorOperation(): Promise<void> {
+    if (!this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = false;
+    try {
+      await this.sensorController.endMotorOperation();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn("control.manual_drive.stop_failed", { error: message });
+    }
+  }
+
+  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    const endTime = Date.now() + delayMs;
+
+    while (Date.now() < endTime) {
+      if (systemStop.isStopped() || !this.running) {
+        return false;
+      }
+
+      const remaining = endTime - Date.now();
+      await this.sleep(Math.min(50, Math.max(0, remaining)));
+    }
+
+    return true;
+  }
+
+  private async disableManualDrive(): Promise<void> {
+    systemStop.requestStop("manual-drive", "manual_drive_disabled");
+    this.manualDriveEnabled = false;
+    this.drivingActive = false;
+    this.lastCommandedLeftMetersPerSecond = null;
+    this.lastCommandedRightMetersPerSecond = null;
+    try {
+      await this.sensorController.stopMotors();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn("control.manual_drive.stop_failed", { error: message });
+    } finally {
+      await this.endMotorOperation();
     }
   }
 }

@@ -182,7 +182,7 @@ test('SensorController allows heading reset and continues integration from new b
   });
 });
 
-test('SensorController exposes motor command API and prioritised stop passthrough', async () => {
+test('SensorController requires an active motor operation for speed commands and still passes stop through', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
       app: 'core-app',
@@ -242,11 +242,18 @@ test('SensorController exposes motor command API and prioritised stop passthroug
       maxLoopCount: 1,
     });
 
+    await assert.rejects(
+      controller.setMotorWheelSpeeds(0.5, -0.5),
+      /motor operation not active/,
+    );
+
+    controller.beginMotorOperation();
     await controller.setMotorWheelSpeeds(0.5, -0.5);
     const afterSpeedCommand = primitivesStore.snapshot();
     assert.equal(afterSpeedCommand.motors.commandedLeftWheelSpeedMetersPerSecond, 0.5);
     assert.equal(afterSpeedCommand.motors.commandedRightWheelSpeedMetersPerSecond, -0.5);
     await controller.stopMotors();
+    await controller.endMotorOperation();
     const afterStop = primitivesStore.snapshot();
     assert.equal(afterStop.motors.commandedLeftWheelSpeedMetersPerSecond, 0);
     assert.equal(afterStop.motors.commandedRightWheelSpeedMetersPerSecond, 0);

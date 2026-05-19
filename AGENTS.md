@@ -7,6 +7,7 @@
 - If `node`, `npm`, or the repo build command is unavailable in this session, do not keep retrying those commands.
 - When tooling is unavailable, switch to source inspection, code edits, and a clear note that build/test verification could not be run here.
 - Do not assume a missing command will become available later in the same session.
+- Never edit files in the dist folder.  Request the user does a "npm run build".
 
 
 ## Goal

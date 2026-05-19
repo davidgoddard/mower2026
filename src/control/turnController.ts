@@ -27,6 +27,7 @@ import {
   TURN_SMALL_CRAWL_SPEED_FACTOR,
 } from "../constants.js";
 import { SENSOR_EVENTS, ImuHeadingUpdateEvent } from "../sensing/sensorEvents.js";
+import { systemStop } from "./systemStop.js";
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -66,6 +67,7 @@ export class TurnController {
   private turnBrakeDistance: RelativeAngle | null = null;
   private turnResolve: ((result: TurnResult) => void) | null = null;
   private turnIsSmallAngle: boolean = false;
+  private motorOperationActive = false;
 
   constructor(options: TurnControllerOptions) {
     this.logger = options.logger.child({ context: "control", source: "TurnController" });
@@ -88,6 +90,7 @@ export class TurnController {
       let subscribed = false;
 
       try {
+        systemStop.clearStop("turn-execute");
         // 1. STARTING - Record initial state
         this.currentTurn = request;
         this.status = "starting";
@@ -100,6 +103,8 @@ export class TurnController {
           direction: request.direction,
           startHeading: unwrapInternalHeading(this.turnStartHeading),
         });
+
+        this.beginMotorOperation();
 
         // 2. Get predicted brake angle from learning model
         const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
@@ -128,6 +133,9 @@ export class TurnController {
         const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelSpeed);
         await this.sensorController.setMotorWheelSpeeds(initialSpeeds.left, initialSpeeds.right);
       } catch (error) {
+        systemStop.requestStop("turn", "turn_error");
+        await this.endMotorOperation();
+
         // Cleanup on error
         if (subscribed) {
           this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
@@ -164,7 +172,14 @@ export class TurnController {
     // Check for emergency stop
     if (this.stopRequested) {
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
-      await this.sensorController.stopMotors();
+      try {
+        await this.sensorController.stopMotors();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("turn.stop_failed", { error: message });
+      } finally {
+        await this.endMotorOperation();
+      }
       this.status = "stopped";
       const stoppedTurn = this.currentTurn;
       this.currentTurn = null;
@@ -297,6 +312,7 @@ export class TurnController {
       // 11. Return to idle and resolve promise
       this.status = "idle";
       this.currentTurn = null;
+      await this.endMotorOperation();
 
       const result: TurnResult = {
         requestedAngle: request.targetAngle,
@@ -318,6 +334,8 @@ export class TurnController {
       // Error during completion - ensure cleanup
       this.status = "idle";
       this.currentTurn = null;
+      systemStop.requestStop("turn", "turn_completion_error");
+      await this.endMotorOperation();
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("turn.completion_error", { error: errorMessage });
@@ -344,11 +362,7 @@ export class TurnController {
     if (this.currentTurn) {
       this.stopRequested = true;
     }
-    this.logger.warn("turn.stop_requested", {
-      currentTurn: this.currentTurn,
-      tuningStopRequested: this.tuningStopRequested,
-      activeTurn: Boolean(this.currentTurn),
-    });
+    systemStop.requestStop("turn", "turn_stop_requested");
   }
 
   /**
@@ -364,9 +378,17 @@ export class TurnController {
 
     try {
       for (let i = 0; i < iterations; i++) {
+        if (systemStop.isStopped()) {
+          this.logger.warn("turn.tuning.stopped", { completed: results.length, reason: "system_stop" });
+          return results;
+        }
         this.logger.info("turn.tuning.iteration", { iteration: i + 1, of: iterations });
 
         for (const angleDeg of testAngles) {
+          if (systemStop.isStopped()) {
+            this.logger.warn("turn.tuning.stopped", { completed: results.length, reason: "system_stop" });
+            return results;
+          }
           if (this.stopRequested || this.tuningStopRequested) {
             this.logger.warn("turn.tuning.stopped", { completed: results.length });
             return results;
@@ -381,6 +403,11 @@ export class TurnController {
 
           if (this.stopRequested || this.tuningStopRequested) {
             this.logger.warn("turn.tuning.stopped", { completed: results.length });
+            return results;
+          }
+
+          if (systemStop.isStopped()) {
+            this.logger.warn("turn.tuning.stopped", { completed: results.length, reason: "system_stop" });
             return results;
           }
 
@@ -448,7 +475,7 @@ export class TurnController {
     const endTime = this.nowMillis() + delayMs;
 
     while (this.nowMillis() < endTime) {
-      if (this.stopRequested || this.tuningStopRequested) {
+      if (this.stopRequested || this.tuningStopRequested || systemStop.isStopped()) {
         return false;
       }
 
@@ -468,6 +495,7 @@ export class TurnController {
     const stoppedTurn = this.currentTurn ?? request;
     this.currentTurn = null;
     this.stopRequested = false;
+    await this.endMotorOperation();
     this.logger.warn("turn.stopped", {
       durationMs: this.nowMillis() - this.turnStartTime,
       reason: errorMessage,
@@ -492,5 +520,23 @@ export class TurnController {
     return direction === "ccw"
       ? { left: -wheelSpeed, right: wheelSpeed }
       : { left: wheelSpeed, right: -wheelSpeed };
+  }
+
+  private beginMotorOperation(): void {
+    if (this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = true;
+    this.sensorController.beginMotorOperation();
+  }
+
+  private async endMotorOperation(): Promise<void> {
+    if (!this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = false;
+    await this.sensorController.endMotorOperation();
   }
 }

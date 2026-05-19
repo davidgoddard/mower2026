@@ -8,6 +8,7 @@ import { DriveLearningModel } from "../control/driveLearningModel.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { SessionLogger } from "../logging/index.js";
 import { SensorController } from "../sensing/sensorController.js";
+import { systemStop } from "../control/systemStop.js";
 import { PathStore } from "../pathfollowing/pathStore.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { StubSensorGateway } from "../sensing/stubSensorGateway.js";
@@ -237,6 +238,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     logDir: options.logDir,
     minLevel: "info",
   });
+  systemStop.configureLogger(logger.child({ context: "control", source: "SystemStop" }));
 
   const requestLogger = logger.child({ context: "http", source: "HttpRouter" });
   let sensorGateway: SensorHardwareGateway | null = null;
@@ -330,6 +332,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop turn
         if (requestUrl.pathname === "/api/turn/stop" && turnController) {
+          systemStop.requestStop("api", "turn_stop");
           await turnController.stopCurrentTurn();
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
@@ -375,6 +378,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop drive
         if (requestUrl.pathname === "/api/drive/stop" && driveController) {
+          systemStop.requestStop("api", "drive_stop");
           await driveController.stopCurrentDrive();
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));

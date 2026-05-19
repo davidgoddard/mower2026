@@ -16,12 +16,15 @@ import {
 import { Pose, Position, createPosition, distanceBetween, unwrapMeters } from "../geometry/positionTypes.js";
 import { LoggerScope } from "../logging/types.js";
 import { unwrapInternalHeading } from "../geometry/headingTypes.js";
+import { systemStop } from "../control/systemStop.js";
 
 export interface PurePursuitDependencies {
   pathStore: IPathStore;
   motorController: {
     setWheelSpeeds(left: number, right: number): Promise<void>;
     stop(): Promise<void>;
+    beginOperation?: () => void | Promise<void>;
+    endOperation?: () => void | Promise<void>;
   };
   getCurrentPose(): Pose;
   getCurrentSpeed(): number;
@@ -46,6 +49,7 @@ export class PurePursuitFollower implements IPathFollower {
   private stopRequested: boolean = false;
   private currentPath: StoredPath | null = null;
   private currentWaypointIndex: number = 0;
+  private motorOperationActive: boolean = false;
 
   constructor(options: PathFollowerOptions, dependencies: PurePursuitDependencies) {
     this.targetSpeed = options.targetSpeed;
@@ -104,7 +108,13 @@ export class PurePursuitFollower implements IPathFollower {
       totalDistance: this.currentPath.metadata.totalDistance,
     });
 
-    return await this.executePathFollowing(waypoints);
+    systemStop.clearStop("path-following-start");
+    await this.beginMotorOperation();
+    try {
+      return await this.executePathFollowing(waypoints);
+    } finally {
+      await this.endMotorOperation();
+    }
   }
 
   async resumeFromWaypoint(waypointIndex: number): Promise<PathFollowResult> {
@@ -146,8 +156,8 @@ export class PurePursuitFollower implements IPathFollower {
   }
 
   async stop(): Promise<void> {
-    this.logger.info("pure_pursuit.stop_requested");
     this.stopRequested = true;
+    systemStop.requestStop("path-following", "path_stop_requested");
     await this.deps.motorController.stop();
   }
 
@@ -191,7 +201,7 @@ export class PurePursuitFollower implements IPathFollower {
     let distanceTraveled = 0;
 
     try {
-      while (this.currentWaypointIndex < waypoints.length - 1 && !this.stopRequested) {
+      while (this.currentWaypointIndex < waypoints.length - 1 && !this.stopRequested && !systemStop.isStopped()) {
         const currentPose = this.deps.getCurrentPose();
         const currentSpeed = this.deps.getCurrentSpeed();
 
@@ -235,11 +245,21 @@ export class PurePursuitFollower implements IPathFollower {
         await this.deps.motorController.setWheelSpeeds(wheelSpeeds.left, wheelSpeeds.right);
 
         // Control loop delay
-        await this.sleep(1000 / this.controlRateHz);
+        const loopDelayCompleted = await this.sleepWithStopChecks(1000 / this.controlRateHz);
+        if (!loopDelayCompleted || this.stopRequested || systemStop.isStopped()) {
+          this.logger.info("pure_pursuit.stopped_by_user", { distanceTraveled });
+          await this.deps.motorController.stop();
+          return {
+            completed: false,
+            reason: "user_stopped",
+            finalPose: this.deps.getCurrentPose(),
+            distanceTraveled,
+          };
+        }
       }
 
       // Check why loop exited
-      if (this.stopRequested) {
+      if (this.stopRequested || systemStop.isStopped()) {
         this.logger.info("pure_pursuit.stopped_by_user", { distanceTraveled });
         await this.deps.motorController.stop();
         return {
@@ -263,6 +283,7 @@ export class PurePursuitFollower implements IPathFollower {
         error: error instanceof Error ? error.message : String(error),
       });
 
+      systemStop.requestStop("path-following", "path_error");
       await this.deps.motorController.stop();
 
       return {
@@ -273,6 +294,39 @@ export class PurePursuitFollower implements IPathFollower {
     } finally {
       this.isFollowing = false;
     }
+  }
+
+  private async beginMotorOperation(): Promise<void> {
+    if (this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = true;
+    await this.deps.motorController.beginOperation?.();
+  }
+
+  private async endMotorOperation(): Promise<void> {
+    if (!this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = false;
+    await this.deps.motorController.endOperation?.();
+  }
+
+  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    const endTime = Date.now() + delayMs;
+
+    while (Date.now() < endTime) {
+      if (this.stopRequested || systemStop.isStopped()) {
+        return false;
+      }
+
+      const remaining = endTime - Date.now();
+      await this.sleep(Math.min(50, Math.max(0, remaining)));
+    }
+
+    return true;
   }
 
   /**

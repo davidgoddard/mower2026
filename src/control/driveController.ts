@@ -41,6 +41,7 @@ import {
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
 } from "../constants.js";
+import { systemStop } from "./systemStop.js";
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -88,6 +89,7 @@ export class DriveController {
   private driveResolve: ((result: DriveResult) => void) | null = null;
   private cteSamples: Meters[] = [];
   private totalEncoderTicks: number = 0;
+  private motorOperationActive = false;
 
   constructor(options: DriveControllerOptions) {
     this.logger = options.logger.child({ context: "control", source: "DriveController" });
@@ -112,6 +114,9 @@ export class DriveController {
       let subscribed = false;
 
       try {
+        systemStop.clearStop("drive-execute");
+        this.beginMotorOperation();
+
         // 1. Get current pose
         this.currentDrive = request;
         this.driveStartTime = this.nowMillis();
@@ -158,7 +163,11 @@ export class DriveController {
 
         // 4. Settle after turn
         this.status = "settling";
-        await this.sleep(this.settleTimeMs);
+        const settleAfterTurnCompleted = await this.sleepWithStopChecks(this.settleTimeMs);
+        if (!settleAfterTurnCompleted || this.stopRequested || systemStop.isStopped()) {
+          await this.finishStoppedDrive("Drive stopped during settle");
+          return;
+        }
 
         // 5. Get current pose again
         const drivingStartPose = this.poseFusion.getCurrentPose();
@@ -192,7 +201,14 @@ export class DriveController {
         if (subscribed) {
           this.poseFusion.off("poseUpdate", this.onPoseUpdate);
         }
-        await this.sensorController.stopMotors();
+        systemStop.requestStop("drive", "drive_error");
+        try {
+          await this.sensorController.stopMotors();
+        } catch (stopError) {
+          const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
+          this.logger.warn("drive.stop_failed", { error: stopMessage });
+        }
+        await this.endMotorOperation();
         this.status = "idle";
         this.currentDrive = null;
 
@@ -234,7 +250,14 @@ export class DriveController {
     // Check for emergency stop
     if (this.stopRequested) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      await this.sensorController.stopMotors();
+      try {
+        await this.sensorController.stopMotors();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("drive.stop_failed", { error: message });
+      } finally {
+        await this.endMotorOperation();
+      }
       this.status = "stopped";
       const stoppedDrive = this.currentDrive;
       this.currentDrive = null;
@@ -254,6 +277,35 @@ export class DriveController {
         errorMessage: "Drive stopped by user request",
         timestamp: new Date().toISOString(),
       });
+      return;
+    }
+
+    if (systemStop.isStopped()) {
+      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
+      try {
+        await this.sensorController.stopMotors();
+      } finally {
+        await this.endMotorOperation();
+      }
+      this.status = "stopped";
+      const stoppedDrive = this.currentDrive;
+      this.currentDrive = null;
+      this.logger.warn("drive.stopped", { durationMs: this.nowMillis() - this.driveStartTime, reason: "system_stop" });
+      this.driveResolve?.({
+        startPosition: this.driveStartPosition,
+        targetPosition: this.driveTargetPosition,
+        finalPosition: pose.position,
+        errorX: createMeters(0),
+        errorY: createMeters(0),
+        maxCteMeters: createMeters(0),
+        avgCteMeters: createMeters(0),
+        durationMs: this.nowMillis() - this.driveStartTime,
+        brakeDistanceUsed: this.learningModel.getBrakeDistance(),
+        status: "stopped",
+        errorMessage: "Drive stopped by system stop",
+        timestamp: new Date().toISOString(),
+      });
+      this.stopRequested = false;
       return;
     }
 
@@ -281,7 +333,15 @@ export class DriveController {
     // Timeout check
     if (this.nowMillis() - this.driveStartTime > this.calculateTimeout()) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      await this.sensorController.stopMotors();
+      try {
+        await this.sensorController.stopMotors();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("drive.stop_failed", { error: message });
+      } finally {
+        await this.endMotorOperation();
+      }
+      systemStop.requestStop("drive", "drive_timeout");
       this.status = "idle";
       const finalPosition = pose.position;
       const errorX = calculateXError(finalPosition, this.driveLineStart, this.driveLineEnd);
@@ -355,11 +415,19 @@ export class DriveController {
 
       // Wait for motor ramp-down (2x ramp-down time per spec)
       const rampDownTime = this.learningModel.getMotorRampDownTime();
-      await this.sleep(2 * rampDownTime);
+      const rampDownCompleted = await this.sleepWithStopChecks(2 * rampDownTime);
+      if (!rampDownCompleted || this.stopRequested || systemStop.isStopped()) {
+        await this.finishStoppedDrive("Drive stopped during ramp-down");
+        return;
+      }
 
       // Settle
       this.status = "settling";
-      await this.sleep(this.settleTimeMs);
+      const settleCompleted = await this.sleepWithStopChecks(this.settleTimeMs);
+      if (!settleCompleted || this.stopRequested || systemStop.isStopped()) {
+        await this.finishStoppedDrive("Drive stopped during settle");
+        return;
+      }
 
       // Measure final position
       this.status = "measuring";
@@ -428,6 +496,7 @@ export class DriveController {
       // Return to idle
       this.status = "idle";
       this.currentDrive = null;
+      await this.endMotorOperation();
 
       const result: DriveResult = {
         startPosition: this.driveStartPosition,
@@ -452,6 +521,8 @@ export class DriveController {
       // Error during completion - ensure cleanup
       this.status = "idle";
       this.currentDrive = null;
+      systemStop.requestStop("drive", "drive_completion_error");
+      await this.endMotorOperation();
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("drive.completion_error", { error: errorMessage });
@@ -479,10 +550,8 @@ export class DriveController {
   async stopCurrentDrive(): Promise<void> {
     if (this.currentDrive) {
       this.stopRequested = true;
+      systemStop.requestStop("drive", "drive_stop_requested");
       void this.turnController.stopCurrentTurn();
-      this.logger.warn("drive.stop_requested", {
-        currentDrive: this.currentDrive,
-      });
     }
   }
 
@@ -511,6 +580,10 @@ export class DriveController {
     const waypoints: Position[] = [];
 
     for (let i = 0; i < waypointCount; i++) {
+      if (systemStop.isStopped()) {
+        this.logger.warn("drive.test_pattern.stopped", { phase: "waypoint_collection", reason: "system_stop", waypoints: waypoints.length });
+        return results;
+      }
       if (this.stopRequested) {
         this.logger.warn("drive.test_pattern.stopped", { phase: "waypoint_collection", waypoints: waypoints.length });
         this.stopRequested = false;
@@ -532,13 +605,25 @@ export class DriveController {
 
       // Drive forward for 2-3 seconds (except on last waypoint)
       if (i < waypointCount - 1) {
-        await this.sensorController.setMotorWheelSpeeds(this.fullSpeedCommand, this.fullSpeedCommand);
-        await this.sleep(driveTimeMs);
-        await this.sensorController.stopMotors();
+        this.beginMotorOperation();
+        try {
+          await this.sensorController.setMotorWheelSpeeds(this.fullSpeedCommand, this.fullSpeedCommand);
+          const driveCompleted = await this.sleepWithStopChecks(driveTimeMs);
+          if (!driveCompleted || this.stopRequested || systemStop.isStopped()) {
+            await this.sensorController.stopMotors();
+            return results;
+          }
+          await this.sensorController.stopMotors();
+        } finally {
+          await this.endMotorOperation();
+        }
 
         // Wait for motors to settle
         const rampDownTime = this.learningModel.getMotorRampDownTime();
-        await this.sleep(2 * rampDownTime + this.settleTimeMs);
+        const settleCompleted = await this.sleepWithStopChecks(2 * rampDownTime + this.settleTimeMs);
+        if (!settleCompleted || systemStop.isStopped()) {
+          return results;
+        }
       }
     }
 
@@ -549,6 +634,10 @@ export class DriveController {
 
     // Phase 2: Pick random waypoints and drive to them
     for (let testNum = 0; testNum < testDriveCount; testNum++) {
+      if (systemStop.isStopped()) {
+        this.logger.warn("drive.test_pattern.stopped", { phase: "test_drives", completed: results.length, reason: "system_stop" });
+        return results;
+      }
       if (this.stopRequested) {
         this.logger.warn("drive.test_pattern.stopped", {
           phase: "test_drives",
@@ -601,7 +690,10 @@ export class DriveController {
       results.push(result);
 
       // Small pause between test drives
-      await this.sleep(1000);
+      const pauseCompleted = await this.sleepWithStopChecks(1000);
+      if (!pauseCompleted || systemStop.isStopped()) {
+        return results;
+      }
     }
 
     this.logger.info("drive.test_pattern.completed", {
@@ -691,5 +783,76 @@ export class DriveController {
     this.drivesCompleted++;
     this.totalErrorXMeters += Math.abs(unwrapMeters(result.errorX));
     this.totalErrorYMeters += Math.abs(unwrapMeters(result.errorY));
+  }
+
+  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    const endTime = this.nowMillis() + delayMs;
+
+    while (this.nowMillis() < endTime) {
+      if (this.stopRequested || systemStop.isStopped()) {
+        return false;
+      }
+
+      const remaining = endTime - this.nowMillis();
+      await this.sleep(Math.min(50, Math.max(0, remaining)));
+    }
+
+    return true;
+  }
+
+  private async finishStoppedDrive(errorMessage: string): Promise<void> {
+    const stoppedDrive = this.currentDrive ?? {
+      targetPosition: this.driveTargetPosition ?? createPosition(0, 0),
+      learningEnabled: true,
+    };
+    const finalPose = this.poseFusion.getCurrentPose();
+    const finalPosition = finalPose.position;
+    this.status = "stopped";
+    this.currentDrive = null;
+    this.stopRequested = false;
+    systemStop.requestStop("drive", errorMessage);
+    try {
+      await this.sensorController.stopMotors();
+    } finally {
+      await this.endMotorOperation();
+    }
+    this.logger.warn("drive.stopped", {
+      durationMs: this.nowMillis() - this.driveStartTime,
+      reason: errorMessage,
+      currentDrive: stoppedDrive,
+    });
+    this.driveResolve?.({
+      startPosition: this.driveStartPosition ?? createPosition(0, 0),
+      targetPosition: stoppedDrive.targetPosition,
+      finalPosition,
+      errorX: createMeters(0),
+      errorY: createMeters(0),
+      maxCteMeters: createMeters(0),
+      avgCteMeters: createMeters(0),
+      durationMs: this.nowMillis() - this.driveStartTime,
+      brakeDistanceUsed: this.learningModel.getBrakeDistance(),
+      status: "stopped",
+      errorMessage,
+      timestamp: new Date().toISOString(),
+    });
+    this.driveResolve = null;
+  }
+
+  private beginMotorOperation(): void {
+    if (this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = true;
+    this.sensorController.beginMotorOperation();
+  }
+
+  private async endMotorOperation(): Promise<void> {
+    if (!this.motorOperationActive) {
+      return;
+    }
+
+    this.motorOperationActive = false;
+    await this.sensorController.endMotorOperation();
   }
 }
