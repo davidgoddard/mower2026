@@ -59,6 +59,14 @@ export class Bmi160ImuSensor implements ImuSensor {
       throw new Error(`Unexpected BMI160 chip id 0x${chipId.toString(16)} at address 0x${this.address.toString(16)}`);
     }
 
+    // Initialize accelerometer
+    await this.writeRegister(BMI160.registers.command, BMI160.commands.accNormalMode);
+    await this.sleep(IMU_ACC_INIT_DELAY_MS);
+
+    // Set accelerometer range to +/-2g for stable pitch/roll calculations.
+    await this.writeRegister(BMI160.registers.accRange, BMI160_ACC_RANGE_2G);
+    await this.sleep(IMU_ACC_RANGE_DELAY_MS);
+
     // Initialize gyroscope
     await this.writeRegister(BMI160.registers.command, BMI160.commands.gyroNormalMode);
     await this.sleep(IMU_GYRO_INIT_DELAY_MS);
@@ -104,8 +112,6 @@ export class Bmi160ImuSensor implements ImuSensor {
     } catch {
       // Some test doubles only model gyro reads.
     }
-    const pitchDeg = this.calculatePitchDeg(accX, accY, accZ) - this.pitchOffsetDeg;
-    const rollDeg = this.calculateRollDeg(accY, accZ) - this.rollOffsetDeg;
 
     // Convert from G to m/s^2
     const xMetersPerSecondSquared = (accX / BMI160.accLsbPerGAt2g) * GRAVITY_METERS_PER_SECOND_SQUARED;

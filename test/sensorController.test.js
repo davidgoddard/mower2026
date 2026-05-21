@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PrimitivesStore, SensorController, SessionLogger } from '../dist/index.js';
+import { systemStop } from '../dist/control/systemStop.js';
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,7 +21,7 @@ async function withTempDir(run) {
 
 test('SensorController polls IMU and stores latest integrated heading state', async () => {
   await withTempDir(async (dir) => {
-    const logger = await SessionLogger.create({
+      const logger = await SessionLogger.create({
       app: 'core-app',
       context: 'test',
       source: 'SensorControllerTest',
@@ -254,9 +255,251 @@ test('SensorController requires an active motor operation for speed commands and
 
     assert.deepEqual(calls, [
       { type: 'speed', left: 0.5, right: -0.5 },
+      { type: 'speed', left: 0, right: 0 },
       { type: 'stop' },
     ]);
 
     await logger.close();
+  });
+});
+
+test('SensorController suppresses duplicate stop logs while still sending stop commands', async () => {
+  const warnCalls = [];
+  const logger = {
+    child: () => logger,
+    info: () => {},
+    warn: (...args) => {
+      warnCalls.push(args);
+    },
+    error: () => {},
+  };
+
+  const calls = [];
+  const gateway = {
+    async initialise() {},
+    async readImu() {
+      return { timestampMillis: 0, angularVelocity: { zDegreesPerSecond: 0 } };
+    },
+    async readGnss() {
+      return {
+        timestampMillis: 0,
+        xMeters: 0,
+        yMeters: 0,
+        positionAccuracyMeters: 1,
+        fixType: 'none',
+        satellitesInUse: 0,
+        sampleAgeMillis: 0,
+      };
+    },
+    async readMotorFeedback() {
+      return {
+        timestampMillis: 0,
+        leftEncoderDelta: 0,
+        rightEncoderDelta: 0,
+        leftPwmAppliedPercent: 0,
+        rightPwmAppliedPercent: 0,
+        watchdogHealthy: true,
+        faultFlags: 0,
+      };
+    },
+    async setMotorWheelOutputs(left, right) {
+      calls.push({ type: "speed", left, right });
+    },
+    async stopMotors() {
+      calls.push({ type: "stop" });
+    },
+    async close() {},
+  };
+
+  const primitivesStore = new PrimitivesStore();
+  const controller = new SensorController({
+    logger,
+    primitivesStore,
+    gateway,
+    pollIntervalMs: 100,
+    sleep: async () => {},
+    nowMillis: () => 0,
+    maxLoopCount: 1,
+  });
+
+  controller.beginMotorOperation();
+  await controller.stopMotors();
+  await controller.stopMotors();
+
+  assert.equal(calls.length, 1);
+  assert.equal(warnCalls.filter((call) => call[0] === "motors.stop_requested").length, 1);
+});
+
+test('SensorController detects a stall after a startup grace period and requests system stop', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    systemStop.clearStop('sensor-controller-test');
+    try {
+      let now = 0;
+      const calls = [];
+      const primitivesStore = new PrimitivesStore();
+      const gateway = {
+        async initialise() {},
+        async readImu() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            angularVelocity: { zDegreesPerSecond: 0 },
+          };
+        },
+        async readGnss() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            xMeters: 1,
+            yMeters: 1,
+            positionAccuracyMeters: 0.01,
+            fixType: 'fixed',
+            satellitesInUse: 22,
+            sampleAgeMillis: 20,
+          };
+        },
+        async readMotorFeedback() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            leftEncoderDelta: 0,
+            rightEncoderDelta: 0,
+            leftPwmAppliedPercent: 80,
+            rightPwmAppliedPercent: 80,
+            leftMotorCurrentAmps: 2.4,
+            rightMotorCurrentAmps: 2.5,
+            watchdogHealthy: true,
+            faultFlags: 0,
+          };
+        },
+        async setMotorWheelOutputs(left, right) {
+          calls.push({ type: 'speed', left, right });
+        },
+        async stopMotors() {
+          calls.push({ type: 'stop' });
+        },
+        async close() {},
+      };
+
+      const controller = new SensorController({
+        logger,
+        primitivesStore,
+        gateway,
+        pollIntervalMs: 0,
+        sleep: async () => {},
+        nowMillis: () => now,
+        maxLoopCount: 20,
+      });
+
+      controller.beginMotorOperation();
+      await controller.start();
+      await controller.setMotorWheelOutputs(0.8, 0.8);
+
+      await delay(20);
+
+      assert.equal(systemStop.isStopped(), true);
+      assert.equal(calls.some((call) => call.type === 'speed' && call.left === 0 && call.right === 0), true);
+      assert.equal(calls.some((call) => call.type === 'stop'), false);
+
+      await controller.stop();
+    } finally {
+      systemStop.clearStop('sensor-controller-test-cleanup');
+      await logger.close();
+    }
+  });
+});
+
+test('SensorController does not stall while commanded motion keeps making GNSS progress', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    systemStop.clearStop('sensor-controller-progress-test');
+    try {
+      let now = 0;
+      let xMeters = 0;
+      const stopCalls = [];
+      const primitivesStore = new PrimitivesStore();
+      const gateway = {
+        async initialise() {},
+        async readImu() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            angularVelocity: { zDegreesPerSecond: 0 },
+          };
+        },
+        async readGnss() {
+          now += 100;
+          xMeters += 0.03;
+          return {
+            timestampMillis: now,
+            xMeters,
+            yMeters: 0,
+            positionAccuracyMeters: 0.01,
+            fixType: 'fixed',
+            satellitesInUse: 22,
+            sampleAgeMillis: 20,
+          };
+        },
+        async readMotorFeedback() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            leftEncoderDelta: 15,
+            rightEncoderDelta: 16,
+            leftPwmAppliedPercent: 80,
+            rightPwmAppliedPercent: 80,
+            leftMotorCurrentAmps: 0.8,
+            rightMotorCurrentAmps: 0.9,
+            watchdogHealthy: true,
+            faultFlags: 0,
+          };
+        },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {
+          stopCalls.push('stop');
+        },
+        async close() {},
+      };
+
+      const controller = new SensorController({
+        logger,
+        primitivesStore,
+        gateway,
+        pollIntervalMs: 0,
+        sleep: async () => {},
+        nowMillis: () => now,
+        maxLoopCount: 20,
+      });
+
+      controller.beginMotorOperation();
+      await controller.start();
+      await controller.setMotorWheelOutputs(0.8, 0.8);
+
+      await delay(20);
+
+      assert.equal(systemStop.isStopped(), false);
+      assert.equal(stopCalls.length, 0);
+
+      await controller.stop();
+      await controller.endMotorOperation();
+    } finally {
+      systemStop.clearStop('sensor-controller-progress-test-cleanup');
+      await logger.close();
+    }
   });
 });

@@ -6,6 +6,7 @@ import { EventEmitter } from "node:events";
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { SensorController } from "./sensorController.js";
+import { systemStop } from "../control/systemStop.js";
 import {
   SENSOR_EVENTS,
   GnssPositionUpdateEvent,
@@ -22,19 +23,46 @@ import {
 import {
   Position,
   Pose,
-  Meters,
   createPosition,
   createPose,
-  createMeters,
   unwrapMeters,
 } from "../geometry/positionTypes.js";
 import { ENCODER_METERS_PER_TICK_DEFAULT } from "../constants.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
 
+const MAX_GNSS_POSITION_ACCURACY_METERS = 0.05;
+const MAX_GNSS_HEADING_ACCURACY_DEGREES = 5;
+
 export interface PoseFusionOptions {
   sensorController: SensorController;
   logger: SessionLogger;
   poseCalibration?: PoseCalibration;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
+export interface StationaryPoseOptions {
+  readonly settleDelayMs?: number;
+  readonly sampleCount?: number;
+  readonly sampleIntervalMs?: number;
+}
+
+interface StationaryPoseSampleTrace {
+  readonly index: number;
+  readonly xMeters: number;
+  readonly yMeters: number;
+  readonly headingDeg: number;
+  readonly quality: Pose["quality"];
+}
+
+interface StationaryPoseSelectionTrace {
+  readonly xMeters: number;
+  readonly yMeters: number;
+  readonly headingDeg: number;
+  readonly quality: Pose["quality"];
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 export interface PoseFusionEvents {
@@ -45,6 +73,7 @@ export class PoseFusion extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly sensorController: SensorController;
   private readonly poseCalibration: PoseCalibration | null;
+  private readonly sleep: (delayMs: number) => Promise<void>;
 
   private running = false;
 
@@ -81,6 +110,7 @@ export class PoseFusion extends EventEmitter {
     this.logger = options.logger.child({ context: "sensing", source: "PoseFusion" });
     this.sensorController = options.sensorController;
     this.poseCalibration = options.poseCalibration ?? null;
+    this.sleep = options.sleep ?? defaultSleep;
     this.encoderMetersPerTick = options.poseCalibration?.getEncoderCalibration() ?? ENCODER_METERS_PER_TICK_DEFAULT;
 
     // Bind event handlers to maintain 'this' context
@@ -151,6 +181,60 @@ export class PoseFusion extends EventEmitter {
     return this.encoderMetersPerTick;
   }
 
+  async stationaryPose(options: StationaryPoseOptions = {}): Promise<Pose | null> {
+    const settleDelayMs = options.settleDelayMs ?? 750;
+    const sampleCount = Math.max(1, Math.floor(options.sampleCount ?? 5));
+    const sampleIntervalMs = Math.max(0, Math.floor(options.sampleIntervalMs ?? 100));
+
+    if (!(await this.sleepWithStopChecks(settleDelayMs))) {
+      return null;
+    }
+
+    const samples: Pose[] = [];
+    for (let index = 0; index < sampleCount; index += 1) {
+      if (systemStop.isStopped()) {
+        return null;
+      }
+
+      samples.push(this.getCurrentPose());
+
+      if (index < sampleCount - 1) {
+        if (!(await this.sleepWithStopChecks(sampleIntervalMs))) {
+          return null;
+        }
+      }
+    }
+
+    const goodSamples = samples.filter((sample) => sample.quality === "gnss");
+    const sampleTrace = samples.map((sample, index): StationaryPoseSampleTrace => ({
+      index,
+      xMeters: unwrapMeters(sample.position.xMeters),
+      yMeters: unwrapMeters(sample.position.yMeters),
+      headingDeg: unwrapInternalHeading(sample.heading),
+      quality: sample.quality,
+    }));
+    if (goodSamples.length === 0) {
+      const fallbackPose = samples[samples.length - 1] ?? this.getCurrentPose();
+      this.logger.info("pose_fusion.stationary_pose.fallback_to_imu", {
+        sampleCount: samples.length,
+        quality: fallbackPose.quality,
+        samples: sampleTrace,
+        selected: this.describeStationaryPoseSelection(fallbackPose),
+      });
+      return fallbackPose;
+    }
+
+    const medianPose = this.buildMedianPose(goodSamples);
+    this.logger.info("pose_fusion.stationary_pose.sampled", {
+      sampleCount: samples.length,
+      goodSampleCount: goodSamples.length,
+      quality: medianPose.quality,
+      samples: sampleTrace,
+      selected: this.describeStationaryPoseSelection(medianPose),
+    });
+    return medianPose;
+  }
+
   private onGnssPositionUpdate(event: GnssPositionUpdateEvent): void {
     if (!this.running) {
       return;
@@ -164,9 +248,15 @@ export class PoseFusion extends EventEmitter {
       event.fixType === "float" ||
       event.fixType === "rtk-fixed" ||
       event.fixType === "rtk-float";
-    const isGoodAccuracy = event.positionAccuracyMeters !== null && event.positionAccuracyMeters < 0.1;
+    const isGoodPositionAccuracy =
+      event.positionAccuracyMeters !== null &&
+      event.positionAccuracyMeters <= MAX_GNSS_POSITION_ACCURACY_METERS;
+    const isGoodHeadingAccuracy =
+      event.heading !== null &&
+      event.headingAccuracyDeg !== null &&
+      event.headingAccuracyDeg <= MAX_GNSS_HEADING_ACCURACY_DEGREES;
 
-    if (isGoodFix && isGoodAccuracy) {
+    if (isGoodFix && isGoodPositionAccuracy && isGoodHeadingAccuracy) {
       // Update position from GNSS
       this.currentPosition = createPosition(event.xMeters, event.yMeters);
       this.currentQuality = "gnss";
@@ -184,7 +274,9 @@ export class PoseFusion extends EventEmitter {
         this.currentQuality = "dead-reckoning";
         this.logger.warn("pose_fusion.gnss_quality_degraded", {
           fixType: event.fixType,
-          accuracy: event.positionAccuracyMeters,
+          positionAccuracyMeters: event.positionAccuracyMeters,
+          headingAccuracyDeg: event.headingAccuracyDeg,
+          hasHeading: event.heading !== null,
         });
       }
     }
@@ -263,9 +355,58 @@ export class PoseFusion extends EventEmitter {
 
     this.lastGnssHeading = gnssHeading;
     this.lastGnssHeadingTime = timestampMillis;
-
-    this.logger.info("pose_fusion.heading_updated_from_gnss", {
-      headingDeg: unwrapInternalHeading(gnssHeading),
-    });
   }
+
+  private buildMedianPose(samples: Pose[]): Pose {
+    const xValues = samples.map((sample) => unwrapMeters(sample.position.xMeters));
+    const yValues = samples.map((sample) => unwrapMeters(sample.position.yMeters));
+    const anchorHeading = samples[Math.floor(samples.length / 2)]?.heading ?? samples[0].heading;
+    const anchorHeadingDeg = unwrapInternalHeading(anchorHeading);
+    const unwrappedHeadingValues = samples.map(
+      (sample) => anchorHeadingDeg + unwrapRelativeAngle(headingDifference(anchorHeading, sample.heading)),
+    );
+
+    return createPose(
+      medianNumber(xValues),
+      medianNumber(yValues),
+      createInternalHeading(medianNumber(unwrappedHeadingValues)),
+      "gnss",
+    );
+  }
+
+  private describeStationaryPoseSelection(pose: Pose): StationaryPoseSelectionTrace {
+    return {
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+      headingDeg: unwrapInternalHeading(pose.heading),
+      quality: pose.quality,
+    };
+  }
+
+  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    let remainingMs = delayMs;
+
+    while (remainingMs > 0) {
+      if (systemStop.isStopped()) {
+        return false;
+      }
+
+      const chunkMs = Math.min(50, remainingMs);
+      await this.sleep(chunkMs);
+      remainingMs -= chunkMs;
+    }
+
+    return true;
+  }
+}
+
+function medianNumber(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+
+  if (sorted.length % 2 === 1) {
+    return sorted[middle];
+  }
+
+  return (sorted[middle - 1] + sorted[middle]) / 2;
 }

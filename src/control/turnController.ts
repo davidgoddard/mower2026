@@ -64,8 +64,6 @@ export class TurnController {
   private turnHistory: TurnResult[] = [];
   private turnsCompleted = 0;
   private totalErrorDeg = 0;
-
-  // Event-driven turn state
   private turnStartHeading: InternalHeading | null = null;
   private turnStartTime: number = 0;
   private turnBrakeDistance: RelativeAngle | null = null;
@@ -123,10 +121,10 @@ export class TurnController {
         }
 
         // 3. Check if this is a "small angle" case
-        this.turnIsSmallAngle = absAngle < this.learningModel.getSmallAngleThreshold();
+        this.turnIsSmallAngle = absAngle <= this.learningModel.getSmallAngleThreshold();
         const brakeDistance = this.turnBrakeDistance ?? createRelativeAngle(0);
         const smallTurnBrakeFraction = typeof (this.learningModel as any).getSmallTurnBrakeFraction === "function"
-          ? (this.learningModel as any).getSmallTurnBrakeFraction(request.direction)
+          ? (this.learningModel as any).getSmallTurnBrakeFraction(request.direction, absAngle)
           : 0.5;
 
         this.logger.info("turn.brake_plan", {
@@ -231,7 +229,7 @@ export class TurnController {
 
     // For small angles, stop at the target using crawl speed and a hard halt.
     const smallTurnBrakeFraction = typeof (this.learningModel as any).getSmallTurnBrakeFraction === "function"
-      ? (this.learningModel as any).getSmallTurnBrakeFraction(this.currentTurn.direction)
+      ? (this.learningModel as any).getSmallTurnBrakeFraction(this.currentTurn.direction, absAngle)
       : 0.5;
     const smallTurnBrakeProgress = absAngle * smallTurnBrakeFraction;
     if (this.turnIsSmallAngle && absProgress >= smallTurnBrakeProgress) {
@@ -261,7 +259,13 @@ export class TurnController {
     }
 
     try {
-      const brakeDistanceUsed = this.turnIsSmallAngle ? createRelativeAngle(0) : this.turnBrakeDistance;
+      const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
+      const smallTurnBrakeFraction = typeof (this.learningModel as any).getSmallTurnBrakeFraction === "function"
+        ? (this.learningModel as any).getSmallTurnBrakeFraction(request.direction, absAngle)
+        : 0.5;
+      const brakeDistanceUsed = this.turnIsSmallAngle
+        ? createRelativeAngle(absAngle * smallTurnBrakeFraction)
+        : this.turnBrakeDistance;
 
       // 6. BRAKING - Command motors to zero or halt, depending on turn size
       this.status = "braking";
@@ -392,61 +396,157 @@ export class TurnController {
   }
 
   /**
-   * Run tuning sequence through multiple test angles
+   * Run the large-angle turn training sequence.
    */
-  async runTuningSequence(iterations: number = 1, anglesToTest?: number[]): Promise<TurnResult[]> {
+  async runLargeAngleTraining(iterations: number = 1, anglesToTest: number[] = this.getLargeTrainingAngles()): Promise<TurnResult[]> {
+    return this.runTrainingSequence({
+      mode: "large",
+      iterations,
+      anglesToTest,
+      targetErrorDeg: 3,
+    });
+  }
+
+  /**
+   * Run the small-angle turn training sequence until each bucket is within target error.
+   */
+  async runSmallAngleTraining(targetErrorDeg: number = 2, anglesToTest: number[] = this.getSmallTrainingAngles()): Promise<TurnResult[]> {
+    return this.runTrainingSequence({
+      mode: "small",
+      anglesToTest,
+      targetErrorDeg,
+    });
+  }
+
+  /**
+   * Run a tuning sequence through multiple test angles.
+   */
+  private async runTrainingSequence(options: {
+    mode: "large" | "small";
+    iterations?: number;
+    anglesToTest: number[];
+    targetErrorDeg: number;
+  }): Promise<TurnResult[]> {
     this.tuningSequenceActive = true;
     this.tuningStopRequested = false;
-    const testAngles = anglesToTest ?? [50, -50, 60, -60, 70, -70, 80, -80, 90, -90, 120, -120, 150, -150, 180, -180];
+    const testAngles = options.anglesToTest;
     const results: TurnResult[] = [];
 
-    this.logger.info("turn.tuning.started", { iterations, angles: testAngles.length });
+    this.logger.info("turn.training.started", {
+      mode: options.mode,
+      iterations: options.iterations ?? 1,
+      angles: testAngles.length,
+      targetErrorDeg: options.targetErrorDeg,
+    });
 
     try {
-      for (let i = 0; i < iterations; i++) {
-        if (systemStop.isStopped()) {
-          this.logger.warn("turn.tuning.stopped", { completed: results.length, reason: "system_stop" });
-          return results;
-        }
-        this.logger.info("turn.tuning.iteration", { iteration: i + 1, of: iterations });
+      if (options.mode === "large") {
+        const iterations = options.iterations ?? 1;
 
+        for (let i = 0; i < iterations; i += 1) {
+          if (systemStop.isStopped()) {
+            this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
+            return results;
+          }
+          this.logger.info("turn.training.iteration", { iteration: i + 1, of: iterations, mode: options.mode });
+
+          for (const angleDeg of testAngles) {
+            if (systemStop.isStopped()) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
+              return results;
+            }
+            if (this.stopRequested || this.tuningStopRequested) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+              return results;
+            }
+
+            const result = await this.executeTurn({
+              targetAngle: createRelativeAngle(angleDeg),
+              direction: angleDeg > 0 ? "ccw" : "cw",
+              learningEnabled: true,
+            });
+            results.push(result);
+
+            if (this.stopRequested || this.tuningStopRequested) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+              return results;
+            }
+
+            if (systemStop.isStopped()) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
+              return results;
+            }
+
+            const pauseCompleted = await this.sleepWithStopChecks(500);
+            if (!pauseCompleted || this.stopRequested || this.tuningStopRequested) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+              return results;
+            }
+          }
+        }
+      } else {
         for (const angleDeg of testAngles) {
           if (systemStop.isStopped()) {
-            this.logger.warn("turn.tuning.stopped", { completed: results.length, reason: "system_stop" });
-            return results;
-          }
-          if (this.stopRequested || this.tuningStopRequested) {
-            this.logger.warn("turn.tuning.stopped", { completed: results.length });
+            this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
             return results;
           }
 
-          const result = await this.executeTurn({
-            targetAngle: createRelativeAngle(angleDeg),
-            direction: angleDeg > 0 ? "ccw" : "cw",
-            learningEnabled: true,
-          });
-          results.push(result);
+          let attempt = 0;
+          let angleResult: TurnResult | null = null;
 
-          if (this.stopRequested || this.tuningStopRequested) {
-            this.logger.warn("turn.tuning.stopped", { completed: results.length });
-            return results;
-          }
+          while (true) {
+            if (systemStop.isStopped()) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
+              return results;
+            }
+            if (this.stopRequested || this.tuningStopRequested) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+              return results;
+            }
 
-          if (systemStop.isStopped()) {
-            this.logger.warn("turn.tuning.stopped", { completed: results.length, reason: "system_stop" });
-            return results;
-          }
+            attempt += 1;
+            this.logger.info("turn.training.small_iteration", {
+              angleDeg,
+              attempt,
+              targetErrorDeg: options.targetErrorDeg,
+            });
 
-          // Small pause between turns
-          const pauseCompleted = await this.sleepWithStopChecks(500);
-          if (!pauseCompleted || this.stopRequested || this.tuningStopRequested) {
-            this.logger.warn("turn.tuning.stopped", { completed: results.length });
-            return results;
+            angleResult = await this.executeTurn({
+              targetAngle: createRelativeAngle(angleDeg),
+              direction: angleDeg > 0 ? "ccw" : "cw",
+              learningEnabled: true,
+            });
+            results.push(angleResult);
+
+            const absErrorDeg = Math.abs(unwrapRelativeAngle(angleResult.errorAngle));
+            this.logger.info("turn.training.small_result", {
+              angleDeg,
+              attempt,
+              achievedAngleDeg: unwrapRelativeAngle(angleResult.achievedAngle),
+              errorDeg: unwrapRelativeAngle(angleResult.errorAngle),
+              absErrorDeg,
+              targetErrorDeg: options.targetErrorDeg,
+            });
+
+            if (absErrorDeg <= options.targetErrorDeg) {
+              break;
+            }
+
+            if (this.stopRequested || this.tuningStopRequested || systemStop.isStopped()) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+              return results;
+            }
+
+            const pauseCompleted = await this.sleepWithStopChecks(500);
+            if (!pauseCompleted || this.stopRequested || this.tuningStopRequested) {
+              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+              return results;
+            }
           }
         }
       }
 
-      this.logger.info("turn.tuning.completed", { totalTurns: results.length });
+      this.logger.info("turn.training.completed", { totalTurns: results.length, mode: options.mode });
       return results;
     } finally {
       this.tuningSequenceActive = false;
@@ -547,6 +647,18 @@ export class TurnController {
     return direction === "ccw"
       ? { left: -wheelOutputPercent, right: wheelOutputPercent }
       : { left: wheelOutputPercent, right: -wheelOutputPercent };
+  }
+
+  private getLargeTrainingAngles(): number[] {
+    return [70, -70, 80, -80, 90, -90, 120, -120, 150, -150, 180, -180];
+  }
+
+  private getSmallTrainingAngles(): number[] {
+    const angles: number[] = [];
+    for (let angleDeg = 3; angleDeg <= 60; angleDeg += 3) {
+      angles.push(angleDeg, -angleDeg);
+    }
+    return angles;
   }
 
   private beginMotorOperation(): void {

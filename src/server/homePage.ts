@@ -402,6 +402,26 @@ export function renderHomePage(): string {
         margin-top: 0.5rem;
       }
 
+      .gnss-summary {
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
+        margin-top: 1rem;
+      }
+
+      .gnss-row {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .gnss-row.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .gnss-row.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .coordinate {
         display: flex;
         flex-direction: column;
@@ -417,6 +437,53 @@ export function renderHomePage(): string {
         font-size: 1.25rem;
         font-weight: 600;
         font-variant-numeric: tabular-nums;
+      }
+
+      .metric-secondary {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        margin-top: 0.125rem;
+      }
+
+      .metric-value.small {
+        font-size: 1rem;
+      }
+
+      .gnss-fix-value {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 5.25rem;
+        padding: 0.35rem 0.7rem;
+        border-radius: 0.5rem;
+        background: var(--bg-tertiary);
+      }
+
+      .gnss-fix-value.gnss-fix-unknown,
+      .gnss-fix-value.gnss-fix-none {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+
+      .gnss-fix-value.gnss-fix-single {
+        background: #ffedd5;
+        color: #9a3412;
+      }
+
+      .gnss-fix-value.gnss-fix-float {
+        background: #fef3c7;
+        color: #92400e;
+      }
+
+      .gnss-fix-value.gnss-fix-fixed,
+      .gnss-fix-value.gnss-fix-rtk-fixed {
+        background: #d1fae5;
+        color: #065f46;
+      }
+
+      .gnss-fix-value.gnss-fix-rtk-float {
+        background: #dcfce7;
+        color: #166534;
       }
 
       .error-message {
@@ -577,32 +644,40 @@ export function renderHomePage(): string {
               <div class="compass-center"></div>
             </div>
           </div>
-          <div class="coordinates" style="margin-top: 0.75rem;">
-            <div class="coordinate">
-              <div class="coordinate-label">X</div>
-              <div class="coordinate-value" id="gnss-x">—</div>
+          <div class="gnss-summary">
+            <div class="gnss-row three">
+              <div class="metric">
+                <div class="metric-label">X</div>
+                <div class="metric-value" id="gnss-x">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Y</div>
+                <div class="metric-value" id="gnss-y">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Accuracy</div>
+                <div class="metric-value" id="gnss-accuracy">—</div>
+              </div>
             </div>
-            <div class="coordinate">
-              <div class="coordinate-label">Y</div>
-              <div class="coordinate-value" id="gnss-y">—</div>
+            <div class="gnss-row two">
+              <div class="metric">
+                <div class="metric-label">Heading</div>
+                <div class="metric-value" id="gnss-heading">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Heading Accuracy</div>
+                <div class="metric-value" id="gnss-heading-accuracy">—</div>
+              </div>
             </div>
-          </div>
-          <div class="metric-grid" style="margin-top: 1rem;">
-            <div class="metric">
-              <div class="metric-label">Fix Type</div>
-              <div class="metric-value" style="font-size: 1rem;" id="gnss-fix">—</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Accuracy</div>
-              <div class="metric-value" style="font-size: 1rem;" id="gnss-accuracy">—</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Satellites</div>
-              <div class="metric-value" style="font-size: 1rem;" id="gnss-sats">—</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Heading</div>
-              <div class="metric-value" style="font-size: 1rem;" id="gnss-heading">—</div>
+            <div class="gnss-row two">
+              <div class="metric">
+                <div class="metric-label">Fix Type</div>
+                <div class="metric-value gnss-fix-value" id="gnss-fix">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Satellites</div>
+                <div class="metric-value" id="gnss-sats">—</div>
+              </div>
             </div>
           </div>
           <div id="gnss-error" class="error-message" style="display: none;"></div>
@@ -705,6 +780,32 @@ export function renderHomePage(): string {
       function formatDegrees(value) {
         if (value === null || value === undefined) return '—';
         return value.toFixed(1) + '°';
+      }
+
+      function getGnssFixClass(fixType) {
+        switch ((fixType || 'unknown').toLowerCase()) {
+          case 'fixed':
+            return 'gnss-fix-fixed';
+          case 'rtk-fixed':
+            return 'gnss-fix-rtk-fixed';
+          case 'float':
+            return 'gnss-fix-float';
+          case 'rtk-float':
+            return 'gnss-fix-rtk-float';
+          case 'single':
+            return 'gnss-fix-single';
+          case 'none':
+            return 'gnss-fix-none';
+          default:
+            return 'gnss-fix-unknown';
+        }
+      }
+
+      function applyGnssFixStyle(fixType) {
+        const fixValue = document.getElementById('gnss-fix');
+        const fixClass = getGnssFixClass(fixType);
+
+        fixValue.className = 'metric-value gnss-fix-value ' + fixClass;
       }
 
       // Convert internal heading (0° = east, counterclockwise) to navigation heading (0° = north, clockwise)
@@ -821,8 +922,12 @@ export function renderHomePage(): string {
           document.getElementById('gnss-x').textContent = formatMeters(gnss.xMeters);
           document.getElementById('gnss-y').textContent = formatMeters(gnss.yMeters);
           document.getElementById('gnss-fix').textContent = gnss.fixType || '—';
+          applyGnssFixStyle(gnss.fixType);
           document.getElementById('gnss-accuracy').textContent = gnss.positionAccuracyMeters !== null
             ? formatMeters(gnss.positionAccuracyMeters)
+            : '—';
+          document.getElementById('gnss-heading-accuracy').textContent = gnss.headingAccuracyDeg !== null
+            ? formatDegrees(gnss.headingAccuracyDeg)
             : '—';
           document.getElementById('gnss-sats').textContent = gnss.satellitesInUse !== null
             ? gnss.satellitesInUse

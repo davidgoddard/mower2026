@@ -188,6 +188,53 @@ export const MAX_WHEEL_SPEED_MPS_DEFAULT = 0.75;
  */
 export const MAX_WHEEL_OUTPUT_PERCENT_DEFAULT = 1.0;
 
+/**
+ * Motor stall detection threshold for commanded output magnitude.
+ * If both wheel commands are above this level and the mower is not moving,
+ * the sensor controller treats it as a likely stall.
+ */
+export const MOTOR_STALL_COMMAND_THRESHOLD_PERCENT = 0.35;
+
+/**
+ * Motor stall detection threshold for measured wheel speed.
+ */
+export const MOTOR_STALL_SPEED_THRESHOLD_MPS = 0.01;
+
+/**
+ * Motor stall detection threshold for encoder deltas.
+ */
+export const MOTOR_STALL_ENCODER_DELTA_THRESHOLD = 0;
+
+/**
+ * Maximum GNSS position accuracy to trust for stall detection.
+ */
+export const MOTOR_STALL_GNSS_ACCURACY_MAX_METERS = 0.1;
+
+/**
+ * Minimum GNSS progress required over the stall observation window while motors are running.
+ */
+export const MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS = 0.1;
+
+/**
+ * Observation window used to judge whether commanded motion is actually producing progress.
+ */
+export const MOTOR_STALL_OBSERVATION_WINDOW_MS = 4000;
+
+/**
+ * Number of consecutive stationary samples before declaring a stall.
+ */
+export const MOTOR_STALL_CONSECUTIVE_SAMPLES = 12;
+
+/**
+ * Motor current threshold used as additional evidence for an obstruction.
+ */
+export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.0;
+
+/**
+ * Grace period after a new motor command before stall detection begins.
+ */
+export const MOTOR_STALL_STARTUP_GRACE_MS = 500;
+
 // =============================================================================
 // NETWORK DEFAULTS
 // =============================================================================
@@ -239,7 +286,7 @@ export const MOTOR_RAMP_UP_TIME_MS = 1000;
  * Small angle threshold - below this, use special handling (degrees)
  * Small angles require different brake strategy
  */
-export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 30;
+export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 60;
 
 /**
  * Crawl speed factor used for small-angle turns
@@ -327,10 +374,56 @@ export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 2.0;
 export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
 
 /**
- * Minimum drive distance for learning (meters)
- * Drives shorter than this may not reach full speed and are excluded from learning
+ * Upper bound for the 5cm fine short-drive buckets (meters)
+ * The short-drive learner still uses one shared 1.05m bucket for longer runs.
  */
-export const DRIVE_MIN_DISTANCE_FOR_LEARNING_METERS = 3.0;
+export const DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS = 1.0;
+
+/**
+ * Short-drive bucket step in meters
+ */
+export const DRIVE_SHORT_BUCKET_STEP_METERS = 0.05;
+
+/**
+ * Maximum distance covered by short-drive bucket learning (meters)
+ */
+export const DRIVE_SHORT_BUCKET_MAX_METERS = 4.0;
+
+/**
+ * Start of the coarse short-drive bucket range (meters)
+ */
+export const DRIVE_SHORT_BUCKET_COARSE_START_METERS = 1.05;
+
+/**
+ * Step size for the coarse short-drive bucket range (meters)
+ */
+export const DRIVE_SHORT_BUCKET_COARSE_STEP_METERS = 0.5;
+
+/**
+ * Target absolute X error for short-drive learning runs (meters)
+ */
+export const DRIVE_SHORT_TARGET_X_ERROR_METERS = 0.04;
+
+/**
+ * Minimum distance covered by segment-drive learning (meters)
+ */
+export const DRIVE_SEGMENT_MIN_DISTANCE_METERS = 1.05;
+
+/**
+ * Maximum distance covered by segment-drive learning (meters)
+ */
+export const DRIVE_SEGMENT_MAX_DISTANCE_METERS = 6.0;
+
+/**
+ * Step size for segment-drive learning distances (meters)
+ */
+export const DRIVE_SEGMENT_STEP_METERS = 0.2;
+
+/**
+ * Arrival tolerance for drive completion (meters)
+ * Once the mower is within this along-track distance of the target, it should stop.
+ */
+export const DRIVE_ARRIVAL_TOLERANCE_METERS = 0.01;
 
 /**
  * Default encoder meters per tick for dead-reckoning
@@ -342,3 +435,26 @@ export const ENCODER_METERS_PER_TICK_DEFAULT = 0.001;
  * 5cm - learning algorithm tries to achieve this
  */
 export const DRIVE_TARGET_CTE_METERS = 0.05;
+
+/**
+ * Distance from the target within which heading preview correction fades out (meters)
+ * This keeps the controller from making sharp turn-ins right at the target.
+ */
+export const DRIVE_HEADING_CORRECTION_FADEOUT_METERS = 0.25;
+
+/**
+ * Maximum distance used when projecting heading error into an equivalent lateral offset (meters)
+ * Larger remaining distances still cap at this preview range to avoid over-correction.
+ */
+export const DRIVE_HEADING_CORRECTION_MAX_LOOKAHEAD_METERS = 1.0;
+
+/**
+ * Blend factor for heading-preview correction
+ * Higher = heading errors influence steering more strongly.
+ */
+export const DRIVE_HEADING_CORRECTION_BLEND = 0.65;
+
+/**
+ * Maximum absolute heading error used by the preview correction (degrees)
+ */
+export const DRIVE_HEADING_CORRECTION_MAX_DEGREES = 45;

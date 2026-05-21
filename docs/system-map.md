@@ -19,7 +19,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/config/poseCalibration.ts`: encoder calibration persistence.
 - `config/motor-calibration.json`: persisted motor calibration values.
 - `config/pose-calibration.json`: persisted pose calibration values.
-- `config/drive-learning-params.json`: persisted drive learning values.
+- `config/drive-learning-params.json`: persisted drive learning values, including forward/reverse CTE gains.
 - `config/turn-learning-parameters.json`: persisted turn learning values.
 
 ## Heading and Angle Types
@@ -50,6 +50,14 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/purePursuitFollower.ts`: path-following stop checks and stop handling.
 
+## Pose Fusion
+- `src/sensing/poseFusion.ts`: fused pose estimate and stationary pose helper
+  - maintains the latest IMU/GNSS/encoder-derived pose estimate
+  - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, and heading stability all pass the acceptance gate
+  - `stationaryPose()` waits for settle, samples 5 poses, returns the median GNSS-good pose when available, and falls back to the IMU-based pose when GNSS is not usable
+  - emits one structured diagnostic trace per stationary sample set with the full sample array and the selected pose
+  - `getCurrentPose()` returns the latest fused pose without settling
+
 ## Motor Control
 - `src/motors/motorProtocol.ts`: normalized motor command frame contract and raw motor feedback telemetry types.
 - `src/motors/motorCodec.ts`: motor command/feedback frame encoding and decoding.
@@ -65,8 +73,12 @@ This document maps problem domains to candidate files removing the need for Code
   - polls heading at 30Hz (matches sensor controller update rate)
   - adaptive brake angle learning per turn angle and direction
   - emergency stop support during turn execution
-  - tuning sequence runner for comprehensive parameter learning
+  - large-angle and small-angle tuning runners for comprehensive parameter learning
   - integrates with retry system for obstruction recovery
+- `src/control/turnValidationRunner.ts`: wrapper for real-pose turn validation sweeps
+  - uses the pose-fusion stationary pose helper before sampling the current pose at the start and end of each turn
+  - chooses a large turn target for each iteration, with turn magnitudes above 45 degrees
+  - records IMU-achieved angle versus real pose change for tuning-page inspection
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
   - adaptive brake angle updates based on turn error
@@ -75,32 +87,51 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/turnTuningPage.ts`: modern responsive web UI for turn tuning
   - real-time turn execution and monitoring
   - results table with error visualization
+  - real-pose validation sweep table comparing IMU and pose fusion headings
   - learning parameter display
+  - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
   - prominent STOP button for emergency abort
+- `src/server/driveTuningPage.ts`: drive tuning UI with live primitive sidebar
+  - short-distance drive training controls and results table
+  - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
 - `test/turnController.test.js`: turn controller unit tests
+- `test/turnValidationRunner.test.js`: real-pose validation wrapper tests
 - API endpoints:
   - `GET /turn-tuning` - turn tuning web page
   - `GET /api/turn/status` - controller state and history
   - `POST /api/turn/execute` - execute single turn
-  - `POST /api/turn/tune` - run full tuning sequence
+  - `POST /api/turn/train-large` - run large-angle training sequence
+  - `POST /api/turn/train-small` - run small-angle training sequence
+  - `POST /api/turn/train-real-pose` - run real-pose validation sweep
   - `POST /api/turn/stop` - emergency stop current turn
   - `POST /api/turn/clear-history` - clear turn history
   - `POST /api/turn/reset-learning` - reset parameters to defaults
 
 ## Drive Controller
-- `src/control/driveController.ts`: point-to-point driving controller with CTE correction and brake distance learning
-  - executes straight-line drives from current position to target position
+- `src/control/driveController.ts`: segment drive controller that turns to face the target and then delegates straight-line travel
+  - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
-  - continuous cross-track error (CTE) correction during drive
-  - adaptive brake distance learning for arrival accuracy
+  - settles after turn, delegates to line controller, and records successful segment history
+  - surfaces short-distance and segment training progress to the drive tuning page state while a training run is active
+  - segment-learning runner for 105cm to 6m fixed-line runs in 20cm steps
   - integrates with retry system for obstruction recovery
-  - creates checkpoints for retry system before each drive
+- `src/control/driveLineController.ts`: straight-line drive controller with CTE correction and brake distance learning
+  - executes straight-line drives from current position to target position
+  - continuous cross-track error (CTE) correction during drive, split into forward and reverse steering branches so reverse travel uses the correct body-heading reference
+  - hard arrival stop plus long-drive brake distance learning
+  - short-drive bucket learning for 5cm increments up to 1m and a single shared 1.05m brake bucket for longer straight runs up to 4m
+  - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
+  - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
+  - self-contained stop handling and learning updates for the line-following phase
 - `src/control/driveLearningModel.ts`: drive parameter learning and persistence
-  - brake distance learning from final X error
-  - CTE gain adaptation from maximum cross-track error
+  - long-drive brake distance learning from final X error
+  - short-drive brake fractions bucketed by 5cm increments from 5cm to 1m plus one shared 1.05m bucket for longer straight runs up to 4m
+  - direction-specific CTE gain adaptation from maximum cross-track error
   - JSON persistence at `config/drive-learning-params.json`
-- Drive sequence: settle → get pose → turn to target → settle → get pose → drive with CTE correction → brake → settle → measure errors → update learning
+- Drive sequence: settle → get pose → turn to target → settle → delegate line drive with CTE correction and arrival braking → measure errors → update learning
 - API: `driveToTarget(target)`, `reverseForDuration(ms)` for retry recovery
+  - `POST /api/drive/train-short` - short-drive forward/reverse training sequence
+  - `POST /api/drive/train-segment` - segment-drive forward/reverse training sequence
 
 ## Retry System (Obstruction Recovery)
 - `src/retry/retryManager.ts`: **EVENT-DRIVEN RECOVERY SYSTEM** - handles obstruction detection and context-aware recovery
@@ -184,8 +215,8 @@ This document maps problem domains to candidate files removing the need for Code
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
   - IMU yaw integration: uses `addRelativeAngle()` with `RelativeAngle` deltas from gyro samples.
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
-  - motor API: `setMotorWheelOutputs(...)` and `stopMotors()` command passthrough to hardware boundary.
-  - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions
+  - motor API: `setMotorWheelOutputs(...)` and `stopMotors()` command passthrough to hardware boundary; operation end disables motors after any in-operation zero-speed stop has been requested
+  - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU
   - `GnssPositionUpdateEvent`: position, heading, fix quality from GNSS
@@ -196,6 +227,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
 - `src/i2c/i2cBusController.ts`: single-bus queued priority controller with key-based request replacement.
 - `src/i2c/liveI2cTransport.ts`: live Raspberry Pi I2C transport (`i2c-bus` module wrapper).
+- `external-hardware/manual-tests/imu_manual_test.js`: manual BMI160 bring-up poller script; uses built runtime modules from `dist/i2c/*` and `dist/imu/*` after `npm run build`.
 - `test/i2cBusController.test.js`: queue priority and replacement behavior tests.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
@@ -225,11 +257,12 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/main.ts`: production server entrypoint (compiled to `dist/server/main.js`).
 - `src/server/appServer.ts`: HTTP server bootstrapping, routing, and graceful shutdown.
 - `src/server/homePage.ts`: minimal tabbed UI page with a Primitives tab.
+- `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
 - `src/server/primitivesStore.ts`: in-memory primitives state holder.
   - primitives payload shape contains `imu`, `gnss`, and `motors` sections.
 - `docs/sensors.md`: sensor boundary/API contract, heading convention, GNSS frame/payload documentation, and primitive field purpose.
-- `scripts/mower-launch.sh`: launcher used by both `npm run start` and systemd.
-- `systemd/mower.service.template`: systemd unit template for runtime process management.
+- `scripts/mower-launch.sh`: launcher used by both `npm run start` and systemd; pins `MOWER_LOG_DIR` to the repo `logs/` folder by default.
+- `systemd/mower.service.template`: systemd unit template for runtime process management; explicitly sets `MOWER_LOG_DIR` to the repo `logs/` folder.
 - `systemd/install-mower-service.sh`: installer for `/etc/systemd/system/mower.service`.
 - `test/server.test.js`: server unit/integration tests.
 

@@ -41,6 +41,8 @@ test('Bmi160ImuSensor initialises, calibrates and reads bias-corrected gyro z', 
   assert.equal(Math.round(sample.angularVelocity.zDegreesPerSecond), 10);
 
   assert.deepEqual(fakeController.writes, [
+    [0x7e, 0x11],
+    [0x41, 0x03],
     [0x7e, 0x15],
     [0x43, 0x00],
   ]);

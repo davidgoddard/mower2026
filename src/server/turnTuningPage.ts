@@ -40,12 +40,281 @@ export function getTurnTuningPageHtml(): string {
       background: var(--bg-secondary);
       color: var(--text-primary);
       line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
 
     .container {
-      max-width: 1400px;
+      max-width: 1800px;
       margin: 0 auto;
       padding: 1rem;
+      width: 100%;
+    }
+
+    .page-layout {
+      display: grid;
+      grid-template-columns: minmax(380px, 420px) minmax(0, 1fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .sidebar-column {
+      position: sticky;
+      top: 5.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      align-self: start;
+    }
+
+    .main-column {
+      min-width: 0;
+    }
+
+    .sensor-card {
+      background: var(--bg-primary);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      box-shadow: var(--shadow-md);
+      border: 1px solid var(--border-color);
+    }
+
+    .sensor-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.875rem;
+      padding-bottom: 0.875rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .sensor-title {
+      font-size: 1rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .metric {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .metric-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .metric-value {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .metric-value.large {
+      font-size: 1.5rem;
+    }
+
+    .position-display {
+      text-align: center;
+      padding: 0.75rem;
+      background: var(--bg-tertiary);
+      border-radius: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .compass {
+      width: 100px;
+      height: 100px;
+      margin: 0 auto;
+      position: relative;
+    }
+
+    .compass-circle {
+      width: 100%;
+      height: 100%;
+      border: 3px solid var(--border-color);
+      border-radius: 50%;
+      position: relative;
+      background: radial-gradient(circle, var(--bg-secondary) 0%, var(--bg-primary) 70%);
+    }
+
+    .compass-needle {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 4px;
+      height: 45%;
+      background: linear-gradient(to top, var(--danger-color), var(--primary-color));
+      transform-origin: bottom center;
+      transform: translate(-50%, -100%) rotate(var(--heading-deg, 0deg));
+      border-radius: 2px;
+      transition: transform 0.3s ease-out;
+    }
+
+    .compass-center {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 12px;
+      height: 12px;
+      background: var(--text-primary);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 0 0 3px var(--bg-primary);
+    }
+
+    .compass-label {
+      position: absolute;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+
+    .compass-label.n { top: 8px; left: 50%; transform: translateX(-50%); }
+    .compass-label.e { right: 8px; top: 50%; transform: translateY(-50%); }
+    .compass-label.s { bottom: 8px; left: 50%; transform: translateX(-50%); }
+    .compass-label.w { left: 8px; top: 50%; transform: translateY(-50%); }
+
+    .tilt-indicators {
+      display: flex;
+      justify-content: space-around;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .tilt-indicator {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .tilt-circle {
+      width: 80px;
+      height: 80px;
+      border: 3px solid var(--border-color);
+      border-radius: 50%;
+      position: relative;
+      background: radial-gradient(circle, var(--bg-secondary) 0%, var(--bg-primary) 70%);
+    }
+
+    .tilt-line {
+      position: absolute;
+      top: 50%;
+      left: 10%;
+      right: 10%;
+      height: 3px;
+      background: var(--primary-color);
+      transform-origin: center center;
+      transform: translateY(-50%) rotate(var(--tilt-deg, 0deg));
+      border-radius: 2px;
+      transition: transform 0.3s ease-out;
+    }
+
+    .tilt-center {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 8px;
+      height: 8px;
+      background: var(--text-primary);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 0 0 2px var(--bg-primary);
+    }
+
+    .tilt-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .tilt-value {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .gnss-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+      margin-top: 1rem;
+    }
+
+    .gnss-row {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .gnss-row.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .gnss-row.two {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .gnss-fix-value {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 5.25rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 0.5rem;
+      background: var(--bg-tertiary);
+    }
+
+    .gnss-fix-value.gnss-fix-unknown,
+    .gnss-fix-value.gnss-fix-none {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .gnss-fix-value.gnss-fix-single {
+      background: #ffedd5;
+      color: #9a3412;
+    }
+
+    .gnss-fix-value.gnss-fix-float {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .gnss-fix-value.gnss-fix-fixed,
+    .gnss-fix-value.gnss-fix-rtk-fixed {
+      background: #d1fae5;
+      color: #065f46;
+    }
+
+    .gnss-fix-value.gnss-fix-rtk-float {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .error-message {
+      background: #fef2f2;
+      color: #991b1b;
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      margin-top: 0.5rem;
     }
 
     .header {
@@ -130,10 +399,39 @@ export function getTurnTuningPageHtml(): string {
       align-items: end;
     }
 
+    .controls-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
     .control-group {
       display: flex;
       flex-direction: column;
       gap: 0.5rem;
+    }
+
+    .center-row {
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .single-run-panel {
+      background: var(--bg-primary);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .single-run-grid {
+      display: grid;
+      grid-template-columns: minmax(220px, 320px) auto;
+      gap: 1rem;
+      align-items: end;
+      justify-content: center;
     }
 
     label {
@@ -162,6 +460,25 @@ export function getTurnTuningPageHtml(): string {
       display: flex;
       gap: 0.75rem;
       flex-wrap: wrap;
+    }
+
+    .start-button-row {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: nowrap;
+      align-items: center;
+      overflow-x: auto;
+      padding-bottom: 0.25rem;
+      scrollbar-width: thin;
+    }
+
+    .start-button-row button {
+      flex: 0 0 auto;
+      min-width: max-content;
+    }
+
+    .start-button-row .btn-primary {
+      border-radius: 9999px;
     }
 
     button {
@@ -211,6 +528,16 @@ export function getTurnTuningPageHtml(): string {
 
     .btn-secondary:hover:not(:disabled) {
       background: var(--border-color);
+    }
+
+    .stop-fab {
+      position: fixed;
+      top: 5.5rem;
+      right: 1rem;
+      z-index: 250;
+      box-shadow: var(--shadow-lg);
+      border-radius: 9999px;
+      padding: 0.9rem 1.2rem;
     }
 
     .stats-grid {
@@ -398,6 +725,24 @@ export function getTurnTuningPageHtml(): string {
         align-items: flex-start;
       }
 
+      .stop-fab {
+        top: auto;
+        bottom: 1rem;
+        right: 1rem;
+      }
+
+      .page-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar-column {
+        position: static;
+      }
+
+      .single-run-grid {
+        grid-template-columns: 1fr;
+      }
+
       table {
         font-size: 0.8125rem;
       }
@@ -444,89 +789,230 @@ export function getTurnTuningPageHtml(): string {
   </div>
 
   <div class="container">
-    <!-- Controls Panel -->
-    <div class="controls-panel">
-      <div class="controls-grid">
-        <div class="control-group">
-          <label for="testAngle">Test Angle (degrees)</label>
-          <input type="number" id="testAngle" min="-180" max="180" step="10" value="50">
+    <div class="page-layout">
+      <aside class="sidebar-column" aria-label="Live primitives">
+        <div class="sensor-card">
+          <div class="sensor-header">
+            <div class="sensor-title">IMU Sensor</div>
+            <span class="status-dot" id="imu-status"></span>
+          </div>
+          <div class="compass" id="compass">
+            <div class="compass-circle">
+              <div class="compass-label n">N</div>
+              <div class="compass-label e">E</div>
+              <div class="compass-label s">S</div>
+              <div class="compass-label w">W</div>
+              <div class="compass-needle"></div>
+              <div class="compass-center"></div>
+            </div>
+          </div>
+          <div class="position-display">
+            <div class="metric-label">Heading</div>
+            <div class="metric-value large" id="imu-heading">—</div>
+          </div>
+          <div class="tilt-indicators">
+            <div class="tilt-indicator">
+              <div class="tilt-circle" id="pitch-indicator">
+                <div class="tilt-line"></div>
+                <div class="tilt-center"></div>
+              </div>
+              <div class="tilt-label">Pitch</div>
+              <div class="tilt-value" id="imu-pitch">—</div>
+            </div>
+            <div class="tilt-indicator">
+              <div class="tilt-circle" id="roll-indicator">
+                <div class="tilt-line"></div>
+                <div class="tilt-center"></div>
+              </div>
+              <div class="tilt-label">Roll</div>
+              <div class="tilt-value" id="imu-roll">—</div>
+            </div>
+          </div>
+          <div id="imu-error" class="error-message" style="display: none;"></div>
         </div>
 
-        <div class="control-group">
-          <label for="iterations">Tuning Iterations</label>
-          <input type="number" id="iterations" min="1" max="10" step="1" value="1">
+        <div class="sensor-card">
+          <div class="sensor-header">
+            <div class="sensor-title">GNSS Position</div>
+            <span class="status-dot" id="gnss-status"></span>
+          </div>
+          <div class="compass" id="gnss-compass">
+            <div class="compass-circle">
+              <div class="compass-label n">N</div>
+              <div class="compass-label e">E</div>
+              <div class="compass-label s">S</div>
+              <div class="compass-label w">W</div>
+              <div class="compass-needle"></div>
+              <div class="compass-center"></div>
+            </div>
+          </div>
+          <div class="gnss-summary">
+            <div class="gnss-row three">
+              <div class="metric">
+                <div class="metric-label">X</div>
+                <div class="metric-value" id="gnss-x">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Y</div>
+                <div class="metric-value" id="gnss-y">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Accuracy</div>
+                <div class="metric-value" id="gnss-accuracy">—</div>
+              </div>
+            </div>
+            <div class="gnss-row two">
+              <div class="metric">
+                <div class="metric-label">Heading</div>
+                <div class="metric-value" id="gnss-heading">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Heading Accuracy</div>
+                <div class="metric-value" id="gnss-heading-accuracy">—</div>
+              </div>
+            </div>
+            <div class="gnss-row two">
+              <div class="metric">
+                <div class="metric-label">Fix Type</div>
+                <div class="metric-value gnss-fix-value" id="gnss-fix">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Satellites</div>
+                <div class="metric-value" id="gnss-sats">—</div>
+              </div>
+            </div>
+          </div>
+          <div id="gnss-error" class="error-message" style="display: none;"></div>
         </div>
+      </aside>
 
-        <div class="control-group">
-          <label>&nbsp;</label>
-          <div class="button-group">
-            <button class="btn-primary" id="runSingleTurn">Run Single Turn</button>
-            <button class="btn-primary" id="runTuningSequence">Run Full Tuning</button>
+      <main class="main-column">
+        <button class="btn-danger stop-fab" id="stopCurrentRun">
+          <span class="status-dot"></span>
+          STOP
+        </button>
+
+        <!-- Controls Panel -->
+        <div class="controls-panel">
+          <div class="controls-stack">
+            <div class="center-row">
+              <button class="btn-primary" id="runLargeAngleTraining">Train Large Angles</button>
+              <button class="btn-primary" id="runSmallAngleTraining">Train Small Angles</button>
+              <button class="btn-primary" id="runRealPoseValidation">Validate Real Pose</button>
+            </div>
+
+            <div class="center-row">
+              <button class="btn-secondary" id="clearHistory">Clear History</button>
+              <button class="btn-secondary" id="resetLearning">Reset Learning</button>
+            </div>
+          </div>
+
+          <div class="single-run-panel" style="margin-top: 1rem;">
+            <div class="single-run-grid">
+              <div class="control-group">
+                <label for="testAngle">Test Angle (degrees)</label>
+                <input type="number" id="testAngle" min="-180" max="180" step="10" value="50">
+              </div>
+              <div class="control-group">
+                <label>&nbsp;</label>
+                <button class="btn-primary" id="runSingleTurn">Run Single Turn</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="control-group">
-          <label>&nbsp;</label>
-          <div class="button-group">
-            <button class="btn-danger" id="stopTurn">⏹ STOP</button>
-            <button class="btn-secondary" id="clearHistory">Clear History</button>
-            <button class="btn-secondary" id="resetLearning">Reset Learning</button>
+        <!-- Statistics -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Turns Completed</div>
+            <div class="stat-value" id="turnsCompleted">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Average Error</div>
+            <div class="stat-value" id="averageError">0.0°</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Last Error</div>
+            <div class="stat-value" id="lastError">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Controller Status</div>
+            <div class="stat-value" id="statusText">Idle</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Real Pose Sweep</div>
+            <div class="stat-value" id="validationStatus">Idle</div>
           </div>
         </div>
-      </div>
-    </div>
 
-    <!-- Statistics -->
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Turns Completed</div>
-        <div class="stat-value" id="turnsCompleted">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Average Error</div>
-        <div class="stat-value" id="averageError">0.0°</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Last Error</div>
-        <div class="stat-value" id="lastError">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Controller Status</div>
-        <div class="stat-value" id="statusText">Idle</div>
-      </div>
-    </div>
+        <!-- Results Table -->
+        <div class="results-section">
+          <div class="section-header">
+            <h2>Turn Results</h2>
+            <span style="font-size: 0.875rem; color: var(--text-secondary);" id="resultsCount">0 turns</span>
+          </div>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Requested</th>
+                  <th>Achieved</th>
+                  <th>Error</th>
+                  <th>Duration</th>
+                  <th>Brake Distance</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="resultsTableBody">
+                <tr>
+                  <td colspan="7">
+                    <div class="empty-state">
+                      <div class="empty-icon">📊</div>
+                      <div>No turn results yet. Run a turn to see results here.</div>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-    <!-- Results Table -->
-    <div class="results-section">
-      <div class="section-header">
-        <h2>Turn Results</h2>
-        <span style="font-size: 0.875rem; color: var(--text-secondary);" id="resultsCount">0 turns</span>
-      </div>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Requested</th>
-              <th>Achieved</th>
-              <th>Error</th>
-              <th>Duration</th>
-              <th>Brake Distance</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="resultsTableBody">
-            <tr>
-              <td colspan="7">
-                <div class="empty-state">
-                  <div class="empty-icon">📊</div>
-                  <div>No turn results yet. Run a turn to see results here.</div>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+        <!-- Real Pose Validation -->
+        <div class="results-section" style="margin-top: 1.5rem;">
+          <div class="section-header">
+            <h2>Real Pose Validation</h2>
+            <span style="font-size: 0.875rem; color: var(--text-secondary);" id="validationResultsCount">0 turns</span>
+          </div>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Start Heading</th>
+                  <th>Target Heading</th>
+                  <th>Turn Angle</th>
+                  <th>IMU Achieved</th>
+                  <th>Real Pose Change</th>
+                  <th>Real Pose Heading</th>
+                  <th>Pose Error</th>
+                  <th>Pose Quality</th>
+                </tr>
+              </thead>
+              <tbody id="validationResultsTableBody">
+                <tr>
+                  <td colspan="9">
+                    <div class="empty-state">
+                      <div class="empty-icon">📍</div>
+                      <div>No real-pose validation results yet. Run a sweep to compare IMU and pose results here.</div>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </main>
     </div>
   </div>
 
@@ -552,11 +1038,180 @@ export function getTurnTuningPageHtml(): string {
       return 'error-bad';
     }
 
+    function getPoseQualityClass(quality) {
+      if (quality === 'gnss') return 'status-success';
+      if (quality === 'dead-reckoning') return 'status-timeout';
+      return 'status-stopped';
+    }
+
+    function formatMeters(value) {
+      if (value === null || value === undefined) return '—';
+      return value.toFixed(3) + ' m';
+    }
+
+    function formatDegrees(value) {
+      if (value === null || value === undefined) return '—';
+      return value.toFixed(1) + '°';
+    }
+
+    function internalToNavigationHeading(internalDeg) {
+      if (internalDeg === null || internalDeg === undefined) return null;
+      let navHeading = 90 - internalDeg;
+      while (navHeading < 0) navHeading += 360;
+      while (navHeading >= 360) navHeading -= 360;
+      return navHeading;
+    }
+
+    function getGnssFixClass(fixType) {
+      switch ((fixType || 'unknown').toLowerCase()) {
+        case 'fixed':
+          return 'gnss-fix-fixed';
+        case 'rtk-fixed':
+          return 'gnss-fix-rtk-fixed';
+        case 'float':
+          return 'gnss-fix-float';
+        case 'rtk-float':
+          return 'gnss-fix-rtk-float';
+        case 'single':
+          return 'gnss-fix-single';
+        case 'none':
+          return 'gnss-fix-none';
+        default:
+          return 'gnss-fix-unknown';
+      }
+    }
+
+    function applyGnssFixStyle(fixType) {
+      const fixValue = document.getElementById('gnss-fix');
+      if (!fixValue) {
+        return;
+      }
+      fixValue.className = 'metric-value gnss-fix-value ' + getGnssFixClass(fixType);
+    }
+
+    function updateSensorWidgets(primitivesPayload) {
+      const primitives = primitivesPayload?.primitives ?? {};
+      const imu = primitives.imu ?? {};
+      const gnss = primitives.gnss ?? {};
+
+      const imuStatusDot = document.getElementById('imu-status');
+      if (imuStatusDot) {
+        imuStatusDot.className = 'status-dot ' + (imu.status || 'idle');
+      }
+
+      if (imu.status === 'error') {
+        const imuError = document.getElementById('imu-error');
+        if (imuError) {
+          imuError.textContent = imu.error;
+          imuError.style.display = 'block';
+        }
+        const imuHeading = document.getElementById('imu-heading');
+        const imuPitch = document.getElementById('imu-pitch');
+        const imuRoll = document.getElementById('imu-roll');
+        if (imuHeading) imuHeading.textContent = '—';
+        if (imuPitch) imuPitch.textContent = '—';
+        if (imuRoll) imuRoll.textContent = '—';
+      } else {
+        const imuError = document.getElementById('imu-error');
+        if (imuError) {
+          imuError.style.display = 'none';
+        }
+        if (imu.headingDeg !== null && imu.headingDeg !== undefined) {
+          const navHeading = internalToNavigationHeading(imu.headingDeg);
+          const imuHeading = document.getElementById('imu-heading');
+          const compass = document.getElementById('compass');
+          if (imuHeading) imuHeading.textContent = formatDegrees(navHeading);
+          if (compass) compass.style.setProperty('--heading-deg', navHeading + 'deg');
+        }
+        if (imu.pitchDeg !== null && imu.pitchDeg !== undefined) {
+          const imuPitch = document.getElementById('imu-pitch');
+          const pitchIndicator = document.getElementById('pitch-indicator');
+          if (imuPitch) imuPitch.textContent = formatDegrees(imu.pitchDeg);
+          if (pitchIndicator) pitchIndicator.style.setProperty('--tilt-deg', imu.pitchDeg + 'deg');
+        }
+        if (imu.rollDeg !== null && imu.rollDeg !== undefined) {
+          const imuRoll = document.getElementById('imu-roll');
+          const rollIndicator = document.getElementById('roll-indicator');
+          if (imuRoll) imuRoll.textContent = formatDegrees(imu.rollDeg);
+          if (rollIndicator) rollIndicator.style.setProperty('--tilt-deg', imu.rollDeg + 'deg');
+        }
+      }
+
+      const gnssStatusDot = document.getElementById('gnss-status');
+      if (gnssStatusDot) {
+        gnssStatusDot.className = 'status-dot ' + (gnss.status || 'idle');
+      }
+
+      const gnssError = document.getElementById('gnss-error');
+      if (gnss.status === 'error') {
+        if (gnssError) {
+          gnssError.textContent = gnss.error;
+          gnssError.style.display = 'block';
+        }
+      } else if (gnssError) {
+        gnssError.style.display = 'none';
+      }
+
+      const gnssX = document.getElementById('gnss-x');
+      const gnssY = document.getElementById('gnss-y');
+      const gnssAccuracy = document.getElementById('gnss-accuracy');
+      const gnssHeadingAccuracy = document.getElementById('gnss-heading-accuracy');
+      const gnssSats = document.getElementById('gnss-sats');
+      const gnssFix = document.getElementById('gnss-fix');
+      const gnssHeading = document.getElementById('gnss-heading');
+      const gnssCompass = document.getElementById('gnss-compass');
+
+      if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
+      if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
+      if (gnssFix) gnssFix.textContent = gnss.fixType || '—';
+      applyGnssFixStyle(gnss.fixType);
+      if (gnssAccuracy) {
+        gnssAccuracy.textContent = gnss.positionAccuracyMeters !== null && gnss.positionAccuracyMeters !== undefined
+          ? formatMeters(gnss.positionAccuracyMeters)
+          : '—';
+      }
+      if (gnssHeadingAccuracy) {
+        gnssHeadingAccuracy.textContent = gnss.headingAccuracyDeg !== null && gnss.headingAccuracyDeg !== undefined
+          ? formatDegrees(gnss.headingAccuracyDeg)
+          : '—';
+      }
+      if (gnssSats) {
+        gnssSats.textContent = gnss.satellitesInUse !== null && gnss.satellitesInUse !== undefined
+          ? gnss.satellitesInUse
+          : '—';
+      }
+      if (gnss.headingDeg !== null && gnss.headingDeg !== undefined) {
+        const navHeading = internalToNavigationHeading(gnss.headingDeg);
+        if (gnssHeading) gnssHeading.textContent = formatDegrees(navHeading);
+        if (gnssCompass) gnssCompass.style.setProperty('--heading-deg', navHeading + 'deg');
+      } else if (gnssHeading) {
+        gnssHeading.textContent = '—';
+      }
+    }
+
+    function formatValidationStatus(validationState) {
+      if (!validationState) return 'Idle';
+      if (validationState.running) {
+        return \`Running \${validationState.completedIterations}/\${validationState.totalIterations}\`;
+      }
+      if (validationState.stopRequested) {
+        return \`Stopped \${validationState.completedIterations}/\${validationState.totalIterations}\`;
+      }
+      return validationState.completedIterations > 0
+        ? \`Complete \${validationState.completedIterations}/\${validationState.totalIterations}\`
+        : 'Idle';
+    }
+
     // Update UI with status data
     async function updateStatus() {
       try {
-        const response = await fetch('/api/turn/status');
-        const data = await response.json();
+        const [turnResponse, primitivesResponse] = await Promise.all([
+          fetch('/api/turn/status'),
+          fetch('/api/primitives')
+        ]);
+        const data = await turnResponse.json();
+        const primitives = await primitivesResponse.json();
+        updateSensorWidgets(primitives);
 
         // Update controller status badge
         const statusBadge = document.getElementById('controllerStatus');
@@ -570,6 +1225,7 @@ export function getTurnTuningPageHtml(): string {
         // Update stats
         document.getElementById('turnsCompleted').textContent = data.state.turnsCompleted;
         document.getElementById('statusText').textContent = data.state.status.charAt(0).toUpperCase() + data.state.status.slice(1);
+        document.getElementById('validationStatus').textContent = formatValidationStatus(data.realPoseValidation);
 
         const avgError = data.state.averageErrorDeg;
         const avgErrorEl = document.getElementById('averageError');
@@ -588,6 +1244,8 @@ export function getTurnTuningPageHtml(): string {
         // Update results table
         const tbody = document.getElementById('resultsTableBody');
         const resultsCount = document.getElementById('resultsCount');
+        const validationTbody = document.getElementById('validationResultsTableBody');
+        const validationResultsCount = document.getElementById('validationResultsCount');
 
         if (data.history && data.history.length > 0) {
           resultsCount.textContent = \`\${data.history.length} turn\${data.history.length !== 1 ? 's' : ''}\`;
@@ -611,6 +1269,35 @@ export function getTurnTuningPageHtml(): string {
                 <div class="empty-state">
                   <div class="empty-icon">📊</div>
                   <div>No turn results yet. Run a turn to see results here.</div>
+                </div>
+              </td>
+            </tr>
+          \`;
+        }
+
+        if (data.realPoseHistory && data.realPoseHistory.length > 0) {
+          validationResultsCount.textContent = \`\${data.realPoseHistory.length} turn\${data.realPoseHistory.length !== 1 ? 's' : ''}\`;
+          validationTbody.innerHTML = data.realPoseHistory.slice().reverse().slice(0, 50).map(result => \`
+            <tr>
+              <td>\${formatTime(result.timestamp)}</td>
+              <td class="angle-cell">\${formatAngle(result.startHeading)}</td>
+              <td class="angle-cell">\${formatAngle(result.targetHeading)}</td>
+              <td class="angle-cell">\${formatAngle(result.targetAngle)}</td>
+              <td class="angle-cell">\${formatAngle(result.imuAchievedAngle)}</td>
+              <td class="angle-cell">\${result.realPoseChange === null ? '—' : formatAngle(result.realPoseChange)}</td>
+              <td class="angle-cell">\${result.realPoseHeading === null ? '—' : formatAngle(result.realPoseHeading)}</td>
+              <td class="error-cell \${result.poseErrorAngle === null ? '' : getErrorClass(result.poseErrorAngle)}">\${result.poseErrorAngle === null ? '—' : formatAngle(result.poseErrorAngle)}</td>
+              <td><span class="status-cell \${getPoseQualityClass(result.poseQuality)}">\${result.poseQuality ?? 'unknown'}</span></td>
+            </tr>
+          \`).join('');
+        } else {
+          validationResultsCount.textContent = '0 turns';
+          validationTbody.innerHTML = \`
+            <tr>
+              <td colspan="9">
+                <div class="empty-state">
+                  <div class="empty-icon">📍</div>
+                  <div>No real-pose validation results yet. Run a sweep to compare IMU and pose results here.</div>
                 </div>
               </td>
             </tr>
@@ -643,41 +1330,86 @@ export function getTurnTuningPageHtml(): string {
       }
     });
 
-    // Run tuning sequence
-    document.getElementById('runTuningSequence').addEventListener('click', async () => {
-      const iterations = parseInt(document.getElementById('iterations').value);
-      const button = document.getElementById('runTuningSequence');
+    // Run large-angle training sequence
+    document.getElementById('runLargeAngleTraining').addEventListener('click', async () => {
+      const button = document.getElementById('runLargeAngleTraining');
       button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Running Tuning...';
+      button.innerHTML = '<span class="spinner"></span> Training Large Angles...';
 
       try {
-        await fetch('/api/turn/tune', {
+        await fetch('/api/turn/train-large', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ iterations })
+          body: JSON.stringify({ iterations: 1 })
         });
         await updateStatus();
       } catch (error) {
-        alert('Failed to run tuning: ' + error.message);
+        alert('Failed to train large angles: ' + error.message);
       } finally {
         button.disabled = false;
-        button.innerHTML = 'Run Full Tuning';
+        button.innerHTML = 'Train Large Angles';
       }
     });
 
-    // Stop turn
-    document.getElementById('stopTurn').addEventListener('click', async () => {
+    // Run small-angle training sequence
+    document.getElementById('runSmallAngleTraining').addEventListener('click', async () => {
+      const button = document.getElementById('runSmallAngleTraining');
+      button.disabled = true;
+      button.innerHTML = '<span class="spinner"></span> Training Small Angles...';
+
+      try {
+        await fetch('/api/turn/train-small', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetErrorDeg: 2 })
+        });
+        await updateStatus();
+      } catch (error) {
+        alert('Failed to train small angles: ' + error.message);
+      } finally {
+        button.disabled = false;
+        button.innerHTML = 'Train Small Angles';
+      }
+    });
+
+    // Run real-pose validation sequence
+    document.getElementById('runRealPoseValidation').addEventListener('click', async () => {
+      const button = document.getElementById('runRealPoseValidation');
+      button.disabled = true;
+      button.innerHTML = '<span class="spinner"></span> Validating Real Pose...';
+
+      try {
+        await updateStatus();
+        await fetch('/api/turn/train-real-pose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ iterations: 20 })
+        });
+        await updateStatus();
+      } catch (error) {
+        alert('Failed to validate real pose: ' + error.message);
+      } finally {
+        button.disabled = false;
+        button.innerHTML = 'Validate Real Pose';
+      }
+    });
+
+    document.getElementById('stopCurrentRun').addEventListener('click', async () => {
+      const button = document.getElementById('stopCurrentRun');
+      button.disabled = true;
       try {
         await fetch('/api/turn/stop', { method: 'POST' });
         await updateStatus();
       } catch (error) {
-        alert('Failed to stop turn: ' + error.message);
+        alert('Failed to stop current run: ' + error.message);
+      } finally {
+        button.disabled = false;
       }
     });
 
     // Clear history
     document.getElementById('clearHistory').addEventListener('click', async () => {
-      if (confirm('Clear all turn history?')) {
+      if (confirm('Are you sure you want to clear all turn history?')) {
         try {
           await fetch('/api/turn/clear-history', { method: 'POST' });
           await updateStatus();
@@ -689,7 +1421,7 @@ export function getTurnTuningPageHtml(): string {
 
     // Reset learning
     document.getElementById('resetLearning').addEventListener('click', async () => {
-      if (confirm('Reset turn learning parameters to defaults?')) {
+      if (confirm('Are you sure you want to reset turn learning parameters to defaults?')) {
         try {
           await fetch('/api/turn/reset-learning', { method: 'POST' });
           await updateStatus();

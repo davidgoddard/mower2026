@@ -12,9 +12,23 @@ import {
   fieldToInternal,
   addRelativeAngle,
   createRelativeAngle,
+  headingDifference,
   unwrapInternalHeading,
+  unwrapRelativeAngle,
 } from "../geometry/headingTypes.js";
-import { ENCODER_METERS_PER_TICK_DEFAULT, SENSOR_POLL_INTERVAL_MS } from "../constants.js";
+import { Position, createPosition, distanceBetween } from "../geometry/positionTypes.js";
+import {
+  ENCODER_METERS_PER_TICK_DEFAULT,
+  SENSOR_POLL_INTERVAL_MS,
+  MOTOR_STALL_COMMAND_THRESHOLD_PERCENT,
+  MOTOR_STALL_ENCODER_DELTA_THRESHOLD,
+  MOTOR_STALL_GNSS_ACCURACY_MAX_METERS,
+  MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS,
+  MOTOR_STALL_OBSERVATION_WINDOW_MS,
+  MOTOR_STALL_CONSECUTIVE_SAMPLES,
+  MOTOR_STALL_CURRENT_THRESHOLD_AMPS,
+  MOTOR_STALL_STARTUP_GRACE_MS,
+} from "../constants.js";
 import {
   SensorControllerEvents,
   SENSOR_EVENTS,
@@ -61,11 +75,21 @@ export class SensorController extends EventEmitter {
   private running = false;
   private loopPromise: Promise<void> | null = null;
   private lastMotorCommand: MotorCommand | null = null;
+  private stopRequestLogged = false;
   private motorOperationDepth = 0;
   private previousMotorFeedbackTimestampMillis: number | null = null;
+  private motorCommandActiveSinceMillis: number | null = null;
+  private latestGnssPosition: Position | null = null;
+  private latestGnssAccuracyMeters: number | null = null;
+  private stallMotionAnchorPosition: Position | null = null;
+  private stallMotionAnchorSinceMillis: number | null = null;
+  private stallDetectionSamples = 0;
+  private stallDetectionLatched = false;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
+  private lastImuHeadingLogMillis: number | null = null;
+  private lastImuHeadingLogValue: InternalHeading | null = null;
 
   // Type-safe event subscription methods
   declare on: <K extends keyof SensorControllerEvents>(
@@ -104,6 +128,13 @@ export class SensorController extends EventEmitter {
     systemStop.clearStop("sensor-controller-start");
     this.lastMotorCommand = null;
     this.previousMotorFeedbackTimestampMillis = null;
+    this.motorCommandActiveSinceMillis = null;
+    this.latestGnssPosition = null;
+    this.latestGnssAccuracyMeters = null;
+    this.stallMotionAnchorPosition = null;
+    this.stallMotionAnchorSinceMillis = null;
+    this.stallDetectionSamples = 0;
+    this.stallDetectionLatched = false;
     this.primitivesStore.update({
       sensorController: {
         status: "starting",
@@ -172,6 +203,13 @@ export class SensorController extends EventEmitter {
       this.loopPromise = null;
     }
 
+    try {
+      await this.sendDisableMotorsCommand();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn("sensor.motors.shutdown_disable_failed", { error: message });
+    }
+
     this.primitivesStore.update({
       sensorController: {
         status: "stopped",
@@ -202,16 +240,40 @@ export class SensorController extends EventEmitter {
       throw new Error("motor operation not active");
     }
 
+    const isActiveCommand =
+      Math.max(Math.abs(leftWheelOutputPercent), Math.abs(rightWheelOutputPercent)) >=
+      MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+    const wasActiveCommand =
+      this.lastMotorCommand?.kind === "output" &&
+      Math.max(
+        Math.abs(this.lastMotorCommand.leftWheelOutputPercent),
+        Math.abs(this.lastMotorCommand.rightWheelOutputPercent),
+      ) >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+
     this.logger.info("motors.commanded", {
       leftWheelOutputPercent,
       rightWheelOutputPercent,
       callStack: this.captureCallStack(),
     });
+    this.stopRequestLogged = false;
     this.lastMotorCommand = {
       kind: "output",
       leftWheelOutputPercent,
       rightWheelOutputPercent,
     };
+    if (isActiveCommand && !wasActiveCommand) {
+      this.motorCommandActiveSinceMillis = this.nowMillis();
+      this.stallMotionAnchorPosition = this.latestGnssPosition;
+      this.stallMotionAnchorSinceMillis = this.stallMotionAnchorPosition !== null ? this.nowMillis() : null;
+      this.stallDetectionSamples = 0;
+      this.stallDetectionLatched = false;
+    } else if (!isActiveCommand) {
+      this.motorCommandActiveSinceMillis = null;
+      this.stallMotionAnchorPosition = null;
+      this.stallMotionAnchorSinceMillis = null;
+      this.stallDetectionSamples = 0;
+      this.stallDetectionLatched = false;
+    }
     await this.gateway.setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent);
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
@@ -236,9 +298,9 @@ export class SensorController extends EventEmitter {
     }
 
     this.motorOperationDepth -= 1;
-    if (this.motorOperationDepth === 0 && this.lastMotorCommand?.kind !== "stop") {
+    if (this.motorOperationDepth === 0) {
       try {
-        await this.stopMotors();
+        await this.sendDisableMotorsCommand();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("motors.operation_stop_failed", { error: message });
@@ -247,31 +309,16 @@ export class SensorController extends EventEmitter {
   }
 
   async stopMotors(): Promise<void> {
-    this.logger.warn("motors.stop_requested", {
-      currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
-      currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
-      callStack: this.captureCallStack(),
-    });
-    this.lastMotorCommand = {
-      kind: "stop",
-    };
-    let stopError: unknown = null;
-    try {
-      await this.gateway.stopMotors();
-    } catch (error) {
-      stopError = error;
+    if (!this.stopRequestLogged) {
+      this.logger.warn("motors.stop_requested", {
+        currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
+        currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
+        callStack: this.captureCallStack(),
+      });
+      this.stopRequestLogged = true;
     }
-    const current = this.primitivesStore.snapshot().motors;
-    this.primitivesStore.update({
-      motors: {
-        ...current,
-        commandedLeftWheelOutputPercent: 0,
-        commandedRightWheelOutputPercent: 0,
-      },
-    });
-    if (stopError) {
-      throw stopError instanceof Error ? stopError : new Error(String(stopError));
-    }
+
+    await this.sendGentleStopMotorsCommand();
   }
 
   /**
@@ -299,7 +346,7 @@ export class SensorController extends EventEmitter {
       await this.pollAllSensors();
       if (systemStop.isStopped()) {
         try {
-          await this.stopMotors();
+          await this.sendGentleStopMotorsCommand();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.warn("sensor.motors.stop_during_global_stop_failed", { error: message });
@@ -365,6 +412,24 @@ export class SensorController extends EventEmitter {
         },
       });
 
+      const shouldLogImuHeading =
+        this.lastImuHeadingLogMillis === null ||
+        sample.timestampMillis - this.lastImuHeadingLogMillis >= 1000;
+      if (shouldLogImuHeading) {
+        const currentHeadingDeg = unwrapInternalHeading(this.imuHeading);
+        const headingChangeDeg = this.lastImuHeadingLogValue === null
+          ? 0
+          : Math.abs(unwrapRelativeAngle(headingDifference(this.lastImuHeadingLogValue, this.imuHeading)));
+        this.logger.info("sensor.imu.heading_sample", {
+          headingDeg: currentHeadingDeg,
+          headingChangeSinceLastLogDeg: headingChangeDeg,
+          yawRateDegPerSec: sample.angularVelocity.zDegreesPerSecond,
+          sampleDeltaMs: this.previousImuSampleMillis !== null ? sample.timestampMillis - this.previousImuSampleMillis : null,
+        });
+        this.lastImuHeadingLogMillis = sample.timestampMillis;
+        this.lastImuHeadingLogValue = this.imuHeading;
+      }
+
       // Emit heading update event
       this.emit(SENSOR_EVENTS.IMU_HEADING_UPDATE, {
         heading: this.imuHeading,
@@ -413,6 +478,14 @@ export class SensorController extends EventEmitter {
           sampleAgeMillis: sample.sampleAgeMillis,
         },
       });
+
+      this.latestGnssPosition = createPosition(sample.xMeters, sample.yMeters);
+      this.latestGnssAccuracyMeters = sample.positionAccuracyMeters;
+
+      if (this.motorCommandActiveSinceMillis !== null && this.stallMotionAnchorPosition === null) {
+        this.stallMotionAnchorPosition = this.latestGnssPosition;
+        this.stallMotionAnchorSinceMillis = this.nowMillis();
+      }
 
       // Emit GNSS position update event
       this.emit(SENSOR_EVENTS.GNSS_POSITION_UPDATE, {
@@ -481,6 +554,14 @@ export class SensorController extends EventEmitter {
         faultFlags: sample.faultFlags,
         timestampMillis: sample.timestampMillis,
       });
+
+      this.evaluateStallDetection(
+        sample.leftEncoderDelta,
+        sample.rightEncoderDelta,
+        sample.leftMotorCurrentAmps ?? null,
+        sample.rightMotorCurrentAmps ?? null,
+        sample.faultFlags,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.primitivesStore.snapshot().motors;
@@ -493,6 +574,180 @@ export class SensorController extends EventEmitter {
       });
       this.logger.error("sensor.motors.poll_failed", { error: message });
     }
+  }
+
+  private evaluateStallDetection(
+    leftEncoderDelta: number,
+    rightEncoderDelta: number,
+    leftMotorCurrentAmps: number | null,
+    rightMotorCurrentAmps: number | null,
+    faultFlags: number,
+  ): void {
+    if (systemStop.isStopped()) {
+      this.stallDetectionSamples = 0;
+      this.stallDetectionLatched = false;
+      return;
+    }
+
+    if (
+      this.motorCommandActiveSinceMillis !== null &&
+      this.nowMillis() - this.motorCommandActiveSinceMillis < MOTOR_STALL_STARTUP_GRACE_MS
+    ) {
+      this.stallDetectionSamples = 0;
+      this.stallDetectionLatched = false;
+      return;
+    }
+
+    const motors = this.primitivesStore.snapshot().motors;
+    const leftCommand = Math.abs(motors.commandedLeftWheelOutputPercent ?? 0);
+    const rightCommand = Math.abs(motors.commandedRightWheelOutputPercent ?? 0);
+    const commandActive =
+      leftCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT &&
+      rightCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+
+    let positionStationary = false;
+    if (
+      this.latestGnssPosition !== null &&
+      this.stallMotionAnchorPosition !== null &&
+      this.stallMotionAnchorSinceMillis !== null &&
+      this.latestGnssAccuracyMeters !== null &&
+      this.latestGnssAccuracyMeters <= MOTOR_STALL_GNSS_ACCURACY_MAX_METERS
+    ) {
+      const movementSinceAnchor = distanceBetween(this.stallMotionAnchorPosition, this.latestGnssPosition);
+      if (movementSinceAnchor >= MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS) {
+        this.stallMotionAnchorPosition = this.latestGnssPosition;
+        this.stallMotionAnchorSinceMillis = this.nowMillis();
+        this.stallDetectionSamples = 0;
+        this.stallDetectionLatched = false;
+        return;
+      }
+
+      if (this.nowMillis() - this.stallMotionAnchorSinceMillis < MOTOR_STALL_OBSERVATION_WINDOW_MS) {
+        return;
+      }
+
+      positionStationary = true;
+    }
+
+    const encoderStationaryFallback =
+      Math.abs(leftEncoderDelta) <= MOTOR_STALL_ENCODER_DELTA_THRESHOLD &&
+      Math.abs(rightEncoderDelta) <= MOTOR_STALL_ENCODER_DELTA_THRESHOLD;
+
+    const currentHigh =
+      (leftMotorCurrentAmps !== null && leftMotorCurrentAmps >= MOTOR_STALL_CURRENT_THRESHOLD_AMPS) ||
+      (rightMotorCurrentAmps !== null && rightMotorCurrentAmps >= MOTOR_STALL_CURRENT_THRESHOLD_AMPS) ||
+      faultFlags !== 0;
+
+    const stationary = commandActive && (positionStationary || encoderStationaryFallback);
+
+    if (!stationary) {
+      this.stallDetectionSamples = 0;
+      this.stallDetectionLatched = false;
+      if (commandActive && this.stallMotionAnchorPosition === null && this.latestGnssPosition !== null) {
+        this.stallMotionAnchorPosition = this.latestGnssPosition;
+        this.stallMotionAnchorSinceMillis = this.nowMillis();
+      }
+      return;
+    }
+
+    this.stallDetectionSamples += currentHigh ? 2 : 1;
+    if (this.stallDetectionLatched || this.stallDetectionSamples < MOTOR_STALL_CONSECUTIVE_SAMPLES) {
+      return;
+    }
+
+    this.stallDetectionLatched = true;
+    const current = this.primitivesStore.snapshot().motors;
+    this.primitivesStore.update({
+      motors: {
+        ...current,
+        status: "error",
+        error: "motor_stall_detected",
+      },
+    });
+
+    this.logger.warn("sensor.motors.stall_detected", {
+      leftCommandPercent: leftCommand,
+      rightCommandPercent: rightCommand,
+      leftEncoderDelta,
+      rightEncoderDelta,
+      leftMotorCurrentAmps,
+      rightMotorCurrentAmps,
+      faultFlags,
+      consecutiveSamples: this.stallDetectionSamples,
+    });
+
+    this.emit(SENSOR_EVENTS.OBSTRUCTION_DETECTED, {
+      type: "stall",
+      timestampMillis: this.nowMillis(),
+      leftMotorCurrentAmps: leftMotorCurrentAmps ?? 0,
+      rightMotorCurrentAmps: rightMotorCurrentAmps ?? 0,
+      leftWheelSpeedMetersPerSecond: 0,
+      rightWheelSpeedMetersPerSecond: 0,
+    });
+    systemStop.requestStop("sensors", "motor_stall_detected");
+  }
+
+  private async sendGentleStopMotorsCommand(): Promise<void> {
+    if (
+      this.lastMotorCommand?.kind === "output" &&
+      this.lastMotorCommand.leftWheelOutputPercent === 0 &&
+      this.lastMotorCommand.rightWheelOutputPercent === 0
+    ) {
+      return;
+    }
+
+    if (this.lastMotorCommand?.kind === "stop") {
+      return;
+    }
+
+    this.lastMotorCommand = {
+      kind: "output",
+      leftWheelOutputPercent: 0,
+      rightWheelOutputPercent: 0,
+    };
+    this.motorCommandActiveSinceMillis = null;
+    this.stallMotionAnchorPosition = null;
+    this.stallMotionAnchorSinceMillis = null;
+    this.stallDetectionSamples = 0;
+    this.stallDetectionLatched = false;
+    try {
+      await this.gateway.setMotorWheelOutputs(0, 0);
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+    const current = this.primitivesStore.snapshot().motors;
+    this.primitivesStore.update({
+      motors: {
+        ...current,
+        commandedLeftWheelOutputPercent: 0,
+        commandedRightWheelOutputPercent: 0,
+      },
+    });
+  }
+
+  private async sendDisableMotorsCommand(): Promise<void> {
+    if (this.lastMotorCommand?.kind === "stop") {
+      return;
+    }
+
+    this.lastMotorCommand = {
+      kind: "stop",
+    };
+    this.motorCommandActiveSinceMillis = null;
+    this.stallMotionAnchorPosition = null;
+    this.stallMotionAnchorSinceMillis = null;
+    this.stallDetectionSamples = 0;
+    this.stallDetectionLatched = false;
+
+    await this.gateway.stopMotors();
+    const current = this.primitivesStore.snapshot().motors;
+    this.primitivesStore.update({
+      motors: {
+        ...current,
+        commandedLeftWheelOutputPercent: 0,
+        commandedRightWheelOutputPercent: 0,
+      },
+    });
   }
 
   private computeWheelSpeedMetersPerSecond(

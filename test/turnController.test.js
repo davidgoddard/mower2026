@@ -1,6 +1,9 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { TurnController } from "../dist/control/turnController.js";
 import { TurnLearningModel } from "../dist/control/turnLearningModel.js";
 import { createRelativeAngle, createInternalHeading, unwrapRelativeAngle } from "../dist/geometry/headingTypes.js";
@@ -70,6 +73,20 @@ describe("TurnController", () => {
       loadParameters: mock.fn(async () => {}),
       getParameters: mock.fn(() => ({ parameters: [] })),
       resetToDefaults: mock.fn(async () => {}),
+    };
+  }
+
+  function createTrainingResult(requestedAngleDeg, errorAngleDeg) {
+    const achievedAngleDeg = requestedAngleDeg - errorAngleDeg;
+    return {
+      requestedAngle: createRelativeAngle(requestedAngleDeg),
+      achievedAngle: createRelativeAngle(achievedAngleDeg),
+      errorAngle: createRelativeAngle(errorAngleDeg),
+      durationMs: 100,
+      brakeDistanceUsed: createRelativeAngle(0),
+      motorEngaged: true,
+      status: "success",
+      timestamp: new Date().toISOString(),
     };
   }
 
@@ -242,6 +259,61 @@ describe("TurnController", () => {
     const state = controller.getState();
     assert.equal(state.turnsCompleted, 0);
   });
+
+  it("runs large-angle training through the requested sweep", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockLearning = createMockLearningModel();
+    const controller = new TurnController({
+      sensorController: mockSensor,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const requestedAngles = [];
+    controller.executeTurn = mock.fn(async (request) => {
+      const angleDeg = unwrapRelativeAngle(request.targetAngle);
+      requestedAngles.push(angleDeg);
+      return createTrainingResult(angleDeg, 4);
+    });
+
+    await controller.runLargeAngleTraining(1, [70, -70]);
+
+    assert.deepEqual(requestedAngles, [70, -70]);
+  });
+
+  it("repeats small-angle training until each angle is within three degrees", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockLearning = createMockLearningModel();
+    const controller = new TurnController({
+      sensorController: mockSensor,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const attemptsByAngle = new Map();
+    const requestedAngles = [];
+    controller.executeTurn = mock.fn(async (request) => {
+      const angleDeg = unwrapRelativeAngle(request.targetAngle);
+      requestedAngles.push(angleDeg);
+
+      const attempt = attemptsByAngle.get(angleDeg) ?? 0;
+      attemptsByAngle.set(angleDeg, attempt + 1);
+
+      const errorSequence = angleDeg > 0 ? [7, 2] : [5, 1];
+      const errorDeg = errorSequence[Math.min(attempt, errorSequence.length - 1)];
+      return createTrainingResult(angleDeg, errorDeg);
+    });
+
+    await controller.runSmallAngleTraining(2, [3, -3]);
+
+    assert.equal(attemptsByAngle.get(3), 2);
+    assert.equal(attemptsByAngle.get(-3), 2);
+    assert.deepEqual(requestedAngles, [3, 3, -3, -3]);
+  });
 });
 
 describe("TurnLearningModel", () => {
@@ -295,5 +367,51 @@ describe("TurnLearningModel", () => {
     // Should get identical brake angles since they map to same bin
     const diff = Math.abs(unwrapRelativeAngle(brake91) - unwrapRelativeAngle(brake90));
     assert.equal(diff < 0.01, true, `Expected diff < 0.01 but got ${diff}`);
+  });
+
+  it("learns the small-angle brake fraction and persists it", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const model = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+
+      await model.loadParameters();
+      const before = model.getParameters();
+      const bucket = before.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
+      assert.ok(bucket);
+      const startFraction = bucket.brakeFractionCcw;
+
+      await model.updateFromTurn({
+        requestedAngle: createRelativeAngle(20),
+        achievedAngle: createRelativeAngle(3),
+        errorAngle: createRelativeAngle(-17),
+        brakeDistanceUsed: createRelativeAngle(0),
+        direction: "ccw",
+      });
+
+      const after = model.getParameters();
+      const updatedBucket = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
+      assert.ok(updatedBucket);
+      assert.equal(updatedBucket.sampleCountCcw, bucket.sampleCountCcw + 1);
+      assert.equal(updatedBucket.brakeFractionCcw > startFraction, true);
+
+      const reloaded = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+      await reloaded.loadParameters();
+      const persisted = reloaded.getParameters();
+      const persistedBucket = persisted.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
+      assert.ok(persistedBucket);
+      assert.equal(persistedBucket.sampleCountCcw, updatedBucket.sampleCountCcw);
+      assert.equal(persistedBucket.brakeFractionCcw, updatedBucket.brakeFractionCcw);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

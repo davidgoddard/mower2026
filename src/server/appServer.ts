@@ -3,6 +3,7 @@ import { HidGameController } from "../controller/hidGameController.js";
 import { ManualDriveCoordinator } from "../control/manualDriveCoordinator.js";
 import { TurnController } from "../control/turnController.js";
 import { TurnLearningModel } from "../control/turnLearningModel.js";
+import { TurnValidationRunner } from "../control/turnValidationRunner.js";
 import { DriveController } from "../control/driveController.js";
 import { DriveLearningModel } from "../control/driveLearningModel.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
@@ -89,6 +90,7 @@ export function routeServerRequest(
   appName: string,
   primitives: PrimitiveSnapshot,
   turnController: TurnController | null,
+  turnValidationRunner: TurnValidationRunner | null,
   driveController: DriveController | null,
   driveLearningModel: DriveLearningModel | null,
   poseFusion: PoseFusion | null,
@@ -181,6 +183,8 @@ export function routeServerRequest(
       body: encodeJson({
         state: turnController.getState(),
         history: turnController.getTurnHistory(),
+        realPoseHistory: turnValidationRunner?.getHistory() ?? [],
+        realPoseValidation: turnValidationRunner?.getState() ?? null,
       }),
       logNotFound: false,
     };
@@ -251,6 +255,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let manualDriveCoordinator: ManualDriveCoordinator | null = null;
   let turnController: TurnController | null = null;
   let turnLearningModel: TurnLearningModel | null = null;
+  let turnValidationRunner: TurnValidationRunner | null = null;
   let poseFusion: PoseFusion | null = null;
   let driveLearningModel: DriveLearningModel | null = null;
   let driveController: DriveController | null = null;
@@ -328,10 +333,28 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Turn tuning sequence
-        if (requestUrl.pathname === "/api/turn/tune" && turnController) {
+        // Large-angle turn training sequence
+        if (requestUrl.pathname === "/api/turn/train-large" && turnController) {
           const data = JSON.parse(body);
-          const results = await turnController.runTuningSequence(data.iterations, data.anglesToTest);
+          const results = await turnController.runLargeAngleTraining(data.iterations);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        // Small-angle turn training sequence
+        if (requestUrl.pathname === "/api/turn/train-small" && turnController) {
+          const data = JSON.parse(body);
+          const results = await turnController.runSmallAngleTraining(data.targetErrorDeg);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        // Real-pose turn validation sweep
+        if (requestUrl.pathname === "/api/turn/train-real-pose" && turnValidationRunner) {
+          const data = JSON.parse(body);
+          const results = await turnValidationRunner.run(data.iterations ?? 20);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson(results));
           return;
@@ -341,6 +364,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         if (requestUrl.pathname === "/api/turn/stop" && turnController) {
           systemStop.requestStop("api", "turn_stop");
           await turnController.stopCurrentTurn();
+          turnValidationRunner?.stopCurrentValidation();
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
@@ -378,6 +402,33 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         // Drive test pattern
         if (requestUrl.pathname === "/api/drive/test-pattern" && driveController) {
           const results = await driveController.runTestPattern();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        // Short-distance drive training
+        if (requestUrl.pathname === "/api/drive/train-short" && driveController) {
+          const data = JSON.parse(body);
+          systemStop.clearStop("api-drive-train-short");
+          const results = await driveController.runShortDistanceTraining({
+            targetXErrorMeters: data.targetXErrorMeters,
+            includeReverseLegs: data.includeReverseLegs ?? true,
+            startDistanceMeters: data.startDistanceMeters,
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        // Segment-drive training
+        if (requestUrl.pathname === "/api/drive/train-segment" && driveController) {
+          const data = JSON.parse(body);
+          systemStop.clearStop("api-drive-train-segment");
+          const results = await driveController.runSegmentTraining({
+            targetXErrorMeters: data.targetXErrorMeters ?? 0.04,
+            includeReverseLegs: data.includeReverseLegs ?? true,
+          });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson(results));
           return;
@@ -422,6 +473,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       appName,
       primitives.snapshot(),
       turnController,
+      turnValidationRunner,
       driveController,
       driveLearningModel,
       poseFusion,
@@ -584,6 +636,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       poseCalibration: poseCalibration!,
     });
     await poseFusion.start();
+
+    turnValidationRunner = new TurnValidationRunner({
+      turnController,
+      poseProvider: () => poseFusion?.getCurrentPose() ?? null,
+      stationaryPoseProvider: () => poseFusion?.stationaryPose() ?? null,
+      logger,
+    });
 
     // Initialize drive controller
     driveLearningModel = new DriveLearningModel({ logger });

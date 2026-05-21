@@ -42,7 +42,8 @@ The Drive Controller is a supervised self-learning component responsible for exe
 
 ```
 src/control/
-  ├── driveController.ts          # Main drive execution controller
+  ├── driveController.ts          # Segment drive controller (turn then line drive)
+  ├── driveLineController.ts      # Straight-line drive controller with CTE/brake learning
   ├── driveControllerTypes.ts     # Type definitions
   └── driveLearningModel.ts       # Adaptive parameter learning
 
@@ -65,6 +66,7 @@ docs/
 import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { TurnController } from "./turnController.js";
+import { DriveLineController } from "./driveLineController.js";
 import { SessionLogger } from "../logging/index.js";
 import {
   InternalHeading,
@@ -229,336 +231,48 @@ After successful drive with good GNSS at start and end:
 
 ---
 
-### 3. Drive Controller (`src/control/driveController.ts`)
+### 3. Segment Drive Controller (`src/control/driveController.ts`)
 
 #### Responsibilities
-- Execute point-to-point drive maneuvers
-- Monitor position and CTE during drives
-- Apply learned brake distance and CTE correction
-- Update learning model with results
-- Coordinate with turn controller for initial turn
+- Execute point-to-point segment drives
+- Turn to face the target before the line drive phase
+- Delegate straight-line motion to `DriveLineController`
+- Keep the segment orchestration isolated from the straight-line braking and learning logic
+- Return a completed or stopped segment result to the app without exposing internal line-drive state
 
-#### State Machine
+#### Execution Flow
 
-```
-IDLE → TURNING → SETTLING → DRIVING → BRAKING → SETTLING → MEASURING → LEARNING → IDLE
-         ↓
-      STOPPED (emergency stop) → IDLE
-```
-
-**States:**
-1. **IDLE** - Ready for new drive command
-2. **TURNING** - Calling turn controller to face target (if needed)
-3. **SETTLING** - Waiting after turn for stability
-4. **DRIVING** - Motors engaged, monitoring CTE and distance
-5. **BRAKING** - Motors commanded to zero, waiting for ramp-down
-6. **SETTLING** - Additional settle time after braking
-7. **MEASURING** - Reading final position, computing errors
-8. **LEARNING** - Updating parameters based on errors
-9. **STOPPED** - Emergency stop requested, motors halted immediately
+- Get the current pose at the start of the segment
+- Turn to face the target if the heading error exceeds the initial threshold
+- Settle after the turn
+- Delegate the straight-line phase to `DriveLineController`
+- Record successful line-drive results in the segment history
+- Return `stopped` or `error` immediately if the turn, settle, or delegated line drive is interrupted
 
 **Emergency Stop Behavior:**
 - User or system can call `stopCurrentDrive()` at any time
-- Stop flag checked in event handler (every position update)
-- Motors stopped immediately, unsubscribe from events
-- No learning occurs on stopped drives
-- Result returned with status="stopped"
-- Controller returns to IDLE state
+- Stop is propagated to the delegated line-drive controller during the straight-line phase
+- No learning occurs on stopped segment drives
+- Result returned with `status="stopped"`
 
-#### Event-Driven Execution
+#### Straight-Line Ownership
 
-**Scoped subscription pattern** (matching turn controller):
-```typescript
-async executeDrive(request: DriveRequest): Promise<DriveResult> {
-  return new Promise<DriveResult>(async (resolve) => {
-    let subscribed = false;
-    
-    try {
-      // 1. Get current pose
-      const startPose = this.poseFusion.getCurrentPose();
-      
-      // 2. Calculate angle to target
-      const angleToTarget = angleTo(startPose.position, request.targetPosition);
-      const headingError = headingDifference(startPose.heading, angleToTarget);
-      
-      // 3. If >5 degrees, turn to face target
-      if (Math.abs(unwrapRelativeAngle(headingError)) > DRIVE_INITIAL_TURN_THRESHOLD_DEG) {
-        this.status = "turning";
-        await this.turnController.executeTurn({
-          targetAngle: headingError,
-          direction: unwrapRelativeAngle(headingError) > 0 ? "ccw" : "cw",
-          learningEnabled: true,
-        });
-      }
-      
-      // 4. Settle after turn
-      this.status = "settling";
-      await this.sleep(this.settleTimeMs);
-      
-      // 5. Get current pose again
-      const drivingStartPose = this.poseFusion.getCurrentPose();
-      this.driveStartPosition = drivingStartPose.position;
-      this.driveStartHeading = drivingStartPose.heading;
-      this.driveTargetPosition = request.targetPosition;
-      
-      // 6. Compute line to target
-      this.driveLineStart = this.driveStartPosition;
-      this.driveLineEnd = request.targetPosition;
-      
-      // 7. Subscribe to pose updates
-      this.poseFusion.on('poseUpdate', this.onPoseUpdate);
-      subscribed = true;
-      
-      // 8. Engage motors at full speed
-      this.status = "driving";
-      const fullSpeed = this.fullSpeedCommand; // 1.0 by default
-      await this.sensorController.setMotorWheelOutputs(fullSpeed, fullSpeed);
-      
-      // Event handler will monitor and complete drive
-      
-    } catch (error) {
-      // Cleanup on error
-      if (subscribed) {
-        this.poseFusion.off('poseUpdate', this.onPoseUpdate);
-      }
-      await this.sensorController.stopMotors();
-      this.status = "idle";
-      this.currentDrive = null;
-      
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error("drive.error", { error: errorMessage });
-      
-      resolve({
-        startPosition: this.driveStartPosition ?? createPosition(0, 0),
-        targetPosition: request.targetPosition,
-        finalPosition: this.driveStartPosition ?? createPosition(0, 0),
-        errorX: createMeters(0),
-        errorY: createMeters(0),
-        maxCteMeters: createMeters(0),
-        avgCteMeters: createMeters(0),
-        durationMs: 0,
-        brakeDistanceUsed: createMeters(0),
-        status: "error",
-        errorMessage,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  });
-}
-```
+The straight-line pose update, cross-track correction, arrival stop, braking, and learning logic live in `src/control/driveLineController.ts`.
+That controller uses separate forward and reverse steering branches so reverse travel can compare the mower heading against the reverse travel direction instead of treating the target line as if it were a forward-only drive.
+Short-distance training legs are generated from the anchor pose heading so the mower can train forward and reverse in its current local frame rather than wandering on an absolute X axis.
 
-#### Position Update Event Handler
-
-Called at 30Hz during drive:
-
-```typescript
-private async onPoseUpdate(pose: Pose): Promise<void> {
-  if (this.status !== "driving" || !this.driveStartPosition || !this.driveTargetPosition) {
-    return;
-  }
-  
-  // Check for emergency stop
-  if (this.stopRequested) {
-    this.poseFusion.off('poseUpdate', this.onPoseUpdate);
-    await this.sensorController.stopMotors();
-    this.status = "stopped";
-    // ... complete with stopped result
-    return;
-  }
-  
-  const currentPosition = pose.position;
-  
-  // Calculate CTE
-  const cte = crossTrackError(currentPosition, this.driveLineStart, this.driveLineEnd);
-  this.cteSamples.push(cte);
-  
-  // Calculate remaining distance
-  const remainingDistance = distanceBetween(currentPosition, this.driveTargetPosition);
-  
-  // Apply CTE correction (asymmetric - keep one wheel at max, slow the other)
-  await this.applyCteCorrection(cte);
-  
-  // Check brake condition
-  const brakeDistance = this.learningModel.getBrakeDistance();
-  if (unwrapMeters(remainingDistance) <= unwrapMeters(brakeDistance)) {
-    // Unsubscribe BEFORE completing
-    this.poseFusion.off('poseUpdate', this.onPoseUpdate);
-    await this.completeDrive();
-  }
-  
-  // Timeout check
-  if (this.nowMillis() - this.driveStartTime > this.calculateTimeout()) {
-    this.poseFusion.off('poseUpdate', this.onPoseUpdate);
-    // ... complete with timeout result
-  }
-}
-```
-
-#### CTE Correction
-
-Asymmetric wheel speed adjustment:
-```typescript
-private async applyCteCorrection(cte: Meters): Promise<void> {
-  const cteValue = unwrapMeters(cte);
-  const gain = this.learningModel.getCteGain();
-  
-  // Positive CTE = drifting right, need to turn left
-  // Keep left wheel at full speed, slow right wheel
-  // Negative CTE = drifting left, need to turn right
-  // Keep right wheel at full speed, slow left wheel
-  
-  let leftSpeed = this.fullSpeedCommand;
-  let rightSpeed = this.fullSpeedCommand;
-  
-  if (cteValue > 0) {
-    // Drifting right - slow right wheel
-    rightSpeed = this.fullSpeedCommand * (1 - gain * cteValue);
-  } else {
-    // Drifting left - slow left wheel
-    leftSpeed = this.fullSpeedCommand * (1 + gain * cteValue); // cteValue is negative
-  }
-  
-  // Clamp speeds to [0, fullSpeedCommand]
-  leftSpeed = Math.max(0, Math.min(this.fullSpeedCommand, leftSpeed));
-  rightSpeed = Math.max(0, Math.min(this.fullSpeedCommand, rightSpeed));
-  
-  await this.sensorController.setMotorWheelOutputs(leftSpeed, rightSpeed);
-}
-```
-
-#### Drive Completion
-
-```typescript
-private async completeDrive(): Promise<void> {
-  try {
-    // Brake
-    this.status = "braking";
-    await this.sensorController.stopMotors();
-    
-    // Wait for ramp-down
-    const rampDownTime = this.learningModel.getMotorRampDownTime();
-    await this.sleep(2 * rampDownTime);
-    
-    // Settle
-    this.status = "settling";
-    await this.sleep(this.settleTimeMs);
-    
-    // Measure final position
-    this.status = "measuring";
-    const finalPose = this.poseFusion.getCurrentPose();
-    const finalPosition = finalPose.position;
-    
-    // Calculate errors
-    // X error: along line to target (positive = overshot, negative = undershot)
-    // Y error: perpendicular to line (CTE at arrival)
-    const errorX = this.calculateXError(finalPosition);
-    const errorY = crossTrackError(finalPosition, this.driveLineStart, this.driveLineEnd);
-    
-    // Calculate CTE statistics
-    const maxCte = this.cteSamples.reduce((max, cte) => 
-      Math.abs(unwrapMeters(cte)) > Math.abs(unwrapMeters(max)) ? cte : max,
-      createMeters(0)
-    );
-    const avgCte = createMeters(
-      this.cteSamples.reduce((sum, cte) => sum + Math.abs(unwrapMeters(cte)), 0) / this.cteSamples.length
-    );
-    
-    this.logger.info("drive.completed", {
-      targetPosition: this.driveTargetPosition,
-      finalPosition,
-      errorX: unwrapMeters(errorX),
-      errorY: unwrapMeters(errorY),
-      maxCte: unwrapMeters(maxCte),
-      avgCte: unwrapMeters(avgCte),
-      durationMs: this.nowMillis() - this.driveStartTime,
-    });
-    
-    // Update learning model
-    if (this.currentDrive?.learningEnabled !== false) {
-      this.status = "learning";
-      await this.learningModel.updateFromDrive({
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition,
-        errorX,
-        errorY,
-        maxCte,
-        avgCte,
-        brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-      });
-      
-      // Update encoder calibration if both poses were GNSS quality
-      if (this.driveStartPoseQuality === "gnss" && finalPose.quality === "gnss") {
-        const actualDistance = distanceBetween(this.driveStartPosition, finalPosition);
-        const encoderTicks = this.totalEncoderTicks; // accumulated during drive
-        if (encoderTicks > 0) {
-          const measuredMetersPerTick = unwrapMeters(actualDistance) / encoderTicks;
-          const currentCalibration = this.poseFusion.getEncoderCalibration();
-          const newCalibration = 0.9 * currentCalibration + 0.1 * measuredMetersPerTick;
-          this.poseFusion.setEncoderCalibration(newCalibration);
-          this.logger.info("drive.encoder_calibrated", {
-            actualDistance: unwrapMeters(actualDistance),
-            encoderTicks,
-            newCalibration,
-          });
-        }
-      }
-    }
-    
-    // Return to idle
-    this.status = "idle";
-    this.currentDrive = null;
-    
-    const result: DriveResult = {
-      startPosition: this.driveStartPosition,
-      targetPosition: this.driveTargetPosition,
-      finalPosition,
-      errorX,
-      errorY,
-      maxCteMeters: maxCte,
-      avgCteMeters: avgCte,
-      durationMs: this.nowMillis() - this.driveStartTime,
-      brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-      status: "success",
-      timestamp: new Date().toISOString(),
-    };
-    
-    this.addToHistory(result);
-    this.driveResolve?.(result);
-    
-  } catch (error) {
-    // ... error handling with cleanup
-  }
-}
-```
-
-#### X Error Calculation
-
-X error is distance along the line from target to final position:
-```typescript
-private calculateXError(finalPosition: Position): Meters {
-  // Project final position onto line to target
-  // X error = distance from target along line (signed)
-  const dx = unwrapMeters(finalPosition.xMeters) - unwrapMeters(this.driveTargetPosition.xMeters);
-  const dy = unwrapMeters(finalPosition.yMeters) - unwrapMeters(this.driveTargetPosition.yMeters);
-  
-  // Line direction (unit vector from start to target)
-  const lineLength = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
-  const lineDx = (unwrapMeters(this.driveTargetPosition.xMeters) - unwrapMeters(this.driveLineStart.xMeters)) / lineLength;
-  const lineDy = (unwrapMeters(this.driveTargetPosition.yMeters) - unwrapMeters(this.driveLineStart.yMeters)) / lineLength;
-  
-  // Dot product gives signed distance along line
-  const xError = dx * lineDx + dy * lineDy;
-  return createMeters(xError);
-}
-```
+The segment controller is responsible only for:
+- turning to face the target
+- settling after turn
+- delegating the straight-line phase
+- returning the resulting segment status and history to the app
 
 ---
 
 ### 4. Drive Learning Model (`src/control/driveLearningModel.ts`)
 
 #### Responsibilities
-- Maintain learned parameters: brake distance, CTE gain, encoder calibration
+- Maintain learned parameters: long-drive brake distance, short-drive brake fractions, CTE gain, encoder calibration
 - Update parameters after each drive based on errors
 - Persist parameters to JSON file
 - Load parameters on startup
@@ -568,10 +282,18 @@ private calculateXError(finalPosition: Position): Meters {
 ```typescript
 export interface DriveParameters {
   version: number;
-  brakeDistanceMeters: number;      // Single value for full-speed drives
-  cteGain: number;                   // Proportional gain for CTE correction
-  minDriveDistanceForLearning: number; // Threshold for short drives (meters)
-  motorRampDownTimeMs: number;       // From hardware spec
+  longDriveBrakeDistanceMeters: number;
+  forwardCteGain: number;
+  reverseCteGain: number;
+  longDriveMinDistanceMeters: number;
+  shortDriveBucketStepMeters: number;
+  shortDriveMaxDistanceMeters: number;
+  shortDriveBrakeFractionsPositive: number[];
+  shortDriveBrakeFractionsNegative: number[];
+  shortDriveSampleCountsPositive: number[];
+  shortDriveSampleCountsNegative: number[];
+  shortDriveLastErrorPositiveMeters: number[];
+  shortDriveLastErrorNegativeMeters: number[];
   updatedAt: string;
 }
 ```
@@ -583,45 +305,62 @@ export interface DriveParameters {
 updateFromDrive(result: DriveUpdateData): void {
   const errorXValue = unwrapMeters(result.errorX);
   
-  // Only learn from drives that likely reached full speed
   const driveDistance = unwrapMeters(distanceBetween(result.startPosition, result.targetPosition));
-  if (driveDistance < this.parameters.minDriveDistanceForLearning) {
-    this.logger.info("drive.learning.skipped_short_drive", { driveDistance });
+  if (driveDistance <= this.parameters.shortDriveMaxDistanceMeters) {
+    // Bucketed short-drive learning: 5cm buckets from 5cm to 1m
+    // plus one additional 1.05m bucket for longer straight runs.
+    // Separate positive/negative variants are used for field X direction.
     return;
   }
-  
-  // Update brake distance
-  const alpha = 0.1; // Learning rate
-  const adjustment = -errorXValue * alpha; // Negative error = undershot, need to reduce brake distance
-  this.parameters.brakeDistanceMeters += adjustment;
-  
-  // Clamp to reasonable range
-  this.parameters.brakeDistanceMeters = Math.max(0.5, Math.min(5.0, this.parameters.brakeDistanceMeters));
-  
+
+  // Long-drive learning keeps a single brake distance for full-speed runs
+  const alpha = 0.1;
+  const adjustment = errorXValue * alpha;
+  this.parameters.longDriveBrakeDistanceMeters += adjustment;
+  this.parameters.longDriveBrakeDistanceMeters = Math.max(0.1, Math.min(5.0, this.parameters.longDriveBrakeDistanceMeters));
+
   this.logger.info("drive.learning.brake_distance_updated", {
     errorX: errorXValue,
     adjustment,
-    newBrakeDistance: this.parameters.brakeDistanceMeters,
+    newBrakeDistance: this.parameters.longDriveBrakeDistanceMeters,
   });
 }
 ```
 
+Short-drive buckets are keyed by 5cm distance bands from 5cm to 1m plus one additional 1.05m bucket for longer straight runs, and split into positive and negative X-direction variants using the sign of the target X displacement relative to the start pose.
+
+The short-distance tuning sequence should sample the mower's current pose and heading immediately before each leg, pause briefly so the operator can see progress, clear any stale stop latch at the start of a new run, and then drive straight forward or straight back from that live heading.  If either leg in a forward/reverse pair misses the target tolerance, the whole pair is retried from a fresh pose sample so the mower keeps learning from the current local frame.
+
+Short-distance legs should stop early if cross-track error grows beyond the requested run distance so a bad run cannot drift far away from the training area.
+
+Segment-drive tuning should keep a fixed line from the mower's starting pose and heading, then train 105cm to 6m segments in 20cm steps on that line using the full segment controller. Each segment leg should turn to face its target, drive to it, and repeat the forward/reverse pair until the absolute X error is within the chosen tolerance.
+
 **CTE Gain Update:**
 ```typescript
-// Update CTE gain based on max CTE achieved
+// Update direction-specific CTE gain based on max CTE achieved
 const maxCteValue = Math.abs(unwrapMeters(result.maxCte));
 const targetCte = 0.05; // 5cm target
+const direction = result.driveDirectionSign ?? 1;
 
 if (maxCteValue > targetCte * 1.5) {
   // CTE too high - increase gain
-  this.parameters.cteGain *= 1.05;
+  if (direction > 0) {
+    this.parameters.forwardCteGain *= 1.05;
+  } else {
+    this.parameters.reverseCteGain *= 1.05;
+  }
 } else if (maxCteValue < targetCte * 0.5) {
   // CTE very low - could decrease gain (more efficient)
-  this.parameters.cteGain *= 0.98;
+  if (direction > 0) {
+    this.parameters.forwardCteGain *= 0.98;
+  } else {
+    this.parameters.reverseCteGain *= 0.98;
+  }
 }
 
 // Clamp gain
-this.parameters.cteGain = Math.max(0.1, Math.min(1.0, this.parameters.cteGain));
+this.parameters.forwardCteGain = Math.max(0.1, Math.min(1.0, this.parameters.forwardCteGain));
+this.parameters.reverseCteGain = Math.max(0.1, Math.min(1.0, this.parameters.reverseCteGain));
 ```
 
 #### Persistence
@@ -641,10 +380,18 @@ async loadParameters(): Promise<void> {
     // Use defaults
     this.parameters = {
       version: 1,
-      brakeDistanceMeters: 2.0,
-      cteGain: 0.3,
-      minDriveDistanceForLearning: 3.0,
-      motorRampDownTimeMs: 700,
+      longDriveBrakeDistanceMeters: 2.0,
+      forwardCteGain: 0.3,
+      reverseCteGain: 0.3,
+      longDriveMinDistanceMeters: 1.0,
+      shortDriveBucketStepMeters: 0.05,
+      shortDriveMaxDistanceMeters: 1.0,
+      shortDriveBrakeFractionsPositive: Array(20).fill(0.5),
+      shortDriveBrakeFractionsNegative: Array(20).fill(0.5),
+      shortDriveSampleCountsPositive: Array(20).fill(0),
+      shortDriveSampleCountsNegative: Array(20).fill(0),
+      shortDriveLastErrorPositiveMeters: Array(20).fill(0),
+      shortDriveLastErrorNegativeMeters: Array(20).fill(0),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -715,12 +462,17 @@ export interface DriveControllerState {
   - Target Y input (meters)
   - "Execute Single Drive" button
   - "Run Test Pattern" button (grid of test points)
+  - "Train Short Distances Forward/Reverse" button for straight-line bucket learning from 5cm to 1m plus a shared 1.05m bucket for longer runs up to 4m
+  - "Train Segments Forward/Reverse" button for 105cm to 6m segment learning from a fixed start line
   - **Red "STOP" button** (prominent)
 - Learning parameters section
   - Display current brake distance
   - Display current CTE gain
   - Display encoder calibration
   - "Reset Learning" button
+- Segment learning results section
+  - Live progress feed while the segment learner is running
+  - Results table for each segment run showing distance, direction, error and status
 - History section
   - Table with columns: timestamp, target, final, errorX, errorY, maxCTE, status
   - Color-coded by status (green=success, red=error, yellow=stopped)
@@ -744,6 +496,8 @@ GET  /drive-tuning                    # Serve drive tuning web page
 GET  /api/drive/status                # Get controller state and history
 POST /api/drive/execute               # Execute single drive
 POST /api/drive/test-pattern          # Run test pattern sequence
+POST /api/drive/train-short           # Run short-drive learning sequence
+POST /api/drive/train-segment         # Run segment-drive learning sequence
 POST /api/drive/stop                  # Emergency stop current drive
 POST /api/drive/clear-history         # Clear drive history
 POST /api/drive/reset-learning        # Reset learning parameters to defaults

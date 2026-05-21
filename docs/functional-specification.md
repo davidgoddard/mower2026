@@ -20,6 +20,8 @@ The system shall:
 - Provide a web page through which a user can:
     - verify the mower state seeing current GNSS pose, IMU reported heading and motor state.  
     - request a run of the turn tuning
+        - separate large-angle and small-angle training runs shall be available
+        - small-angle training shall keep repeating each bucket until the absolute error is below 2 degrees
     - request a run of drive tuning
     - define the mowing areas
         - within each area capture zero or more obstacle perimeters
@@ -30,6 +32,7 @@ The system shall:
     - turns should use IMU heading changes only
     - turns should request one wheel to go forward, the other backward to turn on the spot and run the motors at full speed.
     - turns should learn when to request zero speed (brake) so that the in-built motor ramping down time is built into the stopping distance/angle thus aim to stop with zero degree error
+    - small-angle turns should learn their brake fraction using angle buckets from 3° to 60° rather than using a fixed halt point
     - every turn ever should add to the learning
 - when driving: continually monitor the driving and adjust its internal control parameters to reduce errors:
     - Every drive should be as straight as possible and arrive at the target with a minimal X and Y error distance
@@ -43,12 +46,19 @@ The system shall:
         - apply full motor power
         - loop reading current pose and measure CTE and remaining distance
             - adjust one wheel to slow down to steer back to the line to the target to reduce CTE
-            - when remaining distance to target is less than the learned braking distance request zero motor speed.
-            - exit the loop when brake applied
+        - when remaining distance to target is less than the learned braking distance request zero motor speed if that braking point is still before the target distance.
+        - always stop when the arrival tolerance is reached, even if braking was not used
         - wait learned brake time
         - settle
         - get current pose
         - compute new control parameters based on the CTE and X/Y errors
+- short drives up to 1 metre shall use 5cm learning buckets with positive and negative X-direction variants, and longer straight runs up to 4 metres shall reuse a single 1.05 metre brake bucket while still retrying each bucket as a forward/reverse pair until both legs are below 4cm absolute X error
+- short-drive tuning runs shall be able to alternate forward and reverse legs, taking a fresh pose/heading sample for each leg so the mower can train without walking far away from the test area
+- short-drive tuning runs shall clear any stale stop latch at the start of a new user-requested run so a fresh Start action actually starts motion
+- drive learning shall use a larger learning step for larger distance errors so a 10cm miss adapts faster than a 4cm miss
+- drive learning shall maintain separate CTE gains for forward and reverse motion so reverse steering can learn independently from forward steering
+- the drive tuning page shall let the operator choose a starting distance, defaulting to 50cm, so already-learned shorter buckets can be skipped during a session
+- the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, CTE, X error, and Y error
 - derive mowing patterns that avoid obstacles and ensure the least number of strips are mowed filling the mowing area with strips that are spaced at 3/4 of the cutting width.
 
 ## Operation
@@ -72,7 +82,7 @@ The system shall store persistent configuration in the `config/` folder, split b
 - `config/turn-learning-parameters.json`
   - turn brake distances and turn learning history
 - `config/drive-learning-params.json`
-  - drive brake distance and CTE learning history
+  - drive brake distance, forward/reverse CTE gain, and learning history
 
 The application shall:
 - load these files at startup
@@ -88,7 +98,8 @@ The system shall maintain a global stop state that can be raised by:
 
 When stop is set:
 - all active loops shall check the stop state and return or exit promptly
-- the sensor controller loop shall continue to send zero wheel speed commands with motor disable asserted until stop is cleared
+- the sensor controller loop shall continue to send zero wheel speed commands while the current operation remains active
+- the motor disable shall be asserted only when the active user-requested operation ends
 - active operations shall not continue silently in the background
 
 The stop state shall be cleared only when:
@@ -233,6 +244,9 @@ Where hardware wiring/motor node direction differs, inversion shall be applied o
 Motor feedback shall include, at minimum:
 - encoder pulse delta per wheel since the previous sample
 - watchdog health and fault flags
+- motor current for both wheels
+
+The sensor controller shall detect likely obstructions/stalls from its latest motor feedback, the current motor command and the latest pose estimate. When the motors are commanded to move but the mower makes no meaningful positional progress over a short grace-adjusted observation window, the controller shall emit an obstruction event, request a global stop and log the condition once.
 
 The ESP32 motor node shall send raw encoder pulse deltas and PWM/current telemetry only.
 The Pi-side sensor controller shall convert encoder deltas into wheel speed estimates using the persisted encoder calibration.
@@ -350,6 +364,8 @@ The web server and web app need a dedicated tab that shows requested and achieve
 
 The web page must provide a button to launch into a sequence of test iterations where one iteration goes through all angles to be tested.  
 
+Whenever the system needs a stationary pose reading, it shall wait for a short settle period, sample several pose readings, and return the median of the good GNSS-backed samples when available. GNSS-backed samples shall only be considered good when the fix is acceptable, the position accuracy is within the configured limit, the heading accuracy is within the configured limit, and the heading remains stable. If no good GNSS-backed readings are available, it shall fall back to the IMU-derived pose rather than retrying indefinitely.
+
 Every turn must feed back the error of the achieved angle to improve the braking angle to attain a zero degree error.
 
 Being able to turn 10 degrees will be tough but consideration should be given to handle this being aware that the braking distance might be greater than the angle to turn and yet the system should engage motors and try to stop on target and so a different implementation might be required for small angles below N.
@@ -366,11 +382,13 @@ If the system receives a "Stop" request from a user interaction or a failure con
 
 ## Driving from point to point
 
-An asynchronous component that is responsble for moving the mower from one position(current) to a target position in the X/Y plane.
+An asynchronous segment-driving component that is responsible for moving the mower from one position(current) to a target position in the X/Y plane.
 
 The input is a single target position
 
-The goal is to turn to face the target and then drive as straight a line as possible arriving as close to the target as possible.
+The segment drive goal is to turn to face the target and then drive as straight a line as possible arriving as close to the target as possible.
+
+The straight-line portion is a self-contained line-drive component that assumes the mower is already aligned with the line of travel.  It is responsible for minimising cross-track error (CTE), along-track X error, and arrival Y error, while learning brake distance and CTE gain for both short and long drives.  Forward and reverse motion use separate line-control branches so the reverse case can treat the target as behind the mower while still using the same straight-line learning model.  The target arrival is mandatory; braking is an aid used only when there is still room before the target.  A heading preview term may assist steering while there is still comfortable distance to run, but it should taper off close to the target so that it does not create a sharp turn-in at arrival.
 
 To control this the drive component will learn how to keep CTE small or zero and keep X/Y arrival errors small or zero.  In priority terms, X is more important than Y but Y should naturally be small if CTE is tuned well.
 
@@ -402,9 +420,14 @@ When the start and end positions are obtained using good quality GNSS fixes, the
 
 ### Braking distance learning
 
-Once the mower reaches full speed, the braking distance should stabilize and be roughly constant for all distances driven on level ground.  The system should learn a single brake distance parameter that applies to all drives once at full speed.
+Once the mower reaches full speed, the braking distance should stabilize and be roughly constant for all distances driven on level ground.  The system should learn a single brake distance parameter that applies to all drives once at full speed, but the drive controller must still stop on arrival even if braking was not applied early enough or is not needed.
+In practice the learned full-speed brake distance should be allowed to move down to around 10cm, because the mower may only need a short ramp-down overrun once it is already at speed.
 
-For very short drives where the mower does not reach full speed (due to motor ramp-up time), a different braking strategy may be required.  These short drives should still engage motors and attempt to reach the target, but may need separate learning parameters or a different control approach.
+For very short drives where the mower does not reach full speed (due to motor ramp-up time), a different braking strategy is required.  These short drives should still engage motors and attempt to reach the target, but shall use a short-drive bucket model with 5cm increments up to 1m, a single additional 1.05m bucket for longer straight runs up to 4m, separate positive / negative learning variants, and paired forward/reverse retries when a bucket misses tolerance.
+
+Short-drive tuning shall use a line-drive training mode that alternates forward and reverse legs around a local anchor so the mower can train in a compact area without needing a long run-up or large amount of free space.
+
+The drive tuning web page shall trickle-feed short-distance training progress while a run is active so the operator can see the current bucket, pair attempt and latest leg result before the full run completes.
 
 The brake distance may vary depending on terrain slope (uphill vs downhill).  Future enhancements could incorporate IMU pitch angle to adjust brake distance dynamically, but the initial implementation should focus on learning a single brake distance for level ground operation.
 
@@ -415,10 +438,20 @@ The learning algorithm should:
 - if undershot target (negative X error): decrease brake distance
 - converge quickly since all full-speed stops should behave similarly
 
-For short drives where full speed is not reached, consider:
-- a minimum drive distance threshold (e.g. 3 meters) below which different control may be needed
-- potentially disabling brake distance learning for these short drives
-- or learning a separate parameter set for short-distance drives
+For short drives where full speed is not reached, the system shall:
+- use 5cm buckets from 5cm to 1m for fine tuning, then use one shared 1.05m bucket for all longer straight runs up to 4m
+- maintain separate positive and negative variants of the short-drive buckets
+- continue short-drive learning runs until the absolute X error is below 4cm, retrying forward/reverse pairs together when either leg misses the target
+- sample the current pose and heading immediately before each leg starts so the mower drives from its current local frame
+- pause briefly before each leg starts so the operator can see a clear training cadence on the web page
+- stop a leg early if the cross-track error grows larger than the requested run distance, to avoid the mower drifting far away from the test area
+
+For segment-drive learning, the system shall:
+- use a fixed line defined by the mower's current pose and heading at the start of the run
+- train segment distances from 105cm to 6m in 20cm increments
+- use the segment controller so each leg turns to face its target and then drives the segment
+- repeat each forward/reverse pair until the absolute X error is below 4cm
+- present live learning progress and per-run results on the drive tuning page
 
 ## Path following
 

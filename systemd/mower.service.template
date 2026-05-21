@@ -12,8 +12,7 @@ Environment=MOWER_REPO_DIR=__MOWER_REPO_DIR__
 Environment=HOME=/home/__MOWER_USER__
 Environment=MOWER_CORE_APP_PORT=8090
 Environment=MOWER_I2C_BUS_NUMBER=1
-Environment=MOWER_LOG_DIR=__MOWER_REPO_DIR__/data/logs
-ExecStartPre=/usr/bin/mkdir -p __MOWER_REPO_DIR__/data/logs
+Environment=MOWER_LOG_DIR=__MOWER_REPO_DIR__/logs
 ExecStart=__MOWER_LAUNCHER__
 Restart=on-failure
 RestartSec=5
