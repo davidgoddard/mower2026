@@ -103,7 +103,7 @@ export class PathStore implements IPathStore {
     try {
       await this.ensureStorageDirectory();
       const files = await readdir(this.storageDirectory);
-      const pathFiles = files.filter((f: string) => f.endsWith(".path.json"));
+      const pathFiles = files.filter((f: string) => f.endsWith(".path.json") && !f.startsWith(".") && !f.startsWith("._"));
       const names = pathFiles.map((f: string) => f.replace(".path.json", ""));
 
       this.logger.debug("path_store.list", { count: names.length });

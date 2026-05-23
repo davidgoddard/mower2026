@@ -319,17 +319,26 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       if (requestUrl.pathname === "/api/paths" && pathStore) {
         try {
           const pathNames = await pathStore.listPaths();
-          const paths = await Promise.all(
+          const pathEntries = await Promise.all(
             pathNames.map(async (name) => {
-              const path = await pathStore!.loadPath(name);
-              return {
-                name: path.name,
-                pointCount: path.points.length,
-                totalDistance: path.metadata.totalDistance,
-                createdAt: path.createdAt,
-              };
+              try {
+                const path = await pathStore!.loadPath(name);
+                return {
+                  name: path.name,
+                  pointCount: path.points.length,
+                  totalDistance: path.metadata.totalDistance,
+                  createdAt: path.createdAt,
+                };
+              } catch (error) {
+                logger.warn("path_store.entry_skipped", {
+                  name,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                return null;
+              }
             })
           );
+          const paths = pathEntries.filter((path): path is NonNullable<typeof path> => path !== null);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ paths }));
           return;
@@ -344,17 +353,26 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       if (requestUrl.pathname === "/api/path/list" && pathStore) {
         try {
           const pathNames = await pathStore.listPaths();
-          const paths = await Promise.all(
+          const pathEntries = await Promise.all(
             pathNames.map(async (name) => {
-              const path = await pathStore!.loadPath(name);
-              return {
-                name: path.name,
-                pointCount: path.points.length,
-                totalDistance: path.metadata.totalDistance,
-                createdAt: path.createdAt,
-              };
+              try {
+                const path = await pathStore!.loadPath(name);
+                return {
+                  name: path.name,
+                  pointCount: path.points.length,
+                  totalDistance: path.metadata.totalDistance,
+                  createdAt: path.createdAt,
+                };
+              } catch (error) {
+                logger.warn("path_store.entry_skipped", {
+                  name,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                return null;
+              }
             })
           );
+          const paths = pathEntries.filter((path): path is NonNullable<typeof path> => path !== null);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson(paths));
           return;

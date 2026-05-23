@@ -3,12 +3,12 @@
   "smallAngleThresholdDeg": 60,
   "smallTurnBucketStepDeg": 3,
   "smallTurnMaxAngleDeg": 60,
-  "largeTurnBrakeCcwDeg": 21.539033876158996,
-  "largeTurnBrakeCwDeg": 27.20807129599525,
-  "largeTurnSampleCountCcw": 183,
-  "largeTurnSampleCountCw": 214,
-  "lastLargeErrorCcwDeg": -21.42783399115811,
-  "lastLargeErrorCwDeg": -1.8301393339505125,
+  "largeTurnBrakeCcwDeg": 24.263359748298818,
+  "largeTurnBrakeCwDeg": 27.79280522704843,
+  "largeTurnSampleCountCcw": 184,
+  "largeTurnSampleCountCw": 226,
+  "lastLargeErrorCcwDeg": 9.081086240466078,
+  "lastLargeErrorCwDeg": -0.43042006053931914,
   "smallTurnBrakeFractionsCcw": [
     0.22185447816707554,
     0.4811535000289572,
@@ -141,5 +141,5 @@
     -0.18751524390239638,
     0.6066615853657993
   ],
-  "lastUpdated": "2026-05-23T11:41:44.434Z"
+  "lastUpdated": "2026-05-23T13:43:16.142Z"
 }
