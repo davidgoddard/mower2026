@@ -558,7 +558,7 @@ export function getDriveTuningPageHtml(): string {
           <section class="panel">
             <div class="controls">
               <div class="field">
-                <label for="startDistanceCm">Start at (cm)</label>
+                <label for="startDistanceCm">Distance (cm)</label>
                 <input id="startDistanceCm" type="number" min="50" step="5" value="50" />
               </div>
               <div class="buttons">
@@ -590,7 +590,8 @@ export function getDriveTuningPageHtml(): string {
                 <thead>
                   <tr>
                     <th>Distance</th>
-                    <th>CTE</th>
+                    <th>Avg CTE</th>
+                    <th>Max CTE</th>
                     <th>X Error</th>
                     <th>Y Error</th>
                     <th>Status</th>
@@ -598,7 +599,7 @@ export function getDriveTuningPageHtml(): string {
                 </thead>
                 <tbody id="driveResultsTableBody">
                   <tr>
-                    <td colspan="5" class="empty">Run drive tuning to see distance, CTE and arrival error here.</td>
+                    <td colspan="6" class="empty">Run drive tuning to see distance, average and maximum CTE, and arrival error here.</td>
                   </tr>
                 </tbody>
               </table>
@@ -764,6 +765,48 @@ export function getDriveTuningPageHtml(): string {
         return Math.hypot(dx, dy);
       }
 
+      const maxDriveResultRows = 500;
+      const driveResultKeys = new Set();
+      const driveResultRows = [];
+
+      function driveResultKey(item) {
+        const start = item.startPosition ?? {};
+        const target = item.targetPosition ?? {};
+        const finalPosition = item.finalPosition ?? {};
+        return [
+          item.timestamp ?? "",
+          item.status ?? "",
+          start.xMeters ?? "",
+          start.yMeters ?? "",
+          target.xMeters ?? "",
+          target.yMeters ?? "",
+          finalPosition.xMeters ?? "",
+          finalPosition.yMeters ?? "",
+          item.errorX ?? "",
+          item.errorY ?? "",
+          item.avgCteMeters ?? "",
+          item.maxCteMeters ?? "",
+        ].join("|");
+      }
+
+      function appendDriveRows(rows) {
+        for (const item of rows) {
+          const key = driveResultKey(item);
+          if (driveResultKeys.has(key)) {
+            continue;
+          }
+          driveResultKeys.add(key);
+          driveResultRows.push(item);
+        }
+        if (driveResultRows.length > maxDriveResultRows) {
+          const excess = driveResultRows.length - maxDriveResultRows;
+          const removedRows = driveResultRows.splice(0, excess);
+          for (const removedRow of removedRows) {
+            driveResultKeys.delete(driveResultKey(removedRow));
+          }
+        }
+      }
+
       async function fetchStatus() {
         const [statusResponse, primitivesResponse] = await Promise.all([
           fetch("/api/drive/status?ts=" + Date.now(), {
@@ -785,34 +828,36 @@ export function getDriveTuningPageHtml(): string {
           updateSidebar(payload.primitives);
 
           const driveState = data.state ?? {};
+          const liveResults = Array.isArray(driveState.shortTrainingResults) ? driveState.shortTrainingResults : [];
+          appendDriveRows(history);
+          appendDriveRows(liveResults);
           document.getElementById("driveStatus").textContent = driveState.status ?? "idle";
-          const results = Array.isArray(driveState.shortTrainingResults) && driveState.shortTrainingResults.length > 0
-            ? driveState.shortTrainingResults
-            : history;
-          document.getElementById("driveRunCount").textContent = String(results.length ?? history.length ?? 0);
+          document.getElementById("driveRunCount").textContent = String(driveResultRows.length);
           document.getElementById("driveSummary").textContent = driveState.shortTrainingProgress?.message
             ?? driveState.segmentTrainingProgress?.message
             ?? "Drive tuning idle.";
           document.getElementById("driveCurrentTarget").textContent = driveState.currentDrive
-            ? \`(\${formatCm(driveState.currentDrive.targetPosition.xMeters ?? 0)}, \${formatCm(driveState.currentDrive.targetPosition.yMeters ?? 0)})\`
+            ? "(" + formatCm(driveState.currentDrive.targetPosition.xMeters ?? 0) + ", " + formatCm(driveState.currentDrive.targetPosition.yMeters ?? 0) + ")"
             : "-";
 
-          const rows = results.slice(-25).reverse();
+          const rows = driveResultRows.slice(-maxDriveResultRows).reverse();
           const tbody = document.getElementById("driveResultsTableBody");
           if (rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty">Run drive tuning to see distance, CTE and arrival error here.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="empty">Run drive tuning to see distance, average and maximum CTE, and arrival error here.</td></tr>';
             return;
           }
 
           tbody.innerHTML = rows.map((item) => {
             const distanceMeters = currentDriveDistanceMeters(item);
             const avgCteMeters = item.avgCteMeters ?? 0;
+            const maxCteMeters = item.maxCteMeters ?? 0;
             const xErrorMeters = item.errorX ?? 0;
             const yErrorMeters = item.errorY ?? 0;
             return \`
               <tr>
                 <td>\${formatCm(distanceMeters)}</td>
                 <td class="\${statusClass(avgCteMeters)}">\${formatCm(avgCteMeters)}</td>
+                <td class="\${statusClass(maxCteMeters)}">\${formatCm(maxCteMeters)}</td>
                 <td class="\${statusClass(xErrorMeters)}">\${formatCm(xErrorMeters)}</td>
                 <td class="\${statusClass(yErrorMeters)}">\${formatCm(yErrorMeters)}</td>
                 <td>\${item.status ?? "-"}</td>
@@ -839,12 +884,19 @@ export function getDriveTuningPageHtml(): string {
       document.getElementById("startDriveTuning").addEventListener("click", async () => {
         const button = document.getElementById("startDriveTuning");
         const startDistanceCm = Number(document.getElementById("startDistanceCm").value);
-        const startAtCm = Number.isFinite(startDistanceCm) ? Math.max(50, startDistanceCm).toFixed(0) : "50";
-        document.getElementById("driveSummary").textContent = "Starting short-distance training from " + startAtCm + " cm...";
+        const requestedDistanceMeters = Number.isFinite(startDistanceCm) ? Math.max(0.5, startDistanceCm / 100) : 0.5;
+        const startAtMeters = requestedDistanceMeters;
+        const endAtMeters = requestedDistanceMeters < 4 ? 4 : requestedDistanceMeters;
+        const startAtCm = Math.round(startAtMeters * 100).toString();
+        const endAtCm = Math.round(endAtMeters * 100).toString();
+        document.getElementById("driveSummary").textContent = startAtCm === endAtCm
+          ? "Starting short-distance training at " + startAtCm + " cm..."
+          : "Starting short-distance training from " + startAtCm + " cm to " + endAtCm + " cm...";
         button.disabled = true;
         try {
           await postAction("train-short", {
-            startDistanceMeters: Number.isFinite(startDistanceCm) ? Math.max(0.5, startDistanceCm / 100) : 0.5,
+            startDistanceMeters: startAtMeters,
+            maxDistanceMeters: endAtMeters,
             targetXErrorMeters: 0.04,
             includeReverseLegs: true,
           });

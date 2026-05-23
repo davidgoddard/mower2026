@@ -51,11 +51,11 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/purePursuitFollower.ts`: path-following stop checks and stop handling.
 
 ## Pose Fusion
-- `src/sensing/poseFusion.ts`: fused pose estimate and stationary pose helper
+- `src/sensing/poseFusion.ts`: fused pose estimate
   - maintains the latest IMU/GNSS/encoder-derived pose estimate
-  - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, and heading stability all pass the acceptance gate
-  - `stationaryPose()` waits for settle, samples 5 poses, returns the median GNSS-good pose when available, and falls back to the IMU-based pose when GNSS is not usable
-  - emits one structured diagnostic trace per stationary sample set with the full sample array and the selected pose
+  - GNSS heading accuracy and fix quality drive IMU heading priming/rebasing; GNSS position accuracy is used separately for trusting x/y pose updates
+  - the first good GNSS heading primes the IMU immediately, then IMU remains the live heading reference with GNSS only nudging the IMU when the fix is good, the heading is stable, and the GNSS heading is already close to the current IMU heading
+  - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, heading stability, and the current IMU/GNSS heading alignment gate all pass for the part of pose being updated
   - `getCurrentPose()` returns the latest fused pose without settling
 
 ## Motor Control
@@ -76,7 +76,7 @@ This document maps problem domains to candidate files removing the need for Code
   - large-angle and small-angle tuning runners for comprehensive parameter learning
   - integrates with retry system for obstruction recovery
 - `src/control/turnValidationRunner.ts`: wrapper for real-pose turn validation sweeps
-  - uses the pose-fusion stationary pose helper before sampling the current pose at the start and end of each turn
+  - uses the live pose provider directly at the start and end of each turn
   - chooses a large turn target for each iteration, with turn magnitudes above 45 degrees
   - records IMU-achieved angle versus real pose change for tuning-page inspection
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
@@ -94,6 +94,14 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/driveTuningPage.ts`: drive tuning UI with live primitive sidebar
   - short-distance drive training controls and results table
   - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
+- `src/control/segmentTestRunner.ts`: segment test harness
+  - collects a rough line of 7 waypoints by briefly driving forward, stopping, settling, and then sampling the next live pose
+  - runs one return-to-start segment and then random non-nearest waypoint segments using the existing segment controller
+  - records distance to waypoint, required heading change, achieved heading change, drive quality, average CTE, maximum CTE, and X/Y errors
+- `src/server/segmentTestingPage.ts`: segment testing UI
+  - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
+  - start/stop controls on the right
+  - live results table for the collected segment runs, including both average and maximum CTE
 - `test/turnController.test.js`: turn controller unit tests
 - `test/turnValidationRunner.test.js`: real-pose validation wrapper tests
 - API endpoints:
@@ -111,22 +119,24 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/driveController.ts`: segment drive controller that turns to face the target and then delegates straight-line travel
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
-  - settles after turn, delegates to line controller, and records successful segment history
+  - delegates to line controller immediately after the turn, then records successful segment history
   - surfaces short-distance and segment training progress to the drive tuning page state while a training run is active
   - segment-learning runner for 105cm to 6m fixed-line runs in 20cm steps
   - integrates with retry system for obstruction recovery
-- `src/control/driveLineController.ts`: straight-line drive controller with CTE correction and brake distance learning
+- `src/control/driveLineController.ts`: straight-line drive controller using regulated pure pursuit and brake distance learning
   - executes straight-line drives from current position to target position
-  - continuous cross-track error (CTE) correction during drive, split into forward and reverse steering branches so reverse travel uses the correct body-heading reference
+  - computes a lookahead point on the travel line, converts curvature into differential wheel speeds, and keeps a high cruise speed with only modest slow-down near the target and on the tightest curves so grass friction does not dominate
+  - reverse travel uses the same geometric controller with the correct body-heading reference
   - hard arrival stop plus long-drive brake distance learning
   - short-drive bucket learning for 5cm increments up to 1m and a single shared 1.05m brake bucket for longer straight runs up to 4m
+  - short-drive training uses the entered distance as the sweep boundary; below 4m it runs the normal incremental sweep up to 4m, while above 4m it runs a single forward/reverse pair at exactly the entered distance
   - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
   - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
   - self-contained stop handling and learning updates for the line-following phase
 - `src/control/driveLearningModel.ts`: drive parameter learning and persistence
   - long-drive brake distance learning from final X error
   - short-drive brake fractions bucketed by 5cm increments from 5cm to 1m plus one shared 1.05m bucket for longer straight runs up to 4m
-  - direction-specific CTE gain adaptation from maximum cross-track error
+  - direction-specific CTE gain adaptation from peak CTE and average CTE remains persisted for compatibility with the tuning UI and historical learning data
   - JSON persistence at `config/drive-learning-params.json`
 - Drive sequence: settle → get pose → turn to target → settle → delegate line drive with CTE correction and arrival braking → measure errors → update learning
 - API: `driveToTarget(target)`, `reverseForDuration(ms)` for retry recovery
@@ -176,6 +186,24 @@ This document maps problem domains to candidate files removing the need for Code
   - in-memory caching for loaded paths
   - path metadata: total distance, point count, creation timestamp
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
+- `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification starts at the nearest point and loops back to the join point
+- `src/server/pathTracingPage.ts`: path tracing UI
+  - record controls for named obstacle paths
+  - drive and verify actions for stored paths
+  - prominent stop button for path following aborts
+- Path tracing server behavior:
+  - drive/verify first execute a segment-style approach to the nearest point on the stored path
+  - verify then follows the rotated loop back to the join point
+- Path-following API endpoints:
+  - `GET /api/path/list` - list stored paths for the page
+  - `POST /api/path/record/start` - start recording a named path
+  - `POST /api/path/record/stop` - stop recording and save the path
+  - `POST /api/path/record/cancel` - discard the current recording
+  - `GET /api/path/record/status` - current recording point count
+  - `POST /api/path/drive` - drive a stored path from the current position
+  - `POST /api/path/verify` - join a stored path at the nearest point and loop back to that join point
+  - `POST /api/path/stop` - stop active path following
+  - `POST /api/path/delete` - delete a stored path
   - subscribes to `poseUpdate` events from pose fusion
   - records position every 10cm (configurable distance threshold)
   - start/stop recording with named paths
@@ -240,7 +268,7 @@ This document maps problem domains to candidate files removing the need for Code
   - maintains current position (X, Y meters) and heading (InternalHeading)
   - quality tracking: "gnss" (RTK fixed/float), "dead-reckoning", or "unknown"
   - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
-  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available
+  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; after a zero-speed stop has persisted for long enough, a good GNSS heading may rebase the IMU again even if it is no longer close
   - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps
   - encoder dead-reckoning: integrates motor encoder deltas for position during GNSS gaps
   - heading reset API: `setHeading()` for external absolute heading corrections

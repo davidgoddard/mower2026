@@ -42,10 +42,13 @@ The system shall:
         - if current angle to target is more than 5 degrees then call the turn component with the required angle
         - settle 
         - get current pose again
-        - compute the line to the target
-        - apply full motor power
+        - compute the travel line to the target
+        - apply a regulated pure pursuit controller that:
+            - finds a lookahead point on the line
+            - converts the line curvature into differential wheel speeds
+            - keeps a high cruise speed and only eases off modestly as the mower approaches the target or enters the tightest curves so grass friction does not dominate
+            - uses the same geometry for reverse travel with the correct body-heading reference
         - loop reading current pose and measure CTE and remaining distance
-            - adjust one wheel to slow down to steer back to the line to the target to reduce CTE
         - when remaining distance to target is less than the learned braking distance request zero motor speed if that braking point is still before the target distance.
         - always stop when the arrival tolerance is reached, even if braking was not used
         - wait learned brake time
@@ -58,7 +61,8 @@ The system shall:
 - drive learning shall use a larger learning step for larger distance errors so a 10cm miss adapts faster than a 4cm miss
 - drive learning shall maintain separate CTE gains for forward and reverse motion so reverse steering can learn independently from forward steering
 - the drive tuning page shall let the operator choose a starting distance, defaulting to 50cm, so already-learned shorter buckets can be skipped during a session
-- the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, CTE, X error, and Y error
+- the drive tuning page shall treat the entered distance as the sweep boundary, running the normal incremental short-drive sequence up to 4m when the value is below 4m and, when the value is above 4m, running a single forward/reverse test at exactly the entered distance
+- the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, average CTE, maximum CTE, X error, and Y error
 - derive mowing patterns that avoid obstacles and ensure the least number of strips are mowed filling the mowing area with strips that are spaced at 3/4 of the cutting width.
 
 ## Operation
@@ -296,7 +300,7 @@ At startup, the IMU performs calibration:
 This allows the mower to zero its orientation on uneven ground during startup. All subsequent readings subtract these calibrated offsets.
 
 **Heading Reset:**
-The sensor controller shall support an external absolute heading update (for example from GNSS) which resets the maintained IMU heading to the supplied value. After reset, yaw integration continues from the new heading baseline.
+The sensor controller shall support an external absolute heading update (for example from GNSS) which resets the maintained IMU heading to the supplied value when the GNSS heading is already close to the current IMU heading and the GNSS heading quality is high enough to trust. GNSS position accuracy shall be used separately for trusting x/y updates. After reset, yaw integration continues from the new heading baseline.
 
 **Internal Heading Convention:**
 IMU heading uses internal convention (0° = east, counterclockwise positive). The web interface converts this to navigation convention (0° = north, clockwise positive) for display.
@@ -364,7 +368,7 @@ The web server and web app need a dedicated tab that shows requested and achieve
 
 The web page must provide a button to launch into a sequence of test iterations where one iteration goes through all angles to be tested.  
 
-Whenever the system needs a stationary pose reading, it shall wait for a short settle period, sample several pose readings, and return the median of the good GNSS-backed samples when available. GNSS-backed samples shall only be considered good when the fix is acceptable, the position accuracy is within the configured limit, the heading accuracy is within the configured limit, and the heading remains stable. If no good GNSS-backed readings are available, it shall fall back to the IMU-derived pose rather than retrying indefinitely.
+There shall be no separate stationary-pose helper. Whenever the system needs a pose reading, it shall use the normal live pose provider directly so the tuning and validation paths exercise the same building blocks as the rest of the app.
 
 Every turn must feed back the error of the achieved angle to improve the braking angle to attain a zero degree error.
 
@@ -388,7 +392,7 @@ The input is a single target position
 
 The segment drive goal is to turn to face the target and then drive as straight a line as possible arriving as close to the target as possible.
 
-The straight-line portion is a self-contained line-drive component that assumes the mower is already aligned with the line of travel.  It is responsible for minimising cross-track error (CTE), along-track X error, and arrival Y error, while learning brake distance and CTE gain for both short and long drives.  Forward and reverse motion use separate line-control branches so the reverse case can treat the target as behind the mower while still using the same straight-line learning model.  The target arrival is mandatory; braking is an aid used only when there is still room before the target.  A heading preview term may assist steering while there is still comfortable distance to run, but it should taper off close to the target so that it does not create a sharp turn-in at arrival.
+The straight-line portion is a self-contained line-drive component that assumes the mower is already aligned with the line of travel.  It is responsible for minimising cross-track error (CTE), along-track X error, and arrival Y error, while learning brake distance and CTE gain for both short and long drives.  Forward and reverse motion use separate line-control branches so the reverse case can treat the target as behind the mower while still using the same straight-line learning model.  The target arrival is mandatory; braking is an aid used only when there is still room before the target.  A heading preview term may assist steering while there is still comfortable distance to run, but it should taper off close to the target so that it does not create a sharp turn-in at arrival.  The live CTE correction should become progressively stronger as lateral drift grows so the mower fights a bowing path early rather than waiting for the next run to learn from it.
 
 To control this the drive component will learn how to keep CTE small or zero and keep X/Y arrival errors small or zero.  In priority terms, X is more important than Y but Y should naturally be small if CTE is tuned well.
 
@@ -409,9 +413,11 @@ The logical sequence of steps is:
 - produce summary for web page
 - return
 
+The drive controller shall not add a separate post-turn heading settle wait before starting the straight-line portion; the current IMU-derived pose is used immediately and GNSS only nudges the heading when it is already close enough.
+
 Using events for all sensor value inputs.
 
-Ideally the heading is known at all times.  When GNSS is "fixed" and the current GNSS heading is within tolerance for the time since the last one (i.e. no sudden turns in fractions of a second) then use this GNSS heading as the system wide current heading updating the IMU base heading.  When the GNSS gives a silly value or loses fix quality a form of dead-reckoning is achieved by using the IMU heading (which was updated from the last good GNSS value).  Likewise for position, use GNSS when good fix but if fix is lost, then use a dead-reckoning using the motor feedback.  This will require a calibrated motor feedback tick to distance value.
+Ideally the heading is known at all times.  The mower shall run from the IMU heading continuously.  At startup, the first good GNSS heading shall rebase the IMU immediately.  After that, GNSS headings shall only nudge the IMU when the fix is "fixed", the heading accuracy is good, the heading is stable, and the new GNSS heading is already very close to the current IMU heading.  If the mower has been commanded to zero speed for a sustained period, a good GNSS heading may be allowed to rebase the IMU again even if it is no longer close, so that the system can recover from drift while stationary.  When the GNSS gives a silly value or loses fix quality a form of dead-reckoning is achieved by keeping the IMU heading and using the last known good position estimate.  Likewise for position, use GNSS when the fix is good but if fix is lost, then use a dead-reckoning using the motor feedback.  This will require a calibrated motor feedback tick to distance value.
 
 It is suggested that the above fusion of values to make sensor readings is encapsulated into one place and can be called everytime a current pose is required.  The turn controller will directly hook the IMU and will not use this component.
 
@@ -427,7 +433,7 @@ For very short drives where the mower does not reach full speed (due to motor ra
 
 Short-drive tuning shall use a line-drive training mode that alternates forward and reverse legs around a local anchor so the mower can train in a compact area without needing a long run-up or large amount of free space.
 
-The drive tuning web page shall trickle-feed short-distance training progress while a run is active so the operator can see the current bucket, pair attempt and latest leg result before the full run completes.
+The drive tuning web page shall trickle-feed short-distance training progress while a run is active so the operator can see the current bucket, pair attempt and latest leg result before the full run completes. Short-distance training shall still learn both brake fractions and CTE gain, but the live steering curve should remain nonlinear so the mower fights drift harder as it grows instead of waiting for the next run to discover the bow.
 
 The brake distance may vary depending on terrain slope (uphill vs downhill).  Future enhancements could incorporate IMU pitch angle to adjust brake distance dynamically, but the initial implementation should focus on learning a single brake distance for level ground operation.
 
@@ -453,6 +459,13 @@ For segment-drive learning, the system shall:
 - repeat each forward/reverse pair until the absolute X error is below 4cm
 - present live learning progress and per-run results on the drive tuning page
 
+For segment testing, the system shall:
+- collect 7 rough waypoints by taking a live pose, driving forward for about 3 seconds, stopping, settling, and then sampling the next pose along the same line
+- drive first back to the earliest waypoint using the existing segment controller
+- then run 10 further test segments to random non-nearest waypoints using the same segment controller
+- present live IMU and GNSS widgets on the left and a real-time results table on the segment testing page
+- show distance to waypoint, required heading change, achieved heading change, drive quality, average CTE, maximum CTE, and X/Y errors for each run
+
 ## Path following
 
 There is a need to be able to trace around obstacles using manual driving and then have the mower re-trace that path whilst mowing. 
@@ -470,8 +483,10 @@ A path will be associated with a name which will default to 'Obstacle N' where N
 ### Re-tracing
 
 From the same page as for tracing the obstacle's perimeter, there will be a button to 'Drive'.
+There will also be a button to 'Verify'.
 
-The drive button will pre-pend the current position to the path and then start the drive mode.
+The drive button will first execute a segment-style approach to the nearest point on the stored path, then follow the path from that join point onward.
+The verify button will first execute the same segment-style approach to the nearest point, then continue around the stored path until it returns to that join point.
 
 The drive will perform a smooth line-follower algorithm but only resort to 'turn-on-the-spot' when the direction to the next point requires a turn greater than can be achieved using an arc - arc is preferred.   With one heel stationary the mower will pivot around that wheel so it can produce very tight circles.
 

@@ -178,32 +178,7 @@ export class DriveController {
           });
         }
 
-        // 4. Settle after turn
-        this.status = "settling";
-        const settleAfterTurnCompleted = await this.sleepWithStopChecks(this.settleTimeMs);
-        if (!settleAfterTurnCompleted || this.stopRequested || systemStop.isStopped()) {
-          this.status = "stopped";
-          this.currentDrive = null;
-          this.stopRequested = false;
-          this.logger.warn("drive.stopped", { reason: "settle" });
-          resolve({
-            startPosition: this.driveStartPosition ?? createPosition(0, 0),
-            targetPosition: request.targetPosition,
-            finalPosition: this.driveStartPosition ?? createPosition(0, 0),
-            errorX: createMeters(0),
-            errorY: createMeters(0),
-            maxCteMeters: createMeters(0),
-            avgCteMeters: createMeters(0),
-            durationMs: this.nowMillis() - this.driveStartTime,
-            brakeDistanceUsed: createMeters(0),
-            status: "stopped",
-            errorMessage: "Drive stopped during settle",
-            timestamp: new Date().toISOString(),
-          });
-          return;
-        }
-
-        // 5. Delegate straight-line driving to the self-contained line controller
+        // 4. Delegate straight-line driving immediately after the turn.
         this.status = "driving";
         const lineResult = await this.lineDriveController.executeLineDrive({
           targetPosition: request.targetPosition,
@@ -414,10 +389,12 @@ export class DriveController {
     targetXErrorMeters?: number;
     includeReverseLegs?: boolean;
     startDistanceMeters?: number;
+    maxDistanceMeters?: number;
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const startDistanceMeters = options?.startDistanceMeters;
+    const maxDistanceMeters = options?.maxDistanceMeters;
     this.shortTrainingProgress = null;
     this.shortTrainingProgressFeed = [];
     this.shortTrainingResults = [];
@@ -442,6 +419,7 @@ export class DriveController {
       targetXErrorMeters,
       includeReverseLegs,
       startDistanceMeters,
+      maxDistanceMeters,
       progressReporter,
     });
 

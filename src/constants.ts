@@ -374,6 +374,81 @@ export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 2.0;
 export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
 
 /**
+ * Nonlinear CTE correction factor.
+ * Higher = correction grows faster as lateral drift grows.
+ */
+export const DRIVE_CTE_NONLINEARITY_DEFAULT = 3.0;
+
+/**
+ * Default wheel base used by the regulated pure pursuit controller (meters)
+ */
+export const DRIVE_WHEEL_BASE_METERS_DEFAULT = 0.35;
+
+/**
+ * Fraction of maximum wheel speed used as the nominal target speed for regulated pure pursuit.
+ * Tuned to keep the mower moving with useful inertia while the ESP32 handles motor ramping.
+ */
+export const DRIVE_PURSUIT_TARGET_SPEED_SCALE = 1.0;
+
+/**
+ * Base lookahead distance used by regulated pure pursuit (meters).
+ */
+export const DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS = 0.3;
+
+/**
+ * Minimum pure pursuit lookahead distance (meters).
+ */
+export const DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS = 0.3;
+
+/**
+ * Maximum pure pursuit lookahead distance (meters).
+ */
+export const DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS = 0.9;
+
+/**
+ * How long the lookahead distance grows in proportion to the commanded speed (seconds).
+ */
+export const DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS = 1.5;
+
+/**
+ * Distance over which the controller starts to slow down as it approaches the target (meters).
+ */
+export const DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS = 0.6;
+
+/**
+ * Minimum speed scale applied while approaching the target.
+ * Kept high enough to preserve momentum through grass tufts.
+ */
+export const DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE = 0.85;
+
+/**
+ * Gain applied to curvature when slowing down for tighter arcs.
+ * Lower values keep more speed through moderate bends.
+ */
+export const DRIVE_PURSUIT_CURVATURE_SPEED_GAIN = 1.5;
+
+/**
+ * Minimum speed scale allowed by curvature regulation.
+ */
+export const DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE = 0.75;
+
+/**
+ * Angle threshold at which the controller rotates in place to recover heading alignment.
+ */
+export const DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG = 45;
+
+/**
+ * Wheel output scale used for in-place rotation recovery.
+ */
+export const DRIVE_PURSUIT_PIVOT_SPEED_SCALE = 0.35;
+
+/**
+ * Once the mower is within this distance of the target, it should finish parallel to the line
+ * rather than hooking sideways into the endpoint.
+ */
+export const DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS = 0.2;
+
+/**
  * Upper bound for the 5cm fine short-drive buckets (meters)
  * The short-drive learner still uses one shared 1.05m bucket for longer runs.
  */

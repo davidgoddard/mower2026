@@ -79,6 +79,7 @@ export class SensorController extends EventEmitter {
   private motorOperationDepth = 0;
   private previousMotorFeedbackTimestampMillis: number | null = null;
   private motorCommandActiveSinceMillis: number | null = null;
+  private motorZeroCommandSinceMillis: number | null = null;
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
   private stallMotionAnchorPosition: Position | null = null;
@@ -129,6 +130,7 @@ export class SensorController extends EventEmitter {
     this.lastMotorCommand = null;
     this.previousMotorFeedbackTimestampMillis = null;
     this.motorCommandActiveSinceMillis = null;
+    this.motorZeroCommandSinceMillis = null;
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
     this.stallMotionAnchorPosition = null;
@@ -249,6 +251,11 @@ export class SensorController extends EventEmitter {
         Math.abs(this.lastMotorCommand.leftWheelOutputPercent),
         Math.abs(this.lastMotorCommand.rightWheelOutputPercent),
       ) >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+    const wasZeroCommand =
+      this.lastMotorCommand?.kind === "output" &&
+      this.lastMotorCommand.leftWheelOutputPercent === 0 &&
+      this.lastMotorCommand.rightWheelOutputPercent === 0;
+    const isZeroCommand = leftWheelOutputPercent === 0 && rightWheelOutputPercent === 0;
 
     this.logger.info("motors.commanded", {
       leftWheelOutputPercent,
@@ -273,6 +280,11 @@ export class SensorController extends EventEmitter {
       this.stallMotionAnchorSinceMillis = null;
       this.stallDetectionSamples = 0;
       this.stallDetectionLatched = false;
+    }
+    if (isZeroCommand && !wasZeroCommand) {
+      this.motorZeroCommandSinceMillis = this.nowMillis();
+    } else if (!isZeroCommand) {
+      this.motorZeroCommandSinceMillis = null;
     }
     await this.gateway.setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent);
     const current = this.primitivesStore.snapshot().motors;
@@ -319,6 +331,10 @@ export class SensorController extends EventEmitter {
     }
 
     await this.sendGentleStopMotorsCommand();
+  }
+
+  getMotorZeroCommandSinceMillis(): number | null {
+    return this.motorZeroCommandSinceMillis;
   }
 
   /**
@@ -601,9 +617,9 @@ export class SensorController extends EventEmitter {
     const motors = this.primitivesStore.snapshot().motors;
     const leftCommand = Math.abs(motors.commandedLeftWheelOutputPercent ?? 0);
     const rightCommand = Math.abs(motors.commandedRightWheelOutputPercent ?? 0);
-    const commandActive =
-      leftCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT &&
-      rightCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+    const leftCommandActive = leftCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+    const rightCommandActive = rightCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
+    const commandActive = leftCommandActive || rightCommandActive;
 
     let positionStationary = false;
     if (
@@ -650,7 +666,8 @@ export class SensorController extends EventEmitter {
       return;
     }
 
-    this.stallDetectionSamples += currentHigh ? 2 : 1;
+    const strongEvidence = currentHigh || faultFlags !== 0;
+    this.stallDetectionSamples += strongEvidence ? 2 : 1;
     if (this.stallDetectionLatched || this.stallDetectionSamples < MOTOR_STALL_CONSECUTIVE_SAMPLES) {
       return;
     }
@@ -668,6 +685,8 @@ export class SensorController extends EventEmitter {
     this.logger.warn("sensor.motors.stall_detected", {
       leftCommandPercent: leftCommand,
       rightCommandPercent: rightCommand,
+      leftCommandActive,
+      rightCommandActive,
       leftEncoderDelta,
       rightEncoderDelta,
       leftMotorCurrentAmps,
@@ -705,6 +724,9 @@ export class SensorController extends EventEmitter {
       leftWheelOutputPercent: 0,
       rightWheelOutputPercent: 0,
     };
+    if (this.motorZeroCommandSinceMillis === null) {
+      this.motorZeroCommandSinceMillis = this.nowMillis();
+    }
     this.motorCommandActiveSinceMillis = null;
     this.stallMotionAnchorPosition = null;
     this.stallMotionAnchorSinceMillis = null;

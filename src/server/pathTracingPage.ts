@@ -304,6 +304,15 @@ export function renderPathTracingPage(): string {
         gap: 0.5rem;
       }
 
+      .path-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+
       .button-small {
         padding: 0.5rem 1rem;
         font-size: 0.75rem;
@@ -436,8 +445,14 @@ export function renderPathTracingPage(): string {
       <div class="section">
         <h2 class="section-title">Stored Paths</h2>
         <p class="section-description">
-          Manage and execute recorded paths. Drive a path to follow it autonomously.
+          Manage and execute recorded paths. Drive a path to follow it autonomously, or verify it by joining at the nearest point and looping back to that join point.
         </p>
+
+        <div class="path-toolbar">
+          <button id="stopPathBtn" class="button button-danger" onclick="stopPathOperation()">
+            <span>⏹</span> STOP
+          </button>
+        </div>
 
         <div id="pathsList" class="paths-list">
           <div class="empty-state">
@@ -527,7 +542,8 @@ export function renderPathTracingPage(): string {
           stopStatusPolling();
           await loadPaths();
 
-          alert(\`Path saved: \${result.name}\\n\${result.pointCount} points recorded\`);
+          const savedPointCount = result.pointCount ?? result.metadata?.pointCount ?? 0;
+          alert(\`Path saved: \${result.name}\\n\${savedPointCount} points recorded\`);
         } catch (error) {
           alert('Failed to save path: ' + error.message);
         }
@@ -638,6 +654,9 @@ export function renderPathTracingPage(): string {
               <button class="button button-primary button-small" onclick="drivePath('\${path.name}')">
                 <span>▶️</span> Drive
               </button>
+              <button class="button button-success button-small" onclick="verifyPath('\${path.name}')">
+                <span>✓</span> Verify
+              </button>
               <button class="button button-danger button-small" onclick="deletePath('\${path.name}')">
                 <span>🗑️</span> Delete
               </button>
@@ -648,22 +667,66 @@ export function renderPathTracingPage(): string {
 
       // Drive path
       window.drivePath = async function(pathName) {
+        if (recording) {
+          alert('Stop recording before starting a path drive.');
+          return;
+        }
+
         if (!confirm(\`Start autonomous driving of path "\${pathName}"?\\n\\nPress STOP button to abort at any time.\`)) {
           return;
         }
 
+        await runPathAction(pathName, '/api/path/drive', 'drive', 'Path drive complete');
+      };
+
+      // Verify path from the nearest point and loop back to the join point
+      window.verifyPath = async function(pathName) {
+        if (recording) {
+          alert('Stop recording before starting a path verification run.');
+          return;
+        }
+
+        if (!confirm(\`Verify path "\${pathName}" by joining at the nearest point and looping back to that join point?\\n\\nPress STOP button to abort at any time.\`)) {
+          return;
+        }
+
+        await runPathAction(pathName, '/api/path/verify', 'verify', 'Path verification complete');
+      };
+
+      async function runPathAction(pathName, endpoint, actionName, successLabel) {
         try {
-          const response = await fetch(\`\${API_BASE}/api/path/drive\`, {
+          const response = await fetch(\`\${API_BASE}\${endpoint}\`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pathName })
           });
 
-          if (!response.ok) throw new Error('Failed to start path following');
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || 'Failed to start path action');
+          }
 
-          alert(\`Path following started: \${pathName}\\n\\nMonitor progress on the dashboard.\`);
+          const reason = result.completed ? '' : \`\\nReason: \${result.reason ?? 'unknown'}\`;
+          alert(\`\${successLabel}: \${pathName}\${reason}\`);
         } catch (error) {
-          alert('Failed to drive path: ' + error.message);
+          alert(\`Failed to \${actionName} path: \${error.message}\`);
+        }
+      }
+
+      window.stopPathOperation = async function() {
+        try {
+          const response = await fetch(\`\${API_BASE}/api/path/stop\`, {
+            method: 'POST'
+          });
+
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || 'Failed to stop path following');
+          }
+
+          alert('Path stop requested.');
+        } catch (error) {
+          alert('Failed to stop path operation: ' + error.message);
         }
       };
 

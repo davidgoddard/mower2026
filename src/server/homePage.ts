@@ -572,6 +572,10 @@ export function renderHomePage(): string {
             <span class="nav-button-icon">🎯</span>
             <span>Drive Tuning</span>
           </a>
+          <a href="/segment-testing" class="nav-button" title="Collect rough waypoints and exercise the full turn-and-drive segment controller">
+            <span class="nav-button-icon">🧭</span>
+            <span>Segment Testing</span>
+          </a>
           <a href="/path-tracing" class="nav-button" title="Record and follow paths for obstacle navigation">
             <span class="nav-button-icon">🗺️</span>
             <span>Path Tracing</span>

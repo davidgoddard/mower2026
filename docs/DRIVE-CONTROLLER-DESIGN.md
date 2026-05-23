@@ -24,7 +24,7 @@ The Drive Controller is a supervised self-learning component responsible for exe
 ### Sensor Fusion
 - Use GNSS position when fix quality is good
 - Fall back to IMU heading + encoder dead-reckoning when GNSS lost
-- Update IMU base heading from stable GNSS heading samples
+- Update IMU base heading from stable GNSS heading samples when the GNSS heading is already close to the current IMU heading
 - Calibrate encoder-to-distance conversion from successful drives
 - Encapsulate fusion logic in separate PoseFusion component
 
@@ -244,10 +244,9 @@ After successful drive with good GNSS at start and end:
 
 - Get the current pose at the start of the segment
 - Turn to face the target if the heading error exceeds the initial threshold
-- Settle after the turn
 - Delegate the straight-line phase to `DriveLineController`
 - Record successful line-drive results in the segment history
-- Return `stopped` or `error` immediately if the turn, settle, or delegated line drive is interrupted
+- Return `stopped` or `error` immediately if the turn or delegated line drive is interrupted
 
 **Emergency Stop Behavior:**
 - User or system can call `stopCurrentDrive()` at any time
@@ -359,8 +358,10 @@ if (maxCteValue > targetCte * 1.5) {
 }
 
 // Clamp gain
-this.parameters.forwardCteGain = Math.max(0.1, Math.min(1.0, this.parameters.forwardCteGain));
-this.parameters.reverseCteGain = Math.max(0.1, Math.min(1.0, this.parameters.reverseCteGain));
+// Keep the gain bounded, but allow it to rise well above unity so the mower
+// can become much more assertive when the drift is genuinely large.
+this.parameters.forwardCteGain = Math.max(0.1, Math.min(2.5, this.parameters.forwardCteGain));
+this.parameters.reverseCteGain = Math.max(0.1, Math.min(2.5, this.parameters.reverseCteGain));
 ```
 
 #### Persistence
@@ -478,6 +479,29 @@ export interface DriveControllerState {
   - Color-coded by status (green=success, red=error, yellow=stopped)
   - "Clear History" button
 
+### Segment Testing Page (`/segment-testing`)
+
+**Layout:**
+- Navigation bar (consistent with other pages)
+- Live IMU and GNSS widgets in a left sidebar, pinned while scrolling
+- Control section
+  - "Run Segment Test" button
+  - Red "STOP" button
+- Status section
+  - Current phase
+  - Waypoints collected
+  - Segment runs completed
+  - Current target label
+- Results section
+  - Table with columns: time, type, waypoint, distance, required heading change, achieved heading change, drive quality, CTE, X error, Y error
+  - Live results while the test harness is running
+
+**Test flow:**
+- Collect 7 rough waypoints by taking a live pose, driving forward for about 3 seconds, stopping, settling, and then sampling the next pose along the line
+- Drive first back to the earliest waypoint using the segment controller
+- Then run 10 further test segments to random non-nearest waypoints using the same segment controller
+- Preserve the existing turn and drive controllers; the page is only a harness around them
+
 **Test Pattern:**
 - Grid of target positions at 5m, 10m, 20m distances
 - Multiple angles: 0°, 45°, 90°, 135°, 180°, etc.
@@ -493,11 +517,15 @@ export interface DriveControllerState {
 
 ```
 GET  /drive-tuning                    # Serve drive tuning web page
+GET  /segment-testing                 # Serve segment testing web page
 GET  /api/drive/status                # Get controller state and history
+GET  /api/segment/status              # Get segment test state and history
 POST /api/drive/execute               # Execute single drive
 POST /api/drive/test-pattern          # Run test pattern sequence
 POST /api/drive/train-short           # Run short-drive learning sequence
 POST /api/drive/train-segment         # Run segment-drive learning sequence
+POST /api/segment/start               # Run segment testing harness
+POST /api/segment/stop                # Stop current segment test
 POST /api/drive/stop                  # Emergency stop current drive
 POST /api/drive/clear-history         # Clear drive history
 POST /api/drive/reset-learning        # Reset learning parameters to defaults

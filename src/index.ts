@@ -21,6 +21,7 @@ export { SessionLogger } from "./logging/index.js";
 export * from "./constants.js";
 export { routeServerRequest, startMowerServer, resolveServerPort } from "./server/appServer.js";
 export { PrimitivesStore } from "./server/primitivesStore.js";
+export { getSegmentTestingPageHtml } from "./server/segmentTestingPage.js";
 export { I2cBusController } from "./i2c/i2cBusController.js";
 export { I2C_PRIORITY } from "./i2c/priorities.js";
 export { Bmi160ImuSensor } from "./imu/bmi160ImuSensor.js";
@@ -35,3 +36,4 @@ export {
 } from "./motors/motorMapping.js";
 export { HidGameController } from "./controller/hidGameController.js";
 export { computeManualDriveDemand, normalizeManualTurnDemand } from "./control/manualDriveProfile.js";
+export { SegmentTestRunner } from "./control/segmentTestRunner.js";

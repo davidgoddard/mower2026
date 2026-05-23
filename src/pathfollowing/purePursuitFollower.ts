@@ -50,6 +50,7 @@ export class PurePursuitFollower implements IPathFollower {
   private currentPath: StoredPath | null = null;
   private currentWaypointIndex: number = 0;
   private motorOperationActive: boolean = false;
+  private hasBeenAwayFromFinalPoint: boolean = false;
 
   constructor(options: PathFollowerOptions, dependencies: PurePursuitDependencies) {
     this.targetSpeed = options.targetSpeed;
@@ -196,6 +197,7 @@ export class PurePursuitFollower implements IPathFollower {
     this.isFollowing = true;
     this.stopRequested = false;
     this.currentWaypointIndex = 0;
+    this.hasBeenAwayFromFinalPoint = false;
 
     const startTime = Date.now();
     let distanceTraveled = 0;
@@ -247,11 +249,17 @@ export class PurePursuitFollower implements IPathFollower {
         // Control loop delay
         const loopDelayCompleted = await this.sleepWithStopChecks(1000 / this.controlRateHz);
         if (!loopDelayCompleted || this.stopRequested || systemStop.isStopped()) {
-          this.logger.info("pure_pursuit.stopped_by_user", { distanceTraveled });
+          const stopState = systemStop.snapshot();
+          const obstructed = stopState.reason === "motor_stall_detected";
+          this.logger.info(obstructed ? "pure_pursuit.stopped_by_obstruction" : "pure_pursuit.stopped_by_user", {
+            distanceTraveled,
+            systemStopSource: stopState.source,
+            systemStopReason: stopState.reason,
+          });
           await this.deps.motorController.stop();
           return {
             completed: false,
-            reason: "user_stopped",
+            reason: obstructed ? "obstruction" : "user_stopped",
             finalPose: this.deps.getCurrentPose(),
             distanceTraveled,
           };
@@ -260,11 +268,17 @@ export class PurePursuitFollower implements IPathFollower {
 
       // Check why loop exited
       if (this.stopRequested || systemStop.isStopped()) {
-        this.logger.info("pure_pursuit.stopped_by_user", { distanceTraveled });
+        const stopState = systemStop.snapshot();
+        const obstructed = stopState.reason === "motor_stall_detected";
+        this.logger.info(obstructed ? "pure_pursuit.stopped_by_obstruction" : "pure_pursuit.stopped_by_user", {
+          distanceTraveled,
+          systemStopSource: stopState.source,
+          systemStopReason: stopState.reason,
+        });
         await this.deps.motorController.stop();
         return {
           completed: false,
-          reason: "user_stopped",
+          reason: obstructed ? "obstruction" : "user_stopped",
           finalPose: this.deps.getCurrentPose(),
           distanceTraveled,
         };
@@ -514,7 +528,12 @@ export class PurePursuitFollower implements IPathFollower {
     const lastPoint = path[path.length - 1];
     const distance = this.distanceToPoint(pose.position, lastPoint);
 
-    return distance < this.arrivalThreshold;
+    if (distance >= this.arrivalThreshold) {
+      this.hasBeenAwayFromFinalPoint = true;
+      return false;
+    }
+
+    return this.hasBeenAwayFromFinalPoint;
   }
 
   /**

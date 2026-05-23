@@ -19,10 +19,6 @@ import { TurnController } from "./turnController.js";
 import { TurnResult } from "./turnControllerTypes.js";
 import { systemStop } from "./systemStop.js";
 
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
 export interface TurnPoseValidationResult {
   readonly index: number;
   readonly timestamp: string;
@@ -41,10 +37,8 @@ export interface TurnPoseValidationResult {
 export interface TurnValidationRunnerOptions {
   turnController: TurnController;
   poseProvider: () => Pose | null;
-  stationaryPoseProvider?: () => Promise<Pose | null> | Pose | null;
   logger: SessionLogger;
   random?: () => number;
-  sleep?: (delayMs: number) => Promise<void>;
 }
 
 export interface TurnValidationRunnerState {
@@ -62,9 +56,7 @@ export class TurnValidationRunner {
   private readonly logger: LoggerScope;
   private readonly turnController: TurnController;
   private readonly poseProvider: () => Pose | null;
-  private readonly stationaryPoseProvider: (() => Promise<Pose | null> | Pose | null) | null;
   private readonly random: () => number;
-  private readonly sleep: (delayMs: number) => Promise<void>;
   private validationHistory: TurnPoseValidationResult[] = [];
   private stopRequested = false;
   private running = false;
@@ -76,9 +68,7 @@ export class TurnValidationRunner {
     this.logger = options.logger.child({ context: "control", source: "TurnValidationRunner" });
     this.turnController = options.turnController;
     this.poseProvider = options.poseProvider;
-    this.stationaryPoseProvider = options.stationaryPoseProvider ?? null;
     this.random = options.random ?? Math.random;
-    this.sleep = options.sleep ?? defaultSleep;
   }
 
   async run(iterations: number = 20): Promise<TurnPoseValidationResult[]> {
@@ -102,11 +92,11 @@ export class TurnValidationRunner {
           return results;
         }
 
-        const startPose = await this.getSettledPose();
+        const startPose = this.poseProvider();
         if (startPose === null) {
           this.logger.warn("turn.real_pose_validation.stopped", {
             completed: results.length,
-            reason: "interrupted",
+            reason: "pose_unavailable",
           });
           return results;
         }
@@ -119,7 +109,7 @@ export class TurnValidationRunner {
           learningEnabled: true,
         });
 
-        const endPose = await this.getSettledPose();
+        const endPose = this.poseProvider();
         const validationResult: TurnPoseValidationResult = {
           index: index + 1,
           timestamp: turnResult.timestamp,
@@ -195,22 +185,6 @@ export class TurnValidationRunner {
     this.stopRequested = true;
   }
 
-  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    let remainingMs = delayMs;
-
-    while (remainingMs > 0) {
-      if (systemStop.isStopped() || this.stopRequested) {
-        return false;
-      }
-
-      const chunkMs = Math.min(50, remainingMs);
-      await this.sleep(chunkMs);
-      remainingMs -= chunkMs;
-    }
-
-    return true;
-  }
-
   private pickLargeValidationTurn(): ReturnType<typeof createRelativeAngle> {
     const magnitudeRange = TurnValidationRunner.MAX_VALIDATION_TURN_DEGREES - TurnValidationRunner.MIN_VALIDATION_TURN_DEGREES;
     const magnitude = TurnValidationRunner.MIN_VALIDATION_TURN_DEGREES + (this.random() * magnitudeRange);
@@ -218,16 +192,4 @@ export class TurnValidationRunner {
     return createRelativeAngle(signedMagnitude);
   }
 
-  private async getSettledPose(): Promise<Pose | null> {
-    if (this.stationaryPoseProvider !== null) {
-      return await this.stationaryPoseProvider();
-    }
-
-    const settled = await this.sleepWithStopChecks(750);
-    if (!settled) {
-      return null;
-    }
-
-    return this.poseProvider();
-  }
 }

@@ -103,6 +103,14 @@ The controller exposes motor command methods:
 `stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands.
 The motor node command payload sent over I2C uses normalized percentages, where `1.0` is full output and `0.0` is stop.
 
+### Obstruction detection
+
+The sensor controller raises a stall obstruction when:
+
+- one or both wheels are commanded hard but the mower does not make progress over the observation window
+
+That keeps the normal one-wheel steering corrections available, while still catching a mower that is slipping or stuck and no longer advancing on GNSS even though motion is still being commanded.
+
 ## Heading Convention
 
 Internal heading convention for both IMU and GNSS:

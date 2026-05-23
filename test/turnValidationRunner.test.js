@@ -50,13 +50,9 @@ describe("TurnValidationRunner", () => {
 
     const runner = new TurnValidationRunner({
       turnController,
-      poseProvider: () => {
-        throw new Error("poseProvider should not be used when stationaryPoseProvider is supplied");
-      },
-      stationaryPoseProvider: async () => poses[Math.min(poseIndex++, poses.length - 1)],
+      poseProvider: () => poses[Math.min(poseIndex++, poses.length - 1)],
       logger: createMockLogger(),
       random: () => randomValues.shift() ?? 0.75,
-      sleep: async () => {},
     });
 
     const results = await runner.run(2);
@@ -86,7 +82,7 @@ describe("TurnValidationRunner", () => {
     systemStop.clearStop("test");
   });
 
-  it("uses the stationary pose helper before sampling the start and end pose for each validation turn", async () => {
+  it("uses the live pose provider for the start and end pose of each validation turn", async () => {
     systemStop.clearStop("test");
 
     const poses = [
@@ -94,7 +90,6 @@ describe("TurnValidationRunner", () => {
       createPose(0, 0, createInternalHeading(50), "gnss"),
     ];
     let poseIndex = 0;
-    const sleepCalls = [];
 
     const turnController = {
       executeTurn: mock.fn(async (request) => {
@@ -111,27 +106,20 @@ describe("TurnValidationRunner", () => {
       }),
     };
 
-    const stationaryPoseProvider = mock.fn(async () => poses[Math.min(poseIndex++, poses.length - 1)]);
+    const poseProvider = mock.fn(() => poses[Math.min(poseIndex++, poses.length - 1)]);
 
     const runner = new TurnValidationRunner({
       turnController,
-      poseProvider: () => {
-        throw new Error("poseProvider should not be used when stationaryPoseProvider is supplied");
-      },
-      stationaryPoseProvider,
+      poseProvider,
       logger: createMockLogger(),
       random: () => 0.75,
-      sleep: async (delayMs) => {
-        sleepCalls.push(delayMs);
-      },
     });
 
     await runner.run(1);
 
-    assert.equal(stationaryPoseProvider.mock.calls.length, 2);
-    assert.equal(stationaryPoseProvider.mock.calls[0].arguments.length, 0);
-    assert.equal(stationaryPoseProvider.mock.calls[1].arguments.length, 0);
-    assert.equal(sleepCalls.length, 0);
+    assert.equal(poseProvider.mock.calls.length, 2);
+    assert.equal(poseProvider.mock.calls[0].arguments.length, 0);
+    assert.equal(poseProvider.mock.calls[1].arguments.length, 0);
 
     systemStop.clearStop("test");
   });
@@ -170,7 +158,6 @@ describe("TurnValidationRunner", () => {
       poseProvider: () => poses[Math.min(poseIndex++, poses.length - 1)],
       logger: createMockLogger(),
       random: () => 0.5,
-      sleep: async () => {},
     });
 
     const runPromise = runner.run(1);

@@ -1,11 +1,11 @@
 /**
- * Drive line controller - executes straight-line drives with self-learning CTE correction.
+ * Drive line controller - executes straight-line drives with regulated pure pursuit.
  *
  * This component assumes the mower is already aligned with the line of travel.
  * It is responsible only for following the line, braking, learning, and short
- * distance training. Forward and reverse line travel use separate steering
- * branches so reverse motion can use the correct body-heading reference.
- * Short training samples a fresh pose/heading for each leg.
+ * distance training. Forward and reverse line travel share the same geometric
+ * line-following model while reverse motion uses the correct body-heading
+ * reference. Short training samples a fresh pose/heading for each leg.
  * Segment orchestration is handled by DriveController.
  */
 
@@ -25,6 +25,7 @@ import {
   distanceBetween,
   crossTrackError,
   calculateXError,
+  pointAlongLine,
 } from "../geometry/positionTypes.js";
 import {
   InternalHeading,
@@ -46,18 +47,27 @@ import {
   DRIVE_TIMEOUT_MULTIPLIER,
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
+  MAX_WHEEL_SPEED_MPS_DEFAULT,
+  DRIVE_WHEEL_BASE_METERS_DEFAULT,
   MOTOR_RAMP_DOWN_TIME_MS,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
   DRIVE_SHORT_BUCKET_MAX_METERS,
-  DRIVE_SHORT_BUCKET_COARSE_START_METERS,
   DRIVE_SHORT_BUCKET_COARSE_STEP_METERS,
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
   DRIVE_ARRIVAL_TOLERANCE_METERS,
-  DRIVE_HEADING_CORRECTION_BLEND,
-  DRIVE_HEADING_CORRECTION_FADEOUT_METERS,
-  DRIVE_HEADING_CORRECTION_MAX_DEGREES,
-  DRIVE_HEADING_CORRECTION_MAX_LOOKAHEAD_METERS,
+  DRIVE_PURSUIT_TARGET_SPEED_SCALE,
+  DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS,
+  DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS,
+  DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS,
+  DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS,
+  DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS,
+  DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE,
+  DRIVE_PURSUIT_CURVATURE_SPEED_GAIN,
+  DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
+  DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
+  DRIVE_PURSUIT_PIVOT_SPEED_SCALE,
+  DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
 
@@ -230,18 +240,20 @@ export class DriveLineController {
     targetXErrorMeters?: number;
     includeReverseLegs?: boolean;
     startDistanceMeters?: number;
+    maxDistanceMeters?: number;
     progressReporter?: DriveTrainingProgressReporter;
     pauseBeforeDriveMs?: number;
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
-    const startDistanceMeters = this.normalizeShortTrainingStartDistanceMeters(options?.startDistanceMeters);
+    const maxDistanceMeters = this.normalizeShortTrainingMaxDistanceMeters(options?.maxDistanceMeters ?? DRIVE_SHORT_BUCKET_MAX_METERS);
+    const startDistanceMeters = this.normalizeShortTrainingStartDistanceMeters(options?.startDistanceMeters, maxDistanceMeters);
     const requestedPauseBeforeDriveMs = options?.pauseBeforeDriveMs;
     const pauseBeforeDriveMs = Number.isFinite(requestedPauseBeforeDriveMs)
       ? Math.max(0, requestedPauseBeforeDriveMs ?? 0)
       : 2000;
     const progressReporter = options?.progressReporter;
-    const distancePlan = this.buildStraightLineTrainingDistances(startDistanceMeters);
+    const distancePlan = this.buildStraightLineTrainingDistances(startDistanceMeters, maxDistanceMeters);
     const results: DriveResult[] = [];
     const totalPlannedDrives = distancePlan.length * (includeReverseLegs ? 2 : 1);
     this.stopRequested = false;
@@ -273,14 +285,15 @@ export class DriveLineController {
 
     this.logger.info("drive.line.short_training.started", {
       stepMeters: DRIVE_SHORT_BUCKET_STEP_METERS,
-      maxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+      defaultMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
       startDistanceMeters,
+      requestedMaxDistanceMeters: maxDistanceMeters,
       targetXErrorMeters,
       includeReverseLegs,
     });
     reportProgress(
       "started",
-      `Starting straight-line training from ${Math.round(startDistanceMeters * 100)} cm to ${Math.round(DRIVE_SHORT_BUCKET_MAX_METERS * 100)} cm.`,
+      `Starting straight-line training from ${Math.round(startDistanceMeters * 100)} cm to ${Math.round(maxDistanceMeters * 100)} cm.`,
       {
         distanceMeters: startDistanceMeters,
       },
@@ -665,14 +678,10 @@ export class DriveLineController {
       return;
     }
 
-    const alongTrackError = calculateXError(currentPosition, this.driveLineStart, this.driveLineEnd);
-    const remainingAlongTrackDistance = Math.abs(unwrapMeters(alongTrackError));
     const targetDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
-    if (this.driveDirectionSign > 0) {
-      await this.applyForwardLineControl(pose.heading, cte, remainingAlongTrackDistance);
-    } else {
-      await this.applyReverseLineControl(pose.heading, cte, remainingAlongTrackDistance);
-    }
+    const projectedAlongTrackDistance = this.projectAlongTrackDistance(currentPosition);
+    const remainingAlongTrackDistance = Math.max(0, targetDistance - projectedAlongTrackDistance);
+    await this.applyRegulatedPurePursuitControl(pose, remainingAlongTrackDistance);
 
     // Arrival is the hard stop condition. Braking only helps if there is still
     // enough distance left before the target to make it worthwhile.
@@ -732,112 +741,114 @@ export class DriveLineController {
     }
   }
 
-  private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number): number {
+  private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number {
     const requestedDistance = Number.isFinite(startDistanceMeters) ? (startDistanceMeters as number) : DRIVE_SHORT_BUCKET_STEP_METERS;
+    const upperBound = Math.max(DRIVE_SHORT_BUCKET_MAX_METERS, maxDistanceMeters);
     const clampedDistance = Math.max(
       DRIVE_SHORT_BUCKET_STEP_METERS,
-      Math.min(DRIVE_SHORT_BUCKET_MAX_METERS, requestedDistance),
+      Math.min(upperBound, requestedDistance),
     );
     const alignedDistance = Math.ceil((clampedDistance - 1e-9) / DRIVE_SHORT_BUCKET_STEP_METERS) * DRIVE_SHORT_BUCKET_STEP_METERS;
     return Number(Math.max(
       DRIVE_SHORT_BUCKET_STEP_METERS,
-      Math.min(DRIVE_SHORT_BUCKET_MAX_METERS, alignedDistance),
+      Math.min(upperBound, alignedDistance),
     ).toFixed(2));
   }
 
-  private buildStraightLineTrainingDistances(startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS): number[] {
+  private normalizeShortTrainingMaxDistanceMeters(maxDistanceMeters?: number, startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS): number {
+    const requestedDistance = Number.isFinite(maxDistanceMeters) ? (maxDistanceMeters as number) : DRIVE_SHORT_BUCKET_MAX_METERS;
+    const minimumDistance = Math.max(startDistanceMeters, DRIVE_SHORT_BUCKET_STEP_METERS);
+    const clampedDistance = Math.max(minimumDistance, requestedDistance);
+    return Number(clampedDistance.toFixed(2));
+  }
+
+  private buildStraightLineTrainingDistances(startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number[] {
     const distances: number[] = [];
+    const start = Math.max(DRIVE_SHORT_BUCKET_STEP_METERS, startDistanceMeters);
+    const max = Math.max(start, maxDistanceMeters);
 
-    for (let distance = DRIVE_SHORT_BUCKET_STEP_METERS; distance <= DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS + 1e-9; distance += DRIVE_SHORT_BUCKET_STEP_METERS) {
+    for (let distance = start; distance <= max + 1e-9; ) {
       distances.push(Number(distance.toFixed(2)));
+      const step = distance <= DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS + 1e-9
+        ? DRIVE_SHORT_BUCKET_STEP_METERS
+        : DRIVE_SHORT_BUCKET_COARSE_STEP_METERS;
+      distance = Number((distance + step).toFixed(2));
     }
 
-    for (let distance = DRIVE_SHORT_BUCKET_COARSE_START_METERS; distance < DRIVE_SHORT_BUCKET_MAX_METERS - 1e-9; distance += DRIVE_SHORT_BUCKET_COARSE_STEP_METERS) {
-      distances.push(Number(distance.toFixed(2)));
-    }
-
-    distances.push(Number(DRIVE_SHORT_BUCKET_MAX_METERS.toFixed(2)));
-
-    return distances.filter((distance) => distance + 1e-9 >= startDistanceMeters);
+    return distances;
   }
 
-  private async applyForwardLineControl(
-    currentHeading: InternalHeading,
-    cte: Meters,
+  private async applyRegulatedPurePursuitControl(
+    pose: Pose,
     remainingAlongTrackDistance: number,
   ): Promise<void> {
-    const headingPreview = this.calculateHeadingPreviewCorrection(
-      currentHeading,
-      this.getDriveLineHeading(),
-      remainingAlongTrackDistance,
-    );
-    const blendedCte = createMeters(unwrapMeters(cte) + headingPreview);
-    await this.applyCteCorrection(blendedCte);
-  }
-
-  private async applyReverseLineControl(
-    currentHeading: InternalHeading,
-    cte: Meters,
-    remainingAlongTrackDistance: number,
-  ): Promise<void> {
-    const headingPreview = this.calculateHeadingPreviewCorrection(
-      currentHeading,
-      this.getReverseDriveLineHeading(),
-      remainingAlongTrackDistance,
-    );
-    const blendedCte = createMeters(unwrapMeters(cte) + headingPreview);
-    await this.applyCteCorrection(blendedCte);
-  }
-
-  private async applyCteCorrection(cte: Meters): Promise<void> {
-    const cteValue = unwrapMeters(cte);
-    const gain = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
-
-    let leftSpeed = this.fullSpeedCommand;
-    let rightSpeed = this.fullSpeedCommand;
-
-    if (cteValue > 0) {
-      rightSpeed = this.fullSpeedCommand * (1 - gain * cteValue);
-    } else {
-      leftSpeed = this.fullSpeedCommand * (1 + gain * cteValue);
+    if (this.driveLineStart === null || this.driveLineEnd === null) {
+      await this.sensorController.setMotorWheelOutputs(0, 0);
+      return;
     }
 
-    leftSpeed = Math.max(0, Math.min(this.fullSpeedCommand, leftSpeed));
-    rightSpeed = Math.max(0, Math.min(this.fullSpeedCommand, rightSpeed));
-
-    leftSpeed *= this.driveDirectionSign;
-    rightSpeed *= this.driveDirectionSign;
-
-    await this.sensorController.setMotorWheelOutputs(leftSpeed, rightSpeed);
-  }
-
-  private calculateHeadingPreviewCorrection(
-    currentHeading: InternalHeading,
-    referenceHeading: InternalHeading,
-    remainingAlongTrackDistance: number,
-  ): number {
-    if (remainingAlongTrackDistance <= DRIVE_HEADING_CORRECTION_FADEOUT_METERS) {
-      return 0;
+    const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
+    if (totalDistance <= 1e-6) {
+      await this.sensorController.setMotorWheelOutputs(0, 0);
+      return;
     }
 
-    const headingErrorDeg = unwrapRelativeAngle(headingDifference(currentHeading, referenceHeading));
-    const clampedHeadingErrorDeg = Math.max(
-      -DRIVE_HEADING_CORRECTION_MAX_DEGREES,
-      Math.min(DRIVE_HEADING_CORRECTION_MAX_DEGREES, headingErrorDeg),
-    );
+    const lineHeading = this.getDriveLineHeading();
+    const controlHeading = this.driveDirectionSign > 0
+      ? pose.heading
+      : createInternalHeading(unwrapInternalHeading(pose.heading) + 180);
+    const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)));
+    const isFinalParallelApproach = remainingAlongTrackDistance <= DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS;
 
-    const projectedDistance = Math.max(
-      DRIVE_HEADING_CORRECTION_FADEOUT_METERS,
-      Math.min(remainingAlongTrackDistance, DRIVE_HEADING_CORRECTION_MAX_LOOKAHEAD_METERS),
-    );
-    const previewMeters = -Math.tan((clampedHeadingErrorDeg * Math.PI) / 180) * projectedDistance;
-    const fade = Math.max(
+    if (headingErrorDeg >= DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG && remainingAlongTrackDistance > DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS) {
+      const turnSign = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)) >= 0 ? 1 : -1;
+      const pivotSpeed = this.fullSpeedCommand * DRIVE_PURSUIT_PIVOT_SPEED_SCALE;
+      const leftCommand = this.clampNormalizedSpeed(-turnSign * pivotSpeed);
+      const rightCommand = this.clampNormalizedSpeed(turnSign * pivotSpeed);
+      await this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
+      return;
+    }
+
+    const projectedAlongTrackDistance = this.projectAlongTrackDistance(pose.position);
+    const lookaheadDistance = this.calculateLookaheadDistance(remainingAlongTrackDistance);
+    const lookaheadAlongTrackDistance = Math.max(
       0,
-      Math.min(1, (remainingAlongTrackDistance - DRIVE_HEADING_CORRECTION_FADEOUT_METERS) /
-        (DRIVE_HEADING_CORRECTION_MAX_LOOKAHEAD_METERS - DRIVE_HEADING_CORRECTION_FADEOUT_METERS)),
+      Math.min(totalDistance, projectedAlongTrackDistance + lookaheadDistance),
     );
+    const lookaheadPoint = isFinalParallelApproach
+      ? this.buildParallelLookaheadPoint(pose.position, lookaheadDistance)
+      : pointAlongLine(
+          this.driveLineStart,
+          this.driveLineEnd,
+          createMeters(lookaheadAlongTrackDistance),
+        );
+    const lookaheadFrame = this.toRobotFrame(pose.position, lookaheadPoint, controlHeading);
+    const lookaheadDistanceMeters = Math.hypot(lookaheadFrame.x, lookaheadFrame.y);
 
-    return previewMeters * fade * DRIVE_HEADING_CORRECTION_BLEND;
+    if (!Number.isFinite(lookaheadDistanceMeters) || lookaheadDistanceMeters < 1e-6) {
+      await this.sensorController.setMotorWheelOutputs(0, 0);
+      return;
+    }
+
+    const rawCurvature = (2 * lookaheadFrame.y) / (lookaheadDistanceMeters * lookaheadDistanceMeters);
+    const finalApproachCurvatureScale = isFinalParallelApproach
+      ? this.clamp(
+          remainingAlongTrackDistance / DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS,
+          0,
+          1,
+        )
+      : 1;
+    const curvature = rawCurvature * finalApproachCurvatureScale;
+    const targetLinearSpeedMps = this.calculateTargetLinearSpeedMps(remainingAlongTrackDistance, curvature);
+    const signedLinearSpeedMps = targetLinearSpeedMps * this.driveDirectionSign;
+    const angularSpeedRadPerSec = targetLinearSpeedMps * curvature;
+    const leftWheelSpeedMps = signedLinearSpeedMps - (angularSpeedRadPerSec * DRIVE_WHEEL_BASE_METERS_DEFAULT / 2);
+    const rightWheelSpeedMps = signedLinearSpeedMps + (angularSpeedRadPerSec * DRIVE_WHEEL_BASE_METERS_DEFAULT / 2);
+
+    const leftCommand = this.clampNormalizedSpeed(leftWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
+    const rightCommand = this.clampNormalizedSpeed(rightWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
+
+    await this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
   }
 
   private getDriveLineHeading(): InternalHeading {
@@ -851,8 +862,96 @@ export class DriveLineController {
     return createInternalHeading((Math.atan2(dy, dx) * 180) / Math.PI);
   }
 
-  private getReverseDriveLineHeading(): InternalHeading {
-    return createInternalHeading(unwrapInternalHeading(this.getDriveLineHeading()) + 180);
+  private projectAlongTrackDistance(position: Position): number {
+    if (this.driveLineStart === null || this.driveLineEnd === null) {
+      return 0;
+    }
+
+    const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
+    if (totalDistance <= 1e-6) {
+      return 0;
+    }
+
+    const lineDx = (unwrapMeters(this.driveLineEnd.xMeters) - unwrapMeters(this.driveLineStart.xMeters)) / totalDistance;
+    const lineDy = (unwrapMeters(this.driveLineEnd.yMeters) - unwrapMeters(this.driveLineStart.yMeters)) / totalDistance;
+    const dx = unwrapMeters(position.xMeters) - unwrapMeters(this.driveLineStart.xMeters);
+    const dy = unwrapMeters(position.yMeters) - unwrapMeters(this.driveLineStart.yMeters);
+    return dx * lineDx + dy * lineDy;
+  }
+
+  private calculateLookaheadDistance(remainingAlongTrackDistance: number): number {
+    const targetSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
+    const dynamicLookahead = DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS +
+      (targetSpeedMps * DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS);
+    const clampedLookahead = Math.max(
+      DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS,
+      Math.min(DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS, dynamicLookahead),
+    );
+
+    if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
+      return DRIVE_ARRIVAL_TOLERANCE_METERS;
+    }
+
+    return Math.min(clampedLookahead, Math.max(DRIVE_ARRIVAL_TOLERANCE_METERS, remainingAlongTrackDistance));
+  }
+
+  private calculateTargetLinearSpeedMps(remainingAlongTrackDistance: number, curvature: number): number {
+    const nominalTargetSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
+    const approachScale = this.clamp(
+      remainingAlongTrackDistance / DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS,
+      DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE,
+      1,
+    );
+    const curvatureScale = this.clamp(
+      1 / (1 + (Math.abs(curvature) * DRIVE_PURSUIT_CURVATURE_SPEED_GAIN)),
+      DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
+      1,
+    );
+    return nominalTargetSpeedMps * approachScale * curvatureScale;
+  }
+
+  private buildParallelLookaheadPoint(currentPosition: Position, lookaheadDistance: number): Position {
+    if (this.driveLineStart === null || this.driveLineEnd === null) {
+      return currentPosition;
+    }
+
+    const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
+    if (totalDistance <= 1e-6) {
+      return currentPosition;
+    }
+
+    const lineDx = (unwrapMeters(this.driveLineEnd.xMeters) - unwrapMeters(this.driveLineStart.xMeters)) / totalDistance;
+    const lineDy = (unwrapMeters(this.driveLineEnd.yMeters) - unwrapMeters(this.driveLineStart.yMeters)) / totalDistance;
+
+    return createPosition(
+      unwrapMeters(currentPosition.xMeters) + (lineDx * lookaheadDistance),
+      unwrapMeters(currentPosition.yMeters) + (lineDy * lookaheadDistance),
+    );
+  }
+
+  private toRobotFrame(
+    currentPosition: Position,
+    targetPosition: Position,
+    heading: InternalHeading,
+  ): { x: number; y: number } {
+    const dx = unwrapMeters(targetPosition.xMeters) - unwrapMeters(currentPosition.xMeters);
+    const dy = unwrapMeters(targetPosition.yMeters) - unwrapMeters(currentPosition.yMeters);
+    const theta = (unwrapInternalHeading(heading) * Math.PI) / 180;
+    const cosTheta = Math.cos(theta);
+    const sinTheta = Math.sin(theta);
+
+    return {
+      x: (dx * cosTheta) + (dy * sinTheta),
+      y: (-dx * sinTheta) + (dy * cosTheta),
+    };
+  }
+
+  private clampNormalizedSpeed(speed: number): number {
+    return this.clamp(speed, -this.fullSpeedCommand, this.fullSpeedCommand);
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
   }
 
   private async completeDrive(): Promise<void> {
@@ -1041,7 +1140,8 @@ export class DriveLineController {
     }
 
     const distance = unwrapMeters(distanceBetween(this.driveStartPosition, this.driveTargetPosition));
-    const estimatedDurationMs = (distance / 0.5) * 1000;
+    const nominalSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
+    const estimatedDurationMs = (distance / Math.max(nominalSpeedMps, 1e-6)) * 1000;
     return Math.max(estimatedDurationMs * DRIVE_TIMEOUT_MULTIPLIER, this.driveTimeoutMinimumMs);
   }
 

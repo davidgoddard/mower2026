@@ -160,6 +160,7 @@ export class DriveLearningModel {
   async updateFromDrive(data: DriveUpdateData): Promise<void> {
     const errorXValue = unwrapMeters(data.errorX);
     const maxCteValue = Math.abs(unwrapMeters(data.maxCte));
+    const avgCteValue = Math.abs(unwrapMeters(data.avgCte));
     const direction: 1 | -1 = data.driveDirectionSign ?? this.getShortDriveDirectionSign(data.startPosition, data.targetPosition);
 
     const driveDistance = unwrapMeters(distanceBetween(data.startPosition, data.targetPosition));
@@ -172,7 +173,7 @@ export class DriveLearningModel {
       const adjustment = normalizedError * learningRate;
       const clampedFraction = Math.max(0.05, Math.min(0.95, currentFraction + adjustment));
       const cteGainBefore = this.getCteGainForDirection(direction);
-      this.updateCteGain(direction, maxCteValue);
+      this.updateCteGain(direction, maxCteValue, avgCteValue);
       const cteGainAfter = this.getCteGainForDirection(direction);
 
       if (direction > 0) {
@@ -207,7 +208,7 @@ export class DriveLearningModel {
 
     // Update CTE gain
     const cteGainBefore = this.getCteGainForDirection(direction);
-    this.updateCteGain(direction, maxCteValue);
+    this.updateCteGain(direction, maxCteValue, avgCteValue);
     const cteGainAfter = this.getCteGainForDirection(direction);
 
     this.logger.info("drive.learning.updated", {
@@ -235,20 +236,25 @@ export class DriveLearningModel {
     );
   }
 
-  private updateCteGain(directionSign: 1 | -1, maxCteValue: number): void {
+  private updateCteGain(directionSign: 1 | -1, maxCteValue: number, avgCteValue: number): void {
     const targetCte = DRIVE_TARGET_CTE_METERS;
     let gain = directionSign > 0 ? this.parameters.forwardCteGain : this.parameters.reverseCteGain;
+    const lateralSeverity = Math.max(maxCteValue, avgCteValue);
 
-    if (maxCteValue > targetCte * 1.5) {
-      // CTE too high - increase gain
-      gain *= 1.05;
-    } else if (maxCteValue < targetCte * 0.5) {
-      // CTE very low - could decrease gain (more efficient)
-      gain *= 0.98;
+    if (lateralSeverity > targetCte * 1.2) {
+      // Lateral error is too high - increase gain more aggressively
+      gain *= 1.12;
+    } else if (lateralSeverity > targetCte * 0.7) {
+      // Lateral error is still meaningful - nudge gain upward
+      gain *= 1.06;
+    } else if (lateralSeverity < targetCte * 0.35) {
+      // Lateral error is very low - back gain off only slightly
+      gain *= 0.995;
     }
 
-    // Clamp gain
-    const clampedGain = Math.max(0.1, Math.min(1.0, gain));
+    // Keep the gain bounded, but allow it to rise well above unity so the
+    // controller can become much more assertive when the mower is drifting.
+    const clampedGain = Math.max(0.1, Math.min(2.5, gain));
     if (directionSign > 0) {
       this.parameters.forwardCteGain = clampedGain;
     } else {
