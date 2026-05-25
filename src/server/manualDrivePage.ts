@@ -237,7 +237,25 @@ export function getManualDrivePageHtml(): string {
       color: var(--text-primary);
     }
 
-    .input-group input[type="text"]:focus {
+    .input-group input[type="number"],
+    .input-group select {
+      padding: 0.625rem 0.875rem;
+      border: 1px solid var(--border-color);
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-family: inherit;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+
+    .input-group input[type="range"] {
+      width: 100%;
+      accent-color: var(--primary-color);
+    }
+
+    .input-group input[type="text"]:focus,
+    .input-group input[type="number"]:focus,
+    .input-group select:focus {
       outline: none;
       border-color: var(--primary-color);
       box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
@@ -418,6 +436,20 @@ export function getManualDrivePageHtml(): string {
       flex-wrap: wrap;
     }
 
+    .map-controls {
+      display: grid;
+      grid-template-columns: minmax(220px, 1.2fr) minmax(220px, 1fr) minmax(140px, 0.6fr) auto;
+      gap: 1rem;
+      align-items: end;
+      margin-bottom: 1rem;
+    }
+
+    .map-control-value {
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+
     .empty-state {
       text-align: center;
       padding: 2rem 1rem;
@@ -459,6 +491,10 @@ ${getAppDialogStyles()}
         flex-direction: column;
         align-items: stretch;
       }
+
+      .map-controls {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -475,14 +511,32 @@ ${getAppDialogStyles()}
 
   <div class="container">
     <div class="map-section">
-      <div class="section-title">Position Map (Last 10 Minutes)</div>
+      <div class="section-title">Position Map (Last 10 Minutes + Stored Perimeters)</div>
+      <div class="map-controls">
+        <div class="input-group">
+          <label for="mowingPlanArea">Mowing Area</label>
+          <select id="mowingPlanArea"></select>
+        </div>
+        <div class="input-group">
+          <label for="mowingHeadingDeg">Strip Heading</label>
+          <input type="range" id="mowingHeadingDeg" min="0" max="179" step="1" value="135" />
+          <span class="map-control-value" id="mowingHeadingValue">135° NW-SE</span>
+        </div>
+        <div class="input-group">
+          <label for="stripSpacingCm">Strip Width (cm)</label>
+          <input type="number" id="stripSpacingCm" min="10" max="40" step="1" value="30" />
+        </div>
+        <button id="previewMowingPlanBtn" class="button button-primary" type="button">
+          <span>▦</span> Preview
+        </button>
+      </div>
       <canvas id="mapCanvas" width="1200" height="800"></canvas>
       <div class="map-stats" id="mapStats">Waiting for position data...</div>
     </div>
 
     <div class="path-layout">
         <div class="section">
-          <div class="section-title">Record New Path</div>
+          <div class="section-title">Record New Obstacle Path</div>
           <p class="section-description">
             Record a path by manually driving or dragging the mower. Position samples are captured every 10cm of movement.
           </p>
@@ -537,7 +591,53 @@ ${getAppDialogStyles()}
         </div>
 
         <div class="section">
-          <div class="section-title">Stored Paths</div>
+          <div class="section-title">Record New Mowing Area Perimeter</div>
+          <p class="section-description">
+            Record a named mowing area boundary by driving the mower around the outside edge. Position samples are captured every 10cm of movement.
+          </p>
+
+          <div class="controls">
+            <div class="input-group">
+              <label for="areaPerimeterName">Area Perimeter Name</label>
+              <input type="text" id="areaPerimeterName" placeholder="e.g., Front Lawn" />
+            </div>
+
+            <button id="startAreaRecordingBtn" class="button button-success" type="button">
+              <span>⏺</span> Start Recording
+            </button>
+
+            <button id="stopAreaRecordingBtn" class="button button-danger" type="button" disabled>
+              <span>⏹</span> Stop &amp; Save
+            </button>
+
+            <button id="cancelAreaRecordingBtn" class="button button-secondary" type="button" disabled>
+              <span>✖</span> Cancel
+            </button>
+
+            <div id="areaRecordingIndicator" class="recording-indicator">
+              <div class="recording-dot"></div>
+              <span>Recording...</span>
+            </div>
+          </div>
+
+          <div class="status-box">
+            <div class="status-row">
+              <span class="status-label">Status:</span>
+              <span class="status-value" id="areaRecordingStatus">Ready</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">Points Captured:</span>
+              <span class="status-value" id="areaPointCount">0</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">Current Perimeter:</span>
+              <span class="status-value" id="currentAreaPerimeterName">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Stored Obstacle Paths</div>
           <p class="section-description">
             Manage and execute recorded paths. Drive a path to follow it autonomously, or verify it by joining at the nearest point and looping back to that join point.
           </p>
@@ -555,6 +655,20 @@ ${getAppDialogStyles()}
             </div>
           </div>
         </div>
+
+        <div class="section">
+          <div class="section-title">Stored Mowing Area Perimeters</div>
+          <p class="section-description">
+            Manage mowing area boundaries. Drive starts from the nearest perimeter point in the direction the mower is facing; verify drives to the nearest point, turns to align, then follows the perimeter.
+          </p>
+
+          <div id="areaPerimetersList" class="paths-list">
+            <div class="empty-state">
+              <div class="empty-state-icon">📭</div>
+              <div>No mowing area perimeters recorded yet</div>
+            </div>
+          </div>
+        </div>
     </div>
   </div>
 
@@ -568,6 +682,41 @@ ${getAppDialogScript()}
       return Number(value).toFixed(decimals);
     }
 
+    function jsString(value) {
+      return JSON.stringify(String(value));
+    }
+
+    function normalizeAxisHeading(headingDeg) {
+      const normalized = ((Number(headingDeg) % 180) + 180) % 180;
+      return Number.isFinite(normalized) ? normalized : 0;
+    }
+
+    function describeHeading(headingDeg) {
+      const normalized = normalizeAxisHeading(headingDeg);
+      if (normalized >= 112.5 && normalized < 157.5) {
+        return 'NW-SE';
+      }
+      if (normalized >= 67.5 && normalized < 112.5) {
+        return 'N-S';
+      }
+      if (normalized >= 22.5 && normalized < 67.5) {
+        return 'NE-SW';
+      }
+      return 'E-W';
+    }
+
+    function updateHeadingLabel() {
+      const heading = normalizeAxisHeading(mowingHeadingInput.value);
+      mowingHeadingValue.textContent = \`\${Math.round(heading)}° \${describeHeading(heading)}\`;
+    }
+
+    function setMowingHeading(headingDeg) {
+      const heading = Math.round(normalizeAxisHeading(headingDeg));
+      mowingHeadingInput.value = String(heading);
+      updateHeadingLabel();
+      requestMowingPlanPreview();
+    }
+
     // Position history tracking
     const positionHistory = [];
     const MAX_HISTORY_MS = 10 * 60 * 1000; // 10 minutes
@@ -579,7 +728,16 @@ ${getAppDialogScript()}
     let currentPathName = '';
     let pointCount = 0;
     let storedPaths = [];
+    let areaRecording = false;
+    let currentAreaPerimeterName = '';
+    let areaPointCount = 0;
+    let storedAreaPerimeters = [];
+    let mowingPlanPreview = null;
+    let selectedMowingPlanArea = '';
+    let mapTransform = null;
+    let headingDragStart = null;
     let statusPollInterval = null;
+    let areaStatusPollInterval = null;
 
     // Elements
     const pathNameInput = $("pathName");
@@ -591,6 +749,20 @@ ${getAppDialogScript()}
     const pointCountEl = $("pointCount");
     const currentPathNameEl = $("currentPathName");
     const pathsListEl = $("pathsList");
+    const areaPerimeterNameInput = $("areaPerimeterName");
+    const startAreaRecordingBtn = $("startAreaRecordingBtn");
+    const stopAreaRecordingBtn = $("stopAreaRecordingBtn");
+    const cancelAreaRecordingBtn = $("cancelAreaRecordingBtn");
+    const areaRecordingIndicator = $("areaRecordingIndicator");
+    const areaRecordingStatusEl = $("areaRecordingStatus");
+    const areaPointCountEl = $("areaPointCount");
+    const currentAreaPerimeterNameEl = $("currentAreaPerimeterName");
+    const areaPerimetersListEl = $("areaPerimetersList");
+    const mowingPlanAreaSelect = $("mowingPlanArea");
+    const mowingHeadingInput = $("mowingHeadingDeg");
+    const mowingHeadingValue = $("mowingHeadingValue");
+    const stripSpacingInput = $("stripSpacingCm");
+    const previewMowingPlanBtn = $("previewMowingPlanBtn");
 
     function addPositionToHistory(x, y, heading, timestamp) {
       positionHistory.push({ x, y, heading, timestamp });
@@ -603,7 +775,7 @@ ${getAppDialogScript()}
     }
 
     function drawMap() {
-      if (positionHistory.length === 0 && storedPaths.length === 0) {
+      if (positionHistory.length === 0 && storedPaths.length === 0 && storedAreaPerimeters.length === 0) {
         ctx.fillStyle = "#f3f4f6";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         $("mapStats").textContent = "Waiting for position data...";
@@ -638,6 +810,15 @@ ${getAppDialogScript()}
         }
       }
 
+      for (const path of storedAreaPerimeters) {
+        for (const point of path.points) {
+          minX = Math.min(minX, point.xMeters);
+          maxX = Math.max(maxX, point.xMeters);
+          minY = Math.min(minY, point.yMeters);
+          maxY = Math.max(maxY, point.yMeters);
+        }
+      }
+
       // Add padding to bounds
       const rangeX = maxX - minX || 1;
       const rangeY = maxY - minY || 1;
@@ -654,6 +835,18 @@ ${getAppDialogScript()}
       // Transform functions
       const toCanvasX = (x) => padding + (x - minX) * scale;
       const toCanvasY = (y) => height - padding - (y - minY) * scale;
+      mapTransform = {
+        minX,
+        minY,
+        scale,
+        padding,
+        width,
+        height,
+        toCanvasX,
+        toCanvasY,
+        toWorldX: (x) => minX + ((x - padding) / scale),
+        toWorldY: (y) => minY + ((height - padding - y) / scale),
+      };
 
       // Draw grid
       ctx.strokeStyle = "#e5e7eb";
@@ -734,6 +927,53 @@ ${getAppDialogScript()}
         }
       });
 
+      const perimeterColors = [
+        'rgba(37, 99, 235, 0.75)',
+        'rgba(220, 38, 38, 0.75)',
+        'rgba(5, 150, 105, 0.75)',
+        'rgba(124, 58, 237, 0.75)',
+        'rgba(202, 138, 4, 0.75)',
+      ];
+
+      storedAreaPerimeters.forEach((path, pathIndex) => {
+        const color = perimeterColors[pathIndex % perimeterColors.length];
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 5;
+
+        ctx.beginPath();
+        for (let i = 0; i < path.points.length; i++) {
+          const point = path.points[i];
+          const x = toCanvasX(point.xMeters);
+          const y = toCanvasY(point.yMeters);
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        if (path.points.length > 2) {
+          ctx.closePath();
+        }
+        ctx.stroke();
+
+        if (path.points.length > 0) {
+          const startPoint = path.points[0];
+          const sx = toCanvasX(startPoint.xMeters);
+          const sy = toCanvasY(startPoint.yMeters);
+
+          ctx.fillStyle = color;
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 3;
+          ctx.font = 'bold 14px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.strokeText(path.name, sx, sy + 10);
+          ctx.fillText(path.name, sx, sy + 10);
+        }
+      });
+
+      drawMowingPlanPreview(toCanvasX, toCanvasY);
+
       if (positionHistory.length > 0) {
         // Draw trail with fading (on top of stored paths)
         const now = positionHistory[positionHistory.length - 1].timestamp;
@@ -782,10 +1022,73 @@ ${getAppDialogScript()}
 
         // Update stats
         const distance = Math.max(rangeX, rangeY);
-        $("mapStats").textContent = \`\${positionHistory.length} points | range: \${format(distance, 2)}m | scale: \${format(1/scale, 3)}m/px | current: (\${format(current.x, 2)}, \${format(current.y, 2)})\`;
+        const stripText = mowingPlanPreview ? \` | strips: \${mowingPlanPreview.stripCount}\` : '';
+        $("mapStats").textContent = \`\${positionHistory.length} points | range: \${format(distance, 2)}m | scale: \${format(1/scale, 3)}m/px | current: (\${format(current.x, 2)}, \${format(current.y, 2)})\${stripText}\`;
       } else {
-        $("mapStats").textContent = \`\${storedPaths.length} stored path\${storedPaths.length === 1 ? '' : 's'} | scale: \${format(1/scale, 3)}m/px\`;
+        const storedCount = storedPaths.length + storedAreaPerimeters.length;
+        const stripText = mowingPlanPreview ? \` | strips: \${mowingPlanPreview.stripCount}\` : '';
+        $("mapStats").textContent = \`\${storedCount} stored perimeter\${storedCount === 1 ? '' : 's'} | scale: \${format(1/scale, 3)}m/px\${stripText}\`;
       }
+    }
+
+    function drawMowingPlanPreview(toCanvasX, toCanvasY) {
+      if (!mowingPlanPreview || !Array.isArray(mowingPlanPreview.strips)) {
+        return;
+      }
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(17, 24, 39, 0.72)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([10, 6]);
+
+      mowingPlanPreview.strips.forEach((strip, index) => {
+        const startX = toCanvasX(strip.start.xMeters);
+        const startY = toCanvasY(strip.start.yMeters);
+        const endX = toCanvasX(strip.end.xMeters);
+        const endY = toCanvasY(strip.end.yMeters);
+        ctx.beginPath();
+        if (index % 2 === 0) {
+          ctx.moveTo(startX, startY);
+          ctx.lineTo(endX, endY);
+        } else {
+          ctx.moveTo(endX, endY);
+          ctx.lineTo(startX, startY);
+        }
+        ctx.stroke();
+      });
+
+      ctx.strokeStyle = 'rgba(220, 38, 38, 0.75)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 5]);
+      (mowingPlanPreview.connectors ?? []).forEach((connector) => {
+        if (!Array.isArray(connector) || connector.length < 2) {
+          return;
+        }
+
+        ctx.beginPath();
+        connector.forEach((point, pointIndex) => {
+          const x = toCanvasX(point.xMeters);
+          const y = toCanvasY(point.yMeters);
+          if (pointIndex === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        });
+        ctx.stroke();
+      });
+
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(17, 24, 39, 0.9)';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(
+        \`\${mowingPlanPreview.stripCount} strips @ \${Math.round(mowingPlanPreview.stripSpacingMeters * 100)}cm\`,
+        72,
+        72,
+      );
+      ctx.restore();
     }
 
     async function loadStoredPaths() {
@@ -807,6 +1110,80 @@ ${getAppDialogScript()}
       }
     }
 
+    async function loadStoredAreaPerimeters() {
+      try {
+        const response = await fetch('/api/area-perimeters');
+        const data = await response.json();
+
+        const pathPromises = (data.paths ?? []).map(async (pathInfo) => {
+          const pathResponse = await fetch(\`/api/area-perimeters/\${encodeURIComponent(pathInfo.name)}\`);
+          return await pathResponse.json();
+        });
+
+        storedAreaPerimeters = await Promise.all(pathPromises);
+        renderAreaPerimeters();
+        renderMowingPlanAreaOptions();
+        drawMap();
+      } catch (error) {
+        console.error('Failed to load stored area perimeters:', error);
+      }
+    }
+
+    function renderMowingPlanAreaOptions() {
+      const previousSelection = selectedMowingPlanArea || mowingPlanAreaSelect.value;
+      mowingPlanAreaSelect.innerHTML = storedAreaPerimeters.map((path) => {
+        const selected = path.name === previousSelection ? ' selected' : '';
+        return \`<option value=\${jsString(path.name)}\${selected}>\${path.name}</option>\`;
+      }).join('');
+
+      if (storedAreaPerimeters.length === 0) {
+        mowingPlanAreaSelect.innerHTML = '<option value="">No mowing areas</option>';
+        mowingPlanPreview = null;
+        selectedMowingPlanArea = '';
+        return;
+      }
+
+      selectedMowingPlanArea = mowingPlanAreaSelect.value || storedAreaPerimeters[0].name;
+      mowingPlanAreaSelect.value = selectedMowingPlanArea;
+    }
+
+    async function requestMowingPlanPreview() {
+      const areaName = mowingPlanAreaSelect.value;
+      const headingDeg = normalizeAxisHeading(mowingHeadingInput.value);
+      const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
+
+      if (!areaName || !Number.isFinite(stripSpacingMeters) || stripSpacingMeters <= 0) {
+        mowingPlanPreview = null;
+        drawMap();
+        return;
+      }
+
+      selectedMowingPlanArea = areaName;
+      try {
+        const response = await fetch('/api/mowing-plan/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            areaName,
+            headingDeg,
+            stripSpacingMeters,
+          }),
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to preview mowing plan');
+        }
+
+        mowingPlanPreview = result;
+        drawMap();
+      } catch (error) {
+        mowingPlanPreview = null;
+        drawMap();
+        console.error('Failed to preview mowing plan:', error);
+      }
+    }
+
     function getNextPathName() {
       const obstaclePattern = /^Obstacle (\d+)$/;
       let maxNum = 0;
@@ -821,11 +1198,26 @@ ${getAppDialogScript()}
       return \`Obstacle \${maxNum + 1}\`;
     }
 
+    function getNextAreaPerimeterName() {
+      const areaPattern = /^Mowing Area (\\d+)$/;
+      let maxNum = 0;
+
+      storedAreaPerimeters.forEach((path) => {
+        const match = path.name?.match(areaPattern);
+        if (match) {
+          maxNum = Math.max(maxNum, parseInt(match[1], 10));
+        }
+      });
+
+      return \`Mowing Area \${maxNum + 1}\`;
+    }
+
     function updateRecordingUi() {
       startRecordingBtn.disabled = recording;
       stopRecordingBtn.disabled = !recording;
       cancelRecordingBtn.disabled = !recording;
       pathNameInput.disabled = recording;
+      startAreaRecordingBtn.disabled = recording || areaRecording;
 
       if (recording) {
         recordingIndicator.classList.add('active');
@@ -840,6 +1232,28 @@ ${getAppDialogScript()}
       }
 
       pointCountEl.textContent = String(pointCount);
+    }
+
+    function updateAreaRecordingUi() {
+      startAreaRecordingBtn.disabled = recording || areaRecording;
+      stopAreaRecordingBtn.disabled = !areaRecording;
+      cancelAreaRecordingBtn.disabled = !areaRecording;
+      areaPerimeterNameInput.disabled = areaRecording;
+      startRecordingBtn.disabled = recording || areaRecording;
+
+      if (areaRecording) {
+        areaRecordingIndicator.classList.add('active');
+        areaRecordingStatusEl.textContent = 'Recording';
+        areaRecordingStatusEl.style.color = 'var(--danger-color)';
+        currentAreaPerimeterNameEl.textContent = currentAreaPerimeterName;
+      } else {
+        areaRecordingIndicator.classList.remove('active');
+        areaRecordingStatusEl.textContent = 'Ready';
+        areaRecordingStatusEl.style.color = 'var(--success-color)';
+        currentAreaPerimeterNameEl.textContent = '—';
+      }
+
+      areaPointCountEl.textContent = String(areaPointCount);
     }
 
     function renderPaths() {
@@ -868,13 +1282,54 @@ ${getAppDialogScript()}
               </div>
             </div>
             <div class="path-actions">
-              <button class="button button-primary button-small" type="button" onclick="drivePath('\${path.name}')">
+              <button class="button button-primary button-small" type="button" onclick="drivePath(\${jsString(path.name)})">
                 <span>▶️</span> Drive
               </button>
-              <button class="button button-success button-small" type="button" onclick="verifyPath('\${path.name}')">
+              <button class="button button-success button-small" type="button" onclick="verifyPath(\${jsString(path.name)})">
                 <span>✓</span> Verify
               </button>
-              <button class="button button-danger button-small" type="button" onclick="deletePath('\${path.name}')">
+              <button class="button button-danger button-small" type="button" onclick="deletePath(\${jsString(path.name)})">
+                <span>🗑️</span> Delete
+              </button>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function renderAreaPerimeters() {
+      if (storedAreaPerimeters.length === 0) {
+        areaPerimetersListEl.innerHTML = \`
+          <div class="empty-state">
+            <div class="empty-state-icon">📭</div>
+            <div>No mowing area perimeters recorded yet</div>
+          </div>
+        \`;
+        return;
+      }
+
+      areaPerimetersListEl.innerHTML = storedAreaPerimeters.map((path) => {
+        const pointTotal = path.points?.length ?? path.pointCount ?? 0;
+        const totalDistance = path.metadata?.totalDistance ?? 0;
+        const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
+
+        return \`
+          <div class="path-item">
+            <div class="path-info">
+              <div class="path-name">\${path.name}</div>
+              <div class="path-meta">
+                \${pointTotal} points • \${totalDistance.toFixed(1)}m perimeter
+                • Created \${createdAt}
+              </div>
+            </div>
+            <div class="path-actions">
+              <button class="button button-primary button-small" type="button" onclick="driveAreaPerimeter(\${jsString(path.name)})">
+                <span>▶️</span> Drive
+              </button>
+              <button class="button button-success button-small" type="button" onclick="verifyAreaPerimeter(\${jsString(path.name)})">
+                <span>✓</span> Verify
+              </button>
+              <button class="button button-danger button-small" type="button" onclick="deleteAreaPerimeter(\${jsString(path.name)})">
                 <span>🗑️</span> Delete
               </button>
             </div>
@@ -903,6 +1358,29 @@ ${getAppDialogScript()}
       if (statusPollInterval) {
         clearInterval(statusPollInterval);
         statusPollInterval = null;
+      }
+    }
+
+    function startAreaStatusPolling() {
+      stopAreaStatusPolling();
+      areaStatusPollInterval = setInterval(async () => {
+        try {
+          const response = await fetch('/api/area-perimeter/record/status');
+          if (response.ok) {
+            const status = await response.json();
+            areaPointCount = status.pointCount ?? 0;
+            updateAreaRecordingUi();
+          }
+        } catch (error) {
+          console.error('Failed to fetch area perimeter recording status:', error);
+        }
+      }, 500);
+    }
+
+    function stopAreaStatusPolling() {
+      if (areaStatusPollInterval) {
+        clearInterval(areaStatusPollInterval);
+        areaStatusPollInterval = null;
       }
     }
 
@@ -980,8 +1458,146 @@ ${getAppDialogScript()}
       }
     });
 
+    startAreaRecordingBtn.addEventListener('click', async () => {
+      const pathName = areaPerimeterNameInput.value.trim() || getNextAreaPerimeterName();
+
+      try {
+        const response = await fetch('/api/area-perimeter/record/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pathName }),
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || 'Failed to start area perimeter recording');
+        }
+
+        areaRecording = true;
+        currentAreaPerimeterName = pathName;
+        areaPointCount = 0;
+        updateRecordingUi();
+        updateAreaRecordingUi();
+        startAreaStatusPolling();
+      } catch (error) {
+        alert('Failed to start area perimeter recording: ' + error.message);
+      }
+    });
+
+    stopAreaRecordingBtn.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/api/area-perimeter/record/stop', {
+          method: 'POST',
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || 'Failed to stop area perimeter recording');
+        }
+
+        const result = await response.json();
+        areaRecording = false;
+        currentAreaPerimeterName = '';
+        areaPointCount = 0;
+        areaPerimeterNameInput.value = '';
+        updateRecordingUi();
+        updateAreaRecordingUi();
+        stopAreaStatusPolling();
+        await loadStoredAreaPerimeters();
+        areaPerimeterNameInput.value = getNextAreaPerimeterName();
+        selectedMowingPlanArea = result.name;
+        mowingPlanAreaSelect.value = result.name;
+        await requestMowingPlanPreview();
+
+        const savedPointCount = result.pointCount ?? result.metadata?.pointCount ?? 0;
+        alert(\`Area perimeter saved: \${result.name}\n\${savedPointCount} points recorded\`);
+      } catch (error) {
+        alert('Failed to save area perimeter: ' + error.message);
+      }
+    });
+
+    cancelAreaRecordingBtn.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/api/area-perimeter/record/cancel', {
+          method: 'POST',
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || 'Failed to cancel area perimeter recording');
+        }
+
+        areaRecording = false;
+        currentAreaPerimeterName = '';
+        areaPointCount = 0;
+        updateRecordingUi();
+        updateAreaRecordingUi();
+        stopAreaStatusPolling();
+      } catch (error) {
+        alert('Failed to cancel area perimeter recording: ' + error.message);
+      }
+    });
+
+    mowingPlanAreaSelect.addEventListener('change', () => {
+      selectedMowingPlanArea = mowingPlanAreaSelect.value;
+      requestMowingPlanPreview();
+    });
+
+    mowingHeadingInput.addEventListener('input', () => {
+      updateHeadingLabel();
+      requestMowingPlanPreview();
+    });
+
+    stripSpacingInput.addEventListener('change', () => {
+      requestMowingPlanPreview();
+    });
+
+    previewMowingPlanBtn.addEventListener('click', () => {
+      requestMowingPlanPreview();
+    });
+
+    canvas.addEventListener('mousedown', (event) => {
+      if (!mapTransform) {
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const canvasX = (event.clientX - rect.left) * scaleX;
+      const canvasY = (event.clientY - rect.top) * scaleY;
+      headingDragStart = {
+        x: mapTransform.toWorldX(canvasX),
+        y: mapTransform.toWorldY(canvasY),
+      };
+    });
+
+    canvas.addEventListener('mouseup', (event) => {
+      if (!mapTransform || !headingDragStart) {
+        headingDragStart = null;
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const canvasX = (event.clientX - rect.left) * scaleX;
+      const canvasY = (event.clientY - rect.top) * scaleY;
+      const worldX = mapTransform.toWorldX(canvasX);
+      const worldY = mapTransform.toWorldY(canvasY);
+      const dx = worldX - headingDragStart.x;
+      const dy = worldY - headingDragStart.y;
+      headingDragStart = null;
+
+      if (Math.hypot(dx, dy) < 0.05) {
+        return;
+      }
+
+      setMowingHeading((Math.atan2(dy, dx) * 180) / Math.PI);
+    });
+
     window.drivePath = async function(pathName) {
-      if (recording) {
+      if (recording || areaRecording) {
         alert('Stop recording before starting a path drive.');
         return;
       }
@@ -990,12 +1606,30 @@ ${getAppDialogScript()}
     };
 
     window.verifyPath = async function(pathName) {
-      if (recording) {
+      if (recording || areaRecording) {
         alert('Stop recording before starting a path verification run.');
         return;
       }
 
       await runPathAction(pathName, '/api/path/verify', 'verify', 'Path verification complete');
+    };
+
+    window.driveAreaPerimeter = async function(pathName) {
+      if (recording || areaRecording) {
+        alert('Stop recording before starting an area perimeter drive.');
+        return;
+      }
+
+      await runPathAction(pathName, '/api/area-perimeter/drive', 'drive area perimeter', 'Area perimeter drive complete');
+    };
+
+    window.verifyAreaPerimeter = async function(pathName) {
+      if (recording || areaRecording) {
+        alert('Stop recording before starting an area perimeter verification run.');
+        return;
+      }
+
+      await runPathAction(pathName, '/api/area-perimeter/verify', 'verify area perimeter', 'Area perimeter verification complete');
     };
 
     async function runPathAction(pathName, endpoint, actionName, successLabel) {
@@ -1055,6 +1689,27 @@ ${getAppDialogScript()}
       }
     };
 
+    window.deleteAreaPerimeter = async function(pathName) {
+      try {
+        const response = await fetch('/api/area-perimeter/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pathName }),
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || 'Failed to delete area perimeter');
+        }
+
+        await loadStoredAreaPerimeters();
+        areaPerimeterNameInput.value = getNextAreaPerimeterName();
+        await requestMowingPlanPreview();
+      } catch (error) {
+        alert('Failed to delete area perimeter: ' + error.message);
+      }
+    };
+
     async function updateStatus() {
       try {
         const response = await fetch('/api/primitives');
@@ -1083,6 +1738,8 @@ ${getAppDialogScript()}
     }
 
     updateRecordingUi();
+    updateAreaRecordingUi();
+    updateHeadingLabel();
 
     // Load stored paths once at startup, then refresh every 10 seconds
     loadStoredPaths().then(() => {
@@ -1091,7 +1748,15 @@ ${getAppDialogScript()}
       }
       updateRecordingUi();
     });
+    loadStoredAreaPerimeters().then(() => {
+      if (!areaRecording) {
+        areaPerimeterNameInput.value = getNextAreaPerimeterName();
+      }
+      updateAreaRecordingUi();
+      requestMowingPlanPreview();
+    });
     setInterval(loadStoredPaths, 10000);
+    setInterval(loadStoredAreaPerimeters, 10000);
 
     // Poll for updates
     setInterval(updateStatus, 500);

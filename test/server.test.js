@@ -54,8 +54,12 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   assert.equal(manualRoute.contentType.startsWith('text/html'), true);
   assert.equal(manualRoute.body.includes('Drive & Paths'), true);
   assert.equal(manualRoute.body.includes('id="mapCanvas"'), true);
+  assert.equal(manualRoute.body.includes('id="mowingPlanArea"'), true);
+  assert.equal(manualRoute.body.includes('id="mowingHeadingDeg"'), true);
   assert.equal(manualRoute.body.includes('id="startRecordingBtn"'), true);
+  assert.equal(manualRoute.body.includes('id="startAreaRecordingBtn"'), true);
   assert.equal(manualRoute.body.includes('id="pathsList"'), true);
+  assert.equal(manualRoute.body.includes('id="areaPerimetersList"'), true);
   assert.equal(manualRoute.body.includes('id="stopPathBtn"'), true);
   assert.equal(manualRoute.body.includes('Controller Demand'), false);
   assert.equal(manualRoute.body.includes('Motion Feedback'), false);
@@ -136,9 +140,14 @@ test('tuning pages expose the simplified drive training controls', () => {
   const manualPage = getManualDrivePageHtml();
   assert.equal(manualPage.includes('Drive & Paths'), true);
   assert.equal(manualPage.includes('id="mapCanvas"'), true);
+  assert.equal(manualPage.includes('id="mowingPlanArea"'), true);
+  assert.equal(manualPage.includes('id="mowingHeadingDeg"'), true);
+  assert.equal(manualPage.includes('id="stripSpacingCm"'), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
+  assert.equal(manualPage.includes('id="startAreaRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="stopPathBtn"'), true);
   assert.equal(manualPage.includes('id="pathsList"'), true);
+  assert.equal(manualPage.includes('id="areaPerimetersList"'), true);
   assert.equal(manualPage.includes('Controller Demand'), false);
   assert.equal(manualPage.includes('Motion Feedback'), false);
   assert.equal(manualPage.includes('GNSS'), false);
@@ -146,6 +155,9 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('appDialogBackdrop'), true);
   assert.equal(manualPage.includes('onclick="verifyPath('), true);
   assert.equal(manualPage.includes('/api/path/verify'), true);
+  assert.equal(manualPage.includes('/api/area-perimeter/verify'), true);
+  assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);
+  assert.equal(manualPage.includes('/api/mowing-plan/preview'), true);
   assert.equal(manualPage.includes('nearest point'), true);
   assert.equal(manualPage.includes('confirm('), false);
 

@@ -7,3 +7,4 @@ export * from "./purePursuitFollower.js";
 export * from "./pathStore.js";
 export * from "./pathRecorder.js";
 export * from "./pathVerification.js";
+export * from "./mowingPlanner.js";

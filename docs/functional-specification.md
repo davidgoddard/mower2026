@@ -494,6 +494,14 @@ The web page will offer a button to open a combined drive-and-paths page for thi
 
 A path will be associated with a name which will default to 'Obstacle N' where N is an increasing number based on already stored obstacles.  The user can add new names. For any name, the user can erase which removes it completely or they can 'record' in which case it starts capturing the path as the user moves/drives the mower. And a 'stop and save' button which will persist the array of positions against the name.
 
+The same page shall also support recording one or more named mowing area perimeters. A mowing area perimeter is captured from position samples every 10cm, is persisted separately from obstacle perimeters, and defaults to a generated mowing-area name when the operator does not provide one. The live canvas shall auto-scale to show the current position history, stored obstacle perimeters, and stored mowing area perimeters together.
+
+For a selected mowing area perimeter, the page shall be able to preview logical mowing strips before motion starts. The operator can choose the strip heading, including by dragging a line on the canvas, and can choose the strip spacing. The initial strip spacing shall be 30cm for the 40cm blade width to provide overlap. The system shall clip the parallel strip lines to the selected mowing area perimeter and draw the resulting strips on the canvas.
+
+Mowing strip previews shall treat recorded obstacle perimeters as exclusion zones. Strips shall be split rather than crossing obstacle boundaries, and connector previews between strips shall route around an obstacle perimeter when the direct connector would cross the obstacle.
+
+The server shall seed a `Test Area` mowing area perimeter and a `Test Perimeter` obstacle perimeter when those names are not already stored, so the operator can review strip clipping and obstacle routing on the canvas without first recording a real lawn.
+
 ### Re-tracing
 
 From the same page as for tracing the obstacle's perimeter, there will be a button to 'Drive'.
@@ -505,6 +513,10 @@ The drive button will immediately line-follow the stored path from the mower's c
 The verify button will first execute a segment-style approach to about 10cm short of the nearest point, then continue around the stored path until it returns to that join point.
 
 For closed obstacle perimeters, the recorded path points shall be treated as the inner safety boundary. The runtime shall bias the followed path outward from the closed loop and insert conservative outward points between recorded samples, so smoothing and interpolation do not cut inside the traced obstacle perimeter.
+
+For mowing area perimeters, the recorded points are the boundary to follow and shall not receive the obstacle outward offset. Driving a mowing area perimeter assumes the mower is already on or close to the perimeter: the runtime shall choose the nearest recorded perimeter point and continue in the direction that best matches the mower's current heading. Verifying a mowing area perimeter shall segment-drive to the nearest perimeter point, stop there, turn to align with the chosen path direction, and then switch to the path follower.
+
+Generated strip previews define geometry only. They do not start mowing motion until an execution workflow is added.
 
 The closed-loop tolerance, closed-loop detection tolerance, verification approach standoff, verification turn-only distance, obstacle outward offset, and pure-pursuit lookahead distances shall be loaded from persisted path-following configuration rather than being hard-coded in the path helpers.
 

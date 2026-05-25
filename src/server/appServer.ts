@@ -28,7 +28,8 @@ import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition } from "../geometry/positionTypes.js";
 import { MAX_PORT_NUMBER, MAX_WHEEL_OUTPUT_PERCENT_DEFAULT, MAX_WHEEL_SPEED_MPS_DEFAULT, SENSOR_CONTROLLER_POLL_INTERVAL_MS } from "../constants.js";
-import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPointsForDirection, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan } from "../pathfollowing/index.js";
+import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPointsForDirection, buildMowingPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan } from "../pathfollowing/index.js";
+import type { PathPoint } from "../pathfollowing/index.js";
 
 interface StartMowerServerOptions {
   appName?: string;
@@ -93,6 +94,52 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 const PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG = 2;
+const TEST_AREA_NAME = "Test Area";
+const TEST_PERIMETER_NAME = "Test Perimeter";
+
+function makePathPoint(xMeters: number, yMeters: number, capturedAt: number): PathPoint {
+  return { xMeters, yMeters, capturedAt };
+}
+
+function buildTestAreaPoints(): PathPoint[] {
+  const capturedAt = Date.now();
+  return [
+    makePathPoint(0.5, 0.5, capturedAt),
+    makePathPoint(9.5, 0.5, capturedAt + 1),
+    makePathPoint(9.5, 5.5, capturedAt + 2),
+    makePathPoint(0.5, 5.5, capturedAt + 3),
+    makePathPoint(0.5, 0.5, capturedAt + 4),
+  ];
+}
+
+function buildTestPerimeterPoints(): PathPoint[] {
+  const capturedAt = Date.now();
+  return [
+    makePathPoint(4.1, 2.0, capturedAt),
+    makePathPoint(5.7, 2.0, capturedAt + 1),
+    makePathPoint(6.0, 3.0, capturedAt + 2),
+    makePathPoint(5.4, 4.0, capturedAt + 3),
+    makePathPoint(3.9, 3.7, capturedAt + 4),
+    makePathPoint(3.6, 2.7, capturedAt + 5),
+    makePathPoint(4.1, 2.0, capturedAt + 6),
+  ];
+}
+
+async function ensureDefaultReviewPerimeters(
+  obstacleStore: PathStore,
+  areaStore: PathStore,
+  logger: SessionLogger,
+): Promise<void> {
+  if (!await areaStore.pathExists(TEST_AREA_NAME)) {
+    await areaStore.savePath(TEST_AREA_NAME, buildTestAreaPoints());
+    logger.info("test_area.seeded", { name: TEST_AREA_NAME });
+  }
+
+  if (!await obstacleStore.pathExists(TEST_PERIMETER_NAME)) {
+    await obstacleStore.savePath(TEST_PERIMETER_NAME, buildTestPerimeterPoints());
+    logger.info("test_perimeter.seeded", { name: TEST_PERIMETER_NAME });
+  }
+}
 
 export function routeServerRequest(
   method: string,
@@ -266,6 +313,15 @@ export function routeServerRequest(
     };
   }
 
+  if (method === "GET" && pathname === "/api/area-perimeters") {
+    return {
+      statusCode: 200,
+      contentType: "application/json; charset=utf-8",
+      body: encodeJson({ paths: [] }), // Will be populated async
+      logNotFound: false,
+    };
+  }
+
   return {
     statusCode: 404,
     contentType: "application/json; charset=utf-8",
@@ -307,7 +363,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let geometryCalibration: GeometryCalibration | null = null;
   let pathFollowingConfig: PathFollowingConfig | null = null;
   let pathStore: PathStore | null = null;
+  let areaPerimeterStore: PathStore | null = null;
   let pathRecorder: PathRecorder | null = null;
+  let areaPerimeterRecorder: PathRecorder | null = null;
   let pathFollower: PurePursuitFollower | null = null;
   logger.transition("boot", "starting", { port, host });
 
@@ -315,6 +373,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     storageDirectory: "./paths",
     logger: logger.child({ context: "paths", source: "PathStore" }),
   });
+  areaPerimeterStore = new PathStore({
+    storageDirectory: "./area-perimeters",
+    filenameSuffix: ".area.path.json",
+    logger: logger.child({ context: "paths", source: "AreaPerimeterStore" }),
+  });
+  await ensureDefaultReviewPerimeters(pathStore, areaPerimeterStore, logger);
 
   const server = createServer(async (request: any, response: any) => {
     const method = request.method ?? "GET";
@@ -392,12 +456,80 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         }
       }
 
+      if ((requestUrl.pathname === "/api/area-perimeters" || requestUrl.pathname === "/api/area-perimeter/list") && areaPerimeterStore) {
+        try {
+          const pathNames = await areaPerimeterStore.listPaths();
+          const pathEntries = await Promise.all(
+            pathNames.map(async (name) => {
+              try {
+                const path = await areaPerimeterStore!.loadPath(name);
+                return {
+                  name: path.name,
+                  pointCount: path.points.length,
+                  totalDistance: path.metadata.totalDistance,
+                  createdAt: path.createdAt,
+                };
+              } catch (error) {
+                logger.warn("area_perimeter_store.entry_skipped", {
+                  name,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                return null;
+              }
+            })
+          );
+          const paths = pathEntries.filter((path): path is NonNullable<typeof path> => path !== null);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(requestUrl.pathname === "/api/area-perimeters" ? { paths } : paths));
+          return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: message }));
+          return;
+        }
+      }
+
       // Load specific path with all points
       const pathLoadMatch = requestUrl.pathname.match(/^\/api\/paths\/([^\/]+)$/);
       if (pathLoadMatch && pathStore) {
         try {
           const pathName = decodeURIComponent(pathLoadMatch[1]);
           const path = await pathStore.loadPath(pathName);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(path));
+          return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: message }));
+          return;
+        }
+      }
+
+      if (requestUrl.pathname === "/api/path/record/status" && pathRecorder) {
+        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson({
+          recording: pathRecorder.isRecording(),
+          pointCount: pathRecorder.getPointCount(),
+        }));
+        return;
+      }
+
+      if (requestUrl.pathname === "/api/area-perimeter/record/status" && areaPerimeterRecorder) {
+        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson({
+          recording: areaPerimeterRecorder.isRecording(),
+          pointCount: areaPerimeterRecorder.getPointCount(),
+        }));
+        return;
+      }
+
+      const areaPerimeterLoadMatch = requestUrl.pathname.match(/^\/api\/area-perimeters\/([^\/]+)$/);
+      if (areaPerimeterLoadMatch && areaPerimeterStore) {
+        try {
+          const pathName = decodeURIComponent(areaPerimeterLoadMatch[1]);
+          const path = await areaPerimeterStore.loadPath(pathName);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson(path));
           return;
@@ -511,6 +643,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             response.end(encodeJson({ error: "path_already_recording" }));
             return;
           }
+          if (areaPerimeterRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "area_perimeter_recording_active" }));
+            return;
+          }
 
           pathRecorder.startRecording(pathName);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -531,6 +668,51 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           await pathStore.deletePath(pathName);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ deleted: true, pathName }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/area-perimeter/record/start" && areaPerimeterRecorder) {
+          const data = JSON.parse(body);
+          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
+          if (pathName.length === 0) {
+            throw new Error("path_name_required");
+          }
+          if (pathFollower?.getState().isFollowing) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "path_following_active" }));
+            return;
+          }
+          if (pathRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "path_recording_active" }));
+            return;
+          }
+          if (areaPerimeterRecorder.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "area_perimeter_already_recording" }));
+            return;
+          }
+
+          areaPerimeterRecorder.startRecording(pathName);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            recording: true,
+            pathName,
+            pointCount: areaPerimeterRecorder.getPointCount(),
+          }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/area-perimeter/delete" && areaPerimeterStore) {
+          const data = JSON.parse(body);
+          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
+          if (pathName.length === 0) {
+            throw new Error("path_name_required");
+          }
+
+          await areaPerimeterStore.deletePath(pathName);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ deleted: true, pathName }));
           return;
@@ -577,6 +759,44 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
+        if (requestUrl.pathname === "/api/area-perimeter/record/stop" && areaPerimeterRecorder) {
+          if (!areaPerimeterRecorder.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "not_recording" }));
+            return;
+          }
+
+          const savedPath = await areaPerimeterRecorder.stopAndSave();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            ...savedPath,
+            pointCount: savedPath.metadata.pointCount,
+          }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/area-perimeter/record/cancel" && areaPerimeterRecorder) {
+          if (!areaPerimeterRecorder.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "not_recording" }));
+            return;
+          }
+
+          areaPerimeterRecorder.cancel();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ cancelled: true }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/area-perimeter/record/status" && areaPerimeterRecorder) {
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            recording: areaPerimeterRecorder.isRecording(),
+            pointCount: areaPerimeterRecorder.getPointCount(),
+          }));
+          return;
+        }
+
         // Drive stored path by staging to the outer edge of the join point and then
         // following the stored path in the chosen direction.
         if (requestUrl.pathname === "/api/path/drive" && driveController && turnController && pathFollower && pathStore && poseFusion) {
@@ -588,6 +808,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           if (pathRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
             response.end(encodeJson({ error: "path_recording_active" }));
+            return;
+          }
+          if (areaPerimeterRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "area_perimeter_recording_active" }));
             return;
           }
 
@@ -706,6 +931,47 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
+        if (requestUrl.pathname === "/api/area-perimeter/drive" && pathFollower && areaPerimeterStore && poseFusion) {
+          const data = JSON.parse(body);
+          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
+          if (pathName.length === 0) {
+            throw new Error("path_name_required");
+          }
+          if (pathRecorder?.isRecording() || areaPerimeterRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "path_recording_active" }));
+            return;
+          }
+
+          const path = await areaPerimeterStore.loadPath(pathName);
+          if (path.points.length === 0) {
+            throw new Error("path_empty");
+          }
+
+          const pathFollowingParameters = pathFollowingConfig?.getParameters();
+          const currentPose = poseFusion.getCurrentPose();
+          const joinPlan = buildPerimeterJoinPlan(path.points, currentPose, pathFollowingParameters);
+          if (joinPlan === null) {
+            throw new Error("path_too_short_for_drive");
+          }
+
+          const drivePoints = buildPerimeterPathPointsFromPlan(path.points, joinPlan, pathFollowingParameters);
+          if (drivePoints.length < 2) {
+            throw new Error("path_too_short_for_drive");
+          }
+
+          const result = await pathFollower.followPathPoints(drivePoints);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            mode: "area_perimeter_drive",
+            pathName,
+            phase: "follow",
+            joinPlan,
+            ...result,
+          }));
+          return;
+        }
+
         // Verify stored path using an outer-edge approach to the nearest join point,
         // then a full loop back to it.
         if (requestUrl.pathname === "/api/path/verify" && driveController && turnController && pathFollower && pathStore && poseFusion) {
@@ -717,6 +983,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           if (pathRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
             response.end(encodeJson({ error: "path_recording_active" }));
+            return;
+          }
+          if (areaPerimeterRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "area_perimeter_recording_active" }));
             return;
           }
 
@@ -831,6 +1102,139 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             phase: "follow",
             approachResult,
             ...result,
+          }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/area-perimeter/verify" && driveController && turnController && pathFollower && areaPerimeterStore && poseFusion) {
+          const data = JSON.parse(body);
+          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
+          if (pathName.length === 0) {
+            throw new Error("path_name_required");
+          }
+          if (pathRecorder?.isRecording() || areaPerimeterRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "path_recording_active" }));
+            return;
+          }
+
+          const path = await areaPerimeterStore.loadPath(pathName);
+          if (path.points.length === 0) {
+            throw new Error("path_empty");
+          }
+
+          const currentPose = poseFusion.getCurrentPose();
+          const pathFollowingParameters = pathFollowingConfig?.getParameters();
+          const joinPlan = buildPerimeterJoinPlan(path.points, currentPose, pathFollowingParameters);
+          if (joinPlan === null) {
+            throw new Error("path_too_short_for_verification");
+          }
+
+          let approachResult: Record<string, unknown> = {
+            phase: "already_at_join",
+            joinPoint: joinPlan.joinPoint,
+            tangentHeadingDeg: joinPlan.tangentHeading,
+          };
+          if (!joinPlan.turnOnly) {
+            const driveResult = await driveController.executeDrive({
+              targetPosition: createPosition(joinPlan.approachTarget.xMeters, joinPlan.approachTarget.yMeters),
+              learningEnabled: true,
+            });
+            approachResult = {
+              phase: "nearest_perimeter_drive",
+              joinPoint: joinPlan.joinPoint,
+              tangentHeadingDeg: joinPlan.tangentHeading,
+              approachTarget: joinPlan.approachTarget,
+              driveResult,
+            };
+
+            if (driveResult.status !== "success") {
+              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+              response.end(encodeJson({
+                mode: "area_perimeter_verify",
+                pathName,
+                completed: false,
+                reason: driveResult.status === "stopped" ? "user_stopped" : "error",
+                phase: "approach",
+                approachResult,
+              }));
+              return;
+            }
+          }
+
+          const poseBeforeFollow = poseFusion.getCurrentPose();
+          const turnAngle = headingDifference(poseBeforeFollow.heading, joinPlan.tangentHeading);
+          if (Math.abs(unwrapRelativeAngle(turnAngle)) > PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG) {
+            const turnResult = await turnController.executeTurn({
+              targetAngle: turnAngle,
+              direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
+              learningEnabled: true,
+            });
+            approachResult = {
+              ...approachResult,
+              phase: "turn_to_join",
+              turnResult,
+            };
+
+            if (turnResult.status !== "success") {
+              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+              response.end(encodeJson({
+                mode: "area_perimeter_verify",
+                pathName,
+                completed: false,
+                reason: turnResult.status === "stopped" ? "user_stopped" : "error",
+                phase: "approach",
+                approachResult,
+              }));
+              return;
+            }
+          }
+
+          const perimeterPoints = buildPerimeterPathPointsFromPlan(path.points, joinPlan, pathFollowingParameters);
+          if (perimeterPoints.length < 2) {
+            throw new Error("path_too_short_for_verification");
+          }
+
+          const result = await pathFollower.followPathPoints(perimeterPoints);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            mode: "area_perimeter_verify",
+            pathName,
+            phase: "follow",
+            approachResult,
+            ...result,
+          }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/mowing-plan/preview" && areaPerimeterStore && pathStore) {
+          const data = JSON.parse(body);
+          const areaName = typeof data.areaName === "string" ? data.areaName.trim() : "";
+          const headingDeg = Number(data.headingDeg);
+          const stripSpacingMeters = data.stripSpacingMeters === undefined ? undefined : Number(data.stripSpacingMeters);
+          if (areaName.length === 0) {
+            throw new Error("area_name_required");
+          }
+          if (!Number.isFinite(headingDeg)) {
+            throw new Error("heading_required");
+          }
+
+          const area = await areaPerimeterStore.loadPath(areaName);
+          const obstacleNames = await pathStore.listPaths();
+          const obstacles = await Promise.all(obstacleNames.map(async (obstacleName) => {
+            const obstacle = await pathStore!.loadPath(obstacleName);
+            return obstacle.points;
+          }));
+          const plan = buildMowingPlan(area.points, {
+            headingDeg,
+            stripSpacingMeters,
+            bladeWidthMeters: 0.4,
+            obstacles,
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            areaName,
+            ...plan,
           }));
           return;
         }
@@ -1146,6 +1550,16 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         poseFusion: poseFusion!,
       });
 
+      if (areaPerimeterStore) {
+        areaPerimeterRecorder = new PathRecorder({
+          logger: logger.child({ context: "paths", source: "AreaPerimeterRecorder" }),
+          distanceThreshold: 0.1,
+        }, {
+          pathStore: areaPerimeterStore,
+          poseFusion: poseFusion!,
+        });
+      }
+
       const pathFollowingParameters = pathFollowingConfig?.getParameters();
       pathFollower = new PurePursuitFollower({
         targetSpeed: MAX_WHEEL_SPEED_MPS_DEFAULT * 0.8,
@@ -1242,6 +1656,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       await pathFollower?.stop();
       if (pathRecorder?.isRecording()) {
         pathRecorder.cancel();
+      }
+      if (areaPerimeterRecorder?.isRecording()) {
+        areaPerimeterRecorder.cancel();
       }
       await manualDriveCoordinator?.stop();
       await poseFusion?.stop();

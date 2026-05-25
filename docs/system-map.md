@@ -196,25 +196,39 @@ This document maps problem domains to candidate files removing the need for Code
   - integrates with retry system via checkpoint creation
   - algorithm-specific logging with `pure_pursuit.*` prefixes
 - `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
-  - file format: `{name}.path.json` in configured storage directory
+  - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
   - in-memory caching for loaded paths
   - path metadata: total distance, point count, creation timestamp
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification starts at the nearest point and loops back to the join point
   - verification approach stages to the outer edge of the join point from the mower's current position, then uses an on-the-spot turn if the arrival heading needs to be corrected
   - closed obstacle loops are expanded outward with inserted outward midpoints so recorded waypoints are treated as the inner safety limit rather than a smoothed centreline to cut through
+  - mowing area perimeter helpers join the nearest recorded point directly, preserve the exact perimeter geometry without obstacle offsetting, and choose the follow direction from the mower's current heading
   - path safety distances are supplied from `PathFollowingConfig` rather than hard-coded in this helper
+- `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
+  - normalizes the requested mowing axis to 0-180 degrees because opposite directions produce the same strip layout
+  - clips parallel strips to the selected mowing area perimeter using the requested strip spacing, defaulting to 30cm spacing for the 40cm blade
+  - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
+  - returns logical strip segments for canvas preview and future execution planning
 - `src/server/manualDrivePage.ts`: combined Drive & Paths UI
   - live position map at the top of the page
   - manual-drive telemetry cards
   - path recording controls for named obstacle paths
+  - mowing area perimeter recording controls and stored perimeter management
+  - mowing strip preview controls for selecting an area, setting strip width, and setting the strip angle with either a slider or a canvas drag gesture
   - drive and verify actions for stored paths
+  - canvas map auto-scales across live position history, obstacle paths, and mowing area perimeters
+  - canvas map overlays generated mowing strips and obstacle-aware connectors for the selected area
   - prominent stop button for path following aborts
 - `src/server/pathTracingPage.ts`: legacy wrapper that serves the combined Drive & Paths page
 - Path tracing server behavior:
   - drive immediately line-follows the stored path from the current position
   - verify first executes a segment-style approach to about 10cm short of the nearest point on the stored path
   - verify then follows the rotated loop back to the join point
+  - mowing area perimeter drive starts path following from the nearest perimeter point in the direction closest to the mower's current heading
+  - mowing area perimeter verify segment-drives to the nearest perimeter point, turns to align with the chosen path direction, then follows the perimeter
+  - mowing plan preview clips parallel strip lines to the selected mowing area perimeter, excludes stored obstacle perimeters, and returns the strips/connectors without starting motion
+  - startup seeds `Test Area` and `Test Perimeter` if those names are not already stored, giving the canvas a review fixture for mowing strip previews
 - Path-following API endpoints:
   - `GET /api/path/list` - list stored paths for the page
   - `POST /api/path/record/start` - start recording a named path
@@ -225,6 +239,16 @@ This document maps problem domains to candidate files removing the need for Code
   - `POST /api/path/verify` - join a stored path at the nearest point and loop back to that join point
   - `POST /api/path/stop` - stop active path following
   - `POST /api/path/delete` - delete a stored path
+  - `GET /api/area-perimeters` - list stored mowing area perimeters
+  - `GET /api/area-perimeters/{name}` - load a mowing area perimeter with points
+  - `POST /api/area-perimeter/record/start` - start recording a named mowing area perimeter
+  - `POST /api/area-perimeter/record/stop` - stop recording and save the mowing area perimeter
+  - `POST /api/area-perimeter/record/cancel` - discard the current mowing area perimeter recording
+  - `GET /api/area-perimeter/record/status` - current mowing area perimeter recording point count
+  - `POST /api/area-perimeter/drive` - follow a stored mowing area perimeter from the nearest point and current-facing direction
+  - `POST /api/area-perimeter/verify` - drive to the nearest mowing area perimeter point, align, and follow it
+  - `POST /api/area-perimeter/delete` - delete a stored mowing area perimeter
+  - `POST /api/mowing-plan/preview` - generate a strip preview for a selected mowing area perimeter, heading, and strip spacing
   - subscribes to `poseUpdate` events from pose fusion
   - records position every 10cm (configurable distance threshold)
   - start/stop recording with named paths

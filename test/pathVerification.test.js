@@ -5,6 +5,9 @@ import {
   buildVerificationApproachTarget,
   buildDrivePathPoints,
   buildDrivePathPointsForDirection,
+  buildPerimeterDrivePathPoints,
+  buildPerimeterJoinPlan,
+  buildPerimeterPathPointsFromPlan,
   buildVerificationPathPoints,
   buildVerificationPathPointsFromPlan,
   findNearestPathPointIndex,
@@ -129,6 +132,54 @@ test("buildDrivePathPoints uses supplied obstacle outward offset", () => {
 
   assert.equal(drivePoints.some((point) => point.yMeters < -0.15), true);
   assert.equal(drivePoints.every((point) => point.yMeters >= -0.25), true);
+});
+
+test("buildPerimeterDrivePathPoints follows mowing perimeters exactly without obstacle offset", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const pose = createPose(0.1, -0.2, createInternalHeading(0), "gnss");
+
+  const drivePoints = buildPerimeterDrivePathPoints(points, pose);
+
+  assert.deepEqual(
+    drivePoints.map((point) => [point.xMeters, point.yMeters]),
+    [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+      [0, 0],
+    ],
+  );
+});
+
+test("buildPerimeterJoinPlan uses the nearest point and the direction closest to current heading", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 2, yMeters: 0, capturedAt: 3 },
+    { xMeters: 3, yMeters: 0, capturedAt: 4 },
+  ];
+  const pose = createPose(2.1, 0.1, createInternalHeading(180), "gnss");
+
+  const plan = buildPerimeterJoinPlan(points, pose);
+
+  assert.ok(plan);
+  assert.equal(plan.nearestIndex, 2);
+  assert.equal(plan.pathDirection, "reverse");
+  assert.equal(plan.approachTarget.xMeters, 2);
+  assert.equal(plan.approachTarget.yMeters, 0);
+
+  const perimeterPoints = buildPerimeterPathPointsFromPlan(points, plan);
+  assert.deepEqual(
+    perimeterPoints.map((point) => point.xMeters),
+    [2, 1, 0, 3],
+  );
 });
 
 test("buildVerificationApproachTarget stops 10cm short of the perimeter point", () => {

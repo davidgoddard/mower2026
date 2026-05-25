@@ -1,0 +1,35 @@
+{
+  "name": "Test Area",
+  "points": [
+    {
+      "xMeters": 0.5,
+      "yMeters": 0.5,
+      "capturedAt": 1760000000000
+    },
+    {
+      "xMeters": 9.5,
+      "yMeters": 0.5,
+      "capturedAt": 1760000000001
+    },
+    {
+      "xMeters": 9.5,
+      "yMeters": 5.5,
+      "capturedAt": 1760000000002
+    },
+    {
+      "xMeters": 0.5,
+      "yMeters": 5.5,
+      "capturedAt": 1760000000003
+    },
+    {
+      "xMeters": 0.5,
+      "yMeters": 0.5,
+      "capturedAt": 1760000000004
+    }
+  ],
+  "createdAt": 1760000000000,
+  "metadata": {
+    "totalDistance": 28,
+    "pointCount": 5
+  }
+}

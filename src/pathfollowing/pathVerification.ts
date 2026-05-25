@@ -152,6 +152,39 @@ export function buildVerificationPathPointsFromPlan(
   return rotated.concat([rotated[0]]);
 }
 
+export function buildPerimeterDrivePathPoints(
+  points: PathPoint[],
+  pose: Pose,
+  parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
+): PathPoint[] {
+  const plan = buildPerimeterJoinPlan(points, pose, parameters);
+  if (plan === null) {
+    return [];
+  }
+
+  return buildPerimeterPathPointsFromPlan(points, plan, parameters);
+}
+
+export function buildPerimeterPathPointsFromPlan(
+  points: PathPoint[],
+  plan: VerificationApproachPlan,
+  parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
+): PathPoint[] {
+  const normalizedPath = normalizePath(points, parameters);
+  const normalized = normalizedPath.points;
+  if (normalized.length === 0 || plan.nearestIndex < 0 || plan.nearestIndex >= normalized.length) {
+    return [];
+  }
+
+  const rotated = plan.pathDirection === "forward"
+    ? rotatePathForward(normalized, plan.nearestIndex)
+    : rotatePathReverse(normalized, plan.nearestIndex);
+
+  return normalizedPath.isClosedLoop
+    ? rotated.concat([rotated[0]])
+    : rotated;
+}
+
 /**
  * Approach an obstacle path tangentially so the mower arrives already facing
  * roughly along the perimeter rather than poking into it.
@@ -371,6 +404,28 @@ export function buildVerificationApproachPlan(
   return plan;
 }
 
+export function buildPerimeterJoinPlan(
+  points: PathPoint[],
+  pose: Pose,
+  parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
+): VerificationApproachPlan | null {
+  const normalized = normalizePathPoints(points, parameters);
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const nearestIndex = findNearestPathPointIndex(normalized, pose);
+  if (nearestIndex < 0) {
+    return null;
+  }
+
+  const forwardPlan = buildDirectJoinPlanForDirection(normalized, pose, nearestIndex, "forward", parameters);
+  const reversePlan = buildDirectJoinPlanForDirection(normalized, pose, nearestIndex, "reverse", parameters);
+  return forwardPlan.approachAlignmentErrorDeg <= reversePlan.approachAlignmentErrorDeg
+    ? forwardPlan
+    : reversePlan;
+}
+
 export function buildVerificationApproachTarget(
   point: PathPoint,
   pose: Pose,
@@ -400,5 +455,37 @@ function buildTangentialApproachTarget(
   return {
     xMeters: joinPoint.xMeters - (Math.cos(tangentRadians) * parameters.verificationApproachStandoffMeters),
     yMeters: joinPoint.yMeters - (Math.sin(tangentRadians) * parameters.verificationApproachStandoffMeters),
+  };
+}
+
+function buildDirectJoinPlanForDirection(
+  points: PathPoint[],
+  pose: Pose,
+  nearestIndex: number,
+  pathDirection: "forward" | "reverse",
+  parameters: PathVerificationParameters,
+): VerificationApproachCandidate {
+  const joinPoint = points[nearestIndex];
+  const tangentPoint = pathDirection === "forward"
+    ? getForwardTangentPoint(points, nearestIndex)
+    : getReverseTangentPoint(points, nearestIndex);
+  const tangentHeading = angleTo(
+    createPosition(joinPoint.xMeters, joinPoint.yMeters),
+    createPosition(tangentPoint.xMeters, tangentPoint.yMeters),
+  ) as InternalHeading;
+
+  const poseX = unwrapMeters(pose.position.xMeters);
+  const poseY = unwrapMeters(pose.position.yMeters);
+  const distanceToJoinMeters = Math.hypot(joinPoint.xMeters - poseX, joinPoint.yMeters - poseY);
+
+  return {
+    nearestIndex,
+    joinPoint,
+    tangentHeading,
+    approachTarget: { xMeters: joinPoint.xMeters, yMeters: joinPoint.yMeters },
+    distanceToJoinMeters,
+    turnOnly: distanceToJoinMeters <= parameters.verificationTurnOnlyDistanceMeters,
+    pathDirection,
+    approachAlignmentErrorDeg: getHeadingAlignmentCost(pose, tangentHeading),
   };
 }

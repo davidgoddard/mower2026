@@ -10,16 +10,19 @@ import { LoggerScope } from "../logging/types.js";
 export interface PathStoreOptions {
   storageDirectory: string;
   logger: LoggerScope;
+  filenameSuffix?: string;
 }
 
 export class PathStore implements IPathStore {
   private readonly storageDirectory: string;
   private readonly logger: LoggerScope;
+  private readonly filenameSuffix: string;
   private readonly pathCache: Map<string, StoredPath> = new Map();
 
   constructor(options: PathStoreOptions) {
     this.storageDirectory = options.storageDirectory;
     this.logger = options.logger;
+    this.filenameSuffix = options.filenameSuffix ?? ".path.json";
   }
 
   private async ensureStorageDirectory(): Promise<void> {
@@ -103,8 +106,8 @@ export class PathStore implements IPathStore {
     try {
       await this.ensureStorageDirectory();
       const files = await readdir(this.storageDirectory);
-      const pathFiles = files.filter((f: string) => f.endsWith(".path.json") && !f.startsWith(".") && !f.startsWith("._"));
-      const names = pathFiles.map((f: string) => f.replace(".path.json", ""));
+      const pathFiles = files.filter((f: string) => f.endsWith(this.filenameSuffix) && !f.startsWith(".") && !f.startsWith("._"));
+      const names = pathFiles.map((f: string) => f.slice(0, -this.filenameSuffix.length));
 
       this.logger.debug("path_store.list", { count: names.length });
 
@@ -160,7 +163,7 @@ export class PathStore implements IPathStore {
   private getFilename(name: string): string {
     // Sanitize name for filesystem
     const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return `${sanitized}.path.json`;
+    return `${sanitized}${this.filenameSuffix}`;
   }
 
   private calculateTotalDistance(points: PathPoint[]): number {
