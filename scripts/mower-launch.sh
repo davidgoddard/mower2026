@@ -95,5 +95,7 @@ if [ ! -f "$SERVER_ENTRY" ]; then
   exit 1
 fi
 
+export MOWER_LOG_DIR="${MOWER_LOG_DIR:-$REPO_DIR/logs}"
+
 cd "$REPO_DIR"
 exec "$NODE_BIN" "$SERVER_ENTRY"

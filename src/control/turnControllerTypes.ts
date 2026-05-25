@@ -55,21 +55,34 @@ export interface TurnLearningBin {
   direction: TurnDirection;
 }
 
+export interface TurnLearningBucket {
+  bucketAngleDeg: number;
+  brakeFractionCcw: number;
+  brakeFractionCw: number;
+  sampleCountCcw: number;
+  sampleCountCw: number;
+  lastErrorCcwDeg: number;
+  lastErrorCwDeg: number;
+}
+
 export interface TurnLearningParameters {
   version: number;
   smallAngleThresholdDeg: number;
+  smallTurnBucketStepDeg: number;
+  smallTurnMaxAngleDeg: number;
   largeTurnBrakeCcwDeg: number;
   largeTurnBrakeCwDeg: number;
-  smallTurnBrakeFractionCcw: number;
-  smallTurnBrakeFractionCw: number;
   largeTurnSampleCountCcw: number;
   largeTurnSampleCountCw: number;
-  smallTurnSampleCountCcw: number;
-  smallTurnSampleCountCw: number;
   lastLargeErrorCcwDeg: number;
   lastLargeErrorCwDeg: number;
-  lastSmallErrorCcwDeg: number;
-  lastSmallErrorCwDeg: number;
+  smallTurnBrakeFractionsCcw: number[];
+  smallTurnBrakeFractionsCw: number[];
+  smallTurnSampleCountsCcw: number[];
+  smallTurnSampleCountsCw: number[];
+  smallTurnLastErrorCcwDeg: number[];
+  smallTurnLastErrorCwDeg: number[];
   lastUpdated: string;
   parameters?: TurnLearningBin[];
+  smallTurnBuckets?: TurnLearningBucket[];
 }

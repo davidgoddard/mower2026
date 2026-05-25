@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { PrimitivesStore, resolveServerPort, routeServerRequest } from '../dist/index.js';
+import { getManualDrivePageHtml } from '../dist/server/manualDrivePage.js';
+import { getTurnTuningPageHtml } from '../dist/server/turnTuningPage.js';
+import { getDriveTuningPageHtml } from '../dist/server/driveTuningPage.js';
+import { getSegmentTestingPageHtml } from '../dist/server/segmentTestingPage.js';
+import { renderPathTracingPage } from '../dist/server/pathTracingPage.js';
 
 test('resolveServerPort returns fallback for invalid values', () => {
   assert.equal(resolveServerPort(undefined, 8090), 8090);
@@ -25,6 +32,8 @@ test('routeServerRequest serves health and primitives payloads', () => {
   assert.equal(typeof primitivesPayload.primitives.sampledAt, 'string');
   assert.equal(typeof primitivesPayload.primitives.imu, 'object');
   assert.equal(typeof primitivesPayload.primitives.gnss, 'object');
+  assert.equal(typeof primitivesPayload.primitives.poseFusion, 'object');
+  assert.equal(typeof primitivesPayload.primitives.poseFusion.usingGnssHeading, 'boolean');
   assert.equal(typeof primitivesPayload.primitives.motors, 'object');
 });
 
@@ -34,10 +43,133 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   const homeRoute = routeServerRequest('GET', '/', 'running', 'mower-core-test', primitives.snapshot());
   assert.equal(homeRoute.statusCode, 200);
   assert.equal(homeRoute.contentType.startsWith('text/html'), true);
-  assert.equal(homeRoute.body.includes('Primitives'), true);
+  assert.equal(homeRoute.body.includes('Drive &amp; Paths'), true);
+  assert.equal(homeRoute.body.includes('Path Tracing'), false);
+  assert.equal(homeRoute.body.includes('Manual Drive'), false);
+  assert.equal(homeRoute.body.includes('Segment Testing'), true);
+  assert.equal(homeRoute.body.includes('id="gnss-accuracy"'), true);
+
+  const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot());
+  assert.equal(manualRoute.statusCode, 200);
+  assert.equal(manualRoute.contentType.startsWith('text/html'), true);
+  assert.equal(manualRoute.body.includes('Drive & Paths'), true);
+  assert.equal(manualRoute.body.includes('id="mapCanvas"'), true);
+  assert.equal(manualRoute.body.includes('id="mowingPlanArea"'), true);
+  assert.equal(manualRoute.body.includes('id="mowingHeadingDeg"'), true);
+  assert.equal(manualRoute.body.includes('id="startRecordingBtn"'), true);
+  assert.equal(manualRoute.body.includes('id="startAreaRecordingBtn"'), true);
+  assert.equal(manualRoute.body.includes('id="pathsList"'), true);
+  assert.equal(manualRoute.body.includes('id="areaPerimetersList"'), true);
+  assert.equal(manualRoute.body.includes('id="stopPathBtn"'), true);
+  assert.equal(manualRoute.body.includes('Controller Demand'), false);
+  assert.equal(manualRoute.body.includes('Motion Feedback'), false);
+  assert.equal(manualRoute.body.includes('GNSS'), false);
+  assert.equal(manualRoute.body.includes('IMU'), false);
+
+  const pathRoute = routeServerRequest('GET', '/path-tracing', 'running', 'mower-core-test', primitives.snapshot());
+  assert.equal(pathRoute.statusCode, 200);
+  assert.equal(pathRoute.contentType.startsWith('text/html'), true);
+  assert.equal(pathRoute.body, getManualDrivePageHtml());
 
   const missingRoute = routeServerRequest('GET', '/missing', 'running', 'mower-core-test', primitives.snapshot());
   assert.equal(missingRoute.statusCode, 404);
   const missingPayload = JSON.parse(missingRoute.body);
   assert.equal(missingPayload.error, 'not_found');
+});
+
+test('tuning pages expose the simplified drive training controls', () => {
+  const turnPage = getTurnTuningPageHtml();
+  assert.equal(turnPage.includes('class="page-layout"'), true);
+  assert.equal(turnPage.includes('class="sidebar-column"'), true);
+  assert.equal(turnPage.includes('id="imu-status"'), true);
+  assert.equal(turnPage.includes('id="gnss-status"'), true);
+  assert.equal(turnPage.includes('id="stopCurrentRun"'), true);
+  assert.equal(turnPage.includes('class="center-row"'), true);
+  assert.equal(turnPage.includes('class="single-run-panel"'), true);
+  assert.equal(turnPage.includes('id="runRealPoseValidation"'), true);
+  assert.equal(turnPage.includes('appDialogBackdrop'), true);
+  assert.equal(turnPage.includes('Are you sure you want to clear all turn history?'), true);
+  assert.equal(turnPage.includes('Are you sure you want to reset turn learning parameters to defaults?'), true);
+  assert.equal(turnPage.includes('id="validationResultsTableBody"'), true);
+  assert.equal(turnPage.includes('id="validationStatus"'), true);
+
+  const drivePage = getDriveTuningPageHtml();
+  assert.equal(drivePage.includes('class="page-layout"'), true);
+  assert.equal(drivePage.includes('class="sidebar-column"'), true);
+  assert.equal(drivePage.includes('id="imu-status"'), true);
+  assert.equal(drivePage.includes('id="gnss-status"'), true);
+  assert.equal(drivePage.includes('Distance (cm)'), true);
+  assert.equal(drivePage.includes('id="startDriveTuning"'), true);
+  assert.equal(drivePage.includes('id="stopDriveTuning"'), true);
+  assert.equal(drivePage.includes('id="startDistanceCm"'), true);
+  assert.equal(drivePage.includes('start tuning'), true);
+  assert.equal(drivePage.includes('cache: "no-store"'), true);
+  assert.equal(drivePage.includes('maxDistanceMeters: endAtMeters'), true);
+  assert.equal(drivePage.includes('const maxDriveResultRows = 500;'), true);
+  assert.equal(drivePage.includes('const driveResultRows = [];'), true);
+  assert.equal(drivePage.includes('appendDriveRows(history);'), true);
+  assert.equal(drivePage.includes('appendDriveRows(liveResults);'), true);
+  assert.equal(drivePage.includes('driveResultRows.slice(-maxDriveResultRows).reverse()'), true);
+  assert.equal(drivePage.includes('Distance</th>'), true);
+  assert.equal(drivePage.includes('Avg CTE</th>'), true);
+  assert.equal(drivePage.includes('Max CTE</th>'), true);
+  assert.equal(drivePage.includes('X Error</th>'), true);
+  assert.equal(drivePage.includes('Y Error</th>'), true);
+
+  const segmentPage = getSegmentTestingPageHtml();
+  assert.equal(segmentPage.includes('class="page-layout"'), true);
+  assert.equal(segmentPage.includes('class="sidebar-column"'), true);
+  assert.equal(segmentPage.includes('id="imu-status"'), true);
+  assert.equal(segmentPage.includes('id="gnss-status"'), true);
+  assert.equal(segmentPage.includes('fetch("/api/primitives?ts=" + Date.now(), { cache: "no-store" })'), true);
+  assert.equal(segmentPage.includes('primitives: primitivesPayload.primitives ?? primitivesPayload'), true);
+  assert.equal(segmentPage.includes('id="startSegmentTest"'), true);
+  assert.equal(segmentPage.includes('id="stopSegmentTest"'), true);
+  assert.equal(segmentPage.includes('id="segmentResultsTableBody"'), true);
+  assert.equal(segmentPage.includes('Segment Results'), true);
+  assert.equal(segmentPage.includes('Run Segment Test'), true);
+  assert.equal(segmentPage.includes('Heading Diff</th>'), true);
+  assert.equal(segmentPage.includes('formatHeadingDifference(item.requiredHeadingChangeDeg, item.achievedHeadingChangeDeg)'), true);
+  assert.equal(segmentPage.includes('colspan="12"'), true);
+  assert.equal(segmentPage.includes('Avg CTE (cm)</th>'), true);
+  assert.equal(segmentPage.includes('Max CTE (cm)</th>'), true);
+  assert.equal(segmentPage.includes('X Error (cm)</th>'), true);
+  assert.equal(segmentPage.includes('Y Error (cm)</th>'), true);
+  assert.equal(segmentPage.includes('formatCentimeters(item.cteMeters)'), true);
+
+  const manualPage = getManualDrivePageHtml();
+  assert.equal(manualPage.includes('Drive & Paths'), true);
+  assert.equal(manualPage.includes('id="mapCanvas"'), true);
+  assert.equal(manualPage.includes('id="mowingPlanArea"'), true);
+  assert.equal(manualPage.includes('id="mowingHeadingDeg"'), true);
+  assert.equal(manualPage.includes('id="stripSpacingCm"'), true);
+  assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
+  assert.equal(manualPage.includes('id="startAreaRecordingBtn"'), true);
+  assert.equal(manualPage.includes('id="stopPathBtn"'), true);
+  assert.equal(manualPage.includes('id="pathsList"'), true);
+  assert.equal(manualPage.includes('id="areaPerimetersList"'), true);
+  assert.equal(manualPage.includes('Controller Demand'), false);
+  assert.equal(manualPage.includes('Motion Feedback'), false);
+  assert.equal(manualPage.includes('GNSS'), false);
+  assert.equal(manualPage.includes('IMU'), false);
+  assert.equal(manualPage.includes('appDialogBackdrop'), true);
+  assert.equal(manualPage.includes('onclick="verifyPath('), true);
+  assert.equal(manualPage.includes('/api/path/verify'), true);
+  assert.equal(manualPage.includes('/api/area-perimeter/verify'), true);
+  assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);
+  assert.equal(manualPage.includes('/api/mowing-plan/preview'), true);
+  assert.equal(manualPage.includes('nearest point'), true);
+  assert.equal(manualPage.includes('confirm('), false);
+
+  const pathPage = renderPathTracingPage();
+  assert.equal(pathPage, manualPage);
+});
+
+test('launcher and systemd unit pin logs to the repo logs folder', async () => {
+  const repoRoot = process.cwd();
+  const launcher = await readFile(join(repoRoot, 'scripts/mower-launch.sh'), 'utf8');
+  assert.equal(launcher.includes('export MOWER_LOG_DIR="${MOWER_LOG_DIR:-$REPO_DIR/logs}"'), true);
+
+  const serviceTemplate = await readFile(join(repoRoot, 'systemd/mower.service.template'), 'utf8');
+  assert.equal(serviceTemplate.includes('Environment=MOWER_LOG_DIR=__MOWER_REPO_DIR__/logs'), true);
 });

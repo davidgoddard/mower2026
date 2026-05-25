@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "closedLoopToleranceMeters": 0.05,
+  "closedLoopDetectionToleranceMeters": 0.35,
+  "verificationApproachStandoffMeters": 0.1,
+  "verificationTurnOnlyDistanceMeters": 0.3,
+  "obstacleOutwardOffsetMeters": 0.5,
+  "purePursuitMinLookaheadMeters": 0.5,
+  "purePursuitBaseLookaheadMeters": 1,
+  "purePursuitMaxLookaheadMeters": 2,
+  "updatedAt": "2026-05-24T00:00:00.000Z"
+}

@@ -177,11 +177,21 @@ class SensorController {
 
   private async pollImu(): Promise<void> {
     const sample = await this.gateway.readImu();
-    const deltaSeconds = 0.033; // 30Hz
+    const deltaSeconds = 0.005; // 200Hz
     
-    // Integrate yaw rate
+    // Project the gyro vector onto the gravity axis derived from pitch/roll,
+    // then integrate the tilt-compensated yaw rate.
+    const pitchRad = (sample.pitchDeg ?? 0) * Math.PI / 180;
+    const rollRad = (sample.rollDeg ?? 0) * Math.PI / 180;
+    const gravityX = -Math.sin(pitchRad);
+    const gravityY = Math.sin(rollRad) * Math.cos(pitchRad);
+    const gravityZ = Math.cos(rollRad) * Math.cos(pitchRad);
     const yawDelta = createRelativeAngle(
-      sample.angularVelocity.zDegreesPerSecond * deltaSeconds
+      (
+        sample.angularVelocity.xDegreesPerSecond * gravityX +
+        sample.angularVelocity.yDegreesPerSecond * gravityY +
+        sample.angularVelocity.zDegreesPerSecond * gravityZ
+      ) * deltaSeconds
     );
     this.imuHeading = addRelativeAngle(this.imuHeading, yawDelta);
   }

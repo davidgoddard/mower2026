@@ -2,7 +2,7 @@
  * Path Store - Persistent storage for recorded paths
  */
 
-import { readFile, writeFile, readdir, unlink, access } from "node:fs/promises";
+import { readFile, writeFile, readdir, unlink, access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { IPathStore, PathPoint, StoredPath } from "./pathFollowerApi.js";
 import { LoggerScope } from "../logging/types.js";
@@ -10,16 +10,23 @@ import { LoggerScope } from "../logging/types.js";
 export interface PathStoreOptions {
   storageDirectory: string;
   logger: LoggerScope;
+  filenameSuffix?: string;
 }
 
 export class PathStore implements IPathStore {
   private readonly storageDirectory: string;
   private readonly logger: LoggerScope;
+  private readonly filenameSuffix: string;
   private readonly pathCache: Map<string, StoredPath> = new Map();
 
   constructor(options: PathStoreOptions) {
     this.storageDirectory = options.storageDirectory;
     this.logger = options.logger;
+    this.filenameSuffix = options.filenameSuffix ?? ".path.json";
+  }
+
+  private async ensureStorageDirectory(): Promise<void> {
+    await mkdir(this.storageDirectory, { recursive: true });
   }
 
   async savePath(name: string, points: PathPoint[]): Promise<void> {
@@ -32,6 +39,8 @@ export class PathStore implements IPathStore {
         pointCount: points.length,
       },
     };
+
+    await this.ensureStorageDirectory();
 
     // Update cache
     this.pathCache.set(name, path);
@@ -70,6 +79,7 @@ export class PathStore implements IPathStore {
     const filepath = join(this.storageDirectory, filename);
 
     try {
+      await this.ensureStorageDirectory();
       const content = await readFile(filepath, "utf-8");
       const path: StoredPath = JSON.parse(content);
 
@@ -94,9 +104,10 @@ export class PathStore implements IPathStore {
 
   async listPaths(): Promise<string[]> {
     try {
+      await this.ensureStorageDirectory();
       const files = await readdir(this.storageDirectory);
-      const pathFiles = files.filter((f: string) => f.endsWith(".path.json"));
-      const names = pathFiles.map((f: string) => f.replace(".path.json", ""));
+      const pathFiles = files.filter((f: string) => f.endsWith(this.filenameSuffix) && !f.startsWith(".") && !f.startsWith("._"));
+      const names = pathFiles.map((f: string) => f.slice(0, -this.filenameSuffix.length));
 
       this.logger.debug("path_store.list", { count: names.length });
 
@@ -114,6 +125,7 @@ export class PathStore implements IPathStore {
     const filepath = join(this.storageDirectory, filename);
 
     try {
+      await this.ensureStorageDirectory();
       await unlink(filepath);
 
       // Remove from cache
@@ -140,6 +152,7 @@ export class PathStore implements IPathStore {
     const filepath = join(this.storageDirectory, filename);
 
     try {
+      await this.ensureStorageDirectory();
       await access(filepath);
       return true;
     } catch {
@@ -150,7 +163,7 @@ export class PathStore implements IPathStore {
   private getFilename(name: string): string {
     // Sanitize name for filesystem
     const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return `${sanitized}.path.json`;
+    return `${sanitized}${this.filenameSuffix}`;
   }
 
   private calculateTotalDistance(points: PathPoint[]): number {

@@ -10,8 +10,10 @@ The Turn Controller is a supervised self-learning component responsible for exec
 - Execute turns on the spot using counter-rotating wheels at full speed
 - Use **IMU heading only** (not GNSS) for feedback
 - Learn optimal brake points to minimize arrival error
-- Handle both large turns (180°) and small turns (10°)
+- Handle both large turns (180°) and bucketed small turns from 3° to 60°
 - Every turn improves future accuracy through parameter adaptation
+- A separate wrapper can run real-pose validation sweeps without changing the
+  turn controller's own IMU-based behaviour
 
 ### Learning Behavior
 - Monitor heading during turn execution
@@ -19,9 +21,10 @@ The Turn Controller is a supervised self-learning component responsible for exec
 - Measure arrival error after motor ramp-down
 - Adjust brake angle parameters to reduce future errors
 - Persist learned parameters for next turn
+- Learn the small-angle brake fractions for discrete angle buckets as well as the large-turn brake distance
 
 ### Special Considerations
-- **Small angle challenge**: For turns <~20°, brake distance may exceed turn angle
+- **Small angle challenge**: For turns up to ~60°, the learned brake fraction must vary by angle bucket so each turn size gets a closer brake point
 - **Motor engagement**: Even for small angles, motors must engage to initiate movement
 - **Ramp-down time**: Motors have asymmetric ramp rates (460ms up, 700ms down per hardware docs)
 
@@ -35,6 +38,7 @@ The Turn Controller is a supervised self-learning component responsible for exec
 src/control/
   ├── turnController.ts          # Main turn execution controller
   ├── turnControllerTypes.ts     # Type definitions
+  ├── turnValidationRunner.ts    # Real-pose validation wrapper for the tuning page
   └── turnLearningModel.ts       # Adaptive parameter learning
 
 test/
@@ -129,13 +133,30 @@ interface TurnResult {
 
 export class TurnController {
   async executeTurn(request: TurnRequest): Promise<TurnResult>;
-  async runTuningSequence(iterations?: number): Promise<TurnResult[]>;
+  async runLargeAngleTraining(iterations?: number): Promise<TurnResult[]>;
+  async runSmallAngleTraining(targetErrorDeg?: number): Promise<TurnResult[]>;
   async stopCurrentTurn(): Promise<void>;  // Emergency stop
   getState(): TurnControllerState;
   getTurnHistory(): TurnResult[];
   clearHistory(): void;
 }
 ```
+
+#### Real-Pose Validation Wrapper
+
+The tuning page also uses a wrapper around the controller to compare the IMU
+result with the mower's pose-fusion heading after the turn completes. The
+wrapper:
+
+- samples the current pose before each turn
+- picks a random absolute heading target
+- converts that absolute heading into the relative turn angle required by the
+  turn controller
+- records the IMU-achieved angle and the final pose heading in a separate
+  validation table
+
+This keeps the core controller focused on IMU turn execution while giving the
+operator a simple 20-row discrepancy view on the web page.
 
 #### Algorithm
 
@@ -305,7 +326,7 @@ interface TurnLearningParameters {
   version: number;
   motorRampDownTimeMs: number;     // From hardware (700ms)
   motorRampUpTimeMs: number;       // From hardware (460ms)
-  smallAngleThresholdDeg: number;  // Below this, use special handling
+  smallAngleThresholdDeg: number;  // Below this, use bucketed handling
   learningRate: number;            // How aggressively to adapt (0-1)
   parameters: TurnParameterEntry[];
 }
@@ -381,7 +402,7 @@ function createDefaultParameters(): TurnLearningParameters {
     version: 1,
     motorRampDownTimeMs: 700,    // From hardware spec
     motorRampUpTimeMs: 460,      // From hardware spec
-    smallAngleThresholdDeg: 20,  // Tunable
+    smallAngleThresholdDeg: 60,  // Tunable
     learningRate: 0.3,           // Conservative initial rate
     parameters: TURN_ANGLE_BINS.map(angle => ({
       requestedAngleDeg: angle,
@@ -500,17 +521,17 @@ export const TURN_SETTLE_TIME_MS = 200;
 /**
  * Motor ramp-down time from hardware spec (milliseconds)
  */
-export const MOTOR_RAMP_DOWN_TIME_MS = 700;
+export const MOTOR_RAMP_DOWN_TIME_MS = 1000;
 
 /**
  * Motor ramp-up time from hardware spec (milliseconds)
  */
-export const MOTOR_RAMP_UP_TIME_MS = 460;
+export const MOTOR_RAMP_UP_TIME_MS = 1000;
 
 /**
- * Small angle threshold - below this, use special handling (degrees)
+ * Small angle threshold - below this, use bucketed small-turn handling (degrees)
  */
-export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 20;
+export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 60;
 
 /**
  * Learning rate for brake angle adaptation (0-1)
@@ -556,10 +577,14 @@ interface TurnExecuteRequest {
   enableLearning?: boolean;
 }
 
-// POST /api/turn/tune
-interface TurnTuneRequest {
+// POST /api/turn/train-large
+interface TurnLargeTrainingRequest {
   iterations?: number;  // Default 1
-  anglesToTest?: number[];  // Default: all bins
+}
+
+// POST /api/turn/train-small
+interface TurnSmallTrainingRequest {
+  targetErrorDeg?: number;  // Default 2
 }
 
 // POST /api/turn/stop
@@ -581,7 +606,8 @@ interface TurnTuneRequest {
 <div id="turn-tuning">
   <!-- Control Panel -->
   <div class="controls">
-    <button id="run-tuning">Run Tuning Sequence</button>
+    <button id="run-large-training">Train Large Angles</button>
+    <button id="run-small-training">Train Small Angles</button>
     <input type="number" id="iterations" value="1" min="1" max="10">
     <button id="stop-turn" class="danger">STOP</button>
     <button id="reset-learning">Reset Learning</button>
@@ -631,14 +657,25 @@ interface TurnTuneRequest {
 **JavaScript** (client-side):
 
 ```typescript
-async function runTuningSequence() {
+async function runLargeAngleTraining() {
   const iterations = document.getElementById("iterations").value;
-  const response = await fetch("/api/turn/tune", {
+  const response = await fetch("/api/turn/train-large", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ iterations: parseInt(iterations) }),
   });
   
+  const results = await response.json();
+  updateResultsTable(results);
+}
+
+async function runSmallAngleTraining() {
+  const response = await fetch("/api/turn/train-small", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetErrorDeg: 2 }),
+  });
+
   const results = await response.json();
   updateResultsTable(results);
 }
@@ -831,7 +868,7 @@ docs/
 ## Open Questions for Review
 
 1. **Learning rate**: Is 0.3 appropriate, or should it start higher and decay?
-2. **Small angle threshold**: Should 20° be configurable per-mower?
+2. **Small angle threshold**: Should 60° be configurable per-mower?
 3. **Direction asymmetry**: Should we assume CCW/CW differ, or start symmetric?
 4. **Persistence location**: `config/` or `data/`?
 5. **Timeout calculation**: Current formula reasonable for safety?

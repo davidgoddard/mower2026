@@ -24,6 +24,71 @@ export interface DriveResult {
   readonly timestamp: string;
 }
 
+export type SegmentTrainingPhase =
+  | "started"
+  | "pair_attempt"
+  | "segment_attempt"
+  | "segment_result"
+  | "pair_retry"
+  | "stopped"
+  | "completed";
+
+export interface SegmentTrainingProgress {
+  readonly mode: "segment";
+  readonly phase: SegmentTrainingPhase;
+  readonly distanceMeters: number;
+  readonly pairAttempt: number;
+  readonly segmentAttempt: number;
+  readonly directionSign: 1 | -1 | null;
+  readonly targetXErrorMeters: number;
+  readonly completedSegments: number;
+  readonly totalPlannedSegments: number;
+  readonly message: string;
+  readonly timestamp: string;
+  readonly resultStatus?: DriveResult["status"] | null;
+  readonly errorXMeters?: number | null;
+  readonly absErrorXMeters?: number | null;
+}
+
+export type SegmentTrainingProgressReporter = (progress: SegmentTrainingProgress) => void;
+
+export interface SegmentTrainingResult extends DriveResult {
+  readonly distanceMeters: number;
+  readonly directionSign: 1 | -1;
+  readonly pairAttempt: number;
+  readonly segmentAttempt: number;
+  readonly anchorHeadingDeg: number;
+}
+
+export type DriveTrainingPhase =
+  | "started"
+  | "waiting"
+  | "pair_attempt"
+  | "leg_attempt"
+  | "leg_result"
+  | "pair_retry"
+  | "stopped"
+  | "completed";
+
+export interface DriveTrainingProgress {
+  readonly mode: "short-distance";
+  readonly phase: DriveTrainingPhase;
+  readonly distanceMeters: number;
+  readonly pairAttempt: number;
+  readonly legAttempt: number;
+  readonly directionSign: 1 | -1 | null;
+  readonly targetXErrorMeters: number;
+  readonly completedDrives: number;
+  readonly totalPlannedDrives: number;
+  readonly message: string;
+  readonly timestamp: string;
+  readonly resultStatus?: DriveResult["status"] | null;
+  readonly errorXMeters?: number | null;
+  readonly absErrorXMeters?: number | null;
+}
+
+export type DriveTrainingProgressReporter = (progress: DriveTrainingProgress) => void;
+
 export type DriveStatus =
   | "idle"
   | "turning"
@@ -40,4 +105,10 @@ export interface DriveControllerState {
   readonly drivesCompleted: number;
   readonly averageErrorXMeters: number;
   readonly averageErrorYMeters: number;
+  readonly shortTrainingProgress: DriveTrainingProgress | null;
+  readonly shortTrainingProgressFeed: readonly DriveTrainingProgress[];
+  readonly shortTrainingResults: readonly DriveResult[];
+  readonly segmentTrainingProgress: SegmentTrainingProgress | null;
+  readonly segmentTrainingProgressFeed: readonly SegmentTrainingProgress[];
+  readonly segmentTrainingResults: readonly SegmentTrainingResult[];
 }

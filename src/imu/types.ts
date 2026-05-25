@@ -1,6 +1,8 @@
 export interface ImuSample {
   timestampMillis: number;
   angularVelocity: {
+    xDegreesPerSecond: number;
+    yDegreesPerSecond: number;
     zDegreesPerSecond: number;
   };
   acceleration?: {
@@ -8,6 +10,8 @@ export interface ImuSample {
     yMetersPerSecondSquared: number;
     zMetersPerSecondSquared: number;
   };
+  pitchDeg?: number;
+  rollDeg?: number;
 }
 
 export interface ImuSensor {

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "motorRampDownTimeMs": 1000,
-  "motorRampUpTimeMs": 1000,
+  "motorRampDownTimeMs": 400,
+  "motorRampUpTimeMs": 600,
   "updatedAt": "2026-05-19T00:00:00.000Z"
 }

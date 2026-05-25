@@ -1,5 +1,6 @@
 /**
- * Drive controller - executes point-to-point drives with self-learning CTE correction
+ * Drive controller - executes segment drives by turning to face the target and
+ * then delegating the straight-line drive to DriveLineController.
  */
 
 import { SessionLogger } from "../logging/index.js";
@@ -8,40 +9,45 @@ import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { TurnController } from "./turnController.js";
 import { DriveLearningModel } from "./driveLearningModel.js";
+import { DriveLineController } from "./driveLineController.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
 import {
   InternalHeading,
-  RelativeAngle,
-  createRelativeAngle,
   headingDifference,
   unwrapRelativeAngle,
   unwrapInternalHeading,
 } from "../geometry/headingTypes.js";
 import {
   Position,
-  Pose,
-  Meters,
   createPosition,
   createMeters,
   unwrapMeters,
   distanceBetween,
   angleTo,
-  crossTrackError,
-  calculateXError,
 } from "../geometry/positionTypes.js";
 import {
   DriveRequest,
   DriveResult,
+  DriveTrainingProgress,
+  DriveTrainingProgressReporter,
+  SegmentTrainingProgress,
+  SegmentTrainingProgressReporter,
+  SegmentTrainingResult,
   DriveControllerState,
   DriveStatus,
 } from "./driveControllerTypes.js";
 import {
   DRIVE_SETTLE_TIME_MS,
   DRIVE_INITIAL_TURN_THRESHOLD_DEG,
-  DRIVE_TIMEOUT_MULTIPLIER,
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
   MOTOR_RAMP_DOWN_TIME_MS,
+  DRIVE_SHORT_BUCKET_STEP_METERS,
+  DRIVE_SHORT_BUCKET_MAX_METERS,
+  DRIVE_SHORT_TARGET_X_ERROR_METERS,
+  DRIVE_SEGMENT_MIN_DISTANCE_METERS,
+  DRIVE_SEGMENT_MAX_DISTANCE_METERS,
+  DRIVE_SEGMENT_STEP_METERS,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
 
@@ -55,6 +61,7 @@ export interface DriveControllerOptions {
   turnController: TurnController;
   logger: SessionLogger;
   learningModel: DriveLearningModel;
+  lineDriveController?: DriveLineController;
   motorCalibration?: MotorCalibration;
   fullSpeedCommand?: number;
   settleTimeMs?: number;
@@ -68,6 +75,7 @@ export class DriveController {
   private readonly poseFusion: PoseFusion;
   private readonly turnController: TurnController;
   private readonly learningModel: DriveLearningModel;
+  private readonly lineDriveController: DriveLineController;
   private readonly motorCalibration: MotorCalibration | null;
   private readonly fullSpeedCommand: number;
   private readonly settleTimeMs: number;
@@ -77,23 +85,20 @@ export class DriveController {
   private status: DriveStatus = "idle";
   private currentDrive: DriveRequest | null = null;
   private stopRequested = false;
+  private shortTrainingProgress: DriveTrainingProgress | null = null;
+  private shortTrainingProgressFeed: DriveTrainingProgress[] = [];
+  private shortTrainingResults: DriveResult[] = [];
+  private segmentTrainingProgress: SegmentTrainingProgress | null = null;
+  private segmentTrainingProgressFeed: SegmentTrainingProgress[] = [];
+  private segmentTrainingResults: SegmentTrainingResult[] = [];
   private driveHistory: DriveResult[] = [];
   private drivesCompleted = 0;
   private totalErrorXMeters = 0;
   private totalErrorYMeters = 0;
 
-  // Event-driven drive state
   private driveStartPosition: Position | null = null;
   private driveStartHeading: InternalHeading | null = null;
-  private driveStartPoseQuality: "gnss" | "dead-reckoning" | "unknown" = "unknown";
-  private driveTargetPosition: Position | null = null;
-  private driveLineStart: Position | null = null;
-  private driveLineEnd: Position | null = null;
   private driveStartTime: number = 0;
-  private driveResolve: ((result: DriveResult) => void) | null = null;
-  private cteSamples: Meters[] = [];
-  private totalEncoderTicks: number = 0;
-  private motorOperationActive = false;
 
   constructor(options: DriveControllerOptions) {
     this.logger = options.logger.child({ context: "control", source: "DriveController" });
@@ -101,39 +106,46 @@ export class DriveController {
     this.poseFusion = options.poseFusion;
     this.turnController = options.turnController;
     this.learningModel = options.learningModel;
+    this.lineDriveController = options.lineDriveController ?? new DriveLineController({
+      sensorController: this.sensorController,
+      poseFusion: this.poseFusion,
+      logger: options.logger,
+      learningModel: this.learningModel,
+      motorCalibration: options.motorCalibration,
+      fullSpeedCommand: options.fullSpeedCommand,
+      settleTimeMs: options.settleTimeMs,
+      nowMillis: options.nowMillis,
+      sleep: options.sleep,
+    });
     this.motorCalibration = options.motorCalibration ?? null;
     this.fullSpeedCommand = options.fullSpeedCommand ?? DRIVE_FULL_SPEED_COMMAND_DEFAULT;
     this.settleTimeMs = options.settleTimeMs ?? DRIVE_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
-
-    // Bind event handler to maintain 'this' context
-    this.onPoseUpdate = this.onPoseUpdate.bind(this);
   }
 
   /**
-   * Execute a drive maneuver (event-driven)
+   * Execute a segment drive maneuver.
    */
   async executeDrive(request: DriveRequest): Promise<DriveResult> {
     return new Promise<DriveResult>(async (resolve) => {
-      let subscribed = false;
-
+      const preserveLearningState = this.status === "learning";
       try {
+        this.stopRequested = false;
         systemStop.clearStop("drive-execute");
-        this.beginMotorOperation();
+        if (!preserveLearningState) {
+          this.shortTrainingProgress = null;
+          this.segmentTrainingProgress = null;
+          this.shortTrainingResults = [];
+        }
 
         // 1. Get current pose
         this.currentDrive = request;
         this.driveStartTime = this.nowMillis();
-        this.driveResolve = resolve;
-        this.cteSamples = [];
-        this.totalEncoderTicks = 0;
 
         const startPose = this.poseFusion.getCurrentPose();
         this.driveStartPosition = startPose.position;
         this.driveStartHeading = startPose.heading;
-        this.driveStartPoseQuality = startPose.quality;
-        this.driveTargetPosition = request.targetPosition;
 
         this.logger.info("drive.started", {
           startPosition: {
@@ -166,55 +178,27 @@ export class DriveController {
           });
         }
 
-        // 4. Settle after turn
-        this.status = "settling";
-        const settleAfterTurnCompleted = await this.sleepWithStopChecks(this.settleTimeMs);
-        if (!settleAfterTurnCompleted || this.stopRequested || systemStop.isStopped()) {
-          await this.finishStoppedDrive("Drive stopped during settle");
-          return;
-        }
-
-        // 5. Get current pose again
-        const drivingStartPose = this.poseFusion.getCurrentPose();
-        this.driveStartPosition = drivingStartPose.position;
-        this.driveStartHeading = drivingStartPose.heading;
-        this.driveStartPoseQuality = drivingStartPose.quality;
-
-        // 6. Compute line to target
-        this.driveLineStart = this.driveStartPosition;
-        this.driveLineEnd = request.targetPosition;
-
-        // 7. Subscribe to pose updates
-        this.poseFusion.on("poseUpdate", this.onPoseUpdate);
-        subscribed = true;
-
-        // 8. Engage motors at full speed
+        // 4. Delegate straight-line driving immediately after the turn.
         this.status = "driving";
-        await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
-
-        this.logger.info("drive.driving", {
-          startPosition: {
-            x: unwrapMeters(this.driveStartPosition.xMeters),
-            y: unwrapMeters(this.driveStartPosition.yMeters),
-          },
-          heading: unwrapInternalHeading(this.driveStartHeading),
+        const lineResult = await this.lineDriveController.executeLineDrive({
+          targetPosition: request.targetPosition,
+          learningEnabled: request.learningEnabled,
+          driveDirectionSign: 1,
         });
 
-        // Event handler will monitor and complete drive
+        if (lineResult.status === "success") {
+          this.addToHistory(lineResult);
+        }
+
+        this.stopRequested = false;
+        this.status = preserveLearningState ? "learning" : "idle";
+        this.currentDrive = null;
+        resolve(lineResult);
+        return;
       } catch (error) {
         // Cleanup on error
-        if (subscribed) {
-          this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-        }
         systemStop.requestStop("drive", "drive_error");
-        try {
-          await this.sensorController.stopMotors();
-        } catch (stopError) {
-          const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
-          this.logger.warn("drive.stop_failed", { error: stopMessage });
-        }
-        await this.endMotorOperation();
-        this.status = "idle";
+        this.status = preserveLearningState ? "learning" : "idle";
         this.currentDrive = null;
 
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -239,334 +223,16 @@ export class DriveController {
   }
 
   /**
-   * Event handler for pose updates (called at 30Hz by pose fusion)
-   */
-  private async onPoseUpdate(pose: Pose): Promise<void> {
-    if (
-      this.status !== "driving" ||
-      this.driveStartPosition === null ||
-      this.driveTargetPosition === null ||
-      this.driveLineStart === null ||
-      this.driveLineEnd === null
-    ) {
-      return;
-    }
-
-    // Check for emergency stop
-    if (this.stopRequested) {
-      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      try {
-        await this.sensorController.stopMotors();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn("drive.stop_failed", { error: message });
-      } finally {
-        await this.endMotorOperation();
-      }
-      this.status = "stopped";
-      const stoppedDrive = this.currentDrive;
-      this.currentDrive = null;
-      this.stopRequested = false;
-      this.logger.warn("drive.stopped", { durationMs: this.nowMillis() - this.driveStartTime });
-      this.driveResolve?.({
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition: pose.position,
-        errorX: createMeters(0),
-        errorY: createMeters(0),
-        maxCteMeters: createMeters(0),
-        avgCteMeters: createMeters(0),
-        durationMs: this.nowMillis() - this.driveStartTime,
-        brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-        status: "stopped",
-        errorMessage: "Drive stopped by user request",
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-
-    if (systemStop.isStopped()) {
-      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      try {
-        await this.sensorController.stopMotors();
-      } finally {
-        await this.endMotorOperation();
-      }
-      this.status = "stopped";
-      const stoppedDrive = this.currentDrive;
-      this.currentDrive = null;
-      this.logger.warn("drive.stopped", { durationMs: this.nowMillis() - this.driveStartTime, reason: "system_stop" });
-      this.driveResolve?.({
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition: pose.position,
-        errorX: createMeters(0),
-        errorY: createMeters(0),
-        maxCteMeters: createMeters(0),
-        avgCteMeters: createMeters(0),
-        durationMs: this.nowMillis() - this.driveStartTime,
-        brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-        status: "stopped",
-        errorMessage: "Drive stopped by system stop",
-        timestamp: new Date().toISOString(),
-      });
-      this.stopRequested = false;
-      return;
-    }
-
-    const currentPosition = pose.position;
-
-    // Calculate CTE
-    const cte = crossTrackError(currentPosition, this.driveLineStart, this.driveLineEnd);
-    this.cteSamples.push(cte);
-
-    // Calculate remaining distance
-    const alongTrackError = calculateXError(currentPosition, this.driveLineStart, this.driveLineEnd);
-    const remainingAlongTrackDistance = Math.abs(unwrapMeters(alongTrackError));
-
-    // Apply CTE correction
-    await this.applyCteCorrection(cte);
-
-    // Check brake condition
-    const brakeDistance = this.learningModel.getBrakeDistance();
-    if (remainingAlongTrackDistance <= unwrapMeters(brakeDistance)) {
-      // Unsubscribe BEFORE completing
-      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      await this.completeDrive();
-      return;
-    }
-
-    // Timeout check
-    if (this.nowMillis() - this.driveStartTime > this.calculateTimeout()) {
-      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      try {
-        await this.sensorController.stopMotors();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn("drive.stop_failed", { error: message });
-      } finally {
-        await this.endMotorOperation();
-      }
-      systemStop.requestStop("drive", "drive_timeout");
-      this.status = "idle";
-      const finalPosition = pose.position;
-      const errorX = calculateXError(finalPosition, this.driveLineStart, this.driveLineEnd);
-      const errorY = crossTrackError(finalPosition, this.driveLineStart, this.driveLineEnd);
-      this.logger.error("drive.timeout", {
-        durationMs: this.nowMillis() - this.driveStartTime,
-      });
-      this.driveResolve?.({
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition,
-        errorX,
-        errorY,
-        maxCteMeters: this.calculateMaxCte(),
-        avgCteMeters: this.calculateAvgCte(),
-        durationMs: this.nowMillis() - this.driveStartTime,
-        brakeDistanceUsed: brakeDistance,
-        status: "timeout",
-        errorMessage: "Drive execution timeout",
-        timestamp: new Date().toISOString(),
-      });
-      this.currentDrive = null;
-      return;
-    }
-  }
-
-  /**
-   * Apply CTE correction (asymmetric wheel speed adjustment)
-   */
-  private async applyCteCorrection(cte: Meters): Promise<void> {
-    const cteValue = unwrapMeters(cte);
-    const gain = this.learningModel.getCteGain();
-
-    // Positive CTE = drifting right, need to turn left
-    // Keep left wheel at full speed, slow right wheel
-    // Negative CTE = drifting left, need to turn right
-    // Keep right wheel at full speed, slow left wheel
-
-    let leftSpeed = this.fullSpeedCommand;
-    let rightSpeed = this.fullSpeedCommand;
-
-    if (cteValue > 0) {
-      // Drifting right - slow right wheel
-      rightSpeed = this.fullSpeedCommand * (1 - gain * cteValue);
-    } else {
-      // Drifting left - slow left wheel
-      leftSpeed = this.fullSpeedCommand * (1 + gain * cteValue); // cteValue is negative
-    }
-
-    // Clamp speeds to [0, fullSpeedCommand]
-    leftSpeed = Math.max(0, Math.min(this.fullSpeedCommand, leftSpeed));
-    rightSpeed = Math.max(0, Math.min(this.fullSpeedCommand, rightSpeed));
-
-    await this.sensorController.setMotorWheelOutputs(leftSpeed, rightSpeed);
-  }
-
-  /**
-   * Complete drive after brake point reached
-   */
-  private async completeDrive(): Promise<void> {
-    if (
-      this.driveStartPosition === null ||
-      this.driveTargetPosition === null ||
-      this.driveLineStart === null ||
-      this.driveLineEnd === null
-    ) {
-      return;
-    }
-
-    try {
-      // Brake
-      this.status = "braking";
-      await this.sensorController.stopMotors();
-
-      this.logger.info("drive.braking", {});
-
-      // Wait for motor ramp-down (2x ramp-down time per spec)
-      const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
-      const rampDownCompleted = await this.sleepWithStopChecks(2 * rampDownTime);
-      if (!rampDownCompleted || this.stopRequested || systemStop.isStopped()) {
-        await this.finishStoppedDrive("Drive stopped during ramp-down");
-        return;
-      }
-
-      // Settle
-      this.status = "settling";
-      const settleCompleted = await this.sleepWithStopChecks(this.settleTimeMs);
-      if (!settleCompleted || this.stopRequested || systemStop.isStopped()) {
-        await this.finishStoppedDrive("Drive stopped during settle");
-        return;
-      }
-
-      // Measure final position
-      this.status = "measuring";
-      const finalPose = this.poseFusion.getCurrentPose();
-      const finalPosition = finalPose.position;
-
-      // Calculate errors
-      const errorX = calculateXError(finalPosition, this.driveLineStart, this.driveLineEnd);
-      const errorY = crossTrackError(finalPosition, this.driveLineStart, this.driveLineEnd);
-
-      // Calculate CTE statistics
-      const maxCte = this.calculateMaxCte();
-      const avgCte = this.calculateAvgCte();
-
-      this.logger.info("drive.completed", {
-        startPosition: {
-          x: unwrapMeters(this.driveStartPosition.xMeters),
-          y: unwrapMeters(this.driveStartPosition.yMeters),
-        },
-        targetPosition: {
-          x: unwrapMeters(this.driveTargetPosition.xMeters),
-          y: unwrapMeters(this.driveTargetPosition.yMeters),
-        },
-        finalPosition: {
-          x: unwrapMeters(finalPosition.xMeters),
-          y: unwrapMeters(finalPosition.yMeters),
-        },
-        errorX: unwrapMeters(errorX),
-        errorY: unwrapMeters(errorY),
-        maxCte: unwrapMeters(maxCte),
-        avgCte: unwrapMeters(avgCte),
-        durationMs: this.nowMillis() - this.driveStartTime,
-      });
-
-      // Update learning model
-      if (this.currentDrive?.learningEnabled !== false) {
-        this.status = "learning";
-        await this.learningModel.updateFromDrive({
-          startPosition: this.driveStartPosition,
-          targetPosition: this.driveTargetPosition,
-          finalPosition,
-          errorX,
-          errorY,
-          maxCte,
-          avgCte,
-          brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-        });
-
-        // Update encoder calibration if both poses were GNSS quality
-        if (this.driveStartPoseQuality === "gnss" && finalPose.quality === "gnss") {
-          const actualDistance = distanceBetween(this.driveStartPosition, finalPosition);
-          if (this.totalEncoderTicks > 0) {
-            const measuredMetersPerTick = unwrapMeters(actualDistance) / this.totalEncoderTicks;
-            const currentCalibration = this.poseFusion.getEncoderCalibration();
-            const newCalibration = 0.9 * currentCalibration + 0.1 * measuredMetersPerTick;
-            await this.poseFusion.setEncoderCalibration(newCalibration);
-            this.logger.info("drive.encoder_calibrated", {
-              actualDistance: unwrapMeters(actualDistance),
-              encoderTicks: this.totalEncoderTicks,
-              newCalibration,
-            });
-          }
-        }
-      }
-
-      // Return to idle
-      this.status = "idle";
-      this.currentDrive = null;
-      await this.endMotorOperation();
-
-      const result: DriveResult = {
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition,
-        errorX,
-        errorY,
-        maxCteMeters: maxCte,
-        avgCteMeters: avgCte,
-        durationMs: this.nowMillis() - this.driveStartTime,
-        brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-        status: "success",
-        timestamp: new Date().toISOString(),
-      };
-
-      // Update history
-      this.addToHistory(result);
-
-      // Resolve the promise
-      this.driveResolve?.(result);
-    } catch (error) {
-      // Error during completion - ensure cleanup
-      this.status = "idle";
-      this.currentDrive = null;
-      systemStop.requestStop("drive", "drive_completion_error");
-      await this.endMotorOperation();
-
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error("drive.completion_error", { error: errorMessage });
-
-      this.driveResolve?.({
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition: this.driveStartPosition,
-        errorX: createMeters(0),
-        errorY: createMeters(0),
-        maxCteMeters: createMeters(0),
-        avgCteMeters: createMeters(0),
-        durationMs: this.nowMillis() - this.driveStartTime,
-        brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-        status: "error",
-        errorMessage,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  }
-
-  /**
    * Stop current drive immediately (emergency stop)
    */
   async stopCurrentDrive(): Promise<void> {
-    if (this.currentDrive) {
-      this.stopRequested = true;
-      systemStop.requestStop("drive", "drive_stop_requested");
-      const stopCurrentTurn = (this.turnController as any).stopCurrentTurn;
-      if (typeof stopCurrentTurn === "function") {
-        void stopCurrentTurn.call(this.turnController);
-      }
+    this.stopRequested = true;
+    systemStop.requestStop("drive", "drive_stop_requested");
+    const stopCurrentTurn = (this.turnController as any).stopCurrentTurn;
+    if (typeof stopCurrentTurn === "function") {
+      void stopCurrentTurn.call(this.turnController);
     }
+    void this.lineDriveController.stopCurrentDrive();
   }
 
   /**
@@ -583,6 +249,9 @@ export class DriveController {
     const testDriveCount = options?.testDrives ?? 5;
     const driveTimeMs = 2500; // 2.5 seconds per waypoint collection
     const results: DriveResult[] = [];
+
+    this.shortTrainingProgress = null;
+    this.stopRequested = false;
 
     this.logger.info("drive.test_pattern.started", {
       waypointCount,
@@ -619,18 +288,13 @@ export class DriveController {
 
       // Drive forward for 2-3 seconds (except on last waypoint)
       if (i < waypointCount - 1) {
-        this.beginMotorOperation();
-        try {
-          await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
-          const driveCompleted = await this.sleepWithStopChecks(driveTimeMs);
-          if (!driveCompleted || this.stopRequested || systemStop.isStopped()) {
-            await this.sensorController.stopMotors();
-            return results;
-          }
+        await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
+        const driveCompleted = await this.sleepWithStopChecks(driveTimeMs);
+        if (!driveCompleted || this.stopRequested || systemStop.isStopped()) {
           await this.sensorController.stopMotors();
-        } finally {
-          await this.endMotorOperation();
+          return results;
         }
+        await this.sensorController.stopMotors();
 
         // Wait for motors to settle
         const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
@@ -719,15 +383,394 @@ export class DriveController {
   }
 
   /**
+   * Run short-drive training across 5cm buckets up to 1m in both X directions.
+   */
+  async runShortDistanceTraining(options?: {
+    targetXErrorMeters?: number;
+    includeReverseLegs?: boolean;
+    startDistanceMeters?: number;
+    maxDistanceMeters?: number;
+  }): Promise<DriveResult[]> {
+    const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const includeReverseLegs = options?.includeReverseLegs ?? true;
+    const startDistanceMeters = options?.startDistanceMeters;
+    const maxDistanceMeters = options?.maxDistanceMeters;
+    this.shortTrainingProgress = null;
+    this.shortTrainingProgressFeed = [];
+    this.shortTrainingResults = [];
+    this.segmentTrainingProgress = null;
+    this.segmentTrainingProgressFeed = [];
+    this.segmentTrainingResults = [];
+    this.stopRequested = false;
+    const progressReporter: DriveTrainingProgressReporter = (progress) => {
+      this.shortTrainingProgress = progress;
+      this.shortTrainingProgressFeed = [progress, ...this.shortTrainingProgressFeed].slice(0, 12);
+    };
+
+    this.logger.info("drive.short_training.started", {
+      stepMeters: DRIVE_SHORT_BUCKET_STEP_METERS,
+      maxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+      targetXErrorMeters,
+      includeReverseLegs,
+    });
+
+    this.status = "learning";
+    const results = await this.lineDriveController.runShortDistanceTraining({
+      targetXErrorMeters,
+      includeReverseLegs,
+      startDistanceMeters,
+      maxDistanceMeters,
+      progressReporter,
+    });
+
+    for (const result of results) {
+      this.shortTrainingResults.push(result);
+      if (result.status === "success") {
+        this.addToHistory(result);
+      }
+    }
+
+    this.stopRequested = false;
+    this.status = "idle";
+    if (!this.shortTrainingProgress) {
+      this.shortTrainingProgress = {
+        mode: "short-distance",
+        phase: "completed",
+        distanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+        pairAttempt: 0,
+        legAttempt: 0,
+        directionSign: null,
+        targetXErrorMeters,
+        completedDrives: results.length,
+        totalPlannedDrives: Math.round(DRIVE_SHORT_BUCKET_MAX_METERS / DRIVE_SHORT_BUCKET_STEP_METERS) * (includeReverseLegs ? 2 : 1),
+        message: `Short-distance training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
+        timestamp: new Date().toISOString(),
+        resultStatus: "success",
+      };
+    }
+    this.logger.info("drive.short_training.completed", { totalDrives: results.length });
+    return results;
+  }
+
+  /**
+   * Run segment-drive training across 105cm to 6m segments in 20cm steps.
+   * The mower uses the current pose and heading at the start of the run to
+   * define a fixed line, then trains forward/reverse segment pairs on that line.
+   */
+  async runSegmentTraining(options?: {
+    targetXErrorMeters?: number;
+    includeReverseLegs?: boolean;
+    progressReporter?: SegmentTrainingProgressReporter;
+  }): Promise<SegmentTrainingResult[]> {
+    const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const includeReverseLegs = options?.includeReverseLegs ?? true;
+    const externalProgressReporter = options?.progressReporter;
+    const results: SegmentTrainingResult[] = [];
+    const totalPlannedSegments = (Math.floor((DRIVE_SEGMENT_MAX_DISTANCE_METERS - DRIVE_SEGMENT_MIN_DISTANCE_METERS + 1e-9) / DRIVE_SEGMENT_STEP_METERS) + 1) * (includeReverseLegs ? 2 : 1);
+
+    this.segmentTrainingProgress = null;
+    this.segmentTrainingProgressFeed = [];
+    this.segmentTrainingResults = [];
+    this.shortTrainingProgress = null;
+    this.shortTrainingProgressFeed = [];
+    this.shortTrainingResults = [];
+    this.stopRequested = false;
+    systemStop.clearStop("drive-segment-training-start");
+
+    const progressReporter: SegmentTrainingProgressReporter = (progress) => {
+      this.segmentTrainingProgress = progress;
+      this.segmentTrainingProgressFeed = [progress, ...this.segmentTrainingProgressFeed].slice(0, 12);
+      externalProgressReporter?.(progress);
+    };
+
+    this.status = "learning";
+
+    const reportProgress = (
+      phase: SegmentTrainingProgress["phase"],
+      message: string,
+      details: Partial<SegmentTrainingProgress> = {},
+    ): void => {
+      progressReporter?.({
+        mode: "segment",
+        phase,
+        distanceMeters: details.distanceMeters ?? 0,
+        pairAttempt: details.pairAttempt ?? 0,
+        segmentAttempt: details.segmentAttempt ?? 0,
+        directionSign: details.directionSign ?? null,
+        targetXErrorMeters,
+        completedSegments: details.completedSegments ?? results.length,
+        totalPlannedSegments,
+        message,
+        timestamp: new Date().toISOString(),
+        resultStatus: details.resultStatus ?? null,
+        errorXMeters: details.errorXMeters ?? null,
+        absErrorXMeters: details.absErrorXMeters ?? null,
+      });
+    };
+
+    const segmentLineAnchorPose = this.poseFusion.getCurrentPose();
+    const segmentLineAnchorPosition = segmentLineAnchorPose.position;
+    const segmentLineHeadingDegrees = unwrapInternalHeading(segmentLineAnchorPose.heading);
+
+    this.status = "learning";
+    this.logger.info("drive.segment_training.started", {
+      startPosition: {
+        x: unwrapMeters(segmentLineAnchorPosition.xMeters),
+        y: unwrapMeters(segmentLineAnchorPosition.yMeters),
+      },
+      startHeading: segmentLineHeadingDegrees,
+      minDistanceMeters: DRIVE_SEGMENT_MIN_DISTANCE_METERS,
+      maxDistanceMeters: DRIVE_SEGMENT_MAX_DISTANCE_METERS,
+      stepMeters: DRIVE_SEGMENT_STEP_METERS,
+      targetXErrorMeters,
+      includeReverseLegs,
+    });
+    reportProgress(
+      "started",
+      `Starting segment training from ${Math.round(DRIVE_SEGMENT_MIN_DISTANCE_METERS * 100)} cm to ${Math.round(DRIVE_SEGMENT_MAX_DISTANCE_METERS * 100)} cm.`,
+      {
+        distanceMeters: DRIVE_SEGMENT_MIN_DISTANCE_METERS,
+      },
+    );
+
+    for (let distanceMeters = DRIVE_SEGMENT_MIN_DISTANCE_METERS; distanceMeters <= DRIVE_SEGMENT_MAX_DISTANCE_METERS + 1e-9; distanceMeters += DRIVE_SEGMENT_STEP_METERS) {
+      const directionSigns = includeReverseLegs ? ([1, -1] as const) : ([1] as const);
+      let pairAttempt = 0;
+
+      while (true) {
+        if (systemStop.isStopped() || this.stopRequested) {
+          this.logger.warn("drive.segment_training.stopped", {
+            completed: results.length,
+            distanceMeters,
+            reason: systemStop.isStopped() ? "system_stop" : "stop_requested",
+          });
+          reportProgress("stopped", `Segment training stopped after ${results.length} run${results.length === 1 ? "" : "s"}.`, {
+            distanceMeters,
+            completedSegments: results.length,
+          });
+          this.stopRequested = false;
+          this.status = "idle";
+          return results;
+        }
+
+        pairAttempt += 1;
+        this.logger.info("drive.segment_training.pair_attempt", {
+          distanceMeters,
+          pairAttempt,
+          includeReverseLegs,
+        });
+        reportProgress(
+          "pair_attempt",
+          `Segment ${Math.round(distanceMeters * 100)} cm, pair attempt ${pairAttempt}.`,
+          {
+            distanceMeters,
+            pairAttempt,
+            completedSegments: results.length,
+          },
+        );
+
+        let pairSucceeded = true;
+        let segmentAttempt = 0;
+
+        for (const directionSign of directionSigns) {
+          segmentAttempt += 1;
+          if (systemStop.isStopped() || this.stopRequested) {
+            this.logger.warn("drive.segment_training.stopped", {
+              completed: results.length,
+              distanceMeters,
+              pairAttempt,
+              directionSign,
+              reason: systemStop.isStopped() ? "system_stop" : "stop_requested",
+            });
+            reportProgress("stopped", `Segment training stopped after ${results.length} run${results.length === 1 ? "" : "s"}.`, {
+              distanceMeters,
+              pairAttempt,
+              segmentAttempt,
+              directionSign,
+              completedSegments: results.length,
+            });
+            this.stopRequested = false;
+            this.status = "idle";
+            return results;
+          }
+
+          const targetPosition = this.createSegmentTrainingTargetPosition(
+            segmentLineAnchorPosition,
+            segmentLineHeadingDegrees,
+            distanceMeters,
+            directionSign,
+          );
+
+          this.logger.info("drive.segment_training.attempt", {
+            distanceMeters,
+            directionSign,
+            pairAttempt,
+            segmentAttempt,
+            anchorPosition: {
+              x: unwrapMeters(segmentLineAnchorPosition.xMeters),
+              y: unwrapMeters(segmentLineAnchorPosition.yMeters),
+              heading: segmentLineHeadingDegrees,
+            },
+            targetPosition: {
+              x: unwrapMeters(targetPosition.xMeters),
+              y: unwrapMeters(targetPosition.yMeters),
+            },
+          });
+          reportProgress(
+            "segment_attempt",
+            `Segment ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} segment running.`,
+            {
+              distanceMeters,
+              pairAttempt,
+              segmentAttempt,
+              directionSign,
+              completedSegments: results.length,
+            },
+          );
+
+          const result = await this.executeDrive({
+            targetPosition,
+            learningEnabled: true,
+          });
+
+          const segmentResult: SegmentTrainingResult = {
+            ...result,
+            distanceMeters,
+            directionSign,
+            pairAttempt,
+            segmentAttempt,
+            anchorHeadingDeg: segmentLineHeadingDegrees,
+          };
+          results.push(segmentResult);
+          this.segmentTrainingResults.push(segmentResult);
+
+          if (result.status === "success") {
+            this.addToHistory(result);
+          }
+
+          const absErrorX = Math.abs(unwrapMeters(result.errorX));
+          const segmentSucceeded = result.status === "success" && absErrorX <= targetXErrorMeters;
+          pairSucceeded = pairSucceeded && segmentSucceeded;
+          this.logger.info("drive.segment_training.result", {
+            distanceMeters,
+            directionSign,
+            pairAttempt,
+            segmentAttempt,
+            errorX: unwrapMeters(result.errorX),
+            absErrorX,
+            targetXErrorMeters,
+            status: result.status,
+            segmentSucceeded,
+            pairSucceeded,
+          });
+          reportProgress(
+            "segment_result",
+            `Segment ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} segment ${result.status}${Number.isFinite(absErrorX) ? `, error ${Math.round(absErrorX * 100)} cm` : ""}.`,
+            {
+              distanceMeters,
+              pairAttempt,
+              segmentAttempt,
+              directionSign,
+              completedSegments: results.length,
+              resultStatus: result.status,
+              errorXMeters: unwrapMeters(result.errorX),
+              absErrorXMeters: absErrorX,
+            },
+          );
+
+          if (result.status !== "success") {
+            this.logger.warn("drive.segment_training.stopped", {
+              completed: results.length,
+              distanceMeters,
+              pairAttempt,
+              directionSign,
+              reason: result.status,
+            });
+            reportProgress("stopped", `Segment training stopped after ${results.length} run${results.length === 1 ? "" : "s"} (${result.status}).`, {
+              distanceMeters,
+              pairAttempt,
+              directionSign,
+              completedSegments: results.length,
+              resultStatus: result.status,
+            });
+            this.stopRequested = false;
+            this.status = "idle";
+            return results;
+          }
+        }
+
+        if (pairSucceeded) {
+          reportProgress(
+            "completed",
+            `Segment ${Math.round(distanceMeters * 100)} cm completed after pair attempt ${pairAttempt}.`,
+            {
+              distanceMeters,
+              pairAttempt,
+              completedSegments: results.length,
+            },
+          );
+          break;
+        }
+
+        reportProgress(
+          "pair_retry",
+          `Segment ${Math.round(distanceMeters * 100)} cm pair attempt ${pairAttempt} missed target, retrying the forward/reverse pair.`,
+          {
+            distanceMeters,
+            pairAttempt,
+            completedSegments: results.length,
+          },
+        );
+        const pauseCompleted = await this.sleepWithStopChecks(500);
+        if (!pauseCompleted || this.stopRequested || systemStop.isStopped()) {
+          this.logger.warn("drive.segment_training.stopped", {
+            completed: results.length,
+            distanceMeters,
+            pairAttempt,
+          });
+          reportProgress("stopped", `Segment training stopped after ${results.length} run${results.length === 1 ? "" : "s"}.`, {
+            distanceMeters,
+            pairAttempt,
+            completedSegments: results.length,
+          });
+          this.stopRequested = false;
+          this.status = "idle";
+          return results;
+        }
+      }
+    }
+
+    this.logger.info("drive.segment_training.completed", { totalRuns: results.length });
+    reportProgress(
+      "completed",
+      `Segment training complete. Ran ${results.length} learning run${results.length === 1 ? "" : "s"}.`,
+      {
+        distanceMeters: DRIVE_SEGMENT_MAX_DISTANCE_METERS,
+        completedSegments: results.length,
+      },
+    );
+    this.status = "idle";
+    this.stopRequested = false;
+    return results;
+  }
+
+  /**
    * Get current controller state
    */
   getState(): DriveControllerState {
+    const lineState = this.lineDriveController.getState();
     return {
       status: this.status,
       currentDrive: this.currentDrive,
       drivesCompleted: this.drivesCompleted,
       averageErrorXMeters: this.drivesCompleted > 0 ? this.totalErrorXMeters / this.drivesCompleted : 0,
       averageErrorYMeters: this.drivesCompleted > 0 ? this.totalErrorYMeters / this.drivesCompleted : 0,
+      shortTrainingProgress: this.shortTrainingProgress,
+      shortTrainingProgressFeed: [...this.shortTrainingProgressFeed],
+      shortTrainingResults: [...lineState.shortTrainingResults],
+      segmentTrainingProgress: this.segmentTrainingProgress,
+      segmentTrainingProgressFeed: [...this.segmentTrainingProgressFeed],
+      segmentTrainingResults: [...this.segmentTrainingResults],
     };
   }
 
@@ -748,55 +791,17 @@ export class DriveController {
     this.totalErrorYMeters = 0;
   }
 
-  /**
-   * Calculate timeout for drive
-   */
-  private calculateTimeout(): number {
-    if (this.driveStartPosition === null || this.driveTargetPosition === null) {
-      return 60000; // 1 minute default
-    }
-
-    const distance = unwrapMeters(distanceBetween(this.driveStartPosition, this.driveTargetPosition));
-    // Assume 0.5 m/s average speed (conservative)
-    const estimatedDurationMs = (distance / 0.5) * 1000;
-    return estimatedDurationMs * DRIVE_TIMEOUT_MULTIPLIER;
-  }
-
-  /**
-   * Calculate max CTE from samples
-   */
-  private calculateMaxCte(): Meters {
-    if (this.cteSamples.length === 0) {
-      return createMeters(0);
-    }
-    return this.cteSamples.reduce((max, cte) =>
-      Math.abs(unwrapMeters(cte)) > Math.abs(unwrapMeters(max)) ? cte : max,
-      createMeters(0)
+  private createSegmentTrainingTargetPosition(
+    anchorPosition: Position,
+    anchorHeadingDegrees: number,
+    distanceMeters: number,
+    directionSign: 1 | -1,
+  ): Position {
+    const anchorHeadingRadians = (anchorHeadingDegrees * Math.PI) / 180;
+    return createPosition(
+      unwrapMeters(anchorPosition.xMeters) + (directionSign * distanceMeters * Math.cos(anchorHeadingRadians)),
+      unwrapMeters(anchorPosition.yMeters) + (directionSign * distanceMeters * Math.sin(anchorHeadingRadians)),
     );
-  }
-
-  /**
-   * Calculate average absolute CTE from samples
-   */
-  private calculateAvgCte(): Meters {
-    if (this.cteSamples.length === 0) {
-      return createMeters(0);
-    }
-    const sum = this.cteSamples.reduce((sum, cte) => sum + Math.abs(unwrapMeters(cte)), 0);
-    return createMeters(sum / this.cteSamples.length);
-  }
-
-  /**
-   * Add result to history with size limit
-   */
-  private addToHistory(result: DriveResult): void {
-    this.driveHistory.push(result);
-    if (this.driveHistory.length > DRIVE_HISTORY_MAX_SIZE) {
-      this.driveHistory.shift();
-    }
-    this.drivesCompleted++;
-    this.totalErrorXMeters += Math.abs(unwrapMeters(result.errorX));
-    this.totalErrorYMeters += Math.abs(unwrapMeters(result.errorY));
   }
 
   private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
@@ -815,71 +820,13 @@ export class DriveController {
     return true;
   }
 
-  private async finishStoppedDrive(errorMessage: string): Promise<void> {
-    const stoppedDrive = this.currentDrive ?? {
-      targetPosition: this.driveTargetPosition ?? createPosition(0, 0),
-      learningEnabled: true,
-    };
-    const finalPose = this.poseFusion.getCurrentPose();
-    const finalPosition = finalPose.position;
-    this.status = "stopped";
-    this.currentDrive = null;
-    this.stopRequested = false;
-    systemStop.requestStop("drive", errorMessage);
-    try {
-      await this.sensorController.stopMotors();
-    } finally {
-      await this.endMotorOperation();
+  private addToHistory(result: DriveResult): void {
+    this.driveHistory.push(result);
+    if (this.driveHistory.length > DRIVE_HISTORY_MAX_SIZE) {
+      this.driveHistory.shift();
     }
-    this.logger.warn("drive.stopped", {
-      durationMs: this.nowMillis() - this.driveStartTime,
-      reason: errorMessage,
-      currentDrive: stoppedDrive,
-    });
-    this.driveResolve?.({
-      startPosition: this.driveStartPosition ?? createPosition(0, 0),
-      targetPosition: stoppedDrive.targetPosition,
-      finalPosition,
-      errorX: createMeters(0),
-      errorY: createMeters(0),
-      maxCteMeters: createMeters(0),
-      avgCteMeters: createMeters(0),
-      durationMs: this.nowMillis() - this.driveStartTime,
-      brakeDistanceUsed: this.learningModel.getBrakeDistance(),
-      status: "stopped",
-      errorMessage,
-      timestamp: new Date().toISOString(),
-    });
-    this.driveResolve = null;
-  }
-
-  private beginMotorOperation(): void {
-    if (this.motorOperationActive) {
-      return;
-    }
-
-    this.motorOperationActive = true;
-    const beginMotorOperation = (this.sensorController as any).beginMotorOperation;
-    if (typeof beginMotorOperation === "function") {
-      beginMotorOperation.call(this.sensorController);
-    }
-  }
-
-  private async endMotorOperation(): Promise<void> {
-    if (!this.motorOperationActive) {
-      return;
-    }
-
-    this.motorOperationActive = false;
-    const endMotorOperation = (this.sensorController as any).endMotorOperation;
-    if (typeof endMotorOperation === "function") {
-      await endMotorOperation.call(this.sensorController);
-      return;
-    }
-
-    const stopMotors = (this.sensorController as any).stopMotors;
-    if (typeof stopMotors === "function") {
-      await stopMotors.call(this.sensorController);
-    }
+    this.drivesCompleted += 1;
+    this.totalErrorXMeters += Math.abs(unwrapMeters(result.errorX));
+    this.totalErrorYMeters += Math.abs(unwrapMeters(result.errorY));
   }
 }

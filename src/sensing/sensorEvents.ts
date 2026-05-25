@@ -6,7 +6,7 @@ import { InternalHeading } from "../geometry/headingTypes.js";
 
 /**
  * IMU heading update event
- * Emitted each time IMU heading is integrated (30Hz)
+ * Emitted each time IMU heading is integrated (sensor loop cadence)
  */
 export interface ImuHeadingUpdateEvent {
   readonly heading: InternalHeading;
@@ -17,7 +17,7 @@ export interface ImuHeadingUpdateEvent {
 
 /**
  * GNSS position update event
- * Emitted each time GNSS position is read (30Hz)
+ * Emitted each time GNSS position is read (sensor loop cadence)
  */
 export interface GnssPositionUpdateEvent {
   readonly xMeters: number;
@@ -32,7 +32,7 @@ export interface GnssPositionUpdateEvent {
 
 /**
  * Motor feedback update event
- * Emitted each time motor feedback is read (30Hz)
+ * Emitted each time motor feedback is read (sensor loop cadence)
  */
 export interface MotorFeedbackUpdateEvent {
   readonly leftWheelSpeedMetersPerSecond: number;

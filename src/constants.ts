@@ -19,6 +19,12 @@
 export const SENSOR_POLL_INTERVAL_MS = 33;
 
 /**
+ * Sensor controller polling interval in milliseconds
+ * 5ms ≈ 200Hz update rate for the controller's internal sensor loop
+ */
+export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 5;
+
+/**
  * Manual drive control loop interval in milliseconds
  */
 export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
@@ -26,7 +32,7 @@ export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
 /**
  * Default IMU calibration sample count (design decision for accuracy vs time)
  */
-export const IMU_DEFAULT_CALIBRATION_SAMPLES = 60;
+export const IMU_DEFAULT_CALIBRATION_SAMPLES = 240;
 
 /**
  * GNSS read retry delay in milliseconds (design decision for retry policy)
@@ -95,6 +101,12 @@ export const MANUAL_SPEED_DEADBAND = 0.05;
  * Absolute turn demands below this are treated as zero
  */
 export const MANUAL_TURN_DEADBAND = 0.05;
+
+/**
+ * Motor output deadband
+ * Output commands at or below this magnitude are treated as zero.
+ */
+export const MOTOR_OUTPUT_DEADBAND_PERCENT = 0.1;
 
 /**
  * Manual drive threshold for entering spin mode
@@ -188,6 +200,53 @@ export const MAX_WHEEL_SPEED_MPS_DEFAULT = 0.75;
  */
 export const MAX_WHEEL_OUTPUT_PERCENT_DEFAULT = 1.0;
 
+/**
+ * Motor stall detection threshold for commanded output magnitude.
+ * If both wheel commands are above this level and the mower is not moving,
+ * the sensor controller treats it as a likely stall.
+ */
+export const MOTOR_STALL_COMMAND_THRESHOLD_PERCENT = 0.35;
+
+/**
+ * Motor stall detection threshold for measured wheel speed.
+ */
+export const MOTOR_STALL_SPEED_THRESHOLD_MPS = 0.01;
+
+/**
+ * Motor stall detection threshold for encoder deltas.
+ */
+export const MOTOR_STALL_ENCODER_DELTA_THRESHOLD = 0;
+
+/**
+ * Maximum GNSS position accuracy to trust for stall detection.
+ */
+export const MOTOR_STALL_GNSS_ACCURACY_MAX_METERS = 0.1;
+
+/**
+ * Minimum GNSS progress required over the stall observation window while motors are running.
+ */
+export const MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS = 0.1;
+
+/**
+ * Observation window used to judge whether commanded motion is actually producing progress.
+ */
+export const MOTOR_STALL_OBSERVATION_WINDOW_MS = 4000;
+
+/**
+ * Number of consecutive stationary samples before declaring a stall.
+ */
+export const MOTOR_STALL_CONSECUTIVE_SAMPLES = 12;
+
+/**
+ * Motor current threshold used as additional evidence for an obstruction.
+ */
+export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.0;
+
+/**
+ * Grace period after a new motor command before stall detection begins.
+ */
+export const MOTOR_STALL_STARTUP_GRACE_MS = 500;
+
 // =============================================================================
 // NETWORK DEFAULTS
 // =============================================================================
@@ -214,7 +273,7 @@ export const MAX_PORT_NUMBER = 65535;
 /**
  * Turn controller polling interval in milliseconds
  * How often to check heading during turn execution
- * Matches sensor polling rate (30Hz) - no benefit to polling faster than sensor updates
+ * Matches the current turn control cadence; kept separate from the 200Hz sensor loop.
  */
 export const TURN_POLLING_INTERVAL_MS = 33;
 
@@ -239,7 +298,7 @@ export const MOTOR_RAMP_UP_TIME_MS = 1000;
  * Small angle threshold - below this, use special handling (degrees)
  * Small angles require different brake strategy
  */
-export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 30;
+export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 60;
 
 /**
  * Crawl speed factor used for small-angle turns
@@ -284,6 +343,21 @@ export const MOTOR_CALIBRATION_PATH = "config/motor-calibration.json";
  */
 export const POSE_CALIBRATION_PATH = "config/pose-calibration.json";
 
+/**
+ * Geometry calibration file path (relative to project root)
+ */
+export const GEOMETRY_CALIBRATION_PATH = "config/geometry-calibration.json";
+
+/**
+ * IMU yaw calibration file path (relative to project root)
+ */
+export const IMU_YAW_CALIBRATION_PATH = "config/imu-yaw-calibration.json";
+
+/**
+ * Path following parameters file path (relative to project root)
+ */
+export const PATH_FOLLOWING_PARAMETERS_PATH = "config/path-following-parameters.json";
+
 // =============================================================================
 // DRIVE CONTROLLER PARAMETERS - Design decisions
 // =============================================================================
@@ -327,10 +401,132 @@ export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 2.0;
 export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
 
 /**
- * Minimum drive distance for learning (meters)
- * Drives shorter than this may not reach full speed and are excluded from learning
+ * Nonlinear CTE correction factor.
+ * Higher = correction grows faster as lateral drift grows.
  */
-export const DRIVE_MIN_DISTANCE_FOR_LEARNING_METERS = 3.0;
+export const DRIVE_CTE_NONLINEARITY_DEFAULT = 3.0;
+
+/**
+ * Default wheel base used by the regulated pure pursuit controller (meters)
+ */
+export const DRIVE_WHEEL_BASE_METERS_DEFAULT = 0.35;
+
+/**
+ * Fraction of maximum wheel speed used as the nominal target speed for regulated pure pursuit.
+ * Tuned to keep the mower moving with useful inertia while the ESP32 handles motor ramping.
+ */
+export const DRIVE_PURSUIT_TARGET_SPEED_SCALE = 1.0;
+
+/**
+ * Base lookahead distance used by regulated pure pursuit (meters).
+ */
+export const DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS = 0.3;
+
+/**
+ * Minimum pure pursuit lookahead distance (meters).
+ */
+export const DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS = 0.3;
+
+/**
+ * Maximum pure pursuit lookahead distance (meters).
+ */
+export const DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS = 0.9;
+
+/**
+ * How long the lookahead distance grows in proportion to the commanded speed (seconds).
+ */
+export const DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS = 1.5;
+
+/**
+ * Distance over which the controller starts to slow down as it approaches the target (meters).
+ */
+export const DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS = 0.6;
+
+/**
+ * Minimum speed scale applied while approaching the target.
+ * Kept high enough to preserve momentum through grass tufts.
+ */
+export const DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE = 0.85;
+
+/**
+ * Gain applied to curvature when slowing down for tighter arcs.
+ * Lower values keep more speed through moderate bends.
+ */
+export const DRIVE_PURSUIT_CURVATURE_SPEED_GAIN = 1.5;
+
+/**
+ * Minimum speed scale allowed by curvature regulation.
+ */
+export const DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE = 0.75;
+
+/**
+ * Angle threshold at which the controller rotates in place to recover heading alignment.
+ */
+export const DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG = 45;
+
+/**
+ * Wheel output scale used for in-place rotation recovery.
+ */
+export const DRIVE_PURSUIT_PIVOT_SPEED_SCALE = 0.35;
+
+/**
+ * Once the mower is within this distance of the target, the target endpoint
+ * should stop influencing steering. The controller should keep following the
+ * original straight line using the current cross-track error only.
+ */
+export const DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
+
+/**
+ * Upper bound for the 5cm fine short-drive buckets (meters)
+ * The short-drive learner still uses one shared 1.05m bucket for longer runs.
+ */
+export const DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS = 1.0;
+
+/**
+ * Short-drive bucket step in meters
+ */
+export const DRIVE_SHORT_BUCKET_STEP_METERS = 0.05;
+
+/**
+ * Maximum distance covered by short-drive bucket learning (meters)
+ */
+export const DRIVE_SHORT_BUCKET_MAX_METERS = 4.0;
+
+/**
+ * Start of the coarse short-drive bucket range (meters)
+ */
+export const DRIVE_SHORT_BUCKET_COARSE_START_METERS = 1.05;
+
+/**
+ * Step size for the coarse short-drive bucket range (meters)
+ */
+export const DRIVE_SHORT_BUCKET_COARSE_STEP_METERS = 0.5;
+
+/**
+ * Target absolute X error for short-drive learning runs (meters)
+ */
+export const DRIVE_SHORT_TARGET_X_ERROR_METERS = 0.04;
+
+/**
+ * Minimum distance covered by segment-drive learning (meters)
+ */
+export const DRIVE_SEGMENT_MIN_DISTANCE_METERS = 1.05;
+
+/**
+ * Maximum distance covered by segment-drive learning (meters)
+ */
+export const DRIVE_SEGMENT_MAX_DISTANCE_METERS = 6.0;
+
+/**
+ * Step size for segment-drive learning distances (meters)
+ */
+export const DRIVE_SEGMENT_STEP_METERS = 0.2;
+
+/**
+ * Arrival tolerance for drive completion (meters)
+ * Once the mower is within this along-track distance of the target, it should stop.
+ */
+export const DRIVE_ARRIVAL_TOLERANCE_METERS = 0.01;
 
 /**
  * Default encoder meters per tick for dead-reckoning
@@ -342,3 +538,26 @@ export const ENCODER_METERS_PER_TICK_DEFAULT = 0.001;
  * 5cm - learning algorithm tries to achieve this
  */
 export const DRIVE_TARGET_CTE_METERS = 0.05;
+
+/**
+ * Distance from the target within which heading preview correction fades out (meters)
+ * This keeps the controller from making sharp turn-ins right at the target.
+ */
+export const DRIVE_HEADING_CORRECTION_FADEOUT_METERS = 0.25;
+
+/**
+ * Maximum distance used when projecting heading error into an equivalent lateral offset (meters)
+ * Larger remaining distances still cap at this preview range to avoid over-correction.
+ */
+export const DRIVE_HEADING_CORRECTION_MAX_LOOKAHEAD_METERS = 1.0;
+
+/**
+ * Blend factor for heading-preview correction
+ * Higher = heading errors influence steering more strongly.
+ */
+export const DRIVE_HEADING_CORRECTION_BLEND = 0.65;
+
+/**
+ * Maximum absolute heading error used by the preview correction (degrees)
+ */
+export const DRIVE_HEADING_CORRECTION_MAX_DEGREES = 45;

@@ -1,867 +1,734 @@
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles } from "./liveSensorWidgets.js";
+import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
+
 /**
- * Drive tuning web page - modern, responsive UI for drive controller
+ * Drive tuning web page - simplified operator view for short-distance tuning.
  */
 
 export function getDriveTuningPageHtml(): string {
-  return `
-<!DOCTYPE html>
+  return `<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Drive Tuning - Mower Control</title>
-  <style>
-    :root {
-      --primary-color: #2563eb;
-      --primary-hover: #1d4ed8;
-      --success-color: #10b981;
-      --danger-color: #ef4444;
-      --danger-hover: #dc2626;
-      --warning-color: #f59e0b;
-      --bg-primary: #ffffff;
-      --bg-secondary: #f9fafb;
-      --bg-tertiary: #f3f4f6;
-      --text-primary: #111827;
-      --text-secondary: #6b7280;
-      --border-color: #e5e7eb;
-      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: var(--bg-secondary);
-      color: var(--text-primary);
-      line-height: 1.6;
-    }
-
-    .container {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 1rem;
-    }
-
-    .header {
-      background: var(--bg-primary);
-      border-bottom: 1px solid var(--border-color);
-      padding: 1rem 0;
-      box-shadow: var(--shadow-sm);
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
-
-    .header-content {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 0 1rem;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 1rem;
-    }
-
-    .header-left {
-      flex: 1;
-    }
-
-    .back-link {
-      color: var(--primary-color);
-      text-decoration: none;
-      font-weight: 500;
-      font-size: 0.875rem;
-      transition: all 0.2s;
-    }
-
-    .back-link:hover {
-      color: var(--primary-hover);
-      text-decoration: underline;
-    }
-
-    h1 {
-      font-size: 1.875rem;
-      font-weight: 700;
-      color: var(--text-primary);
-    }
-
-    .status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.375rem 0.75rem;
-      border-radius: 0.5rem;
-      font-size: 0.875rem;
-      font-weight: 500;
-      background: var(--bg-tertiary);
-      color: var(--text-secondary);
-    }
-
-    .status-badge.running {
-      background: #dbeafe;
-      color: var(--primary-color);
-    }
-
-    .status-dot {
-      width: 0.5rem;
-      height: 0.5rem;
-      border-radius: 50%;
-      background: currentColor;
-    }
-
-    .controls-panel {
-      background: var(--bg-primary);
-      border-radius: 0.75rem;
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
-      box-shadow: var(--shadow-md);
-    }
-
-    .controls-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 1rem;
-      align-items: end;
-    }
-
-    .control-group {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    label {
-      font-size: 0.875rem;
-      font-weight: 500;
-      color: var(--text-secondary);
-    }
-
-    input[type="number"] {
-      padding: 0.625rem 0.875rem;
-      border: 1px solid var(--border-color);
-      border-radius: 0.5rem;
-      font-size: 1rem;
-      background: var(--bg-primary);
-      color: var(--text-primary);
-      transition: all 0.2s;
-    }
-
-    input[type="number"]:focus {
-      outline: none;
-      border-color: var(--primary-color);
-      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-    }
-
-    .button-group {
-      display: flex;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
-
-    button {
-      padding: 0.625rem 1.25rem;
-      border: none;
-      border-radius: 0.5rem;
-      font-size: 0.9375rem;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      white-space: nowrap;
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .btn-primary {
-      background: var(--primary-color);
-      color: white;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-      background: var(--primary-hover);
-      box-shadow: var(--shadow-md);
-    }
-
-    .btn-danger {
-      background: var(--danger-color);
-      color: white;
-      font-weight: 600;
-      font-size: 1.1rem;
-      padding: 0.75rem 2rem;
-    }
-
-    .btn-danger:hover:not(:disabled) {
-      background: var(--danger-hover);
-      box-shadow: var(--shadow-md);
-    }
-
-    .btn-secondary {
-      background: var(--bg-tertiary);
-      color: var(--text-primary);
-    }
-
-    .btn-secondary:hover:not(:disabled) {
-      background: var(--border-color);
-    }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .stat-card {
-      background: var(--bg-primary);
-      border-radius: 0.75rem;
-      padding: 1.25rem;
-      box-shadow: var(--shadow-sm);
-    }
-
-    .stat-label {
-      font-size: 0.75rem;
-      font-weight: 500;
-      color: var(--text-secondary);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 0.5rem;
-    }
-
-    .stat-value {
-      font-size: 1.875rem;
-      font-weight: 700;
-      color: var(--text-primary);
-    }
-
-    .stat-value.good {
-      color: var(--success-color);
-    }
-
-    .stat-value.warning {
-      color: var(--warning-color);
-    }
-
-    .stat-subvalue {
-      font-size: 0.875rem;
-      color: var(--text-secondary);
-      margin-top: 0.25rem;
-    }
-
-    .results-section {
-      background: var(--bg-primary);
-      border-radius: 0.75rem;
-      padding: 1.5rem;
-      box-shadow: var(--shadow-md);
-      margin-bottom: 1.5rem;
-    }
-
-    .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1.25rem;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    .table-container {
-      overflow-x: auto;
-      border-radius: 0.5rem;
-      border: 1px solid var(--border-color);
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.875rem;
-    }
-
-    thead {
-      background: var(--bg-tertiary);
-    }
-
-    th {
-      padding: 0.75rem 1rem;
-      text-align: left;
-      font-weight: 600;
-      color: var(--text-secondary);
-      border-bottom: 1px solid var(--border-color);
-      white-space: nowrap;
-    }
-
-    td {
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    tbody tr:last-child td {
-      border-bottom: none;
-    }
-
-    tbody tr:hover {
-      background: var(--bg-secondary);
-    }
-
-    tbody tr.success {
-      background: #d1fae5;
-    }
-
-    tbody tr.error,
-    tbody tr.timeout {
-      background: #fee2e2;
-    }
-
-    tbody tr.stopped {
-      background: #fef3c7;
-    }
-
-    .position-cell {
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    .error-cell {
-      font-weight: 500;
-    }
-
-    .error-good {
-      color: var(--success-color);
-    }
-
-    .error-warning {
-      color: var(--warning-color);
-    }
-
-    .error-bad {
-      color: var(--danger-color);
-    }
-
-    .status-cell {
-      display: inline-block;
-      padding: 0.25rem 0.625rem;
-      border-radius: 0.375rem;
-      font-size: 0.75rem;
-      font-weight: 500;
-    }
-
-    .status-success {
-      background: #d1fae5;
-      color: #065f46;
-    }
-
-    .status-timeout {
-      background: #fed7aa;
-      color: #92400e;
-    }
-
-    .status-stopped {
-      background: #fee2e2;
-      color: #991b1b;
-    }
-
-    .status-error {
-      background: #fee2e2;
-      color: #991b1b;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 3rem 1rem;
-      color: var(--text-secondary);
-    }
-
-    .empty-icon {
-      font-size: 3rem;
-      margin-bottom: 1rem;
-      opacity: 0.5;
-    }
-
-    .learning-params {
-      background: var(--bg-primary);
-      border-radius: 0.75rem;
-      padding: 1.5rem;
-      box-shadow: var(--shadow-md);
-      margin-bottom: 1.5rem;
-    }
-
-    .params-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1rem;
-    }
-
-    .param-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 0.75rem;
-      background: var(--bg-secondary);
-      border-radius: 0.5rem;
-    }
-
-    .param-label {
-      font-size: 0.875rem;
-      color: var(--text-secondary);
-    }
-
-    .param-value {
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    /* Mobile responsiveness */
-    @media (max-width: 768px) {
-      h1 {
-        font-size: 1.25rem;
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drive Tuning - Mower Control</title>
+    <style>
+${getLiveSensorWidgetsStyles()}
+${getAppDialogStyles()}
+      :root {
+        --primary-color: #2563eb;
+        --primary-hover: #1d4ed8;
+        --danger-color: #ef4444;
+        --danger-hover: #dc2626;
+        --bg-primary: #ffffff;
+        --bg-secondary: #f9fafb;
+        --bg-tertiary: #f3f4f6;
+        --text-primary: #111827;
+        --text-secondary: #6b7280;
+        --border-color: #e5e7eb;
+        --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
       }
 
-      .controls-grid {
-        grid-template-columns: 1fr;
+      * {
+        box-sizing: border-box;
       }
 
-      .button-group {
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        line-height: 1.5;
+        min-height: 100vh;
+        display: flex;
         flex-direction: column;
       }
 
-      button {
+      .container {
+        max-width: 1800px;
+        margin: 0 auto;
+        padding: 1rem;
         width: 100%;
-        justify-content: center;
       }
 
-      .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
+      .page-layout {
+        display: grid;
+        grid-template-columns: minmax(380px, 420px) minmax(0, 1fr);
+        gap: 1rem;
+        align-items: start;
       }
 
-      .stat-value {
+      .sidebar-column {
+        position: sticky;
+        top: 5.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        align-self: start;
+      }
+
+      .main-column {
+        min-width: 0;
+      }
+
+      .sensor-card {
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 0.75rem;
+        padding: 1.25rem;
+        box-shadow: var(--shadow-md);
+      }
+
+      .sensor-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.875rem;
+        padding-bottom: 0.875rem;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      .sensor-title {
+        font-size: 1rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-secondary);
+      }
+
+      .status-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        display: inline-block;
+        background: currentColor;
+      }
+
+      .metric-label {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .metric-value {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      .metric-value.large {
         font-size: 1.5rem;
       }
 
+      /* shared live sensor widget styles injected above */
+
+      .error-message {
+        background: #fef2f2;
+        color: #991b1b;
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        font-size: 0.875rem;
+        margin-top: 0.5rem;
+      }
+
+      .header {
+        background: var(--bg-primary);
+        border-bottom: 1px solid var(--border-color);
+        box-shadow: var(--shadow-sm);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+
       .header-content {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 1rem;
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.8rem;
+      }
+
+      .back-link {
+        color: var(--primary-color);
+        text-decoration: none;
+        font-weight: 600;
+      }
+
+      .panel,
+      .results {
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 0.75rem;
+        box-shadow: var(--shadow-md);
+        padding: 1rem;
+        margin-top: 1rem;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: minmax(180px, 240px) auto;
+        gap: 1rem;
+        align-items: end;
+      }
+
+      .field {
+        display: flex;
         flex-direction: column;
-        align-items: flex-start;
+        gap: 0.4rem;
+      }
+
+      label {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+      }
+
+      input[type="number"] {
+        padding: 0.7rem 0.8rem;
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+        font-size: 1rem;
+      }
+
+      .buttons {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: none;
+        border-radius: 0.5rem;
+        padding: 0.7rem 1rem;
+        font-size: 0.98rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .primary {
+        background: var(--primary-color);
+        color: white;
+      }
+
+      .primary:hover:not(:disabled) {
+        background: var(--primary-hover);
+      }
+
+      .danger {
+        background: var(--danger-color);
+        color: white;
+      }
+
+      .danger:hover:not(:disabled) {
+        background: var(--danger-hover);
+      }
+
+      .summary {
+        margin-top: 0.75rem;
+        color: var(--text-secondary);
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+
+      .stat {
+        padding: 0.85rem;
+        border: 1px solid var(--border-color);
+        border-radius: 0.65rem;
+        background: #fff;
+      }
+
+      .stat-label {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        color: var(--text-secondary);
+        letter-spacing: 0.08em;
+      }
+
+      .stat-value {
+        margin-top: 0.3rem;
+        font-size: 1.4rem;
+        font-weight: 700;
+      }
+
+      .results h2 {
+        margin: 0 0 0.75rem;
+        font-size: 1.2rem;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border-color);
+        border-radius: 0.6rem;
       }
 
       table {
-        font-size: 0.8125rem;
+        width: 100%;
+        border-collapse: collapse;
       }
 
-      th, td {
-        padding: 0.5rem 0.75rem;
+      th,
+      td {
+        padding: 0.7rem 0.8rem;
+        border-bottom: 1px solid var(--border-color);
+        text-align: left;
+        white-space: nowrap;
       }
-    }
 
-    @media (max-width: 480px) {
-      .stats-grid {
-        grid-template-columns: 1fr;
+      thead {
+        background: var(--bg-tertiary);
       }
-    }
 
-    /* Loading spinner */
-    .spinner {
-      display: inline-block;
-      width: 1rem;
-      height: 1rem;
-      border: 2px solid rgba(255, 255, 255, 0.3);
-      border-top-color: white;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
+      th {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+      }
 
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="header-content">
-      <div class="header-left">
-        <h1>🎯 Drive Tuning</h1>
-      </div>
-      <div class="status-badge" id="controllerStatus">
-        <span class="status-dot"></span>
-        <span>Idle</span>
-      </div>
-      <a href="/" class="back-link">← Back to Dashboard</a>
-    </div>
-  </div>
+      tbody tr:hover {
+        background: #fcfcfd;
+      }
 
-  <div class="container">
-    <!-- Controls Panel -->
-    <div class="controls-panel">
-      <div class="controls-grid">
-        <div class="control-group">
-          <label for="targetX">Target X (meters)</label>
-          <input type="number" id="targetX" min="-100" max="100" step="0.5" value="5.0">
-        </div>
+      .good {
+        color: #065f46;
+      }
 
-        <div class="control-group">
-          <label for="targetY">Target Y (meters)</label>
-          <input type="number" id="targetY" min="-100" max="100" step="0.5" value="0.0">
-        </div>
+      .warn {
+        color: #92400e;
+      }
 
-        <div class="control-group">
-          <label>&nbsp;</label>
-          <div class="button-group">
-            <button class="btn-primary" id="executeDrive">Execute Single Drive</button>
-            <button class="btn-primary" id="runTestPattern">Run Test Pattern</button>
-          </div>
-        </div>
+      .bad {
+        color: #991b1b;
+      }
 
-        <div class="control-group">
-          <label>&nbsp;</label>
-          <div class="button-group">
-            <button class="btn-danger" id="stopDrive">⏹ STOP</button>
-          </div>
-        </div>
-      </div>
-    </div>
+      .empty {
+        text-align: center;
+        color: var(--text-secondary);
+        padding: 2rem 1rem;
+      }
 
-    <!-- Statistics -->
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Status</div>
-        <div class="stat-value" id="statusText">Idle</div>
-        <div class="stat-subvalue" id="currentTarget">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Drives Completed</div>
-        <div class="stat-value" id="drivesCompleted">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Avg Error X</div>
-        <div class="stat-value" id="averageErrorX">0.000 m</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Avg Error Y</div>
-        <div class="stat-value" id="averageErrorY">0.000 m</div>
-      </div>
-    </div>
-
-    <!-- Operational Parameters -->
-    <div class="learning-params">
-      <div class="section-header">
-        <h2>Operational Parameters</h2>
-        <button class="btn-secondary" id="resetLearning">Reset Learning</button>
-      </div>
-      <div class="params-grid">
-        <div class="param-item">
-          <span class="param-label">Brake Distance</span>
-          <span class="param-value" id="brakeDistance">—</span>
-        </div>
-        <div class="param-item">
-          <span class="param-label">CTE Gain</span>
-          <span class="param-value" id="cteGain">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Hardware Calibration -->
-    <div class="learning-params">
-      <div class="section-header">
-        <h2>Hardware Calibration</h2>
-      </div>
-      <div class="params-grid">
-        <div class="param-item">
-          <span class="param-label">Motor Ramp Down</span>
-          <span class="param-value" id="motorRampDown">—</span>
-        </div>
-        <div class="param-item">
-          <span class="param-label">Motor Ramp Up</span>
-          <span class="param-value" id="motorRampUp">—</span>
-        </div>
-        <div class="param-item">
-          <span class="param-label">Encoder Calibration</span>
-          <span class="param-value" id="encoderCalibration">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Test Pattern Status -->
-    <div id="testPatternStatus" style="display: none; margin: 1.5rem 0; padding: 1rem; background: var(--bg-tertiary); border-radius: 0.5rem; border-left: 4px solid var(--primary-color);">
-      <div style="font-weight: 600; margin-bottom: 0.5rem;">Test Pattern Progress</div>
-      <div id="testPatternMessage" style="color: var(--text-secondary);"></div>
-    </div>
-
-    <!-- Results Table -->
-    <div class="results-section">
-      <div class="section-header">
-        <h2>Drive History</h2>
-        <div style="display: flex; gap: 1rem; align-items: center;">
-          <span style="font-size: 0.875rem; color: var(--text-secondary);" id="resultsCount">0 drives</span>
-          <button class="btn-secondary" id="clearHistory">Clear History</button>
-        </div>
-      </div>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Distance</th>
-              <th>Initial Turn</th>
-              <th>Avg CTE</th>
-              <th>Max CTE</th>
-              <th>Error X</th>
-              <th>Error Y</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="resultsTableBody">
-            <tr>
-              <td colspan="8">
-                <div class="empty-state">
-                  <div class="empty-icon">📊</div>
-                  <div>No drive results yet. Execute a drive to see results here.</div>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    let updateInterval = null;
-
-    // Format time
-    function formatTime(isoString) {
-      const date = new Date(isoString);
-      return date.toLocaleTimeString();
-    }
-
-    // Format meters with 3 decimal places
-    function formatMeters(meters) {
-      return meters.toFixed(3) + ' m';
-    }
-
-    // Get error class
-    function getErrorClass(errorMeters) {
-      const abs = Math.abs(errorMeters);
-      if (abs <= 0.05) return 'error-good';
-      if (abs <= 0.15) return 'error-warning';
-      return 'error-bad';
-    }
-
-    // Update UI with status data
-    async function updateStatus() {
-      try {
-        const response = await fetch('/api/drive/status');
-        const data = await response.json();
-
-        // Update controller status badge
-        const statusBadge = document.getElementById('controllerStatus');
-        const statusSpan = statusBadge.querySelector('span:last-child');
-        statusSpan.textContent = data.state.status.charAt(0).toUpperCase() + data.state.status.slice(1);
-        statusBadge.className = 'status-badge';
-        if (data.state.status !== 'idle') {
-          statusBadge.classList.add('running');
+      @media (max-width: 760px) {
+        .page-layout {
+          grid-template-columns: 1fr;
         }
 
-        // Update stats
-        document.getElementById('drivesCompleted').textContent = data.state.drivesCompleted;
-        document.getElementById('statusText').textContent = data.state.status.charAt(0).toUpperCase() + data.state.status.slice(1);
-
-        // Update current target if driving
-        const currentTargetEl = document.getElementById('currentTarget');
-        if (data.state.currentDrive) {
-          const target = data.state.currentDrive.targetPosition;
-          currentTargetEl.textContent = \`Target: (\${target.xMeters.toFixed(3)}, \${target.yMeters.toFixed(3)}) m\`;
-        } else {
-          currentTargetEl.textContent = '—';
+        .sidebar-column {
+          position: static;
         }
 
-        // Update average errors
-        const avgErrorX = data.state.averageErrorXMeters;
-        const avgErrorY = data.state.averageErrorYMeters;
-        const avgErrorXEl = document.getElementById('averageErrorX');
-        const avgErrorYEl = document.getElementById('averageErrorY');
-        avgErrorXEl.textContent = formatMeters(avgErrorX);
-        avgErrorYEl.textContent = formatMeters(avgErrorY);
-        avgErrorXEl.className = 'stat-value ' + (Math.abs(avgErrorX) <= 0.05 ? 'good' : Math.abs(avgErrorX) <= 0.15 ? 'warning' : '');
-        avgErrorYEl.className = 'stat-value ' + (Math.abs(avgErrorY) <= 0.05 ? 'good' : Math.abs(avgErrorY) <= 0.15 ? 'warning' : '');
-
-        // Update learning parameters
-        if (data.parameters) {
-          document.getElementById('brakeDistance').textContent = formatMeters(data.parameters.brakeDistanceMeters);
-          document.getElementById('cteGain').textContent = data.parameters.cteGain.toFixed(3);
-          document.getElementById('motorRampDown').textContent = data.parameters.motorRampDownTimeMs + ' ms';
-          document.getElementById('motorRampUp').textContent = data.parameters.motorRampUpTimeMs + ' ms';
-          document.getElementById('encoderCalibration').textContent = data.parameters.encoderMetersPerTick.toFixed(6) + ' m/tick';
+        .controls,
+        .stats {
+          grid-template-columns: 1fr;
         }
 
-        // Update results table
-        const tbody = document.getElementById('resultsTableBody');
-        const resultsCount = document.getElementById('resultsCount');
+        .buttons {
+          flex-direction: column;
+        }
 
-        if (data.history && data.history.length > 0) {
-          resultsCount.textContent = \`\${data.history.length} drive\${data.history.length !== 1 ? 's' : ''}\`;
+        button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="header-content">
+        <h1>Drive Tuning</h1>
+        <a class="back-link" href="/">← Back to Dashboard</a>
+      </div>
+    </div>
 
-          tbody.innerHTML = data.history.slice().reverse().slice(0, 50).map(result => {
-            // Calculate distance from start to target
-            const dx = result.targetPosition.xMeters - result.startPosition.xMeters;
-            const dy = result.targetPosition.yMeters - result.startPosition.yMeters;
-            const distance = Math.sqrt(dx * dx + dy * dy);
+    <div class="container">
+      <div class="page-layout">
+        <aside class="sidebar-column" aria-label="Live primitives">
+${getLiveSensorWidgetsHtml({
+  imuCardId: "imu-card",
+  imuCompassId: "compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+})}
+        </aside>
 
-            // Calculate initial heading turn required
-            const initialTurn = Math.atan2(dy, dx) * 180 / Math.PI;
+        <main class="main-column">
+          <section class="panel">
+            <div class="controls">
+              <div class="field">
+                <label for="startDistanceCm">Distance (cm)</label>
+                <input id="startDistanceCm" type="number" min="50" step="5" value="50" />
+              </div>
+              <div class="buttons">
+                <button id="startDriveTuning" class="primary">start tuning</button>
+                <button id="stopDriveTuning" class="danger">STOP</button>
+              </div>
+            </div>
+            <div class="summary" id="driveSummary">Drive tuning idle.</div>
+            <div class="stats">
+              <div class="stat">
+                <div class="stat-label">Status</div>
+                <div class="stat-value" id="driveStatus">idle</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Runs</div>
+                <div class="stat-value" id="driveRunCount">0</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Current Target</div>
+                <div class="stat-value" id="driveCurrentTarget">-</div>
+              </div>
+            </div>
+          </section>
 
+          <section class="results">
+            <h2>Results</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Distance</th>
+                    <th>Avg CTE</th>
+                    <th>Max CTE</th>
+                    <th>X Error</th>
+                    <th>Y Error</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="driveResultsTableBody">
+                  <tr>
+                    <td colspan="6" class="empty">Run drive tuning to see distance, average and maximum CTE, and arrival error here.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+${getAppDialogHtml()}
+
+    <script>
+${getAppDialogScript()}
+      function formatMeters(value) {
+        if (value === null || value === undefined) return '—';
+        return value.toFixed(3) + ' m';
+      }
+
+      function formatDegrees(value) {
+        if (value === null || value === undefined) return '—';
+        return value.toFixed(1) + '°';
+      }
+${getLiveSensorWidgetsScript()}
+
+      function getGnssFixClass(fixType) {
+        switch ((fixType || 'unknown').toLowerCase()) {
+          case 'fixed':
+            return 'gnss-fix-fixed';
+          case 'rtk-fixed':
+            return 'gnss-fix-rtk-fixed';
+          case 'float':
+            return 'gnss-fix-float';
+          case 'rtk-float':
+            return 'gnss-fix-rtk-float';
+          case 'single':
+            return 'gnss-fix-single';
+          case 'none':
+            return 'gnss-fix-none';
+          default:
+            return 'gnss-fix-unknown';
+        }
+      }
+
+      function applyGnssFixStyle(fixType) {
+        const fixValue = document.getElementById("gnss-fix");
+        if (!fixValue) return;
+        fixValue.className = "metric-value gnss-fix-value " + getGnssFixClass(fixType);
+      }
+
+      function updateSidebar(primitivesPayload) {
+        const primitives = primitivesPayload?.primitives ?? {};
+        const imu = primitives.imu ?? {};
+        const gnss = primitives.gnss ?? {};
+
+        const imuStatusDot = document.getElementById("imu-status");
+        if (imuStatusDot) {
+          imuStatusDot.className = "status-dot " + (imu.status || "idle");
+        }
+
+        const imuError = document.getElementById("imu-error");
+      if (imu.status === "error") {
+        if (imuError) {
+          imuError.textContent = imu.error;
+          imuError.style.display = "block";
+        }
+      } else {
+        if (imuError) {
+          imuError.style.display = "none";
+        }
+      }
+      const imuNavHeading = updateWidgetHeading("compass", "imu-heading", imu.status === "error" ? null : imu.headingDeg);
+      updateTiltIndicator("pitch-indicator", "imu-pitch", imu.status === "error" ? null : imu.pitchDeg);
+      updateTiltIndicator("roll-indicator", "imu-roll", imu.status === "error" ? null : imu.rollDeg);
+
+      const gnssStatusDot = document.getElementById("gnss-status");
+      if (gnssStatusDot) {
+        gnssStatusDot.className = "status-dot " + (gnss.status || "idle");
+      }
+
+      const gnssError = document.getElementById("gnss-error");
+      if (gnss.status === "error") {
+        if (gnssError) {
+          gnssError.textContent = gnss.error;
+          gnssError.style.display = "block";
+        }
+      } else if (gnssError) {
+        gnssError.style.display = "none";
+      }
+
+      const gnssX = document.getElementById("gnss-x");
+      const gnssY = document.getElementById("gnss-y");
+      const gnssAccuracy = document.getElementById("gnss-accuracy");
+      const gnssHeadingAccuracy = document.getElementById("gnss-heading-accuracy");
+      const gnssSats = document.getElementById("gnss-sats");
+      const gnssFix = document.getElementById("gnss-fix");
+
+      if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
+      if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
+      if (gnssFix) gnssFix.textContent = gnss.fixType || "—";
+      applyGnssFixStyle(gnss.fixType);
+      if (gnssAccuracy) {
+        gnssAccuracy.textContent = gnss.positionAccuracyMeters !== null && gnss.positionAccuracyMeters !== undefined
+          ? formatMeters(gnss.positionAccuracyMeters)
+          : "—";
+      }
+      if (gnssHeadingAccuracy) {
+        gnssHeadingAccuracy.textContent = gnss.headingAccuracyDeg !== null && gnss.headingAccuracyDeg !== undefined
+          ? formatDegrees(gnss.headingAccuracyDeg)
+          : "—";
+      }
+      if (gnssSats) {
+        gnssSats.textContent = gnss.satellitesInUse !== null && gnss.satellitesInUse !== undefined
+          ? gnss.satellitesInUse
+          : "—";
+      }
+      const gnssNavHeading = updateWidgetHeading("gnss-compass", "gnss-heading", gnss.status === "error" ? null : gnss.headingDeg);
+      const poseFusion = primitives.poseFusion ?? {};
+      updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
+      }
+
+      function formatCm(meters) {
+        return \`\${(meters * 100).toFixed(1)} cm\`;
+      }
+
+      function statusClass(value) {
+        const abs = Math.abs(value);
+        if (abs <= 0.04) return "good";
+        if (abs <= 0.12) return "warn";
+        return "bad";
+      }
+
+      function currentDriveDistanceMeters(historyItem) {
+        const dx = historyItem.targetPosition.xMeters - historyItem.startPosition.xMeters;
+        const dy = historyItem.targetPosition.yMeters - historyItem.startPosition.yMeters;
+        return Math.hypot(dx, dy);
+      }
+
+      const maxDriveResultRows = 500;
+      const driveResultKeys = new Set();
+      const driveResultRows = [];
+
+      function driveResultKey(item) {
+        const start = item.startPosition ?? {};
+        const target = item.targetPosition ?? {};
+        const finalPosition = item.finalPosition ?? {};
+        return [
+          item.timestamp ?? "",
+          item.status ?? "",
+          start.xMeters ?? "",
+          start.yMeters ?? "",
+          target.xMeters ?? "",
+          target.yMeters ?? "",
+          finalPosition.xMeters ?? "",
+          finalPosition.yMeters ?? "",
+          item.errorX ?? "",
+          item.errorY ?? "",
+          item.avgCteMeters ?? "",
+          item.maxCteMeters ?? "",
+        ].join("|");
+      }
+
+      function appendDriveRows(rows) {
+        for (const item of rows) {
+          const key = driveResultKey(item);
+          if (driveResultKeys.has(key)) {
+            continue;
+          }
+          driveResultKeys.add(key);
+          driveResultRows.push(item);
+        }
+        if (driveResultRows.length > maxDriveResultRows) {
+          const excess = driveResultRows.length - maxDriveResultRows;
+          const removedRows = driveResultRows.splice(0, excess);
+          for (const removedRow of removedRows) {
+            driveResultKeys.delete(driveResultKey(removedRow));
+          }
+        }
+      }
+
+      async function fetchStatus() {
+        const [statusResponse, primitivesResponse] = await Promise.all([
+          fetch("/api/drive/status?ts=" + Date.now(), {
+            cache: "no-store",
+          }),
+          fetch("/api/primitives")
+        ]);
+        return {
+          status: await statusResponse.json(),
+          primitives: await primitivesResponse.json(),
+        };
+      }
+
+      async function update() {
+        try {
+          const payload = await fetchStatus();
+          const data = payload.status;
+          const history = Array.isArray(data.history) ? data.history : [];
+          updateSidebar(payload.primitives);
+
+          const driveState = data.state ?? {};
+          const liveResults = Array.isArray(driveState.shortTrainingResults) ? driveState.shortTrainingResults : [];
+          appendDriveRows(history);
+          appendDriveRows(liveResults);
+          document.getElementById("driveStatus").textContent = driveState.status ?? "idle";
+          document.getElementById("driveRunCount").textContent = String(driveResultRows.length);
+          document.getElementById("driveSummary").textContent = driveState.shortTrainingProgress?.message
+            ?? driveState.segmentTrainingProgress?.message
+            ?? "Drive tuning idle.";
+          document.getElementById("driveCurrentTarget").textContent = driveState.currentDrive
+            ? "(" + formatCm(driveState.currentDrive.targetPosition.xMeters ?? 0) + ", " + formatCm(driveState.currentDrive.targetPosition.yMeters ?? 0) + ")"
+            : "-";
+
+          const rows = driveResultRows.slice(-maxDriveResultRows).reverse();
+          const tbody = document.getElementById("driveResultsTableBody");
+          if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty">Run drive tuning to see distance, average and maximum CTE, and arrival error here.</td></tr>';
+            return;
+          }
+
+          tbody.innerHTML = rows.map((item) => {
+            const distanceMeters = currentDriveDistanceMeters(item);
+            const avgCteMeters = item.avgCteMeters ?? 0;
+            const maxCteMeters = item.maxCteMeters ?? 0;
+            const xErrorMeters = item.errorX ?? 0;
+            const yErrorMeters = item.errorY ?? 0;
             return \`
-              <tr class="\${result.status}">
-                <td>\${formatTime(result.timestamp)}</td>
-                <td>\${formatMeters(distance)}</td>
-                <td>\${initialTurn.toFixed(1)}°</td>
-                <td>\${formatMeters(result.avgCteMeters)}</td>
-                <td>\${formatMeters(result.maxCteMeters)}</td>
-                <td class="error-cell \${getErrorClass(result.errorX)}">\${formatMeters(result.errorX)}</td>
-                <td class="error-cell \${getErrorClass(result.errorY)}">\${formatMeters(result.errorY)}</td>
-                <td><span class="status-cell status-\${result.status}">\${result.status}</span></td>
+              <tr>
+                <td>\${formatCm(distanceMeters)}</td>
+                <td class="\${statusClass(avgCteMeters)}">\${formatCm(avgCteMeters)}</td>
+                <td class="\${statusClass(maxCteMeters)}">\${formatCm(maxCteMeters)}</td>
+                <td class="\${statusClass(xErrorMeters)}">\${formatCm(xErrorMeters)}</td>
+                <td class="\${statusClass(yErrorMeters)}">\${formatCm(yErrorMeters)}</td>
+                <td>\${item.status ?? "-"}</td>
               </tr>
             \`;
-          }).join('');
-        } else {
-          resultsCount.textContent = '0 drives';
-          tbody.innerHTML = \`
-            <tr>
-              <td colspan="8">
-                <div class="empty-state">
-                  <div class="empty-icon">📊</div>
-                  <div>No drive results yet. Execute a drive to see results here.</div>
-                </div>
-              </td>
-            </tr>
-          \`;
+          }).join("");
+        } catch (error) {
+          console.error("Failed to update drive tuning page:", error);
         }
-      } catch (error) {
-        console.error('Failed to update status:', error);
       }
-    }
 
-    // Execute single drive
-    document.getElementById('executeDrive').addEventListener('click', async () => {
-      const targetX = parseFloat(document.getElementById('targetX').value);
-      const targetY = parseFloat(document.getElementById('targetY').value);
-      const button = document.getElementById('executeDrive');
-      button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Driving...';
-
-      try {
-        await fetch('/api/drive/execute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targetX, targetY })
+      async function postAction(action, body = {}) {
+        const response = await fetch("/api/drive/" + action, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
         });
-        await updateStatus();
-      } catch (error) {
-        alert('Failed to execute drive: ' + error.message);
-      } finally {
-        button.disabled = false;
-        button.innerHTML = 'Execute Single Drive';
-      }
-    });
-
-    // Run test pattern
-    document.getElementById('runTestPattern').addEventListener('click', async () => {
-      const button = document.getElementById('runTestPattern');
-      const statusDiv = document.getElementById('testPatternStatus');
-      const messageDiv = document.getElementById('testPatternMessage');
-
-      button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Running Pattern...';
-      statusDiv.style.display = 'block';
-      messageDiv.textContent = 'Phase 1: Collecting waypoints by driving forward (7 waypoints, ~2.5s each)...';
-
-      try {
-        // Start test pattern (this will take time)
-        const response = await fetch('/api/drive/test-pattern', { method: 'POST' });
-        const results = await response.json();
-
-        messageDiv.textContent = \`Test pattern complete! Collected waypoints and ran \${results.length} test drives.\`;
-
-        await updateStatus();
-
-        // Hide status after a few seconds
-        setTimeout(() => {
-          statusDiv.style.display = 'none';
-        }, 5000);
-      } catch (error) {
-        messageDiv.textContent = 'Failed: ' + error.message;
-        statusDiv.style.borderColor = 'var(--danger-color)';
-
-        setTimeout(() => {
-          statusDiv.style.display = 'none';
-          statusDiv.style.borderColor = 'var(--primary-color)';
-        }, 5000);
-      } finally {
-        button.disabled = false;
-        button.innerHTML = 'Run Test Pattern';
-      }
-    });
-
-    // Stop drive
-    document.getElementById('stopDrive').addEventListener('click', async () => {
-      try {
-        await fetch('/api/drive/stop', { method: 'POST' });
-        await updateStatus();
-      } catch (error) {
-        alert('Failed to stop drive: ' + error.message);
-      }
-    });
-
-    // Clear history
-    document.getElementById('clearHistory').addEventListener('click', async () => {
-      if (confirm('Clear all drive history?')) {
-        try {
-          await fetch('/api/drive/clear-history', { method: 'POST' });
-          await updateStatus();
-        } catch (error) {
-          alert('Failed to clear history: ' + error.message);
+        if (!response.ok) {
+          throw new Error(await response.text());
         }
+        return response.json();
       }
-    });
 
-    // Reset learning
-    document.getElementById('resetLearning').addEventListener('click', async () => {
-      if (confirm('Reset drive learning parameters to defaults?')) {
+      document.getElementById("startDriveTuning").addEventListener("click", async () => {
+        const button = document.getElementById("startDriveTuning");
+        const startDistanceCm = Number(document.getElementById("startDistanceCm").value);
+        const requestedDistanceMeters = Number.isFinite(startDistanceCm) ? Math.max(0.5, startDistanceCm / 100) : 0.5;
+        const startAtMeters = requestedDistanceMeters;
+        const endAtMeters = requestedDistanceMeters < 4 ? 4 : requestedDistanceMeters;
+        const startAtCm = Math.round(startAtMeters * 100).toString();
+        const endAtCm = Math.round(endAtMeters * 100).toString();
+        document.getElementById("driveSummary").textContent = startAtCm === endAtCm
+          ? "Starting short-distance training at " + startAtCm + " cm..."
+          : "Starting short-distance training from " + startAtCm + " cm to " + endAtCm + " cm...";
+        button.disabled = true;
         try {
-          await fetch('/api/drive/reset-learning', { method: 'POST' });
-          await updateStatus();
+          await postAction("train-short", {
+            startDistanceMeters: startAtMeters,
+            maxDistanceMeters: endAtMeters,
+            targetXErrorMeters: 0.04,
+            includeReverseLegs: true,
+          });
+          await update();
         } catch (error) {
-          alert('Failed to reset learning: ' + error.message);
+          alert("Failed to start drive tuning: " + (error instanceof Error ? error.message : String(error)));
+        } finally {
+          button.disabled = false;
         }
-      }
-    });
+      });
 
-    // Initial update and start polling
-    updateStatus();
-    updateInterval = setInterval(updateStatus, 1000);
+      document.getElementById("stopDriveTuning").addEventListener("click", async () => {
+        try {
+          await postAction("stop");
+          await update();
+        } catch (error) {
+          alert("Failed to stop drive tuning: " + (error instanceof Error ? error.message : String(error)));
+        }
+      });
 
-    // Clean up on page unload
-    window.addEventListener('beforeunload', () => {
-      if (updateInterval) {
+      update();
+      const updateInterval = setInterval(update, 1000);
+      window.addEventListener("beforeunload", () => {
         clearInterval(updateInterval);
-      }
-    });
-  </script>
-</body>
-</html>
-  `;
+      });
+    </script>
+  </body>
+</html>`;
 }

@@ -12,6 +12,11 @@ export interface Position {
   readonly yMeters: Meters;
 }
 
+export interface BodyFrameOffset {
+  readonly forwardMeters: Meters;
+  readonly rightMeters: Meters;
+}
+
 export interface Pose {
   readonly position: Position;
   readonly heading: InternalHeading;
@@ -34,6 +39,13 @@ export function createPosition(x: number, y: number): Position {
   };
 }
 
+export function createBodyFrameOffset(forwardMeters: number, rightMeters: number): BodyFrameOffset {
+  return {
+    forwardMeters: createMeters(forwardMeters),
+    rightMeters: createMeters(rightMeters),
+  };
+}
+
 export function createPose(
   x: number,
   y: number,
@@ -45,6 +57,58 @@ export function createPose(
     heading,
     quality,
   };
+}
+
+function bodyFrameOffsetToWorldDelta(
+  heading: InternalHeading,
+  offset: BodyFrameOffset,
+): { readonly xMeters: number; readonly yMeters: number } {
+  const headingRadians = (unwrapInternalHeading(heading) * Math.PI) / 180;
+  const forward = {
+    x: Math.cos(headingRadians),
+    y: Math.sin(headingRadians),
+  };
+  const right = {
+    x: Math.sin(headingRadians),
+    y: -Math.cos(headingRadians),
+  };
+
+  const forwardMeters = unwrapMeters(offset.forwardMeters);
+  const rightMeters = unwrapMeters(offset.rightMeters);
+
+  return {
+    xMeters: (forward.x * forwardMeters) + (right.x * rightMeters),
+    yMeters: (forward.y * forwardMeters) + (right.y * rightMeters),
+  };
+}
+
+export function translatePositionByHeading(
+  position: Position,
+  heading: InternalHeading,
+  offset: BodyFrameOffset,
+): Position {
+  const worldDelta = bodyFrameOffsetToWorldDelta(heading, offset);
+  return createPosition(
+    unwrapMeters(position.xMeters) + worldDelta.xMeters,
+    unwrapMeters(position.yMeters) + worldDelta.yMeters,
+  );
+}
+
+export function projectWorldDeltaToBodyFrame(
+  deltaXMeters: number,
+  deltaYMeters: number,
+  heading: InternalHeading,
+): BodyFrameOffset {
+  const headingRadians = (unwrapInternalHeading(heading) * Math.PI) / 180;
+  const forwardX = Math.cos(headingRadians);
+  const forwardY = Math.sin(headingRadians);
+  const rightX = Math.sin(headingRadians);
+  const rightY = -Math.cos(headingRadians);
+
+  return createBodyFrameOffset(
+    (deltaXMeters * forwardX) + (deltaYMeters * forwardY),
+    (deltaXMeters * rightX) + (deltaYMeters * rightY),
+  );
 }
 
 // Geometry functions
