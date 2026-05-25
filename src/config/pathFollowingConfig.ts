@@ -13,6 +13,7 @@ export interface PathFollowingParameters {
   purePursuitMinLookaheadMeters: number;
   purePursuitBaseLookaheadMeters: number;
   purePursuitMaxLookaheadMeters: number;
+  mowingStandoffMeters: number;
   updatedAt: string;
 }
 
@@ -26,6 +27,7 @@ export const DEFAULT_PATH_FOLLOWING_PARAMETERS: PathFollowingParameters = {
   purePursuitMinLookaheadMeters: 0.5,
   purePursuitBaseLookaheadMeters: 1.0,
   purePursuitMaxLookaheadMeters: 2.0,
+  mowingStandoffMeters: 0.15,
   updatedAt: new Date().toISOString(),
 };
 
@@ -44,6 +46,7 @@ interface LegacyPathFollowingParameters {
   purePursuitMinLookaheadMeters?: unknown;
   purePursuitBaseLookaheadMeters?: unknown;
   purePursuitMaxLookaheadMeters?: unknown;
+  mowingStandoffMeters?: unknown;
   updatedAt?: unknown;
 }
 
@@ -162,6 +165,10 @@ export class PathFollowingConfig {
       purePursuitMaxLookaheadMeters: this.readPositiveNumber(
         legacy.purePursuitMaxLookaheadMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.purePursuitMaxLookaheadMeters,
+      ),
+      mowingStandoffMeters: this.readPositiveNumber(
+        legacy.mowingStandoffMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.mowingStandoffMeters,
       ),
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };

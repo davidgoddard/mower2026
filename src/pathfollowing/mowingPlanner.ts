@@ -26,6 +26,7 @@ export interface MowingPlanOptions {
 const DEFAULT_STRIP_SPACING_METERS = 0.3;
 const DEFAULT_BLADE_WIDTH_METERS = 0.4;
 const EPSILON = 1e-9;
+const MOWN_STRIP_CROSSING_PENALTY = 10;
 
 interface Vector {
   readonly x: number;
@@ -266,6 +267,7 @@ function sequenceStripsForMowing(
   const offsets = [...new Set(strips.map((strip) => strip.centerOffsetMeters))].sort((a, b) => a - b);
   const remaining = strips.slice();
   const traversal: TraversalStep[] = [];
+  const mownCrossings = new Map<MowingStrip, number>();
   let currentPoint: Vector | null = null;
 
   if (remaining.length === 0) {
@@ -277,6 +279,7 @@ function sequenceStripsForMowing(
   const firstStrip = firstCandidates.sort((a, b) => dot(stripTraversalStart(b, false), direction) - dot(stripTraversalStart(a, false), direction))[0];
   traversal.push({ strip: firstStrip, reversed: false });
   removeStrip(remaining, firstStrip);
+  mownCrossings.set(firstStrip, 0);
   currentPoint = stripTraversalEnd(firstStrip, false);
 
   while (remaining.length > 0 && currentPoint !== null) {
@@ -288,7 +291,7 @@ function sequenceStripsForMowing(
       const candidate = remaining[index];
       for (const reversed of [false, true] as const) {
         const candidateStart = stripTraversalStart(candidate, reversed);
-        const cost = connectorCost(currentPoint, candidateStart, obstacles);
+        const cost = connectorCost(currentPoint, candidateStart, obstacles, mownCrossings);
         if (cost < bestCost - EPSILON || (Math.abs(cost - bestCost) <= EPSILON && preferCandidate(candidate, reversed, remaining[bestIndex], bestReversed, direction))) {
           bestCost = cost;
           bestIndex = index;
@@ -298,7 +301,20 @@ function sequenceStripsForMowing(
     }
 
     const nextStrip = remaining[bestIndex];
+    const connectorPath = buildConnectorVectors(currentPoint, stripTraversalStart(nextStrip, bestReversed), obstacles);
+    for (const [strip, count] of mownCrossings) {
+      const stripStart = { x: strip.start.xMeters, y: strip.start.yMeters };
+      const stripEnd = { x: strip.end.xMeters, y: strip.end.yMeters };
+      for (let index = 1; index < connectorPath.length; index += 1) {
+        if (segmentsIntersect(connectorPath[index - 1], connectorPath[index], stripStart, stripEnd)) {
+          mownCrossings.set(strip, count + 1);
+          break;
+        }
+      }
+    }
+
     traversal.push({ strip: nextStrip, reversed: bestReversed });
+    mownCrossings.set(nextStrip, 0);
     currentPoint = stripTraversalEnd(nextStrip, bestReversed);
     remaining.splice(bestIndex, 1);
   }
@@ -387,21 +403,37 @@ function pathLength(points: Vector[]): number {
   return total;
 }
 
-function connectorCost(from: Vector, to: Vector, obstacles: Vector[][]): number {
+function buildConnectorVectors(from: Vector, to: Vector, obstacles: Vector[][]): Vector[] {
   const obstacle = obstacles.find((candidate) => segmentIntersectsPolygon(from, to, candidate));
   if (!obstacle) {
-    return distance(from, to);
+    return [from, to];
   }
-
   const connector = buildObstaclePerimeterConnector(from, to, obstacle);
-  let total = 0;
-  for (let index = 1; index < connector.length; index += 1) {
-    total += distance(
-      { x: connector[index - 1].xMeters, y: connector[index - 1].yMeters },
-      { x: connector[index].xMeters, y: connector[index].yMeters },
-    );
-  }
+  return connector.map((p) => ({ x: p.xMeters, y: p.yMeters }));
+}
 
+function mownCrossingPenalty(connectorPath: Vector[], mownCrossings: ReadonlyMap<MowingStrip, number>): number {
+  let penalty = 0;
+  for (const [strip, crossCount] of mownCrossings) {
+    const stripStart = { x: strip.start.xMeters, y: strip.start.yMeters };
+    const stripEnd = { x: strip.end.xMeters, y: strip.end.yMeters };
+    for (let index = 1; index < connectorPath.length; index += 1) {
+      if (segmentsIntersect(connectorPath[index - 1], connectorPath[index], stripStart, stripEnd)) {
+        penalty += MOWN_STRIP_CROSSING_PENALTY * (crossCount + 1);
+        break;
+      }
+    }
+  }
+  return penalty;
+}
+
+function connectorCost(from: Vector, to: Vector, obstacles: Vector[][], mownCrossings: ReadonlyMap<MowingStrip, number>): number {
+  const path = buildConnectorVectors(from, to, obstacles);
+  let total = 0;
+  for (let index = 1; index < path.length; index += 1) {
+    total += distance(path[index - 1], path[index]);
+  }
+  total += mownCrossingPenalty(path, mownCrossings);
   return total;
 }
 

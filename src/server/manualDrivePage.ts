@@ -438,10 +438,51 @@ export function getManualDrivePageHtml(): string {
 
     .map-controls {
       display: grid;
-      grid-template-columns: minmax(220px, 1.2fr) minmax(220px, 1fr) minmax(140px, 0.6fr) auto;
+      grid-template-columns: minmax(220px, 1.2fr) minmax(220px, 1fr) minmax(140px, 0.6fr) auto auto;
       gap: 1rem;
       align-items: end;
+      margin-bottom: 0.5rem;
+    }
+
+    .mowing-status-bar {
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.625rem 1rem;
+      background: rgba(16, 185, 129, 0.08);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
       margin-bottom: 1rem;
+      color: var(--text-primary);
+    }
+
+    .mowing-status-bar.active {
+      display: flex;
+    }
+
+    .mowing-status-bar.error {
+      background: rgba(239, 68, 68, 0.08);
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+
+    .mowing-status-dot {
+      width: 0.625rem;
+      height: 0.625rem;
+      border-radius: 50%;
+      background: var(--success-color);
+      flex-shrink: 0;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    .mowing-status-bar.error .mowing-status-dot {
+      background: var(--danger-color);
+      animation: none;
+    }
+
+    .mowing-status-bar.complete .mowing-status-dot {
+      background: var(--success-color);
+      animation: none;
     }
 
     .map-control-value {
@@ -529,6 +570,18 @@ ${getAppDialogStyles()}
         <button id="previewMowingPlanBtn" class="button button-primary" type="button">
           <span>▦</span> Preview
         </button>
+        <div style="display:flex;flex-direction:column;gap:0.5rem;align-items:stretch">
+          <button id="startMowingBtn" class="button button-success" type="button">
+            <span>🌿</span> Mow Area
+          </button>
+          <button id="stopMowingBtn" class="button button-danger" type="button" style="display:none">
+            <span>⏹</span> Stop Mowing
+          </button>
+        </div>
+      </div>
+      <div id="mowingStatusBar" class="mowing-status-bar">
+        <div class="mowing-status-dot"></div>
+        <span id="mowingStatusText">Idle</span>
       </div>
       <canvas id="mapCanvas" width="1200" height="800"></canvas>
       <div class="map-stats" id="mapStats">Waiting for position data...</div>
@@ -738,6 +791,8 @@ ${getAppDialogScript()}
     let headingDragStart = null;
     let statusPollInterval = null;
     let areaStatusPollInterval = null;
+    let mowingActive = false;
+    let mowingStatusInterval = null;
 
     // Elements
     const pathNameInput = $("pathName");
@@ -1383,6 +1438,105 @@ ${getAppDialogScript()}
         areaStatusPollInterval = null;
       }
     }
+
+    const startMowingBtn = $("startMowingBtn");
+    const stopMowingBtn = $("stopMowingBtn");
+    const mowingStatusBar = $("mowingStatusBar");
+    const mowingStatusText = $("mowingStatusText");
+
+    const MOWING_PHASE_LABELS = {
+      idle: 'Idle',
+      approaching_strip: 'Approaching strip',
+      tracing_boundary: 'Tracing boundary',
+      mowing_strip: 'Mowing strip',
+      following_connector: 'Following connector',
+      complete: 'Complete',
+      stopped: 'Stopped',
+      error: 'Error',
+    };
+
+    function updateMowingStatusUi(status) {
+      const active = status.phase !== 'idle';
+      mowingStatusBar.classList.toggle('active', active);
+      mowingStatusBar.classList.toggle('error', status.phase === 'error');
+      mowingStatusBar.classList.toggle('complete', status.phase === 'complete' || status.phase === 'stopped');
+
+      const phaseLabel = MOWING_PHASE_LABELS[status.phase] ?? status.phase;
+      const stripInfo = status.totalStrips > 0
+        ? \` — strip \${status.currentStripIndex + 1}/\${status.totalStrips}\`
+        : '';
+      const errorInfo = status.error ? \` (\${status.error})\` : '';
+      mowingStatusText.textContent = \`\${phaseLabel}\${stripInfo}\${errorInfo}\`;
+
+      const isRunning = status.phase !== 'idle' && status.phase !== 'complete' && status.phase !== 'stopped' && status.phase !== 'error';
+      startMowingBtn.style.display = isRunning ? 'none' : '';
+      stopMowingBtn.style.display = isRunning ? '' : 'none';
+      mowingActive = isRunning;
+    }
+
+    async function pollMowingStatus() {
+      try {
+        const response = await fetch('/api/mowing/status');
+        if (response.ok) {
+          const status = await response.json();
+          updateMowingStatusUi(status);
+          if (status.phase === 'complete' || status.phase === 'stopped' || status.phase === 'error') {
+            clearInterval(mowingStatusInterval);
+            mowingStatusInterval = null;
+          }
+        }
+      } catch (error) {
+        console.error('Failed to poll mowing status:', error);
+      }
+    }
+
+    startMowingBtn.addEventListener('click', async () => {
+      const areaName = mowingPlanAreaSelect.value;
+      if (!areaName) {
+        alert('Please select a mowing area first.');
+        return;
+      }
+      if (recording || areaRecording) {
+        alert('Stop recording before starting mowing.');
+        return;
+      }
+
+      const headingDeg = normalizeAxisHeading(mowingHeadingInput.value);
+      const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
+
+      try {
+        const response = await fetch('/api/mowing/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ areaName, headingDeg, stripSpacingMeters }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to start mowing');
+        }
+
+        updateMowingStatusUi({ phase: 'approaching_strip', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
+        if (mowingStatusInterval) clearInterval(mowingStatusInterval);
+        mowingStatusInterval = setInterval(pollMowingStatus, 1000);
+      } catch (error) {
+        alert('Failed to start mowing: ' + error.message);
+      }
+    });
+
+    stopMowingBtn.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/api/mowing/stop', { method: 'POST' });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to stop mowing');
+        }
+      } catch (error) {
+        alert('Failed to stop mowing: ' + error.message);
+      }
+    });
+
+    // Check initial mowing status on page load
+    pollMowingStatus();
 
     startRecordingBtn.addEventListener('click', async () => {
       const pathName = pathNameInput.value.trim() || getNextPathName();

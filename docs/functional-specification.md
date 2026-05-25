@@ -537,3 +537,56 @@ The retry loop involves retracing the path backwards for the last 5 waypoints if
 If turning on the spot, then simply turn the other way for 2 seconds and then retry going forward.  Note that this will require the angles to be managed so that the original target heading is reached even if a back-up and retry occurs.
 
 Logging should indicate that the retry has occured and which condition was detected and the context in which it occured such as line following or turning.
+
+## Mowing Strip Planning
+
+### Strip geometry
+
+The mowing planner divides a recorded area perimeter into a set of parallel mowing strips whose axis is set by the operator-chosen heading angle.  The planner projects the perimeter polygon onto the normal to that axis and generates one strip line per spacing interval across the full width of the area.  Each strip line is then clipped to the area polygon boundary so strip endpoints land exactly on the perimeter.  Where a recorded obstacle polygon intersects a strip, the overlapping section is removed and the strip is split into two or more shorter sub-strips, each of which is treated as an independent mowing segment.  The strip spacing defaults to 30 cm for a 40 cm blade to provide a 10 cm overlap on each pass.
+
+### Traversal sequencing and directional consistency
+
+Once all strips are computed the planner sequences them for the shortest total travel path.  The first strip is chosen at the lowest normal-axis offset and entered from the end with the highest projection along the mowing direction.  After the first transition the planner records which side of the area (which normal-axis direction) it advanced toward and locks that crossing direction in for the remainder of the plan.  Subsequent strip choices prefer candidates that continue in the same crossing direction; only if no same-direction strip is reachable (for example an island of unmown ground on the far side of an obstacle) will the planner cross back.
+
+Within each strip the mower always enters at one end and exits at the other, giving a boustrophedon (back-and-forth) pattern across the area.  Where two candidate strips have equal connector cost, the planner prefers the strip with the smallest offset difference from the current strip (i.e. the immediately adjacent strip) to avoid skipping over uncut ground.
+
+### Already-mown crossing penalty
+
+When the connector path between the end of one strip and the start of the next passes over a strip that has already been mown, the mower re-cuts that ground unnecessarily and wastes battery.  The planner therefore adds a penalty to the connector cost for each already-mown strip the connector crosses.  The penalty is multiplied by the number of times that strip has already been crossed, so a strip crossed once costs one penalty unit, a strip crossed twice costs two penalty units, and so on.  This escalating cost strongly biases the planner toward routes that travel along the perimeter edge or in gaps between unmown strips rather than cutting back through completed ground.  The penalty magnitude is set well above the geometric cost of a typical detour so it always dominates unless no clean path exists at all.
+
+### Boundary standoff distance
+
+No mowing strip or connector segment shall bring the mower closer than 15 cm to any recorded boundary (area perimeter or obstacle perimeter) unless that boundary is being explicitly driven as part of a boundary-tracing pass (see below).  This standoff gives the mower sufficient room to execute a turn-on-the-spot at a strip end without fouling the boundary.  The standoff distance of 15 cm is a configurable parameter stored in the path-following configuration.
+
+### First-arrival boundary tracing
+
+The first time the mower reaches any boundary — whether the outer area perimeter or an obstacle perimeter — during a mowing session it must perform a complete boundary trace of that boundary before continuing with strip mowing.  This ensures a clean mowed edge is cut all the way around the area and around each obstacle, which the strip pattern alone would not achieve since strips stop short of the boundary by the standoff distance.
+
+The sequence on first arrival at a boundary is:
+
+1. **Stop short.** The mowing strip or connector brings the mower to within the standoff distance (15 cm) of the boundary, then stops.  The boundary is flagged as not yet traced.
+2. **Align to the boundary tangent.** The mower turns on the spot to face tangentially along the boundary at the nearest recorded boundary point, choosing the direction that will travel around the boundary in the correct orientation (clockwise around obstacles, following the recorded direction for the area perimeter).
+3. **Line-follow the boundary.** The mower switches to path-follower mode and follows the recorded boundary path.  It continues until it returns to the point at which it joined the boundary — the join point is detected when the mower is within the closed-loop tolerance of that starting point and has travelled enough distance to have genuinely completed a loop.
+4. **Mark boundary as traced.** The boundary is flagged as fully traced for this mowing session.
+5. **Resume strip sequencing.** The mower returns to the strip end at which it first stopped and continues the normal strip-mowing sequence from that point.
+
+### Connector routing at strip ends
+
+At the end of a mowing strip the mower cannot simply drive a straight line toward the start of the next strip.  The perimeter boundary, an obstacle edge, or uneven terrain may lie immediately in that direction, and driving blindly across unknown ground risks the mower falling into a hole, hitting a kerb, or colliding with an obstacle.
+
+The safe transition sequence at a strip end is therefore:
+
+1. **Stop at the standoff point.** The strip drive ends when the mower reaches the point on the strip that is the standoff distance back from the boundary.  If this is the first arrival at this boundary the mower performs the boundary trace described above before continuing.
+2. **Turn to face along the boundary.** The mower performs a turn-on-the-spot to align its heading tangentially with the recorded boundary at the nearest boundary point.
+3. **Line-follow the boundary to the next strip entry.** The mower switches to path-follower mode and travels along the recorded boundary — known safe ground — until it reaches the standoff point of the next strip's entry end.  Because the boundary has already been traced at this stage, this leg travels inward of the boundary by the standoff distance rather than on the boundary line itself.
+4. **Segment drive down the next strip.** At the next strip's entry standoff point the mower executes a segment drive: it turns on the spot to face along the strip axis and then drives the strip in a straight line using the pure-pursuit controller until it reaches the standoff point at the far end.
+
+This means inter-strip travel is always composed of two phases: a boundary-following phase (safe known ground, inside the standoff margin) and a segment-drive phase (straight mowing pass).  The planner pre-computes the full sequence of strip standoff endpoints and connector waypoints before motion starts so the operator can preview the entire planned route on the canvas.
+
+### Cost model summary
+
+The total connector cost between two strips is the sum of:
+- the geometric path length of the connector (Euclidean distance or obstacle-perimeter walk distance when a direct line would cross an obstacle), plus
+- for each already-mown strip the connector crosses: `penalty × crossing_count`, where `crossing_count` is incremented each time a connector passes over that strip.
+
+The planner selects the traversal sequence that minimises total connector cost across all strip transitions, which simultaneously minimises total non-mowing travel distance and re-mowing of already-cut ground.

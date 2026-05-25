@@ -8,3 +8,4 @@ export * from "./pathStore.js";
 export * from "./pathRecorder.js";
 export * from "./pathVerification.js";
 export * from "./mowingPlanner.js";
+export * from "./mowingExecutor.js";

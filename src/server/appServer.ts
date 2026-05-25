@@ -28,8 +28,8 @@ import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition } from "../geometry/positionTypes.js";
 import { MAX_PORT_NUMBER, MAX_WHEEL_OUTPUT_PERCENT_DEFAULT, MAX_WHEEL_SPEED_MPS_DEFAULT, SENSOR_CONTROLLER_POLL_INTERVAL_MS } from "../constants.js";
-import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPointsForDirection, buildMowingPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan } from "../pathfollowing/index.js";
-import type { PathPoint } from "../pathfollowing/index.js";
+import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPointsForDirection, buildMowingPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, MowingExecutor } from "../pathfollowing/index.js";
+import type { PathPoint, MowingStatus } from "../pathfollowing/index.js";
 
 interface StartMowerServerOptions {
   appName?: string;
@@ -367,6 +367,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let pathRecorder: PathRecorder | null = null;
   let areaPerimeterRecorder: PathRecorder | null = null;
   let pathFollower: PurePursuitFollower | null = null;
+  let mowingExecutor: MowingExecutor | null = null;
+  let mowingStatus: MowingStatus = { phase: "idle", currentStripIndex: 0, totalStrips: 0, tracedBoundaryCount: 0 };
   logger.transition("boot", "starting", { port, host });
 
   pathStore = new PathStore({
@@ -522,6 +524,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           recording: areaPerimeterRecorder.isRecording(),
           pointCount: areaPerimeterRecorder.getPointCount(),
         }));
+        return;
+      }
+
+      if (requestUrl.pathname === "/api/mowing/status") {
+        const status = mowingExecutor ? mowingExecutor.getStatus() : mowingStatus;
+        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson(status));
         return;
       }
 
@@ -1204,6 +1213,83 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             approachResult,
             ...result,
           }));
+          return;
+        }
+
+        // Start mowing an area
+        if (requestUrl.pathname === "/api/mowing/start" && areaPerimeterStore && pathStore && driveController && turnController && pathFollower && poseFusion) {
+          const data = JSON.parse(body);
+          const areaName = typeof data.areaName === "string" ? data.areaName.trim() : "";
+          const headingDeg = Number(data.headingDeg);
+          const stripSpacingMeters = data.stripSpacingMeters === undefined ? undefined : Number(data.stripSpacingMeters);
+          if (areaName.length === 0) {
+            throw new Error("area_name_required");
+          }
+          if (!Number.isFinite(headingDeg)) {
+            throw new Error("heading_required");
+          }
+          if (mowingExecutor && mowingStatus.phase !== "idle" && mowingStatus.phase !== "complete" && mowingStatus.phase !== "stopped" && mowingStatus.phase !== "error") {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "mowing_already_active" }));
+            return;
+          }
+          if (pathRecorder?.isRecording() || areaPerimeterRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "path_recording_active" }));
+            return;
+          }
+
+          const area = await areaPerimeterStore.loadPath(areaName);
+          const obstacleNames = await pathStore.listPaths();
+          const obstaclePointsArray = await Promise.all(obstacleNames.map(async (name) => {
+            const obs = await pathStore!.loadPath(name);
+            return obs.points;
+          }));
+          const plan = buildMowingPlan(area.points, {
+            headingDeg,
+            stripSpacingMeters,
+            bladeWidthMeters: 0.4,
+            obstacles: obstaclePointsArray,
+          });
+
+          if (plan.strips.length === 0) {
+            throw new Error("no_strips_generated");
+          }
+
+          systemStop.clearStop("api-mowing-start");
+          mowingExecutor = new MowingExecutor({
+            plan,
+            areaPoints: area.points,
+            obstaclePointsArray,
+            driveController,
+            turnController,
+            pathFollower,
+            poseFusion,
+            logger: logger.child({ context: "mowing", source: "MowingExecutor" }),
+            parameters: pathFollowingConfig?.getParameters(),
+          });
+          mowingStatus = mowingExecutor.getStatus();
+
+          // Run in background; update shared status when done
+          mowingExecutor.execute().then((finalStatus) => {
+            mowingStatus = finalStatus;
+          }).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            mowingStatus = { phase: "error", currentStripIndex: 0, totalStrips: plan.strips.length, tracedBoundaryCount: 0, error: message };
+          });
+
+          mowingStatus = mowingExecutor.getStatus();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ started: true, areaName, stripCount: plan.strips.length }));
+          return;
+        }
+
+        // Stop active mowing
+        if (requestUrl.pathname === "/api/mowing/stop") {
+          systemStop.requestStop("api", "mowing_stop");
+          mowingExecutor?.stop();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ stopped: true }));
           return;
         }
 
