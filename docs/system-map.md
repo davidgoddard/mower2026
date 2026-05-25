@@ -4,7 +4,7 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Constants
 - `src/constants.ts`: system-wide DESIGN DECISION constants (see `docs/CONSTANTS-ARCHITECTURE.md`).
-  - timing design decisions: sensor poll intervals (30Hz), manual drive loop rate, retry policies
+  - timing design decisions: sensor poll intervals (200Hz), manual drive loop rate, retry policies
   - I2C hardware addresses: GNSS (0x52), motor (0x66), IMU (0x69) - system topology
   - manual drive tuning: 12 parameters for joystick response, deadbands, spin thresholds
   - motor configuration: direction signs for hardware inversion, max wheel speed
@@ -16,9 +16,15 @@ This document maps problem domains to candidate files removing the need for Code
 ## Configuration
 - `src/config/jsonFileStore.ts`: shared JSON persistence helper for config files.
 - `src/config/motorCalibration.ts`: motor ramp calibration and persistence.
+- `src/config/imuCalibration.ts`: IMU yaw scale calibration and persistence.
 - `src/config/poseCalibration.ts`: encoder calibration persistence.
+- `src/config/geometryCalibration.ts`: body-frame GNSS-to-vehicle reference offset persistence.
+- `src/config/pathFollowingConfig.ts`: path tracing/following safety parameters for closed-loop detection, approach standoff, turn-only threshold, obstacle outward offset, and pure-pursuit lookahead distances.
 - `config/motor-calibration.json`: persisted motor calibration values.
+- `config/imu-yaw-calibration.json`: persisted IMU yaw scale factor.
 - `config/pose-calibration.json`: persisted pose calibration values.
+- `config/geometry-calibration.json`: persisted GNSS position offset values for the vehicle control point.
+- `config/path-following-parameters.json`: persisted obstacle path following and pure-pursuit lookahead parameters.
 - `config/drive-learning-params.json`: persisted drive learning values, including forward/reverse CTE gains.
 - `config/turn-learning-parameters.json`: persisted turn learning values.
 
@@ -40,6 +46,13 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/logging/types.ts`: logging entry and API types.
 - `src/logging/index.ts`: logging exports.
 - `test/logger.test.js`: logger unit tests (local timestamp format, scope, transitions, retention).
+
+## UI Dialogs
+- `src/server/appDialogs.ts`: shared lightweight modal alert/confirm overlay used by operator pages.
+- `src/server/manualDrivePage.ts`: Drive & Paths UI with a lighter custom popup overlay for alerts.
+- `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
+- `src/server/driveTuningPage.ts`: drive tuning UI uses the shared popup overlay for alerts.
+- `src/server/segmentTestingPage.ts`: segment testing UI uses the shared popup overlay for alerts.
 
 ## Stop State
 - `src/control/systemStop.ts`: global stop latch for user actions, timeouts, and runtime safety faults.
@@ -70,7 +83,7 @@ This document maps problem domains to candidate files removing the need for Code
 ## Turn Controller
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
   - executes on-the-spot turns using IMU heading integration
-  - polls heading at 30Hz (matches sensor controller update rate)
+  - polls heading at the sensor controller update rate
   - adaptive brake angle learning per turn angle and direction
   - emergency stop support during turn execution
   - large-angle and small-angle tuning runners for comprehensive parameter learning
@@ -101,7 +114,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/segmentTestingPage.ts`: segment testing UI
   - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
   - start/stop controls on the right
-  - live results table for the collected segment runs, including both average and maximum CTE
+  - live results table for the collected segment runs, including required heading, achieved heading, signed heading difference, average CTE, and maximum CTE; CTE and X/Y arrival errors are displayed in centimetres while source telemetry remains in metres
 - `test/turnController.test.js`: turn controller unit tests
 - `test/turnValidationRunner.test.js`: real-pose validation wrapper tests
 - API endpoints:
@@ -174,9 +187,10 @@ This document maps problem domains to candidate files removing the need for Code
   - API methods: `followPath()`, `followPathPoints()`, `resumeFromWaypoint()`, `retraceToWaypoint()`, `stop()`
   - State: current path, waypoint index, distance to target, cross-track error
 - `src/pathfollowing/purePursuitFollower.ts`: **PURE PURSUIT ALGORITHM IMPLEMENTATION**
-  - adaptive lookahead distance (0.5m - 2.0m) based on speed and path curvature
+  - adaptive lookahead distance loaded from path-following config and adjusted by speed/path curvature
   - smooth arc following using differential wheel speeds
   - automatic pivot turns for tight radius (<0.5m) - one wheel stationary
+  - waypoint progress is monotonic during a run so closed-loop verification stops at the duplicated join point instead of snapping back to the first copy and starting another lap
   - 20Hz control loop (configurable)
   - curvature calculation: κ = 2 * sin(α) / L (classic Pure Pursuit formula)
   - integrates with retry system via checkpoint creation
@@ -187,12 +201,19 @@ This document maps problem domains to candidate files removing the need for Code
   - path metadata: total distance, point count, creation timestamp
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification starts at the nearest point and loops back to the join point
-- `src/server/pathTracingPage.ts`: path tracing UI
-  - record controls for named obstacle paths
+  - verification approach stages to the outer edge of the join point from the mower's current position, then uses an on-the-spot turn if the arrival heading needs to be corrected
+  - closed obstacle loops are expanded outward with inserted outward midpoints so recorded waypoints are treated as the inner safety limit rather than a smoothed centreline to cut through
+  - path safety distances are supplied from `PathFollowingConfig` rather than hard-coded in this helper
+- `src/server/manualDrivePage.ts`: combined Drive & Paths UI
+  - live position map at the top of the page
+  - manual-drive telemetry cards
+  - path recording controls for named obstacle paths
   - drive and verify actions for stored paths
   - prominent stop button for path following aborts
+- `src/server/pathTracingPage.ts`: legacy wrapper that serves the combined Drive & Paths page
 - Path tracing server behavior:
-  - drive/verify first execute a segment-style approach to the nearest point on the stored path
+  - drive immediately line-follows the stored path from the current position
+  - verify first executes a segment-style approach to about 10cm short of the nearest point on the stored path
   - verify then follows the rotated loop back to the join point
 - Path-following API endpoints:
   - `GET /api/path/list` - list stored paths for the page
@@ -212,12 +233,14 @@ This document maps problem domains to candidate files removing the need for Code
   - cross-track error calculation for line/arc following
   - point-to-line distance calculations
   - along-track progress measurement
+  - body-frame position translation from raw GNSS reference points to the mower control point
+  - circle-fit helper use cases in geometry calibration utilities
 
 ## Sensors and Hardware
 - `src/imu/bmi160ImuSensor.ts`: BMI160 gyro and accelerometer access over I2C.
-  - gyro: Z-axis angular velocity for heading integration
+  - gyro: 3-axis angular velocity for heading integration
   - accelerometer: 3-axis (X, Y, Z) for pitch and roll calculation
-  - bias calibration on startup for drift compensation
+  - bias calibration on startup across all three gyro axes for drift compensation
   - pitch/roll zeroing to establish level reference on uneven ground
 - `src/imu/bmi160Registers.ts`: BMI160 register/command constants.
 - `src/imu/types.ts`: IMU sample and sensor contracts.
@@ -238,11 +261,15 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
 - `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
 - `src/bus/crc.ts`: CRC16-CCITT implementation.
-- `src/sensing/sensorController.ts`: single 30Hz sensor polling controller and latest sensor state integration.
-  - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading)` for absolute heading reset integration.
+- `src/sensing/sensorController.ts`: single 200Hz sensor polling controller and latest sensor state integration.
+  - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading, timestampMillis?)` for timestamp-aware absolute heading reset integration.
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
-  - IMU yaw integration: uses `addRelativeAngle()` with `RelativeAngle` deltas from gyro samples.
+  - IMU yaw integration: projects the 3-axis gyro vector onto the gravity axis derived from pitch and roll, then uses `addRelativeAngle()` with `RelativeAngle` deltas from that tilt-compensated yaw rate and applies the persisted IMU yaw scale factor before updating the heading.
+  - buffered IMU diagnostics: retains a short in-memory window of recent gyro integrations, snapshots that window when motor motion stops, and can expose a compact summary for turn debugging without per-sample file writes.
+  - heading rebase readiness: exposes whether GNSS heading may safely rebase the IMU; rebasing is blocked while a motor command is active or the latest tilt-compensated yaw rate exceeds 1 deg/s.
+  - GNSS geometry correction: applies the configured body-frame offset to raw GNSS reference coordinates before exposing them to the rest of the runtime.
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
+  - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - motor API: `setMotorWheelOutputs(...)` and `stopMotors()` command passthrough to hardware boundary; operation end disables motors after any in-operation zero-speed stop has been requested
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
@@ -256,6 +283,8 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/i2c/i2cBusController.ts`: single-bus queued priority controller with key-based request replacement.
 - `src/i2c/liveI2cTransport.ts`: live Raspberry Pi I2C transport (`i2c-bus` module wrapper).
 - `external-hardware/manual-tests/imu_manual_test.js`: manual BMI160 bring-up poller script; uses built runtime modules from `dist/i2c/*` and `dist/imu/*` after `npm run build`.
+- `external-hardware/manual-tests/imu_gnss_turn_calibration.js`: interactive IMU/GNSS heading capture utility; press `S` to start a run and locally align the IMU to the current GNSS heading, then press `E` to save paired start/end headings, a suggested yaw-scale correction to JSONL, and the averaged export to `config/imu-yaw-calibration.json`.
+- `external-hardware/manual-tests/rotation_center_calibration.js`: manual GNSS geometry calibration utility that spins the mower through at least one full rotation and writes `config/geometry-calibration.json`.
 - `test/i2cBusController.test.js`: queue priority and replacement behavior tests.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
@@ -268,7 +297,9 @@ This document maps problem domains to candidate files removing the need for Code
   - maintains current position (X, Y meters) and heading (InternalHeading)
   - quality tracking: "gnss" (RTK fixed/float), "dead-reckoning", or "unknown"
   - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
-  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; after a zero-speed stop has persisted for long enough, a good GNSS heading may rebase the IMU again even if it is no longer close
+  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; after a zero-speed stop has persisted for long enough, a good GNSS heading may rebase the IMU again even if it is no longer close; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw.
+  - exposes a primitive snapshot flag indicating whether GNSS heading is currently being used to rebase the IMU so the web UI can tint the widgets without re-deriving that state
+  - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without 200Hz disk writes
   - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps
   - encoder dead-reckoning: integrates motor encoder deltas for position during GNSS gaps
   - heading reset API: `setHeading()` for external absolute heading corrections
@@ -280,14 +311,16 @@ This document maps problem domains to candidate files removing the need for Code
   - `Position`: X/Y position in meters
   - `Pose`: position + heading + quality indicator
   - geometry functions: `distanceBetween()`, `angleTo()`, `crossTrackError()`, `calculateXError()`
+  - vehicle geometry helpers: body-frame offset translation and projection for GNSS control-point calibration
 
 ## Operation And Server Entry
 - `src/server/main.ts`: production server entrypoint (compiled to `dist/server/main.js`).
 - `src/server/appServer.ts`: HTTP server bootstrapping, routing, and graceful shutdown.
-- `src/server/homePage.ts`: minimal tabbed UI page with a Primitives tab.
+- `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
 - `src/server/primitivesStore.ts`: in-memory primitives state holder.
-  - primitives payload shape contains `imu`, `gnss`, and `motors` sections.
+  - primitives payload shape contains `imu`, `gnss`, `poseFusion`, and `motors` sections.
+  - `poseFusion.usingGnssHeading` is the app-level flag consumed by the live widgets to show whether GNSS is currently rebasing the IMU heading.
 - `docs/sensors.md`: sensor boundary/API contract, heading convention, GNSS frame/payload documentation, and primitive field purpose.
 - `scripts/mower-launch.sh`: launcher used by both `npm run start` and systemd; pins `MOWER_LOG_DIR` to the repo `logs/` folder by default.
 - `systemd/mower.service.template`: systemd unit template for runtime process management; explicitly sets `MOWER_LOG_DIR` to the repo `logs/` folder.

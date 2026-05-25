@@ -19,6 +19,12 @@
 export const SENSOR_POLL_INTERVAL_MS = 33;
 
 /**
+ * Sensor controller polling interval in milliseconds
+ * 5ms ≈ 200Hz update rate for the controller's internal sensor loop
+ */
+export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 5;
+
+/**
  * Manual drive control loop interval in milliseconds
  */
 export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
@@ -26,7 +32,7 @@ export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
 /**
  * Default IMU calibration sample count (design decision for accuracy vs time)
  */
-export const IMU_DEFAULT_CALIBRATION_SAMPLES = 60;
+export const IMU_DEFAULT_CALIBRATION_SAMPLES = 240;
 
 /**
  * GNSS read retry delay in milliseconds (design decision for retry policy)
@@ -95,6 +101,12 @@ export const MANUAL_SPEED_DEADBAND = 0.05;
  * Absolute turn demands below this are treated as zero
  */
 export const MANUAL_TURN_DEADBAND = 0.05;
+
+/**
+ * Motor output deadband
+ * Output commands at or below this magnitude are treated as zero.
+ */
+export const MOTOR_OUTPUT_DEADBAND_PERCENT = 0.1;
 
 /**
  * Manual drive threshold for entering spin mode
@@ -261,7 +273,7 @@ export const MAX_PORT_NUMBER = 65535;
 /**
  * Turn controller polling interval in milliseconds
  * How often to check heading during turn execution
- * Matches sensor polling rate (30Hz) - no benefit to polling faster than sensor updates
+ * Matches the current turn control cadence; kept separate from the 200Hz sensor loop.
  */
 export const TURN_POLLING_INTERVAL_MS = 33;
 
@@ -330,6 +342,21 @@ export const MOTOR_CALIBRATION_PATH = "config/motor-calibration.json";
  * Pose calibration file path (relative to project root)
  */
 export const POSE_CALIBRATION_PATH = "config/pose-calibration.json";
+
+/**
+ * Geometry calibration file path (relative to project root)
+ */
+export const GEOMETRY_CALIBRATION_PATH = "config/geometry-calibration.json";
+
+/**
+ * IMU yaw calibration file path (relative to project root)
+ */
+export const IMU_YAW_CALIBRATION_PATH = "config/imu-yaw-calibration.json";
+
+/**
+ * Path following parameters file path (relative to project root)
+ */
+export const PATH_FOLLOWING_PARAMETERS_PATH = "config/path-following-parameters.json";
 
 // =============================================================================
 // DRIVE CONTROLLER PARAMETERS - Design decisions
@@ -443,10 +470,11 @@ export const DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG = 45;
 export const DRIVE_PURSUIT_PIVOT_SPEED_SCALE = 0.35;
 
 /**
- * Once the mower is within this distance of the target, it should finish parallel to the line
- * rather than hooking sideways into the endpoint.
+ * Once the mower is within this distance of the target, the target endpoint
+ * should stop influencing steering. The controller should keep following the
+ * original straight line using the current cross-track error only.
  */
-export const DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS = 0.2;
+export const DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
 
 /**
  * Upper bound for the 5cm fine short-drive buckets (meters)

@@ -1,3 +1,6 @@
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles } from "./liveSensorWidgets.js";
+import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
+
 /**
  * Drive tuning web page - simplified operator view for short-distance tuning.
  */
@@ -10,6 +13,8 @@ export function getDriveTuningPageHtml(): string {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Drive Tuning - Mower Control</title>
     <style>
+${getLiveSensorWidgetsStyles()}
+${getAppDialogStyles()}
       :root {
         --primary-color: #2563eb;
         --primary-hover: #1d4ed8;
@@ -119,123 +124,7 @@ export function getDriveTuningPageHtml(): string {
         font-size: 1.5rem;
       }
 
-      .position-display {
-        text-align: center;
-        padding: 0.75rem;
-        background: var(--bg-tertiary);
-        border-radius: 0.5rem;
-        margin-top: 0.75rem;
-      }
-
-      .compass {
-        width: 100px;
-        height: 100px;
-        margin: 0 auto;
-        position: relative;
-      }
-
-      .compass-circle {
-        width: 100%;
-        height: 100%;
-        border: 3px solid var(--border-color);
-        border-radius: 50%;
-        position: relative;
-        background: radial-gradient(circle, var(--bg-secondary) 0%, var(--bg-primary) 70%);
-      }
-
-      .compass-needle {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 4px;
-        height: 45%;
-        background: linear-gradient(to top, var(--danger-color), var(--primary-color));
-        transform-origin: bottom center;
-        transform: translate(-50%, -100%) rotate(var(--heading-deg, 0deg));
-        border-radius: 2px;
-        transition: transform 0.3s ease-out;
-      }
-
-      .compass-center {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 12px;
-        height: 12px;
-        background: var(--text-primary);
-        border-radius: 50%;
-        transform: translate(-50%, -50%);
-        box-shadow: 0 0 0 3px var(--bg-primary);
-      }
-
-      .compass-label {
-        position: absolute;
-        font-size: 0.75rem;
-        font-weight: 600;
-        color: var(--text-secondary);
-      }
-
-      .compass-label.n { top: 8px; left: 50%; transform: translateX(-50%); }
-      .compass-label.e { right: 8px; top: 50%; transform: translateY(-50%); }
-      .compass-label.s { bottom: 8px; left: 50%; transform: translateX(-50%); }
-      .compass-label.w { left: 8px; top: 50%; transform: translateY(-50%); }
-
-      .gnss-summary {
-        display: flex;
-        flex-direction: column;
-        gap: 0.9rem;
-        margin-top: 1rem;
-      }
-
-      .gnss-row {
-        display: grid;
-        gap: 1rem;
-      }
-
-      .gnss-row.three {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-
-      .gnss-row.two {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .gnss-fix-value {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 5.25rem;
-        padding: 0.35rem 0.7rem;
-        border-radius: 0.5rem;
-        background: var(--bg-tertiary);
-      }
-
-      .gnss-fix-value.gnss-fix-unknown,
-      .gnss-fix-value.gnss-fix-none {
-        background: #fee2e2;
-        color: #991b1b;
-      }
-
-      .gnss-fix-value.gnss-fix-single {
-        background: #ffedd5;
-        color: #9a3412;
-      }
-
-      .gnss-fix-value.gnss-fix-float {
-        background: #fef3c7;
-        color: #92400e;
-      }
-
-      .gnss-fix-value.gnss-fix-fixed,
-      .gnss-fix-value.gnss-fix-rtk-fixed {
-        background: #d1fae5;
-        color: #065f46;
-      }
-
-      .gnss-fix-value.gnss-fix-rtk-float {
-        background: #dcfce7;
-        color: #166534;
-      }
+      /* shared live sensor widget styles injected above */
 
       .error-message {
         background: #fef2f2;
@@ -473,85 +362,30 @@ export function getDriveTuningPageHtml(): string {
     <div class="container">
       <div class="page-layout">
         <aside class="sidebar-column" aria-label="Live primitives">
-          <div class="sensor-card">
-            <div class="sensor-header">
-              <div class="sensor-title">IMU Sensor</div>
-              <span class="status-dot" id="imu-status"></span>
-            </div>
-            <div class="compass" id="compass">
-              <div class="compass-circle">
-                <div class="compass-label n">N</div>
-                <div class="compass-label e">E</div>
-                <div class="compass-label s">S</div>
-                <div class="compass-label w">W</div>
-                <div class="compass-needle"></div>
-                <div class="compass-center"></div>
-              </div>
-            </div>
-            <div class="position-display">
-              <div class="metric-label">Heading</div>
-              <div class="metric-value large" id="imu-heading">—</div>
-            </div>
-            <div class="metric-label" style="margin-top: 0.75rem;">Pitch</div>
-            <div class="metric-value" id="imu-pitch">—</div>
-            <div class="metric-label" style="margin-top: 0.5rem;">Roll</div>
-            <div class="metric-value" id="imu-roll">—</div>
-            <div id="imu-error" class="error-message" style="display: none;"></div>
-          </div>
-
-          <div class="sensor-card">
-            <div class="sensor-header">
-              <div class="sensor-title">GNSS Position</div>
-              <span class="status-dot" id="gnss-status"></span>
-            </div>
-            <div class="compass" id="gnss-compass">
-              <div class="compass-circle">
-                <div class="compass-label n">N</div>
-                <div class="compass-label e">E</div>
-                <div class="compass-label s">S</div>
-                <div class="compass-label w">W</div>
-                <div class="compass-needle"></div>
-                <div class="compass-center"></div>
-              </div>
-            </div>
-            <div class="gnss-summary">
-              <div class="gnss-row three">
-                <div class="metric">
-                  <div class="metric-label">X</div>
-                  <div class="metric-value" id="gnss-x">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Y</div>
-                  <div class="metric-value" id="gnss-y">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Accuracy</div>
-                  <div class="metric-value" id="gnss-accuracy">—</div>
-                </div>
-              </div>
-              <div class="gnss-row two">
-                <div class="metric">
-                  <div class="metric-label">Heading</div>
-                  <div class="metric-value" id="gnss-heading">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Heading Accuracy</div>
-                  <div class="metric-value" id="gnss-heading-accuracy">—</div>
-                </div>
-              </div>
-              <div class="gnss-row two">
-                <div class="metric">
-                  <div class="metric-label">Fix Type</div>
-                  <div class="metric-value gnss-fix-value" id="gnss-fix">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Satellites</div>
-                  <div class="metric-value" id="gnss-sats">—</div>
-                </div>
-              </div>
-            </div>
-            <div id="gnss-error" class="error-message" style="display: none;"></div>
-          </div>
+${getLiveSensorWidgetsHtml({
+  imuCardId: "imu-card",
+  imuCompassId: "compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+})}
         </aside>
 
         <main class="main-column">
@@ -609,7 +443,10 @@ export function getDriveTuningPageHtml(): string {
       </div>
     </div>
 
+${getAppDialogHtml()}
+
     <script>
+${getAppDialogScript()}
       function formatMeters(value) {
         if (value === null || value === undefined) return '—';
         return value.toFixed(3) + ' m';
@@ -619,14 +456,7 @@ export function getDriveTuningPageHtml(): string {
         if (value === null || value === undefined) return '—';
         return value.toFixed(1) + '°';
       }
-
-      function internalToNavigationHeading(internalDeg) {
-        if (internalDeg === null || internalDeg === undefined) return null;
-        let navHeading = 90 - internalDeg;
-        while (navHeading < 0) navHeading += 360;
-        while (navHeading >= 360) navHeading -= 360;
-        return navHeading;
-      }
+${getLiveSensorWidgetsScript()}
 
       function getGnssFixClass(fixType) {
         switch ((fixType || 'unknown').toLowerCase()) {
@@ -664,88 +494,64 @@ export function getDriveTuningPageHtml(): string {
         }
 
         const imuError = document.getElementById("imu-error");
-        if (imu.status === "error") {
-          if (imuError) {
-            imuError.textContent = imu.error;
-            imuError.style.display = "block";
-          }
-          const imuHeading = document.getElementById("imu-heading");
-          const imuPitch = document.getElementById("imu-pitch");
-          const imuRoll = document.getElementById("imu-roll");
-          if (imuHeading) imuHeading.textContent = "—";
-          if (imuPitch) imuPitch.textContent = "—";
-          if (imuRoll) imuRoll.textContent = "—";
-        } else {
-          if (imuError) {
-            imuError.style.display = "none";
-          }
-          if (imu.headingDeg !== null && imu.headingDeg !== undefined) {
-            const navHeading = internalToNavigationHeading(imu.headingDeg);
-            const imuHeading = document.getElementById("imu-heading");
-            const compass = document.getElementById("compass");
-            if (imuHeading) imuHeading.textContent = formatDegrees(navHeading);
-            if (compass) compass.style.setProperty("--heading-deg", navHeading + "deg");
-          }
-          if (imu.pitchDeg !== null && imu.pitchDeg !== undefined) {
-            const imuPitch = document.getElementById("imu-pitch");
-            if (imuPitch) imuPitch.textContent = formatDegrees(imu.pitchDeg);
-          }
-          if (imu.rollDeg !== null && imu.rollDeg !== undefined) {
-            const imuRoll = document.getElementById("imu-roll");
-            if (imuRoll) imuRoll.textContent = formatDegrees(imu.rollDeg);
-          }
+      if (imu.status === "error") {
+        if (imuError) {
+          imuError.textContent = imu.error;
+          imuError.style.display = "block";
         }
+      } else {
+        if (imuError) {
+          imuError.style.display = "none";
+        }
+      }
+      const imuNavHeading = updateWidgetHeading("compass", "imu-heading", imu.status === "error" ? null : imu.headingDeg);
+      updateTiltIndicator("pitch-indicator", "imu-pitch", imu.status === "error" ? null : imu.pitchDeg);
+      updateTiltIndicator("roll-indicator", "imu-roll", imu.status === "error" ? null : imu.rollDeg);
 
-        const gnssStatusDot = document.getElementById("gnss-status");
-        if (gnssStatusDot) {
-          gnssStatusDot.className = "status-dot " + (gnss.status || "idle");
-        }
+      const gnssStatusDot = document.getElementById("gnss-status");
+      if (gnssStatusDot) {
+        gnssStatusDot.className = "status-dot " + (gnss.status || "idle");
+      }
 
-        const gnssError = document.getElementById("gnss-error");
-        if (gnss.status === "error") {
-          if (gnssError) {
-            gnssError.textContent = gnss.error;
-            gnssError.style.display = "block";
-          }
-        } else if (gnssError) {
-          gnssError.style.display = "none";
+      const gnssError = document.getElementById("gnss-error");
+      if (gnss.status === "error") {
+        if (gnssError) {
+          gnssError.textContent = gnss.error;
+          gnssError.style.display = "block";
         }
+      } else if (gnssError) {
+        gnssError.style.display = "none";
+      }
 
-        const gnssX = document.getElementById("gnss-x");
-        const gnssY = document.getElementById("gnss-y");
-        const gnssAccuracy = document.getElementById("gnss-accuracy");
-        const gnssHeadingAccuracy = document.getElementById("gnss-heading-accuracy");
-        const gnssSats = document.getElementById("gnss-sats");
-        const gnssFix = document.getElementById("gnss-fix");
-        const gnssHeading = document.getElementById("gnss-heading");
-        const gnssCompass = document.getElementById("gnss-compass");
+      const gnssX = document.getElementById("gnss-x");
+      const gnssY = document.getElementById("gnss-y");
+      const gnssAccuracy = document.getElementById("gnss-accuracy");
+      const gnssHeadingAccuracy = document.getElementById("gnss-heading-accuracy");
+      const gnssSats = document.getElementById("gnss-sats");
+      const gnssFix = document.getElementById("gnss-fix");
 
-        if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
-        if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
-        if (gnssFix) gnssFix.textContent = gnss.fixType || "—";
-        applyGnssFixStyle(gnss.fixType);
-        if (gnssAccuracy) {
-          gnssAccuracy.textContent = gnss.positionAccuracyMeters !== null && gnss.positionAccuracyMeters !== undefined
-            ? formatMeters(gnss.positionAccuracyMeters)
-            : "—";
-        }
-        if (gnssHeadingAccuracy) {
-          gnssHeadingAccuracy.textContent = gnss.headingAccuracyDeg !== null && gnss.headingAccuracyDeg !== undefined
-            ? formatDegrees(gnss.headingAccuracyDeg)
-            : "—";
-        }
-        if (gnssSats) {
-          gnssSats.textContent = gnss.satellitesInUse !== null && gnss.satellitesInUse !== undefined
-            ? gnss.satellitesInUse
-            : "—";
-        }
-        if (gnss.headingDeg !== null && gnss.headingDeg !== undefined) {
-          const navHeading = internalToNavigationHeading(gnss.headingDeg);
-          if (gnssHeading) gnssHeading.textContent = formatDegrees(navHeading);
-          if (gnssCompass) gnssCompass.style.setProperty("--heading-deg", navHeading + "deg");
-        } else if (gnssHeading) {
-          gnssHeading.textContent = "—";
-        }
+      if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
+      if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
+      if (gnssFix) gnssFix.textContent = gnss.fixType || "—";
+      applyGnssFixStyle(gnss.fixType);
+      if (gnssAccuracy) {
+        gnssAccuracy.textContent = gnss.positionAccuracyMeters !== null && gnss.positionAccuracyMeters !== undefined
+          ? formatMeters(gnss.positionAccuracyMeters)
+          : "—";
+      }
+      if (gnssHeadingAccuracy) {
+        gnssHeadingAccuracy.textContent = gnss.headingAccuracyDeg !== null && gnss.headingAccuracyDeg !== undefined
+          ? formatDegrees(gnss.headingAccuracyDeg)
+          : "—";
+      }
+      if (gnssSats) {
+        gnssSats.textContent = gnss.satellitesInUse !== null && gnss.satellitesInUse !== undefined
+          ? gnss.satellitesInUse
+          : "—";
+      }
+      const gnssNavHeading = updateWidgetHeading("gnss-compass", "gnss-heading", gnss.status === "error" ? null : gnss.headingDeg);
+      const poseFusion = primitives.poseFusion ?? {};
+      updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
       }
 
       function formatCm(meters) {

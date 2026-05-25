@@ -50,6 +50,17 @@ export interface PoseFusionEvents {
   poseUpdate: Pose;
 }
 
+export interface PoseFusionPrimitiveState {
+  readonly status: "idle" | "ok";
+  readonly error: string | null;
+  readonly xMeters: number | null;
+  readonly yMeters: number | null;
+  readonly headingDeg: number | null;
+  readonly quality: "gnss" | "dead-reckoning" | "unknown";
+  readonly speedMetersPerSecond: number | null;
+  readonly usingGnssHeading: boolean;
+}
+
 export class PoseFusion extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly sensorController: SensorController;
@@ -62,6 +73,7 @@ export class PoseFusion extends EventEmitter {
   private currentHeading: InternalHeading = createInternalHeading(0);
   private currentQuality: "gnss" | "dead-reckoning" | "unknown" = "unknown";
   private hasGnssHeadingBaseline = false;
+  private isUsingGnssHeading = false;
 
   // Encoder calibration
   private encoderMetersPerTick: number;
@@ -148,6 +160,20 @@ export class PoseFusion extends EventEmitter {
     );
   }
 
+  getPrimitiveState(): PoseFusionPrimitiveState {
+    const pose = this.getCurrentPose();
+    return {
+      status: this.running ? "ok" : "idle",
+      error: null,
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+      headingDeg: unwrapInternalHeading(pose.heading),
+      quality: pose.quality,
+      speedMetersPerSecond: null,
+      usingGnssHeading: this.isUsingGnssHeading,
+    };
+  }
+
   setPosition(position: Position): void {
     this.currentPosition = position;
     this.currentQuality = "unknown"; // User-set position, not from sensors
@@ -214,6 +240,7 @@ export class PoseFusion extends EventEmitter {
     // We intentionally do not require the position accuracy gate here so a fresh
     // start can still pick up a trusted GNSS heading even if x/y accuracy is not
     // yet in the tighter range.
+    this.isUsingGnssHeading = false;
     if (canTrustHeading) {
       this.updateHeadingFromGnss(event.heading, event.timestampMillis);
     }
@@ -277,11 +304,21 @@ export class PoseFusion extends EventEmitter {
       unwrapRelativeAngle(headingDifference(this.currentHeading, gnssHeading))
     );
     const motorZeroCommandSinceMillis = this.sensorController.getMotorZeroCommandSinceMillis?.() ?? null;
+    const currentTimeMillis = this.sensorController.getCurrentTimeMillis?.() ?? timestampMillis;
     const stationaryZeroCommandAgeMs =
-      motorZeroCommandSinceMillis === null ? null : Math.max(0, timestampMillis - motorZeroCommandSinceMillis);
+      motorZeroCommandSinceMillis === null ? null : Math.max(0, currentTimeMillis - motorZeroCommandSinceMillis);
     const stationaryTimeoutReached =
       stationaryZeroCommandAgeMs !== null &&
       stationaryZeroCommandAgeMs >= GNSS_STATIONARY_REBASE_TIMEOUT_MS;
+    const rebaseReadiness = this.sensorController.getHeadingRebaseReadiness?.() ?? null;
+
+    if (rebaseReadiness !== null && !rebaseReadiness.safe) {
+      this.lastGnssHeading = gnssHeading;
+      this.lastGnssHeadingTime = timestampMillis;
+      this.resetOffsetTracking();
+      this.isUsingGnssHeading = false;
+      return;
+    }
 
     if (!this.hasGnssHeadingBaseline) {
       this.logger.info("pose_fusion.gnss_heading_primed", {
@@ -291,6 +328,7 @@ export class PoseFusion extends EventEmitter {
       });
       this.applyGnssHeadingRebase(gnssHeading, timestampMillis);
       this.hasGnssHeadingBaseline = true;
+      this.isUsingGnssHeading = true;
       return;
     }
 
@@ -325,8 +363,13 @@ export class PoseFusion extends EventEmitter {
         consistentOffsetDurationMs: consistentOffset.durationMs,
         consistentOffsetSamples: consistentOffset.sampleCount,
       });
+      this.isUsingGnssHeading = false;
       return;
     }
+
+    const imuDiagnostics =
+      this.sensorController.getLastImuMotionStopSummary?.() ??
+      this.sensorController.getRecentImuDiagnosticSummary?.();
 
     if (alignmentDeltaDeg > MAX_GNSS_IMU_ALIGNMENT_DEGREES && stationaryTimeoutReached) {
       this.logger.info("pose_fusion.gnss_heading_rebased_after_stop", {
@@ -334,6 +377,7 @@ export class PoseFusion extends EventEmitter {
         currentHeadingDeg: unwrapInternalHeading(this.currentHeading),
         gnssHeadingDeg: unwrapInternalHeading(gnssHeading),
         stationaryZeroCommandAgeMs,
+        imuDiagnostics,
       });
     }
 
@@ -344,14 +388,17 @@ export class PoseFusion extends EventEmitter {
         gnssHeadingDeg: unwrapInternalHeading(gnssHeading),
         consistentOffsetDurationMs: consistentOffset.durationMs,
         consistentOffsetSamples: consistentOffset.sampleCount,
+        imuDiagnostics,
       });
     }
 
     this.applyGnssHeadingRebase(gnssHeading, timestampMillis);
+    this.isUsingGnssHeading = true;
   }
 
   private applyGnssHeadingRebase(gnssHeading: InternalHeading, timestampMillis: number): void {
-    this.sensorController.setHeading(gnssHeading);
+    const rebaseTimestampMillis = this.sensorController.getCurrentTimeMillis?.() ?? timestampMillis;
+    this.sensorController.setHeading(gnssHeading, rebaseTimestampMillis);
     this.currentHeading = gnssHeading;
     this.lastGnssHeading = gnssHeading;
     this.lastGnssHeadingTime = timestampMillis;

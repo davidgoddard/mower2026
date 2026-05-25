@@ -16,7 +16,7 @@ This keeps application logic independent from device/protocol details.
 
 ## Polling Model
 
-- Poll loop target: ~30Hz (`33ms` default)
+- Poll loop target: ~200Hz (`5ms` default)
 - Poll order in each loop:
   1. IMU
   2. GNSS
@@ -33,7 +33,9 @@ The controller exposes a heading-focused API:
 - `getHeadingDegrees(): number`
 - `setHeadingDegrees(headingDegrees: number): void`
 
-`setHeadingDegrees(...)` resets the integrated IMU heading baseline to an absolute value (for example from GNSS), then integration continues from the new baseline.
+`setHeadingDegrees(...)` resets the integrated IMU heading baseline to an absolute value (for example from GNSS), then integration continues from the new baseline. GNSS heading rebases supply the controller-clock reset timestamp, and direct heading resets fall back to the current controller clock, so the next IMU sample does not skip or double-count a turn interval.
+
+For rough yaw-scale checks without a turn rig, the interactive utility `external-hardware/manual-tests/imu_gnss_turn_calibration.js` can log paired IMU and GNSS headings at `S`/`E` points while applying a local per-run IMU offset so the session starts aligned to the current GNSS heading. When you finish runs it exports the averaged yaw scale factor to `config/imu-yaw-calibration.json`, which `SensorController` loads at startup and applies to the integrated gyro heading.
 
 ### Primitive snapshot API
 
@@ -72,6 +74,16 @@ Current sensor-related shape:
     "satellitesInUse": 22,
     "sampleAgeMillis": 110
   },
+  "poseFusion": {
+    "status": "ok",
+    "error": null,
+    "xMeters": 12.345,
+    "yMeters": -1.234,
+    "headingDeg": 42.1,
+    "quality": "gnss",
+    "speedMetersPerSecond": null,
+    "usingGnssHeading": true
+  },
   "motors": {
     "status": "idle",
     "error": null,
@@ -93,6 +105,8 @@ Current sensor-related shape:
 }
 ```
 
+The `poseFusion.usingGnssHeading` flag is the app-level indicator the live widgets use for the green/orange sync background. The browser does not compare headings itself.
+
 ### Motor command API
 
 The controller exposes motor command methods:
@@ -101,6 +115,9 @@ The controller exposes motor command methods:
 - `stopMotors()`
 
 `stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands.
+The stationary pose-fusion timer is armed by either an explicit zero-output command or the hard motor-disable stop path, so a mower that has been stopped by the controller can still qualify for a GNSS heading rebase after the timeout.
+Motor output commands at or below 10% magnitude are treated as zero before transmission, which gives the controller a little tolerance around the joystick center and helps stationary detection settle cleanly.
+The stationary timer uses the controller clock rather than the GNSS sample timestamp, so a stale GNSS receiver time cannot suppress the stop timeout.
 The motor node command payload sent over I2C uses normalized percentages, where `1.0` is full output and `0.0` is stop.
 
 ### Obstruction detection
@@ -129,15 +146,23 @@ GNSS heading from field/navigation convention (`0° = north`, clockwise positive
 
 The IMU sensor provides:
 
-- **BMI160 gyroscope**: Z-axis angular velocity (`zDegreesPerSecond`) for heading integration
+- **BMI160 gyroscope**: 3-axis angular velocity (`xDegreesPerSecond`, `yDegreesPerSecond`, `zDegreesPerSecond`)
 - **BMI160 accelerometer**: 3-axis acceleration (X, Y, Z in m/s²) for pitch and roll calculation
+
+The BMI160 gyro is configured for the `2000 dps` range, which corresponds to `16.4 LSB/dps` in this runtime.
 
 ### Heading Integration
 
-- `heading += yawRateDegPerSec * deltaSeconds`
+- `heading += tiltCompensatedYawRateDegPerSec * deltaSeconds`
+- the controller projects the 3-axis gyro vector onto the current gravity axis derived from pitch and roll before integrating yaw
 - first sample sets timestamp reference only
 - subsequent samples integrate using sample-to-sample timestamp delta
 - heading always normalized to `(-180, 180]`
+
+`SensorController` also keeps a short in-memory IMU diagnostic window so the runtime can emit one compact turn summary when pose fusion rebases GNSS heading. That gives us the raw sample interval and integrated yaw evidence without writing a log line for every 200Hz sample.
+When a non-zero motor command transitions to a stop command, the controller snapshots that same window as `sensor.imu.motion_stop_summary`. Pose fusion prefers this stop-time summary when it later logs a GNSS heading rebase, because the actual turn may be several seconds behind the stationary rebase.
+
+GNSS heading rebases are only allowed when the motor command is stopped and the latest tilt-compensated yaw rate is within 1 deg/s. During active turns the GNSS heading can still be observed for quality and position updates, but it does not write back into the IMU heading baseline.
 
 ### Pitch and Roll Calculation
 
@@ -155,8 +180,8 @@ Pitch and roll are derived from accelerometer readings using the gravity vector:
 
 At startup, the IMU performs calibration by sampling sensor noise:
 
-1. **Gyroscope bias calibration**: Averages Z-axis gyro readings over N samples while stationary to determine drift offset
-2. **Pitch/roll zeroing**: Averages pitch and roll calculations over N samples to establish level reference
+1. **Gyroscope bias calibration**: Averages all three gyro axes over the default 240 stationary samples to determine drift offsets
+2. **Pitch/roll zeroing**: Averages pitch and roll calculations over the same stationary sample window to establish level reference
 3. All subsequent readings subtract these calibrated offsets
 
 This allows the mower to zero its tilt reference on uneven ground during startup.
@@ -217,6 +242,16 @@ Both decode to the same application `GnssSample` shape.
   - `uniheadingAgeMillis`
   - `rtcmAgeMillis`
   - `logConfigMask`
+
+### Vehicle geometry correction
+
+The runtime treats the GNSS sample position as a fixed receiver reference point and then translates that point into the mower control point using a calibrated body-frame offset:
+
+- `positionOffsetForwardMeters`: distance from the raw GNSS reference point toward the mower nose
+- `positionOffsetRightMeters`: distance from the raw GNSS reference point toward the mower's right-hand side
+
+That offset is applied before the position is exposed through `SensorController`, `PoseFusion`, and the primitive snapshot. The manual calibration utility `external-hardware/manual-tests/rotation_center_calibration.js` estimates the offset by slowly spinning the mower through at least one full rotation and fitting the observed GNSS trace to a circle.
+For quick field tuning, `config/geometry-calibration.json` is the live persisted value the runtime loads at startup, so small manual nudges to `positionOffsetForwardMeters` and `positionOffsetRightMeters` will immediately affect the mower reference point on the next restart.
 
 ## Error Handling
 

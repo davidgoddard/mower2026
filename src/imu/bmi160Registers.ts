@@ -3,6 +3,8 @@ export const BMI160 = {
   expectedChipId: 0xd1,
   registers: {
     chipId: 0x00,
+    gyroXLsb: 0x0c,
+    gyroYLsb: 0x0e,
     accXLsb: 0x12,
     accYLsb: 0x14,
     accZLsb: 0x16,

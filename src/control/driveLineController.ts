@@ -67,7 +67,7 @@ import {
   DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
   DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
   DRIVE_PURSUIT_PIVOT_SPEED_SCALE,
-  DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS,
+  DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
 
@@ -798,9 +798,9 @@ export class DriveLineController {
       ? pose.heading
       : createInternalHeading(unwrapInternalHeading(pose.heading) + 180);
     const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)));
-    const isFinalParallelApproach = remainingAlongTrackDistance <= DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS;
+    const ignoreTargetEndpoint = remainingAlongTrackDistance <= DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS;
 
-    if (headingErrorDeg >= DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG && remainingAlongTrackDistance > DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS) {
+    if (headingErrorDeg >= DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG && remainingAlongTrackDistance > DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS) {
       const turnSign = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)) >= 0 ? 1 : -1;
       const pivotSpeed = this.fullSpeedCommand * DRIVE_PURSUIT_PIVOT_SPEED_SCALE;
       const leftCommand = this.clampNormalizedSpeed(-turnSign * pivotSpeed);
@@ -810,18 +810,18 @@ export class DriveLineController {
     }
 
     const projectedAlongTrackDistance = this.projectAlongTrackDistance(pose.position);
-    const lookaheadDistance = this.calculateLookaheadDistance(remainingAlongTrackDistance);
-    const lookaheadAlongTrackDistance = Math.max(
-      0,
-      Math.min(totalDistance, projectedAlongTrackDistance + lookaheadDistance),
-    );
-    const lookaheadPoint = isFinalParallelApproach
-      ? this.buildParallelLookaheadPoint(pose.position, lookaheadDistance)
-      : pointAlongLine(
-          this.driveLineStart,
-          this.driveLineEnd,
-          createMeters(lookaheadAlongTrackDistance),
+    const lookaheadDistance = this.calculateLookaheadDistance(remainingAlongTrackDistance, ignoreTargetEndpoint);
+    const lookaheadAlongTrackDistance = ignoreTargetEndpoint
+      ? Math.max(0, projectedAlongTrackDistance + lookaheadDistance)
+      : Math.max(
+          0,
+          Math.min(totalDistance, projectedAlongTrackDistance + lookaheadDistance),
         );
+    const lookaheadPoint = pointAlongLine(
+      this.driveLineStart,
+      this.driveLineEnd,
+      createMeters(lookaheadAlongTrackDistance),
+    );
     const lookaheadFrame = this.toRobotFrame(pose.position, lookaheadPoint, controlHeading);
     const lookaheadDistanceMeters = Math.hypot(lookaheadFrame.x, lookaheadFrame.y);
 
@@ -831,14 +831,7 @@ export class DriveLineController {
     }
 
     const rawCurvature = (2 * lookaheadFrame.y) / (lookaheadDistanceMeters * lookaheadDistanceMeters);
-    const finalApproachCurvatureScale = isFinalParallelApproach
-      ? this.clamp(
-          remainingAlongTrackDistance / DRIVE_PURSUIT_FINAL_PARALLEL_DISTANCE_METERS,
-          0,
-          1,
-        )
-      : 1;
-    const curvature = rawCurvature * finalApproachCurvatureScale;
+    const curvature = rawCurvature;
     const targetLinearSpeedMps = this.calculateTargetLinearSpeedMps(remainingAlongTrackDistance, curvature);
     const signedLinearSpeedMps = targetLinearSpeedMps * this.driveDirectionSign;
     const angularSpeedRadPerSec = targetLinearSpeedMps * curvature;
@@ -879,7 +872,7 @@ export class DriveLineController {
     return dx * lineDx + dy * lineDy;
   }
 
-  private calculateLookaheadDistance(remainingAlongTrackDistance: number): number {
+  private calculateLookaheadDistance(remainingAlongTrackDistance: number, ignoreTargetEndpoint = false): number {
     const targetSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
     const dynamicLookahead = DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS +
       (targetSpeedMps * DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS);
@@ -887,6 +880,10 @@ export class DriveLineController {
       DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS,
       Math.min(DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS, dynamicLookahead),
     );
+
+    if (ignoreTargetEndpoint) {
+      return clampedLookahead;
+    }
 
     if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
       return DRIVE_ARRIVAL_TOLERANCE_METERS;
@@ -908,25 +905,6 @@ export class DriveLineController {
       1,
     );
     return nominalTargetSpeedMps * approachScale * curvatureScale;
-  }
-
-  private buildParallelLookaheadPoint(currentPosition: Position, lookaheadDistance: number): Position {
-    if (this.driveLineStart === null || this.driveLineEnd === null) {
-      return currentPosition;
-    }
-
-    const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
-    if (totalDistance <= 1e-6) {
-      return currentPosition;
-    }
-
-    const lineDx = (unwrapMeters(this.driveLineEnd.xMeters) - unwrapMeters(this.driveLineStart.xMeters)) / totalDistance;
-    const lineDy = (unwrapMeters(this.driveLineEnd.yMeters) - unwrapMeters(this.driveLineStart.yMeters)) / totalDistance;
-
-    return createPosition(
-      unwrapMeters(currentPosition.xMeters) + (lineDx * lookaheadDistance),
-      unwrapMeters(currentPosition.yMeters) + (lineDy * lookaheadDistance),
-    );
   }
 
   private toRobotFrame(

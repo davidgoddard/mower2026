@@ -24,6 +24,16 @@ export interface PrimitiveSnapshot {
     satellitesInUse: number | null;
     sampleAgeMillis: number | null;
   };
+  poseFusion: {
+    status: "idle" | "ok";
+    error: string | null;
+    xMeters: number | null;
+    yMeters: number | null;
+    headingDeg: number | null;
+    quality: "gnss" | "dead-reckoning" | "unknown";
+    speedMetersPerSecond: number | null;
+    usingGnssHeading: boolean;
+  };
   motors: {
     status: "idle" | "running" | "error";
     error: string | null;
@@ -56,6 +66,7 @@ export class PrimitivesStore {
       ...this.snapshotValue,
       imu: { ...this.snapshotValue.imu },
       gnss: { ...this.snapshotValue.gnss },
+      poseFusion: { ...this.snapshotValue.poseFusion },
       motors: { ...this.snapshotValue.motors },
     };
   }
@@ -71,6 +82,10 @@ export class PrimitivesStore {
       gnss: {
         ...this.snapshotValue.gnss,
         ...(partial.gnss ?? {}),
+      },
+      poseFusion: {
+        ...this.snapshotValue.poseFusion,
+        ...(partial.poseFusion ?? {}),
       },
       motors: {
         ...this.snapshotValue.motors,
@@ -106,6 +121,16 @@ export class PrimitivesStore {
         fixType: "unknown",
         satellitesInUse: null,
         sampleAgeMillis: null,
+      },
+      poseFusion: {
+        status: "idle",
+        error: null,
+        xMeters: null,
+        yMeters: null,
+        headingDeg: null,
+        quality: "unknown",
+        speedMetersPerSecond: null,
+        usingGnssHeading: false,
       },
       motors: {
         status: "idle",

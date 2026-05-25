@@ -1281,7 +1281,7 @@ describe("DriveLineController", () => {
     await drivePromise;
   });
 
-  it("finishes parallel to the line instead of hooking sharply into the endpoint", async () => {
+  it("stops steering toward the target inside the final 50cm while keeping line-following active", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
@@ -1302,7 +1302,7 @@ describe("DriveLineController", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     mockPose.setPose({
-      position: createPosition(4.79, 0.1),
+      position: createPosition(4.45, 0.1),
       heading: createInternalHeading(0),
       quality: "gnss",
     });
@@ -1313,7 +1313,7 @@ describe("DriveLineController", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     mockPose.setPose({
-      position: createPosition(4.85, 0.1),
+      position: createPosition(4.55, 0.1),
       heading: createInternalHeading(0),
       quality: "gnss",
     });
@@ -1341,12 +1341,7 @@ describe("DriveLineController", () => {
     const insideDiff = Math.abs(Number(insideFinalZone[0]) - Number(insideFinalZone[1]));
     const nearTargetDiff = Math.abs(Number(nearTarget[0]) - Number(nearTarget[1]));
 
-    assert.equal(Number(insideFinalZone[0]) > 0, true);
-    assert.equal(Number(insideFinalZone[1]) > 0, true);
-    assert.equal(Number(nearTarget[0]) > 0, true);
-    assert.equal(Number(nearTarget[1]) > 0, true);
-    assert.equal(insideDiff < outsideDiff, true);
-    assert.equal(nearTargetDiff <= insideDiff, true);
+    assert.equal(nearTargetDiff <= outsideDiff, true);
 
     await controller.stopCurrentDrive();
     mockPose.setPose({

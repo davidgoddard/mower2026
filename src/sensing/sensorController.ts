@@ -4,7 +4,9 @@ import { LoggerScope } from "../logging/types.js";
 import { PrimitivesStore } from "../server/primitivesStore.js";
 import { SensorHardwareGateway } from "./sensorHardwareGateway.js";
 import { systemStop } from "../control/systemStop.js";
+import { ImuCalibration } from "../config/imuCalibration.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
+import { GeometryCalibration } from "../config/geometryCalibration.js";
 import {
   InternalHeading,
   FieldHeading,
@@ -16,10 +18,17 @@ import {
   unwrapInternalHeading,
   unwrapRelativeAngle,
 } from "../geometry/headingTypes.js";
-import { Position, createPosition, distanceBetween } from "../geometry/positionTypes.js";
+import {
+  Position,
+  createPosition,
+  distanceBetween,
+  unwrapMeters,
+  translatePositionByHeading,
+  createBodyFrameOffset,
+} from "../geometry/positionTypes.js";
 import {
   ENCODER_METERS_PER_TICK_DEFAULT,
-  SENSOR_POLL_INTERVAL_MS,
+  SENSOR_CONTROLLER_POLL_INTERVAL_MS,
   MOTOR_STALL_COMMAND_THRESHOLD_PERCENT,
   MOTOR_STALL_ENCODER_DELTA_THRESHOLD,
   MOTOR_STALL_GNSS_ACCURACY_MAX_METERS,
@@ -28,6 +37,7 @@ import {
   MOTOR_STALL_CONSECUTIVE_SAMPLES,
   MOTOR_STALL_CURRENT_THRESHOLD_AMPS,
   MOTOR_STALL_STARTUP_GRACE_MS,
+  MOTOR_OUTPUT_DEADBAND_PERCENT,
 } from "../constants.js";
 import {
   SensorControllerEvents,
@@ -36,12 +46,19 @@ import {
 
 // Time conversion constant (implementation detail)
 const MS_PER_SECOND = 1000;
+const DEG_TO_RAD = Math.PI / 180;
+const IMU_DIAGNOSTIC_WINDOW_MS = 5_000;
+const IMU_DIAGNOSTIC_MAX_SAMPLES = 1_000;
+const IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT = 20;
+const HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC = 1;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
   primitivesStore: PrimitivesStore;
   gateway: SensorHardwareGateway;
+  imuCalibration?: ImuCalibration;
   poseCalibration?: PoseCalibration;
+  geometryCalibration?: GeometryCalibration;
   pollIntervalMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
@@ -62,11 +79,52 @@ type MotorCommand =
       kind: "stop";
     };
 
+interface ImuDiagnosticSample {
+  readonly timestampMillis: number;
+  readonly sampleDeltaMs: number | null;
+  readonly headingBeforeDeg: number;
+  readonly headingAfterDeg: number;
+  readonly pitchDeg: number;
+  readonly rollDeg: number;
+  readonly rawYawRateDegPerSec: number;
+  readonly tiltCompensatedYawRateDegPerSec: number;
+  readonly yawDeltaDeg: number;
+}
+
+export interface ImuDiagnosticSummary {
+  readonly windowMs: number;
+  readonly sampleCount: number;
+  readonly startTimestampMillis: number;
+  readonly endTimestampMillis: number;
+  readonly durationMs: number;
+  readonly headingBeforeDeg: number;
+  readonly headingAfterDeg: number;
+  readonly headingChangeDeg: number;
+  readonly integratedYawDeltaDeg: number;
+  readonly averageYawRateDegPerSec: number | null;
+  readonly averageRawYawRateDegPerSec: number | null;
+  readonly minYawRateDegPerSec: number | null;
+  readonly maxYawRateDegPerSec: number | null;
+  readonly averageSampleDeltaMs: number | null;
+  readonly minSampleDeltaMs: number | null;
+  readonly maxSampleDeltaMs: number | null;
+  readonly recentSamples: ImuDiagnosticSample[];
+}
+
+export interface HeadingRebaseReadiness {
+  readonly safe: boolean;
+  readonly motorCommandActive: boolean;
+  readonly yawRateDegPerSec: number | null;
+  readonly maxYawRateDegPerSec: number;
+}
+
 export class SensorController extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly primitivesStore: PrimitivesStore;
   private readonly gateway: SensorHardwareGateway;
+  private readonly imuCalibration: ImuCalibration | null;
   private readonly poseCalibration: PoseCalibration | null;
+  private readonly geometryCalibration: GeometryCalibration | null;
   private readonly pollIntervalMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
@@ -91,6 +149,12 @@ export class SensorController extends EventEmitter {
   private previousImuSampleMillis: number | null = null;
   private lastImuHeadingLogMillis: number | null = null;
   private lastImuHeadingLogValue: InternalHeading | null = null;
+  private readonly imuDiagnosticSamples: Array<ImuDiagnosticSample | null> = new Array(IMU_DIAGNOSTIC_MAX_SAMPLES).fill(null);
+  private imuDiagnosticNextIndex = 0;
+  private imuDiagnosticSampleCount = 0;
+  private imuDiagnosticLatestTimestampMillis: number | null = null;
+  private latestTiltCompensatedYawRateDegPerSec: number | null = null;
+  private lastImuMotionStopSummary: ImuDiagnosticSummary | null = null;
 
   // Type-safe event subscription methods
   declare on: <K extends keyof SensorControllerEvents>(
@@ -113,8 +177,10 @@ export class SensorController extends EventEmitter {
     this.logger = options.logger.child({ context: "sensors", source: "SensorController" });
     this.primitivesStore = options.primitivesStore;
     this.gateway = options.gateway;
+    this.imuCalibration = options.imuCalibration ?? null;
     this.poseCalibration = options.poseCalibration ?? null;
-    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_POLL_INTERVAL_MS;
+    this.geometryCalibration = options.geometryCalibration ?? null;
+    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
     this.maxLoopCount = options.maxLoopCount ?? null;
@@ -225,9 +291,13 @@ export class SensorController extends EventEmitter {
     return this.imuHeading;
   }
 
-  setHeading(heading: InternalHeading): void {
+  getCurrentTimeMillis(): number {
+    return this.nowMillis();
+  }
+
+  setHeading(heading: InternalHeading, timestampMillis: number | null = null): void {
     this.imuHeading = heading;
-    this.previousImuSampleMillis = null;
+    this.previousImuSampleMillis = timestampMillis ?? this.nowMillis();
     const currentImu = this.primitivesStore.snapshot().imu;
     this.primitivesStore.update({
       imu: {
@@ -242,8 +312,13 @@ export class SensorController extends EventEmitter {
       throw new Error("motor operation not active");
     }
 
+    const normalizedLeftWheelOutputPercent = this.applyMotorOutputDeadband(leftWheelOutputPercent);
+    const normalizedRightWheelOutputPercent = this.applyMotorOutputDeadband(rightWheelOutputPercent);
     const isActiveCommand =
-      Math.max(Math.abs(leftWheelOutputPercent), Math.abs(rightWheelOutputPercent)) >=
+      Math.max(
+        Math.abs(normalizedLeftWheelOutputPercent),
+        Math.abs(normalizedRightWheelOutputPercent),
+      ) >=
       MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
     const wasActiveCommand =
       this.lastMotorCommand?.kind === "output" &&
@@ -255,18 +330,19 @@ export class SensorController extends EventEmitter {
       this.lastMotorCommand?.kind === "output" &&
       this.lastMotorCommand.leftWheelOutputPercent === 0 &&
       this.lastMotorCommand.rightWheelOutputPercent === 0;
-    const isZeroCommand = leftWheelOutputPercent === 0 && rightWheelOutputPercent === 0;
+    const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
+    const isZeroCommand = normalizedLeftWheelOutputPercent === 0 && normalizedRightWheelOutputPercent === 0;
 
     this.logger.info("motors.commanded", {
-      leftWheelOutputPercent,
-      rightWheelOutputPercent,
+      leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
+      rightWheelOutputPercent: normalizedRightWheelOutputPercent,
       callStack: this.captureCallStack(),
     });
     this.stopRequestLogged = false;
     this.lastMotorCommand = {
       kind: "output",
-      leftWheelOutputPercent,
-      rightWheelOutputPercent,
+      leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
+      rightWheelOutputPercent: normalizedRightWheelOutputPercent,
     };
     if (isActiveCommand && !wasActiveCommand) {
       this.motorCommandActiveSinceMillis = this.nowMillis();
@@ -283,16 +359,20 @@ export class SensorController extends EventEmitter {
     }
     if (isZeroCommand && !wasZeroCommand) {
       this.motorZeroCommandSinceMillis = this.nowMillis();
+      if (wasMotionCommand) {
+        this.recordImuMotionStopSummary("zero_output_command");
+      }
     } else if (!isZeroCommand) {
       this.motorZeroCommandSinceMillis = null;
+      this.lastImuMotionStopSummary = null;
     }
-    await this.gateway.setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent);
+    await this.gateway.setMotorWheelOutputs(normalizedLeftWheelOutputPercent, normalizedRightWheelOutputPercent);
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
         ...current,
-        commandedLeftWheelOutputPercent: leftWheelOutputPercent,
-        commandedRightWheelOutputPercent: rightWheelOutputPercent,
+        commandedLeftWheelOutputPercent: normalizedLeftWheelOutputPercent,
+        commandedRightWheelOutputPercent: normalizedRightWheelOutputPercent,
       },
     });
   }
@@ -335,6 +415,138 @@ export class SensorController extends EventEmitter {
 
   getMotorZeroCommandSinceMillis(): number | null {
     return this.motorZeroCommandSinceMillis;
+  }
+
+  getHeadingRebaseReadiness(): HeadingRebaseReadiness {
+    const motorCommandActive = this.isMotorCommandMotion(this.lastMotorCommand);
+    const yawRateDegPerSec = this.latestTiltCompensatedYawRateDegPerSec;
+    const yawRateActive =
+      yawRateDegPerSec !== null &&
+      Math.abs(yawRateDegPerSec) > HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC;
+
+    return {
+      safe: !motorCommandActive && !yawRateActive,
+      motorCommandActive,
+      yawRateDegPerSec,
+      maxYawRateDegPerSec: HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC,
+    };
+  }
+
+  getLastImuMotionStopSummary(): ImuDiagnosticSummary | null {
+    return this.lastImuMotionStopSummary;
+  }
+
+  getRecentImuDiagnosticSummary(
+    windowMs: number = IMU_DIAGNOSTIC_WINDOW_MS,
+    recentSampleLimit: number = IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT,
+  ): ImuDiagnosticSummary | null {
+    if (this.imuDiagnosticSampleCount === 0 || this.imuDiagnosticLatestTimestampMillis === null) {
+      return null;
+    }
+
+    const boundedWindowMs = Math.max(0, windowMs);
+    const cutoffTimestampMillis = this.imuDiagnosticLatestTimestampMillis - boundedWindowMs;
+    const orderedSamples: ImuDiagnosticSample[] = [];
+    const oldestIndex = this.imuDiagnosticSampleCount < IMU_DIAGNOSTIC_MAX_SAMPLES
+      ? 0
+      : this.imuDiagnosticNextIndex;
+
+    for (let offset = 0; offset < this.imuDiagnosticSampleCount; offset += 1) {
+      const index = (oldestIndex + offset) % IMU_DIAGNOSTIC_MAX_SAMPLES;
+      const sample = this.imuDiagnosticSamples[index];
+      if (sample !== null && sample.timestampMillis >= cutoffTimestampMillis) {
+        orderedSamples.push(sample);
+      }
+    }
+
+    if (orderedSamples.length === 0) {
+      return null;
+    }
+
+    const firstSample = orderedSamples[0];
+    const lastSample = orderedSamples[orderedSamples.length - 1];
+    const durationMs = Math.max(0, lastSample.timestampMillis - firstSample.timestampMillis);
+    const integratedYawDeltaDeg = orderedSamples.reduce((total, sample) => total + sample.yawDeltaDeg, 0);
+    const yawRates = orderedSamples.map((sample) => sample.tiltCompensatedYawRateDegPerSec);
+    const rawYawRates = orderedSamples.map((sample) => sample.rawYawRateDegPerSec);
+    const sampleDeltas = orderedSamples.flatMap((sample) => (sample.sampleDeltaMs === null ? [] : [sample.sampleDeltaMs]));
+    const recentSamples = orderedSamples.slice(Math.max(0, orderedSamples.length - recentSampleLimit));
+
+    return {
+      windowMs: boundedWindowMs,
+      sampleCount: orderedSamples.length,
+      startTimestampMillis: firstSample.timestampMillis,
+      endTimestampMillis: lastSample.timestampMillis,
+      durationMs,
+      headingBeforeDeg: firstSample.headingBeforeDeg,
+      headingAfterDeg: lastSample.headingAfterDeg,
+      headingChangeDeg: unwrapRelativeAngle(headingDifference(
+        createInternalHeading(firstSample.headingBeforeDeg),
+        createInternalHeading(lastSample.headingAfterDeg),
+      )),
+      integratedYawDeltaDeg,
+      averageYawRateDegPerSec: yawRates.length === 0 ? null : yawRates.reduce((total, value) => total + value, 0) / yawRates.length,
+      averageRawYawRateDegPerSec: rawYawRates.length === 0 ? null : rawYawRates.reduce((total, value) => total + value, 0) / rawYawRates.length,
+      minYawRateDegPerSec: yawRates.length === 0 ? null : Math.min(...yawRates),
+      maxYawRateDegPerSec: yawRates.length === 0 ? null : Math.max(...yawRates),
+      averageSampleDeltaMs: sampleDeltas.length === 0 ? null : sampleDeltas.reduce((total, value) => total + value, 0) / sampleDeltas.length,
+      minSampleDeltaMs: sampleDeltas.length === 0 ? null : Math.min(...sampleDeltas),
+      maxSampleDeltaMs: sampleDeltas.length === 0 ? null : Math.max(...sampleDeltas),
+      recentSamples,
+    };
+  }
+
+  private applyMotorOutputDeadband(outputPercent: number): number {
+    return Math.abs(outputPercent) <= MOTOR_OUTPUT_DEADBAND_PERCENT ? 0 : outputPercent;
+  }
+
+  private isMotorCommandMotion(command: MotorCommand | null): boolean {
+    return (
+      command?.kind === "output" &&
+      (command.leftWheelOutputPercent !== 0 || command.rightWheelOutputPercent !== 0)
+    );
+  }
+
+  private recordImuMotionStopSummary(reason: string): void {
+    const summary = this.getRecentImuDiagnosticSummary();
+    this.lastImuMotionStopSummary = summary;
+    if (summary !== null) {
+      this.logger.info("sensor.imu.motion_stop_summary", {
+        reason,
+        imuDiagnostics: summary,
+      });
+    }
+  }
+
+  private calculateTiltCompensatedYawRateDegPerSec(
+    angularVelocity: {
+      xDegreesPerSecond: number;
+      yDegreesPerSecond: number;
+      zDegreesPerSecond: number;
+    },
+    pitchDeg: number,
+    rollDeg: number,
+  ): number {
+    const pitchRad = pitchDeg * DEG_TO_RAD;
+    const rollRad = rollDeg * DEG_TO_RAD;
+    const gravityX = -Math.sin(pitchRad);
+    const gravityY = Math.sin(rollRad) * Math.cos(pitchRad);
+    const gravityZ = Math.cos(rollRad) * Math.cos(pitchRad);
+
+    return (
+      angularVelocity.xDegreesPerSecond * gravityX +
+      angularVelocity.yDegreesPerSecond * gravityY +
+      angularVelocity.zDegreesPerSecond * gravityZ
+    );
+  }
+
+  private recordImuDiagnosticSample(sample: ImuDiagnosticSample): void {
+    this.imuDiagnosticSamples[this.imuDiagnosticNextIndex] = sample;
+    this.imuDiagnosticNextIndex = (this.imuDiagnosticNextIndex + 1) % IMU_DIAGNOSTIC_MAX_SAMPLES;
+    if (this.imuDiagnosticSampleCount < IMU_DIAGNOSTIC_MAX_SAMPLES) {
+      this.imuDiagnosticSampleCount += 1;
+    }
+    this.imuDiagnosticLatestTimestampMillis = sample.timestampMillis;
   }
 
   /**
@@ -400,23 +612,67 @@ export class SensorController extends EventEmitter {
   private async pollImu(): Promise<void> {
     try {
       const sample = await this.gateway.readImu();
+      const sourceAngularVelocity = sample.angularVelocity ?? {
+        xDegreesPerSecond: 0,
+        yDegreesPerSecond: 0,
+        zDegreesPerSecond: 0,
+      };
+      const angularVelocity = {
+        xDegreesPerSecond: sourceAngularVelocity.xDegreesPerSecond ?? 0,
+        yDegreesPerSecond: sourceAngularVelocity.yDegreesPerSecond ?? 0,
+        zDegreesPerSecond: sourceAngularVelocity.zDegreesPerSecond ?? 0,
+      };
       const acceleration = sample.acceleration ?? {
         xMetersPerSecondSquared: 0,
         yMetersPerSecondSquared: 0,
         zMetersPerSecondSquared: 0,
       };
-      if (this.previousImuSampleMillis != null) {
-        const deltaSeconds = Math.max(0, sample.timestampMillis - this.previousImuSampleMillis) / MS_PER_SECOND;
-        const yawDelta = createRelativeAngle(sample.angularVelocity.zDegreesPerSecond * deltaSeconds);
+      const sampleDeltaMs = this.previousImuSampleMillis === null
+        ? null
+        : Math.max(0, sample.timestampMillis - this.previousImuSampleMillis);
+      const headingBeforeDeg = unwrapInternalHeading(this.imuHeading);
+      const computedPitchDeg = Math.atan2(
+        -(acceleration.xMetersPerSecondSquared / 9.80665),
+        Math.sqrt(
+          (acceleration.yMetersPerSecondSquared * acceleration.yMetersPerSecondSquared +
+            acceleration.zMetersPerSecondSquared * acceleration.zMetersPerSecondSquared) /
+            (9.80665 * 9.80665),
+        ),
+      ) * (180 / Math.PI);
+      const computedRollDeg = Math.atan2(
+        acceleration.yMetersPerSecondSquared / 9.80665,
+        acceleration.zMetersPerSecondSquared / 9.80665,
+      ) * (180 / Math.PI);
+      const pitchDeg = sample.pitchDeg ?? computedPitchDeg;
+      const rollDeg = sample.rollDeg ?? computedRollDeg;
+      const rawYawRateDegPerSec = angularVelocity.zDegreesPerSecond;
+      const tiltCompensatedYawRateDegPerSec = this.calculateTiltCompensatedYawRateDegPerSec(
+        angularVelocity,
+        pitchDeg,
+        rollDeg,
+      );
+      this.latestTiltCompensatedYawRateDegPerSec = tiltCompensatedYawRateDegPerSec;
+      let yawDeltaDeg = 0;
+      if (sampleDeltaMs !== null) {
+        const safeDeltaSeconds = sampleDeltaMs / MS_PER_SECOND;
+        const yawScaleFactor = this.imuCalibration?.getYawScaleFactor() ?? 1;
+        const yawDelta = createRelativeAngle(tiltCompensatedYawRateDegPerSec * safeDeltaSeconds * yawScaleFactor);
+        yawDeltaDeg = unwrapRelativeAngle(yawDelta);
         this.imuHeading = addRelativeAngle(this.imuHeading, yawDelta);
       }
+      const headingAfterDeg = unwrapInternalHeading(this.imuHeading);
+      this.recordImuDiagnosticSample({
+        timestampMillis: sample.timestampMillis,
+        sampleDeltaMs,
+        headingBeforeDeg,
+        headingAfterDeg,
+        pitchDeg,
+        rollDeg,
+        rawYawRateDegPerSec,
+        tiltCompensatedYawRateDegPerSec,
+        yawDeltaDeg,
+      });
       this.previousImuSampleMillis = sample.timestampMillis;
-
-      // Calculate pitch and roll from accelerometer
-      const { xMetersPerSecondSquared: ax, yMetersPerSecondSquared: ay, zMetersPerSecondSquared: az } = acceleration;
-      const g = 9.80665;
-      const pitchDeg = Math.atan2(-ax / g, Math.sqrt((ay * ay + az * az) / (g * g))) * (180 / Math.PI);
-      const rollDeg = Math.atan2(ay / g, az / g) * (180 / Math.PI);
 
       this.primitivesStore.update({
         imu: {
@@ -432,15 +688,18 @@ export class SensorController extends EventEmitter {
         this.lastImuHeadingLogMillis === null ||
         sample.timestampMillis - this.lastImuHeadingLogMillis >= 1000;
       if (shouldLogImuHeading) {
-        const currentHeadingDeg = unwrapInternalHeading(this.imuHeading);
+        const currentHeadingDeg = headingAfterDeg;
         const headingChangeDeg = this.lastImuHeadingLogValue === null
           ? 0
           : Math.abs(unwrapRelativeAngle(headingDifference(this.lastImuHeadingLogValue, this.imuHeading)));
         this.logger.info("sensor.imu.heading_sample", {
           headingDeg: currentHeadingDeg,
           headingChangeSinceLastLogDeg: headingChangeDeg,
-          yawRateDegPerSec: sample.angularVelocity.zDegreesPerSecond,
-          sampleDeltaMs: this.previousImuSampleMillis !== null ? sample.timestampMillis - this.previousImuSampleMillis : null,
+          rawYawRateDegPerSec,
+          tiltCompensatedYawRateDegPerSec,
+          pitchDeg,
+          rollDeg,
+          sampleDeltaMs,
         });
         this.lastImuHeadingLogMillis = sample.timestampMillis;
         this.lastImuHeadingLogValue = this.imuHeading;
@@ -480,12 +739,25 @@ export class SensorController extends EventEmitter {
         internalHeadingDeg = unwrapInternalHeading(internalHeading);
       }
 
+      const geometryHeading = internalHeading ?? this.imuHeading;
+      const geometryOffset = createBodyFrameOffset(
+        this.geometryCalibration?.getPositionOffsetForwardMeters() ?? 0,
+        this.geometryCalibration?.getPositionOffsetRightMeters() ?? 0,
+      );
+      const adjustedPosition = translatePositionByHeading(
+        createPosition(sample.xMeters, sample.yMeters),
+        geometryHeading,
+        geometryOffset,
+      );
+      const adjustedXMeters = unwrapMeters(adjustedPosition.xMeters);
+      const adjustedYMeters = unwrapMeters(adjustedPosition.yMeters);
+
       this.primitivesStore.update({
         gnss: {
           status: "running",
           error: null,
-          xMeters: sample.xMeters,
-          yMeters: sample.yMeters,
+          xMeters: adjustedXMeters,
+          yMeters: adjustedYMeters,
           headingDeg: internalHeadingDeg,
           positionAccuracyMeters: sample.positionAccuracyMeters,
           headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
@@ -495,7 +767,7 @@ export class SensorController extends EventEmitter {
         },
       });
 
-      this.latestGnssPosition = createPosition(sample.xMeters, sample.yMeters);
+      this.latestGnssPosition = adjustedPosition;
       this.latestGnssAccuracyMeters = sample.positionAccuracyMeters;
 
       if (this.motorCommandActiveSinceMillis !== null && this.stallMotionAnchorPosition === null) {
@@ -505,8 +777,8 @@ export class SensorController extends EventEmitter {
 
       // Emit GNSS position update event
       this.emit(SENSOR_EVENTS.GNSS_POSITION_UPDATE, {
-        xMeters: sample.xMeters,
-        yMeters: sample.yMeters,
+        xMeters: adjustedXMeters,
+        yMeters: adjustedYMeters,
         heading: internalHeading,
         positionAccuracyMeters: sample.positionAccuracyMeters,
         headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
@@ -707,6 +979,7 @@ export class SensorController extends EventEmitter {
   }
 
   private async sendGentleStopMotorsCommand(): Promise<void> {
+    const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
     if (
       this.lastMotorCommand?.kind === "output" &&
       this.lastMotorCommand.leftWheelOutputPercent === 0 &&
@@ -726,6 +999,9 @@ export class SensorController extends EventEmitter {
     };
     if (this.motorZeroCommandSinceMillis === null) {
       this.motorZeroCommandSinceMillis = this.nowMillis();
+    }
+    if (wasMotionCommand) {
+      this.recordImuMotionStopSummary("gentle_stop_command");
     }
     this.motorCommandActiveSinceMillis = null;
     this.stallMotionAnchorPosition = null;
@@ -748,6 +1024,7 @@ export class SensorController extends EventEmitter {
   }
 
   private async sendDisableMotorsCommand(): Promise<void> {
+    const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
     if (this.lastMotorCommand?.kind === "stop") {
       return;
     }
@@ -755,6 +1032,12 @@ export class SensorController extends EventEmitter {
     this.lastMotorCommand = {
       kind: "stop",
     };
+    if (this.motorZeroCommandSinceMillis === null) {
+      this.motorZeroCommandSinceMillis = this.nowMillis();
+    }
+    if (wasMotionCommand) {
+      this.recordImuMotionStopSummary("disable_motors_command");
+    }
     this.motorCommandActiveSinceMillis = null;
     this.stallMotionAnchorPosition = null;
     this.stallMotionAnchorSinceMillis = null;

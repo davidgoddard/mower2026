@@ -1,3 +1,6 @@
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles } from "./liveSensorWidgets.js";
+import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
+
 /**
  * Segment testing web page.
  *
@@ -12,8 +15,10 @@ export function getSegmentTestingPageHtml(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Segment Testing - Mower Control</title>
-    <style>
+<title>Segment Testing - Mower Control</title>
+      <style>
+${getLiveSensorWidgetsStyles()}
+${getAppDialogStyles()}
       :root {
         --primary-color: #2563eb;
         --primary-hover: #1d4ed8;
@@ -538,99 +543,30 @@ export function getSegmentTestingPageHtml(): string {
     <div class="container">
       <div class="page-layout">
         <div class="sidebar-column">
-          <div class="sensor-card">
-            <div class="sensor-header">
-              <div class="sensor-title">IMU Sensor</div>
-              <span class="status-dot" id="imu-status"></span>
-            </div>
-            <div class="compass" id="imu-compass">
-              <div class="compass-circle">
-                <div class="compass-label n">N</div>
-                <div class="compass-label e">E</div>
-                <div class="compass-label s">S</div>
-                <div class="compass-label w">W</div>
-                <div class="compass-needle"></div>
-                <div class="compass-center"></div>
-              </div>
-            </div>
-            <div class="position-display">
-              <div class="metric-label">Heading</div>
-              <div class="metric-value large" id="imu-heading">—</div>
-            </div>
-            <div class="tilt-indicators">
-              <div class="tilt-indicator">
-                <div class="tilt-circle" id="pitch-indicator">
-                  <div class="tilt-line"></div>
-                  <div class="tilt-center"></div>
-                </div>
-                <div class="tilt-label">Pitch</div>
-                <div class="tilt-value" id="imu-pitch">—</div>
-              </div>
-              <div class="tilt-indicator">
-                <div class="tilt-circle" id="roll-indicator">
-                  <div class="tilt-line"></div>
-                  <div class="tilt-center"></div>
-                </div>
-                <div class="tilt-label">Roll</div>
-                <div class="tilt-value" id="imu-roll">—</div>
-              </div>
-            </div>
-            <div id="imu-error" class="error-message" style="display: none;"></div>
-          </div>
-
-          <div class="sensor-card">
-            <div class="sensor-header">
-              <div class="sensor-title">GNSS Position</div>
-              <span class="status-dot" id="gnss-status"></span>
-            </div>
-            <div class="compass" id="gnss-compass">
-              <div class="compass-circle">
-                <div class="compass-label n">N</div>
-                <div class="compass-label e">E</div>
-                <div class="compass-label s">S</div>
-                <div class="compass-label w">W</div>
-                <div class="compass-needle"></div>
-                <div class="compass-center"></div>
-              </div>
-            </div>
-            <div class="gnss-summary">
-              <div class="gnss-row three">
-                <div class="metric">
-                  <div class="metric-label">X</div>
-                  <div class="metric-value" id="gnss-x">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Y</div>
-                  <div class="metric-value" id="gnss-y">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Accuracy</div>
-                  <div class="metric-value" id="gnss-accuracy">—</div>
-                </div>
-              </div>
-              <div class="gnss-row two">
-                <div class="metric">
-                  <div class="metric-label">Heading</div>
-                  <div class="metric-value" id="gnss-heading">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Heading Accuracy</div>
-                  <div class="metric-value" id="gnss-heading-accuracy">—</div>
-                </div>
-              </div>
-              <div class="gnss-row two">
-                <div class="metric">
-                  <div class="metric-label">Fix Type</div>
-                  <div class="metric-value gnss-fix-value" id="gnss-fix">—</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">Satellites</div>
-                  <div class="metric-value" id="gnss-sats">—</div>
-                </div>
-              </div>
-            </div>
-            <div id="gnss-error" class="error-message" style="display: none;"></div>
-          </div>
+${getLiveSensorWidgetsHtml({
+  imuCardId: "imu-card",
+  imuCompassId: "imu-compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+})}
         </div>
 
         <div class="main-column">
@@ -688,16 +624,17 @@ export function getSegmentTestingPageHtml(): string {
                     <th>Distance</th>
                     <th>Heading Req</th>
                     <th>Heading Achieved</th>
+                    <th>Heading Diff</th>
                     <th>Quality</th>
-                    <th>Avg CTE</th>
-                    <th>Max CTE</th>
-                    <th>X Error</th>
-                    <th>Y Error</th>
+                    <th>Avg CTE (cm)</th>
+                    <th>Max CTE (cm)</th>
+                    <th>X Error (cm)</th>
+                    <th>Y Error (cm)</th>
                   </tr>
                 </thead>
                 <tbody id="segmentResultsTableBody">
                   <tr>
-                    <td colspan="11" class="empty-row">Run segment testing to see waypoint distance, heading change, CTE and arrival errors here.</td>
+                    <td colspan="12" class="empty-row">Run segment testing to see waypoint distance, heading change, CTE and arrival errors here.</td>
                   </tr>
                 </tbody>
               </table>
@@ -707,11 +644,10 @@ export function getSegmentTestingPageHtml(): string {
       </div>
     </div>
 
-    <script>
-      function internalToNavigationHeading(headingDeg) {
-        return (90 - headingDeg + 360) % 360;
-      }
+${getAppDialogHtml()}
 
+    <script>
+${getAppDialogScript()}
       function formatDegrees(value) {
         if (value === null || value === undefined || Number.isNaN(value)) {
           return "—";
@@ -719,11 +655,37 @@ export function getSegmentTestingPageHtml(): string {
         return (value >= 0 ? "+" : "") + value.toFixed(1) + "°";
       }
 
+      function normalizeSignedDegrees(value) {
+        return ((((value + 180) % 360) + 360) % 360) - 180;
+      }
+
+      function formatHeadingDifference(requiredDeg, achievedDeg) {
+        if (
+          requiredDeg === null ||
+          requiredDeg === undefined ||
+          Number.isNaN(requiredDeg) ||
+          achievedDeg === null ||
+          achievedDeg === undefined ||
+          Number.isNaN(achievedDeg)
+        ) {
+          return "—";
+        }
+        return formatDegrees(normalizeSignedDegrees(achievedDeg - requiredDeg));
+      }
+${getLiveSensorWidgetsScript()}
+
       function formatMeters(value) {
         if (value === null || value === undefined || Number.isNaN(value)) {
           return "—";
         }
         return value.toFixed(2) + " m";
+      }
+
+      function formatCentimeters(value) {
+        if (value === null || value === undefined || Number.isNaN(value)) {
+          return "—";
+        }
+        return (value * 100).toFixed(1) + " cm";
       }
 
       function formatTime(timestamp) {
@@ -772,37 +734,17 @@ export function getSegmentTestingPageHtml(): string {
           imuStatusDot.className = "status-dot " + (imu.status || "idle");
         }
         const imuError = document.getElementById("imu-error");
-        if (imu.status === "error") {
-          if (imuError) {
-            imuError.textContent = imu.error || "IMU error";
-            imuError.style.display = "block";
-          }
-        } else if (imuError) {
-          imuError.style.display = "none";
+      if (imu.status === "error") {
+        if (imuError) {
+          imuError.textContent = imu.error || "IMU error";
+          imuError.style.display = "block";
         }
-
-        const imuHeading = document.getElementById("imu-heading");
-        const imuPitch = document.getElementById("imu-pitch");
-        const imuRoll = document.getElementById("imu-roll");
-        const imuCompass = document.getElementById("imu-compass");
-        const pitchIndicator = document.getElementById("pitch-indicator");
-        const rollIndicator = document.getElementById("roll-indicator");
-        if (imuHeading) imuHeading.textContent = imu.headingDeg !== null && imu.headingDeg !== undefined ? formatDegrees(internalToNavigationHeading(imu.headingDeg)) : "—";
-        if (imuPitch) {
-          imuPitch.textContent = imu.pitchDeg !== null && imu.pitchDeg !== undefined ? formatDegrees(imu.pitchDeg) : "—";
-        }
-        if (pitchIndicator) {
-          pitchIndicator.style.setProperty("--tilt-deg", (imu.pitchDeg !== null && imu.pitchDeg !== undefined ? imu.pitchDeg : 0) + "deg");
-        }
-        if (imuRoll) {
-          imuRoll.textContent = imu.rollDeg !== null && imu.rollDeg !== undefined ? formatDegrees(imu.rollDeg) : "—";
-        }
-        if (rollIndicator) {
-          rollIndicator.style.setProperty("--tilt-deg", (imu.rollDeg !== null && imu.rollDeg !== undefined ? imu.rollDeg : 0) + "deg");
-        }
-        if (imu.headingDeg !== null && imu.headingDeg !== undefined && imuCompass) {
-          imuCompass.style.setProperty("--heading-deg", internalToNavigationHeading(imu.headingDeg) + "deg");
-        }
+      } else if (imuError) {
+        imuError.style.display = "none";
+      }
+      const imuNavHeading = updateWidgetHeading("imu-compass", "imu-heading", imu.status === "error" ? null : imu.headingDeg);
+      updateTiltIndicator("pitch-indicator", "imu-pitch", imu.status === "error" ? null : imu.pitchDeg);
+      updateTiltIndicator("roll-indicator", "imu-roll", imu.status === "error" ? null : imu.rollDeg);
 
         const gnssStatusDot = document.getElementById("gnss-status");
         if (gnssStatusDot) {
@@ -824,8 +766,6 @@ export function getSegmentTestingPageHtml(): string {
         const gnssHeadingAccuracy = document.getElementById("gnss-heading-accuracy");
         const gnssSats = document.getElementById("gnss-sats");
         const gnssFix = document.getElementById("gnss-fix");
-        const gnssHeading = document.getElementById("gnss-heading");
-        const gnssCompass = document.getElementById("gnss-compass");
 
         if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
         if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
@@ -846,13 +786,9 @@ export function getSegmentTestingPageHtml(): string {
             ? gnss.satellitesInUse
             : "—";
         }
-        if (gnss.headingDeg !== null && gnss.headingDeg !== undefined) {
-          const navHeading = internalToNavigationHeading(gnss.headingDeg);
-          if (gnssHeading) gnssHeading.textContent = formatDegrees(navHeading);
-          if (gnssCompass) gnssCompass.style.setProperty("--heading-deg", navHeading + "deg");
-        } else if (gnssHeading) {
-          gnssHeading.textContent = "—";
-        }
+        const gnssNavHeading = updateWidgetHeading("gnss-compass", "gnss-heading", gnss.status === "error" ? null : gnss.headingDeg);
+        const poseFusion = primitives.poseFusion ?? {};
+        updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
       }
 
       async function fetchStatus() {
@@ -916,7 +852,7 @@ export function getSegmentTestingPageHtml(): string {
           }
 
           if (rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="11" class="empty-row">Run segment testing to see waypoint distance, heading change, CTE and arrival errors here.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="12" class="empty-row">Run segment testing to see waypoint distance, heading change, CTE and arrival errors here.</td></tr>';
             return;
           }
 
@@ -930,11 +866,12 @@ export function getSegmentTestingPageHtml(): string {
               "<td>" + formatMeters(item.distanceToWaypointMeters) + "</td>",
               "<td>" + formatDegrees(item.requiredHeadingChangeDeg) + "</td>",
               "<td>" + formatDegrees(item.achievedHeadingChangeDeg) + "</td>",
+              "<td>" + formatHeadingDifference(item.requiredHeadingChangeDeg, item.achievedHeadingChangeDeg) + "</td>",
               '<td class="' + qualityClass + '">' + item.driveStatus + '</td>',
-              "<td>" + formatMeters(item.cteMeters) + "</td>",
-              "<td>" + formatMeters(item.maxCteMeters) + "</td>",
-              "<td>" + formatMeters(item.xErrorMeters) + "</td>",
-              "<td>" + formatMeters(item.yErrorMeters) + "</td>",
+              "<td>" + formatCentimeters(item.cteMeters) + "</td>",
+              "<td>" + formatCentimeters(item.maxCteMeters) + "</td>",
+              "<td>" + formatCentimeters(item.xErrorMeters) + "</td>",
+              "<td>" + formatCentimeters(item.yErrorMeters) + "</td>",
               "</tr>",
             ].join("");
           }).join("");

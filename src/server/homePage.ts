@@ -1,3 +1,5 @@
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsStyles, getLiveSensorWidgetsScript } from "./liveSensorWidgets.js";
+
 export function renderHomePage(): string {
   return `<!doctype html>
 <html lang="en">
@@ -5,8 +7,9 @@ export function renderHomePage(): string {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mower Control Dashboard</title>
-    <style>
-      :root {
+      <style>
+${getLiveSensorWidgetsStyles()}
+        :root {
         --primary-color: #2563eb;
         --primary-hover: #1d4ed8;
         --success-color: #10b981;
@@ -560,10 +563,6 @@ export function renderHomePage(): string {
           <div class="subtitle">Autonomous Lawn Mower Control System</div>
         </div>
         <div class="header-nav">
-          <a href="/#primitives" class="nav-button" title="Jump to the live primitives dashboard">
-            <span class="nav-button-icon">📡</span>
-            <span>Primitives</span>
-          </a>
           <a href="/turn-tuning" class="nav-button" title="Configure and test autonomous turning with self-learning brake points">
             <span class="nav-button-icon">🔄</span>
             <span>Turn Tuning</span>
@@ -576,13 +575,9 @@ export function renderHomePage(): string {
             <span class="nav-button-icon">🧭</span>
             <span>Segment Testing</span>
           </a>
-          <a href="/path-tracing" class="nav-button" title="Record and follow paths for obstacle navigation">
-            <span class="nav-button-icon">🗺️</span>
-            <span>Path Tracing</span>
-          </a>
-          <a href="/manual-drive" class="nav-button" title="Live controller view with position tracking">
-            <span class="nav-button-icon">🎮</span>
-            <span>Manual Drive</span>
+          <a href="/manual-drive" class="nav-button" title="Manual drive, live position tracking, and stored path management">
+            <span class="nav-button-icon">🧭</span>
+            <span>Drive &amp; Paths</span>
           </a>
         </div>
       </div>
@@ -591,101 +586,30 @@ export function renderHomePage(): string {
     <div class="container">
       <!-- Sensor Dashboard -->
       <div class="dashboard-grid">
-        <!-- IMU Card -->
-        <div class="sensor-card">
-          <div class="sensor-header">
-            <div class="sensor-title">IMU Sensor</div>
-            <span class="status-dot" id="imu-status"></span>
-          </div>
-          <div class="compass" id="compass">
-            <div class="compass-circle">
-              <div class="compass-label n">N</div>
-              <div class="compass-label e">E</div>
-              <div class="compass-label s">S</div>
-              <div class="compass-label w">W</div>
-              <div class="compass-needle"></div>
-              <div class="compass-center"></div>
-            </div>
-          </div>
-          <div class="position-display">
-            <div class="metric-label">Heading</div>
-            <div class="metric-value large" id="imu-heading">—</div>
-          </div>
-          <div class="tilt-indicators">
-            <div class="tilt-indicator">
-              <div class="tilt-circle" id="pitch-indicator">
-                <div class="tilt-line"></div>
-                <div class="tilt-center"></div>
-              </div>
-              <div class="tilt-label">Pitch</div>
-              <div class="tilt-value" id="imu-pitch">—</div>
-            </div>
-            <div class="tilt-indicator">
-              <div class="tilt-circle" id="roll-indicator">
-                <div class="tilt-line"></div>
-                <div class="tilt-center"></div>
-              </div>
-              <div class="tilt-label">Roll</div>
-              <div class="tilt-value" id="imu-roll">—</div>
-            </div>
-          </div>
-          <div id="imu-error" class="error-message" style="display: none;"></div>
-        </div>
-
-        <!-- GNSS Card -->
-        <div class="sensor-card">
-          <div class="sensor-header">
-            <div class="sensor-title">GNSS Position</div>
-            <span class="status-dot" id="gnss-status"></span>
-          </div>
-          <div class="compass" id="gnss-compass">
-            <div class="compass-circle">
-              <div class="compass-label n">N</div>
-              <div class="compass-label e">E</div>
-              <div class="compass-label s">S</div>
-              <div class="compass-label w">W</div>
-              <div class="compass-needle"></div>
-              <div class="compass-center"></div>
-            </div>
-          </div>
-          <div class="gnss-summary">
-            <div class="gnss-row three">
-              <div class="metric">
-                <div class="metric-label">X</div>
-                <div class="metric-value" id="gnss-x">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Y</div>
-                <div class="metric-value" id="gnss-y">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Accuracy</div>
-                <div class="metric-value" id="gnss-accuracy">—</div>
-              </div>
-            </div>
-            <div class="gnss-row two">
-              <div class="metric">
-                <div class="metric-label">Heading</div>
-                <div class="metric-value" id="gnss-heading">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Heading Accuracy</div>
-                <div class="metric-value" id="gnss-heading-accuracy">—</div>
-              </div>
-            </div>
-            <div class="gnss-row two">
-              <div class="metric">
-                <div class="metric-label">Fix Type</div>
-                <div class="metric-value gnss-fix-value" id="gnss-fix">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Satellites</div>
-                <div class="metric-value" id="gnss-sats">—</div>
-              </div>
-            </div>
-          </div>
-          <div id="gnss-error" class="error-message" style="display: none;"></div>
-        </div>
+${getLiveSensorWidgetsHtml({
+  imuCardId: "imu-card",
+  imuCompassId: "compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+})}
 
         <!-- Motors Card -->
         <div class="sensor-card">
@@ -811,17 +735,7 @@ export function renderHomePage(): string {
 
         fixValue.className = 'metric-value gnss-fix-value ' + fixClass;
       }
-
-      // Convert internal heading (0° = east, counterclockwise) to navigation heading (0° = north, clockwise)
-      // Convert internal heading (0° = east, counterclockwise) to navigation heading (0° = north, clockwise)
-      function internalToNavigationHeading(internalDeg) {
-        if (internalDeg === null || internalDeg === undefined) return null;
-        let navHeading = 90 - internalDeg;
-        // Normalize to [0, 360)
-        while (navHeading < 0) navHeading += 360;
-        while (navHeading >= 360) navHeading -= 360;
-        return navHeading;
-      }
+${getLiveSensorWidgetsScript()}
 
       // Peak tracking for motor current VU meters
       const MOTOR_CURRENT_MAX_AMPS = 10.0; // Maximum expected current for scale
@@ -878,38 +792,12 @@ export function renderHomePage(): string {
           if (imu.status === 'error') {
             document.getElementById('imu-error').textContent = imu.error;
             document.getElementById('imu-error').style.display = 'block';
-            document.getElementById('imu-heading').textContent = '—';
-            document.getElementById('imu-pitch').textContent = '—';
-            document.getElementById('imu-roll').textContent = '—';
           } else {
             document.getElementById('imu-error').style.display = 'none';
-            if (imu.headingDeg !== null) {
-              const navHeading = internalToNavigationHeading(imu.headingDeg);
-              document.getElementById('imu-heading').textContent = formatDegrees(navHeading);
-              // Update compass needle (use navigation heading for display)
-              const compass = document.getElementById('compass');
-              compass.style.setProperty('--heading-deg', navHeading + 'deg');
-            } else {
-              document.getElementById('imu-heading').textContent = '—';
-            }
-
-            // Update pitch and roll indicators
-            if (imu.pitchDeg !== null) {
-              document.getElementById('imu-pitch').textContent = formatDegrees(imu.pitchDeg);
-              const pitchIndicator = document.getElementById('pitch-indicator');
-              pitchIndicator.style.setProperty('--tilt-deg', imu.pitchDeg + 'deg');
-            } else {
-              document.getElementById('imu-pitch').textContent = '—';
-            }
-
-            if (imu.rollDeg !== null) {
-              document.getElementById('imu-roll').textContent = formatDegrees(imu.rollDeg);
-              const rollIndicator = document.getElementById('roll-indicator');
-              rollIndicator.style.setProperty('--tilt-deg', imu.rollDeg + 'deg');
-            } else {
-              document.getElementById('imu-roll').textContent = '—';
-            }
           }
+          const imuNavHeading = updateWidgetHeading('compass', 'imu-heading', imu.status === 'error' ? null : imu.headingDeg);
+          updateTiltIndicator('pitch-indicator', 'imu-pitch', imu.status === 'error' ? null : imu.pitchDeg);
+          updateTiltIndicator('roll-indicator', 'imu-roll', imu.status === 'error' ? null : imu.rollDeg);
 
           // Update GNSS
           const gnss = primitives.primitives.gnss;
@@ -936,17 +824,9 @@ export function renderHomePage(): string {
           document.getElementById('gnss-sats').textContent = gnss.satellitesInUse !== null
             ? gnss.satellitesInUse
             : '—';
-
-          // Convert GNSS heading from internal to navigation for display
-          if (gnss.headingDeg !== null) {
-            const navHeading = internalToNavigationHeading(gnss.headingDeg);
-            document.getElementById('gnss-heading').textContent = formatDegrees(navHeading);
-            // Update GNSS compass needle (use navigation heading for display)
-            const gnssCompass = document.getElementById('gnss-compass');
-            gnssCompass.style.setProperty('--heading-deg', navHeading + 'deg');
-          } else {
-            document.getElementById('gnss-heading').textContent = '—';
-          }
+          const gnssNavHeading = updateWidgetHeading('gnss-compass', 'gnss-heading', gnss.status === 'error' ? null : gnss.headingDeg);
+          const poseFusion = primitives.primitives.poseFusion ?? {};
+          updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
 
           // Update Motors
           const motors = primitives.primitives.motors;

@@ -1,3 +1,6 @@
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles } from "./liveSensorWidgets.js";
+import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
+
 /**
  * Turn tuning web page - modern, responsive UI for turn controller
  */
@@ -9,8 +12,10 @@ export function getTurnTuningPageHtml(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Turn Tuning - Mower Control</title>
+<title>Turn Tuning - Mower Control</title>
   <style>
+${getLiveSensorWidgetsStyles()}
+${getAppDialogStyles()}
     :root {
       --primary-color: #2563eb;
       --primary-hover: #1d4ed8;
@@ -788,102 +793,33 @@ export function getTurnTuningPageHtml(): string {
     </div>
   </div>
 
-  <div class="container">
-    <div class="page-layout">
-      <aside class="sidebar-column" aria-label="Live primitives">
-        <div class="sensor-card">
-          <div class="sensor-header">
-            <div class="sensor-title">IMU Sensor</div>
-            <span class="status-dot" id="imu-status"></span>
-          </div>
-          <div class="compass" id="compass">
-            <div class="compass-circle">
-              <div class="compass-label n">N</div>
-              <div class="compass-label e">E</div>
-              <div class="compass-label s">S</div>
-              <div class="compass-label w">W</div>
-              <div class="compass-needle"></div>
-              <div class="compass-center"></div>
-            </div>
-          </div>
-          <div class="position-display">
-            <div class="metric-label">Heading</div>
-            <div class="metric-value large" id="imu-heading">—</div>
-          </div>
-          <div class="tilt-indicators">
-            <div class="tilt-indicator">
-              <div class="tilt-circle" id="pitch-indicator">
-                <div class="tilt-line"></div>
-                <div class="tilt-center"></div>
-              </div>
-              <div class="tilt-label">Pitch</div>
-              <div class="tilt-value" id="imu-pitch">—</div>
-            </div>
-            <div class="tilt-indicator">
-              <div class="tilt-circle" id="roll-indicator">
-                <div class="tilt-line"></div>
-                <div class="tilt-center"></div>
-              </div>
-              <div class="tilt-label">Roll</div>
-              <div class="tilt-value" id="imu-roll">—</div>
-            </div>
-          </div>
-          <div id="imu-error" class="error-message" style="display: none;"></div>
-        </div>
-
-        <div class="sensor-card">
-          <div class="sensor-header">
-            <div class="sensor-title">GNSS Position</div>
-            <span class="status-dot" id="gnss-status"></span>
-          </div>
-          <div class="compass" id="gnss-compass">
-            <div class="compass-circle">
-              <div class="compass-label n">N</div>
-              <div class="compass-label e">E</div>
-              <div class="compass-label s">S</div>
-              <div class="compass-label w">W</div>
-              <div class="compass-needle"></div>
-              <div class="compass-center"></div>
-            </div>
-          </div>
-          <div class="gnss-summary">
-            <div class="gnss-row three">
-              <div class="metric">
-                <div class="metric-label">X</div>
-                <div class="metric-value" id="gnss-x">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Y</div>
-                <div class="metric-value" id="gnss-y">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Accuracy</div>
-                <div class="metric-value" id="gnss-accuracy">—</div>
-              </div>
-            </div>
-            <div class="gnss-row two">
-              <div class="metric">
-                <div class="metric-label">Heading</div>
-                <div class="metric-value" id="gnss-heading">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Heading Accuracy</div>
-                <div class="metric-value" id="gnss-heading-accuracy">—</div>
-              </div>
-            </div>
-            <div class="gnss-row two">
-              <div class="metric">
-                <div class="metric-label">Fix Type</div>
-                <div class="metric-value gnss-fix-value" id="gnss-fix">—</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">Satellites</div>
-                <div class="metric-value" id="gnss-sats">—</div>
-              </div>
-            </div>
-          </div>
-          <div id="gnss-error" class="error-message" style="display: none;"></div>
-        </div>
+      <div class="container">
+        <div class="page-layout">
+          <aside class="sidebar-column" aria-label="Live primitives">
+${getLiveSensorWidgetsHtml({
+  imuCardId: "imu-card",
+  imuCompassId: "compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+})}
       </aside>
 
       <main class="main-column">
@@ -1016,7 +952,10 @@ export function getTurnTuningPageHtml(): string {
     </div>
   </div>
 
+${getAppDialogHtml()}
+
   <script>
+${getAppDialogScript()}
     let updateInterval = null;
 
     // Format time
@@ -1053,14 +992,7 @@ export function getTurnTuningPageHtml(): string {
       if (value === null || value === undefined) return '—';
       return value.toFixed(1) + '°';
     }
-
-    function internalToNavigationHeading(internalDeg) {
-      if (internalDeg === null || internalDeg === undefined) return null;
-      let navHeading = 90 - internalDeg;
-      while (navHeading < 0) navHeading += 360;
-      while (navHeading >= 360) navHeading -= 360;
-      return navHeading;
-    }
+${getLiveSensorWidgetsScript()}
 
     function getGnssFixClass(fixType) {
       switch ((fixType || 'unknown').toLowerCase()) {
@@ -1105,37 +1037,15 @@ export function getTurnTuningPageHtml(): string {
           imuError.textContent = imu.error;
           imuError.style.display = 'block';
         }
-        const imuHeading = document.getElementById('imu-heading');
-        const imuPitch = document.getElementById('imu-pitch');
-        const imuRoll = document.getElementById('imu-roll');
-        if (imuHeading) imuHeading.textContent = '—';
-        if (imuPitch) imuPitch.textContent = '—';
-        if (imuRoll) imuRoll.textContent = '—';
       } else {
         const imuError = document.getElementById('imu-error');
         if (imuError) {
           imuError.style.display = 'none';
         }
-        if (imu.headingDeg !== null && imu.headingDeg !== undefined) {
-          const navHeading = internalToNavigationHeading(imu.headingDeg);
-          const imuHeading = document.getElementById('imu-heading');
-          const compass = document.getElementById('compass');
-          if (imuHeading) imuHeading.textContent = formatDegrees(navHeading);
-          if (compass) compass.style.setProperty('--heading-deg', navHeading + 'deg');
-        }
-        if (imu.pitchDeg !== null && imu.pitchDeg !== undefined) {
-          const imuPitch = document.getElementById('imu-pitch');
-          const pitchIndicator = document.getElementById('pitch-indicator');
-          if (imuPitch) imuPitch.textContent = formatDegrees(imu.pitchDeg);
-          if (pitchIndicator) pitchIndicator.style.setProperty('--tilt-deg', imu.pitchDeg + 'deg');
-        }
-        if (imu.rollDeg !== null && imu.rollDeg !== undefined) {
-          const imuRoll = document.getElementById('imu-roll');
-          const rollIndicator = document.getElementById('roll-indicator');
-          if (imuRoll) imuRoll.textContent = formatDegrees(imu.rollDeg);
-          if (rollIndicator) rollIndicator.style.setProperty('--tilt-deg', imu.rollDeg + 'deg');
-        }
       }
+      const imuNavHeading = updateWidgetHeading('compass', 'imu-heading', imu.status === 'error' ? null : imu.headingDeg);
+      updateTiltIndicator('pitch-indicator', 'imu-pitch', imu.status === 'error' ? null : imu.pitchDeg);
+      updateTiltIndicator('roll-indicator', 'imu-roll', imu.status === 'error' ? null : imu.rollDeg);
 
       const gnssStatusDot = document.getElementById('gnss-status');
       if (gnssStatusDot) {
@@ -1158,8 +1068,6 @@ export function getTurnTuningPageHtml(): string {
       const gnssHeadingAccuracy = document.getElementById('gnss-heading-accuracy');
       const gnssSats = document.getElementById('gnss-sats');
       const gnssFix = document.getElementById('gnss-fix');
-      const gnssHeading = document.getElementById('gnss-heading');
-      const gnssCompass = document.getElementById('gnss-compass');
 
       if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
       if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
@@ -1180,13 +1088,9 @@ export function getTurnTuningPageHtml(): string {
           ? gnss.satellitesInUse
           : '—';
       }
-      if (gnss.headingDeg !== null && gnss.headingDeg !== undefined) {
-        const navHeading = internalToNavigationHeading(gnss.headingDeg);
-        if (gnssHeading) gnssHeading.textContent = formatDegrees(navHeading);
-        if (gnssCompass) gnssCompass.style.setProperty('--heading-deg', navHeading + 'deg');
-      } else if (gnssHeading) {
-        gnssHeading.textContent = '—';
-      }
+      const gnssNavHeading = updateWidgetHeading('gnss-compass', 'gnss-heading', gnss.status === 'error' ? null : gnss.headingDeg);
+      const poseFusion = primitives.poseFusion ?? {};
+      updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
     }
 
     function formatValidationStatus(validationState) {
@@ -1409,7 +1313,7 @@ export function getTurnTuningPageHtml(): string {
 
     // Clear history
     document.getElementById('clearHistory').addEventListener('click', async () => {
-      if (confirm('Are you sure you want to clear all turn history?')) {
+      if (await window.appConfirm('Are you sure you want to clear all turn history?')) {
         try {
           await fetch('/api/turn/clear-history', { method: 'POST' });
           await updateStatus();
@@ -1421,7 +1325,7 @@ export function getTurnTuningPageHtml(): string {
 
     // Reset learning
     document.getElementById('resetLearning').addEventListener('click', async () => {
-      if (confirm('Are you sure you want to reset turn learning parameters to defaults?')) {
+      if (await window.appConfirm('Are you sure you want to reset turn learning parameters to defaults?')) {
         try {
           await fetch('/api/turn/reset-learning', { method: 'POST' });
           await updateStatus();

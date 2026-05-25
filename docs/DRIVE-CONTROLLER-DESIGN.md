@@ -188,7 +188,7 @@ export class PoseFusion extends EventEmitter {
   setEncoderCalibration(metersPerTick: number): void;
   getEncoderCalibration(): number;
   
-  // Emits 'poseUpdate' event at sensor rate (30Hz)
+  // Emits 'poseUpdate' event at sensor rate (200Hz)
   on(event: 'poseUpdate', listener: (pose: Pose) => void): this;
   off(event: 'poseUpdate', listener: (pose: Pose) => void): this;
 }

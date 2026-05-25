@@ -81,8 +81,12 @@ The system shall store persistent configuration in the `config/` folder, split b
   - motor ramp-up time
   - motor ramp-down time
   - motor-specific calibration values
+- `config/imu-yaw-calibration.json`
+  - persisted IMU yaw scale factor used by the sensor controller
 - `config/pose-calibration.json`
   - encoder meters-per-tick calibration
+- `config/path-following-parameters.json`
+  - closed-loop detection, verification standoff, turn-only threshold, obstacle outward offset, and pure-pursuit lookahead values used for traced obstacle path following
 - `config/turn-learning-parameters.json`
   - turn brake distances and turn learning history
 - `config/drive-learning-params.json`
@@ -220,7 +224,7 @@ The sensor interface shall be implemented as one Sensor Controller boundary in t
 - application-facing sensor state and polling orchestration
 - hardware-facing adapters/drivers for each device.
 
-The Sensor Controller will be responsible for polling each configured sensor device in turn and storing only the latest successful state (plus last error state where relevant).  Polling is asynchronous to the main control code and the sensor loop runs at 30Hz.
+The Sensor Controller will be responsible for polling each configured sensor device in turn and storing only the latest successful state (plus last error state where relevant).  Polling is asynchronous to the main control code and the sensor loop runs at 200Hz.
 
 The Sensor Controller is the single owner of sensor polling cadence.  Device-specific polling loops are not to be run independently outside this controller in production runtime.
 
@@ -280,11 +284,13 @@ If controller connectivity is lost while manual drive is armed, manual drive sha
 The sensor controller must maintain IMU-based orientation, integrating yaw values and calculating tilt from the IMU.
 
 **BMI160 IMU Sensor:**
-- Gyroscope: Z-axis angular velocity for heading integration
+- Gyroscope: 3-axis angular velocity for heading integration
 - Accelerometer: 3-axis acceleration (X, Y, Z) for pitch and roll calculation
 
+The runtime shall treat the BMI160 gyro as a `2000 dps` range sensor with the corresponding `16.4 LSB/dps` conversion already baked into the driver.
+
 **Orientation Data Provided:**
-- **Heading**: Integrated from gyro Z-axis, normalized to signed range `[-180, 180]`
+- **Heading**: Integrated from the gyro vector projected onto the gravity axis derived from pitch and roll, normalized to signed range `[-180, 180]`
 - **Pitch**: Tilt front-to-back (rotation around Y-axis), calculated from accelerometer
   - Positive pitch = nose up, negative = nose down
   - Formula: `pitch = atan2(-ax, sqrt(ay² + az²)) * 180/π`
@@ -294,13 +300,19 @@ The sensor controller must maintain IMU-based orientation, integrating yaw value
 
 **Calibration and Zeroing:**
 At startup, the IMU performs calibration:
-1. Gyroscope bias: Averages Z-axis readings while stationary to determine drift offset
-2. Pitch/roll zeroing: Averages tilt calculations to establish level reference
+1. Gyroscope bias: Averages all three gyro axes over the default stationary calibration window to determine drift offsets
+2. Pitch/roll zeroing: Averages tilt calculations over the same stationary calibration window to establish level reference
 
 This allows the mower to zero its orientation on uneven ground during startup. All subsequent readings subtract these calibrated offsets.
 
 **Heading Reset:**
 The sensor controller shall support an external absolute heading update (for example from GNSS) which resets the maintained IMU heading to the supplied value when the GNSS heading is already close to the current IMU heading and the GNSS heading quality is high enough to trust. GNSS position accuracy shall be used separately for trusting x/y updates. After reset, yaw integration continues from the new heading baseline.
+
+Heading resets must be timestamp-aware. When the caller can provide the controller-clock time of the reset, the sensor controller shall use that timestamp as the next integration reference; otherwise it shall use the current controller clock. This ensures rebasing the IMU does not discard or double-count a gyro interval during or immediately after a turn.
+
+GNSS heading resets shall be deferred whenever the latest motor command is non-zero or the latest tilt-compensated IMU yaw rate is above the stationary threshold. The system may still observe the GNSS heading and use good GNSS position data in that state, but it must not write the GNSS heading back into the IMU heading baseline until the mower is stopped and yaw motion has settled.
+
+When a non-zero motor command transitions to a stop command, the sensor controller shall capture a compact IMU diagnostic summary for the just-finished motion. Pose fusion shall prefer that stop-time summary when later logging a GNSS heading rebase, because the sustained stationary wait may otherwise hide the turn evidence from the rolling diagnostic window.
 
 **Internal Heading Convention:**
 IMU heading uses internal convention (0° = east, counterclockwise positive). The web interface converts this to navigation convention (0° = north, clockwise positive) for display.
@@ -340,6 +352,8 @@ Internal heading conventions shall be tied to the X/Y plane:
 GNSS heading values that use field/navigation convention (clockwise from north) must be rotated into the internal X/Y heading convention before use in estimator/control logic (for example `internalHeading = normalize(90 - fieldHeading)`).
 
 The GNSS heading exposed to application consumers must be this rotated internal heading and normalized to the signed range `[-180, 180]`.
+
+The GNSS position exposed to application consumers shall be the mower control point rather than the raw antenna phase centre whenever a calibrated body-frame offset is available. That offset is fixed in mower coordinates and must be applied using the current heading so the control point stays consistent as the mower turns.
 
 IMU heading integration direction must match this same internal heading convention so that IMU and GNSS heading increases/decreases are aligned.
 
@@ -417,7 +431,7 @@ The drive controller shall not add a separate post-turn heading settle wait befo
 
 Using events for all sensor value inputs.
 
-Ideally the heading is known at all times.  The mower shall run from the IMU heading continuously.  At startup, the first good GNSS heading shall rebase the IMU immediately.  After that, GNSS headings shall only nudge the IMU when the fix is "fixed", the heading accuracy is good, the heading is stable, and the new GNSS heading is already very close to the current IMU heading.  If the mower has been commanded to zero speed for a sustained period, a good GNSS heading may be allowed to rebase the IMU again even if it is no longer close, so that the system can recover from drift while stationary.  When the GNSS gives a silly value or loses fix quality a form of dead-reckoning is achieved by keeping the IMU heading and using the last known good position estimate.  Likewise for position, use GNSS when the fix is good but if fix is lost, then use a dead-reckoning using the motor feedback.  This will require a calibrated motor feedback tick to distance value.
+Ideally the heading is known at all times.  The mower shall run from the IMU heading continuously.  At startup, the first good GNSS heading shall rebase the IMU immediately if the mower is not already commanded to move and yaw motion is settled.  After that, GNSS headings shall only nudge the IMU when the fix is "fixed", the heading accuracy is good, the heading is stable, the mower is stopped, yaw motion has settled, and the new GNSS heading is already very close to the current IMU heading.  If the mower has been commanded to zero speed for a sustained period, a good GNSS heading may be allowed to rebase the IMU again even if it is no longer close, so that the system can recover from drift while stationary.  When the GNSS gives a silly value or loses fix quality a form of dead-reckoning is achieved by keeping the IMU heading and using the last known good position estimate.  Likewise for position, use GNSS when the fix is good but if fix is lost, then use a dead-reckoning using the motor feedback.  This will require a calibrated motor feedback tick to distance value.
 
 It is suggested that the above fusion of values to make sensor readings is encapsulated into one place and can be called everytime a current pose is required.  The turn controller will directly hook the IMU and will not use this component.
 
@@ -476,17 +490,23 @@ A path driving component is required which will take an array of path points whi
 
 The user will be able to use manual driving or simply dragging the mower around an obstacle. The position part only is obtained and logged every time it moves more than 10cm.
 
-The web page will offer a button to open a path tracing page for this purpose.  
+The web page will offer a button to open a combined drive-and-paths page for this purpose, with the live manual-drive canvas at the top and the path recording and management controls alongside it.  
 
 A path will be associated with a name which will default to 'Obstacle N' where N is an increasing number based on already stored obstacles.  The user can add new names. For any name, the user can erase which removes it completely or they can 'record' in which case it starts capturing the path as the user moves/drives the mower. And a 'stop and save' button which will persist the array of positions against the name.
 
 ### Re-tracing
 
 From the same page as for tracing the obstacle's perimeter, there will be a button to 'Drive'.
+
+When verifying a traced obstacle perimeter, the mower shall first approach the nearest point on the path but stop about 10cm short of the perimeter so it can turn to face the obstacle path without fouling it.
 There will also be a button to 'Verify'.
 
-The drive button will first execute a segment-style approach to the nearest point on the stored path, then follow the path from that join point onward.
-The verify button will first execute the same segment-style approach to the nearest point, then continue around the stored path until it returns to that join point.
+The drive button will immediately line-follow the stored path from the mower's current position.
+The verify button will first execute a segment-style approach to about 10cm short of the nearest point, then continue around the stored path until it returns to that join point.
+
+For closed obstacle perimeters, the recorded path points shall be treated as the inner safety boundary. The runtime shall bias the followed path outward from the closed loop and insert conservative outward points between recorded samples, so smoothing and interpolation do not cut inside the traced obstacle perimeter.
+
+The closed-loop tolerance, closed-loop detection tolerance, verification approach standoff, verification turn-only distance, obstacle outward offset, and pure-pursuit lookahead distances shall be loaded from persisted path-following configuration rather than being hard-coded in the path helpers.
 
 The drive will perform a smooth line-follower algorithm but only resort to 'turn-on-the-spot' when the direction to the next point requires a turn greater than can be achieved using an arc - arc is preferred.   With one heel stationary the mower will pivot around that wheel so it can produce very tight circles.
 

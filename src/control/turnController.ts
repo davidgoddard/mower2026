@@ -177,7 +177,7 @@ export class TurnController {
   }
 
   /**
-   * Event handler for IMU heading updates (called at 30Hz by sensor controller)
+   * Event handler for IMU heading updates (called at the sensor loop cadence)
    */
   private async onHeadingUpdate(event: ImuHeadingUpdateEvent): Promise<void> {
     if (

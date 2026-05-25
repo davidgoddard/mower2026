@@ -14,7 +14,10 @@ import { systemStop } from "../control/systemStop.js";
 import { SensorHardwareGateway, createPiSensorHardwareGateway } from "../sensing/sensorHardwareGateway.js";
 import { StubSensorGateway } from "../sensing/stubSensorGateway.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
+import { ImuCalibration } from "../config/imuCalibration.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
+import { GeometryCalibration } from "../config/geometryCalibration.js";
+import { PathFollowingConfig } from "../config/pathFollowingConfig.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -22,10 +25,10 @@ import { getSegmentTestingPageHtml } from "./segmentTestingPage.js";
 import { renderPathTracingPage } from "./pathTracingPage.js";
 import { getManualDrivePageHtml } from "./manualDrivePage.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
-import { createRelativeAngle } from "../geometry/headingTypes.js";
+import { createRelativeAngle, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition } from "../geometry/positionTypes.js";
-import { MAX_PORT_NUMBER, MAX_WHEEL_OUTPUT_PERCENT_DEFAULT, MAX_WHEEL_SPEED_MPS_DEFAULT } from "../constants.js";
-import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPoints, buildVerificationPathPoints, findNearestPathPointIndex } from "../pathfollowing/index.js";
+import { MAX_PORT_NUMBER, MAX_WHEEL_OUTPUT_PERCENT_DEFAULT, MAX_WHEEL_SPEED_MPS_DEFAULT, SENSOR_CONTROLLER_POLL_INTERVAL_MS } from "../constants.js";
+import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPointsForDirection, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan } from "../pathfollowing/index.js";
 
 interface StartMowerServerOptions {
   appName?: string;
@@ -88,6 +91,8 @@ function encodeJson(payload: unknown): string {
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
+
+const PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG = 2;
 
 export function routeServerRequest(
   method: string,
@@ -297,7 +302,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let driveController: DriveController | null = null;
   let segmentTestRunner: SegmentTestRunner | null = null;
   let motorCalibration: MotorCalibration | null = null;
+  let imuCalibration: ImuCalibration | null = null;
   let poseCalibration: PoseCalibration | null = null;
+  let geometryCalibration: GeometryCalibration | null = null;
+  let pathFollowingConfig: PathFollowingConfig | null = null;
   let pathStore: PathStore | null = null;
   let pathRecorder: PathRecorder | null = null;
   let pathFollower: PurePursuitFollower | null = null;
@@ -569,42 +577,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Drive stored path directly, assuming the mower is already on or near the path.
-        if (requestUrl.pathname === "/api/path/drive" && pathFollower && pathStore && poseFusion) {
-          const data = JSON.parse(body);
-          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
-          if (pathName.length === 0) {
-            throw new Error("path_name_required");
-          }
-          if (pathRecorder?.isRecording()) {
-            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
-            response.end(encodeJson({ error: "path_recording_active" }));
-            return;
-          }
-
-          const path = await pathStore.loadPath(pathName);
-          if (path.points.length === 0) {
-            throw new Error("path_empty");
-          }
-
-          const drivePoints = buildDrivePathPoints(path.points, poseFusion.getCurrentPose());
-          if (drivePoints.length < 2) {
-            throw new Error("path_too_short_for_drive");
-          }
-
-          const followResult = await pathFollower.followPathPoints(drivePoints);
-          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-          response.end(encodeJson({
-            mode: "drive",
-            pathName,
-            phase: "follow",
-            ...followResult,
-          }));
-          return;
-        }
-
-        // Verify stored path using the nearest join point then a full loop back to it
-        if (requestUrl.pathname === "/api/path/verify" && driveController && pathFollower && pathStore && poseFusion) {
+        // Drive stored path by staging to the outer edge of the join point and then
+        // following the stored path in the chosen direction.
+        if (requestUrl.pathname === "/api/path/drive" && driveController && turnController && pathFollower && pathStore && poseFusion) {
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
@@ -622,27 +597,228 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const currentPose = poseFusion.getCurrentPose();
-          const nearestIndex = findNearestPathPointIndex(path.points, currentPose);
-          const nearestPoint = path.points[nearestIndex];
-          const approachResult = await driveController.executeDrive({
-            targetPosition: createPosition(nearestPoint.xMeters, nearestPoint.yMeters),
-            learningEnabled: true,
-          });
+          const pathFollowingParameters = pathFollowingConfig?.getParameters();
+          const approachPlan = buildVerificationApproachPlan(path.points, currentPose, pathFollowingParameters);
+          if (approachPlan === null) {
+            throw new Error("path_too_short_for_drive");
+          }
 
-          if (approachResult.status !== "success") {
-            response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-            response.end(encodeJson({
-              mode: "verify",
-              pathName,
-              completed: false,
-              reason: approachResult.status === "stopped" ? "user_stopped" : "error",
-              phase: "approach",
-              approachResult,
-            }));
+          let approachResult: Record<string, unknown>;
+          if (approachPlan.turnOnly) {
+            const turnAngle = headingDifference(currentPose.heading, approachPlan.tangentHeading);
+            const turnResult = await turnController.executeTurn({
+              targetAngle: turnAngle,
+              direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
+              learningEnabled: true,
+            });
+            approachResult = {
+              phase: "turn_only",
+              tangentHeadingDeg: approachPlan.tangentHeading,
+              turnResult,
+            };
+
+            if (turnResult.status !== "success") {
+              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+              response.end(encodeJson({
+                mode: "drive",
+                pathName,
+                completed: false,
+                reason: turnResult.status === "stopped" ? "user_stopped" : "error",
+                phase: "approach",
+                approachResult,
+              }));
+              return;
+            }
+          } else {
+            const driveResult = await driveController.executeDrive({
+              targetPosition: createPosition(approachPlan.approachTarget.xMeters, approachPlan.approachTarget.yMeters),
+              learningEnabled: true,
+            });
+            approachResult = {
+              phase: "outer_edge_drive",
+              joinPoint: approachPlan.joinPoint,
+              tangentHeadingDeg: approachPlan.tangentHeading,
+              approachTarget: approachPlan.approachTarget,
+              driveResult,
+            };
+
+            if (driveResult.status !== "success") {
+              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+              response.end(encodeJson({
+                mode: "drive",
+                pathName,
+                completed: false,
+                reason: driveResult.status === "stopped" ? "user_stopped" : "error",
+                phase: "approach",
+                approachResult,
+              }));
+              return;
+            }
+
+            const poseAfterDrive = poseFusion.getCurrentPose();
+            const turnAngle = headingDifference(poseAfterDrive.heading, approachPlan.tangentHeading);
+            if (Math.abs(unwrapRelativeAngle(turnAngle)) > PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG) {
+              const turnResult = await turnController.executeTurn({
+                targetAngle: turnAngle,
+                direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
+                learningEnabled: true,
+              });
+              approachResult = {
+                ...approachResult,
+                phase: "turn_to_join",
+                turnResult,
+              };
+
+              if (turnResult.status !== "success") {
+                response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+                response.end(encodeJson({
+                  mode: "drive",
+                  pathName,
+                  completed: false,
+                  reason: turnResult.status === "stopped" ? "user_stopped" : "error",
+                  phase: "approach",
+                  approachResult,
+                }));
+                return;
+              }
+            }
+          }
+
+          const drivePoints = buildDrivePathPointsForDirection(
+            path.points,
+            poseFusion.getCurrentPose(),
+            approachPlan.pathDirection,
+            pathFollowingParameters,
+          );
+          if (drivePoints.length < 2) {
+            throw new Error("path_too_short_for_drive");
+          }
+
+          const followResult = await pathFollower.followPathPoints(drivePoints);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({
+            mode: "drive",
+            pathName,
+            phase: "follow",
+            approachResult,
+            ...followResult,
+          }));
+          return;
+        }
+
+        // Verify stored path using an outer-edge approach to the nearest join point,
+        // then a full loop back to it.
+        if (requestUrl.pathname === "/api/path/verify" && driveController && turnController && pathFollower && pathStore && poseFusion) {
+          const data = JSON.parse(body);
+          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
+          if (pathName.length === 0) {
+            throw new Error("path_name_required");
+          }
+          if (pathRecorder?.isRecording()) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "path_recording_active" }));
             return;
           }
 
-          const verificationPoints = buildVerificationPathPoints(path.points, poseFusion.getCurrentPose());
+          const path = await pathStore.loadPath(pathName);
+          if (path.points.length === 0) {
+            throw new Error("path_empty");
+          }
+
+          const currentPose = poseFusion.getCurrentPose();
+          const pathFollowingParameters = pathFollowingConfig?.getParameters();
+          const approachPlan = buildVerificationApproachPlan(path.points, currentPose, pathFollowingParameters);
+          if (approachPlan === null) {
+            throw new Error("path_too_short_for_verification");
+          }
+
+          let approachResult: Record<string, unknown>;
+          if (approachPlan.turnOnly) {
+            const turnAngle = headingDifference(currentPose.heading, approachPlan.tangentHeading);
+            const turnResult = await turnController.executeTurn({
+              targetAngle: turnAngle,
+              direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
+              learningEnabled: true,
+            });
+            approachResult = {
+              phase: "turn_only",
+              tangentHeadingDeg: approachPlan.tangentHeading,
+              turnResult,
+            };
+
+            if (turnResult.status !== "success") {
+              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+              response.end(encodeJson({
+                mode: "verify",
+                pathName,
+                completed: false,
+                reason: turnResult.status === "stopped" ? "user_stopped" : "error",
+                phase: "approach",
+                approachResult,
+              }));
+              return;
+            }
+          } else {
+            const driveResult = await driveController.executeDrive({
+              targetPosition: createPosition(approachPlan.approachTarget.xMeters, approachPlan.approachTarget.yMeters),
+              learningEnabled: true,
+            });
+            approachResult = {
+              phase: "tangent_drive",
+              joinPoint: approachPlan.joinPoint,
+              tangentHeadingDeg: approachPlan.tangentHeading,
+              approachTarget: approachPlan.approachTarget,
+              driveResult,
+            };
+
+            if (driveResult.status !== "success") {
+              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+              response.end(encodeJson({
+                mode: "verify",
+                pathName,
+                completed: false,
+                reason: driveResult.status === "stopped" ? "user_stopped" : "error",
+                phase: "approach",
+                approachResult,
+              }));
+              return;
+            }
+
+            const poseAfterDrive = poseFusion.getCurrentPose();
+            const turnAngle = headingDifference(poseAfterDrive.heading, approachPlan.tangentHeading);
+            if (Math.abs(unwrapRelativeAngle(turnAngle)) > PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG) {
+              const turnResult = await turnController.executeTurn({
+                targetAngle: turnAngle,
+                direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
+                learningEnabled: true,
+              });
+              approachResult = {
+                ...approachResult,
+                phase: "turn_to_join",
+                turnResult,
+              };
+
+              if (turnResult.status !== "success") {
+                response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+                response.end(encodeJson({
+                  mode: "verify",
+                  pathName,
+                  completed: false,
+                  reason: turnResult.status === "stopped" ? "user_stopped" : "error",
+                  phase: "approach",
+                  approachResult,
+                }));
+                return;
+              }
+            }
+          }
+
+          const verificationPoints = buildVerificationPathPointsFromPlan(
+            path.points,
+            poseFusion.getCurrentPose(),
+            approachPlan,
+            pathFollowingParameters,
+          );
           if (verificationPoints.length < 2) {
             throw new Error("path_too_short_for_verification");
           }
@@ -810,8 +986,23 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     motorCalibration = new MotorCalibration({ logger });
     await motorCalibration.loadParameters();
 
+    imuCalibration = new ImuCalibration({
+      logger,
+      parametersPath: process.env.MOWER_IMU_YAW_CALIBRATION_PATH,
+    });
+    await imuCalibration.loadParameters();
+
     poseCalibration = new PoseCalibration({ logger });
     await poseCalibration.loadParameters();
+
+    geometryCalibration = new GeometryCalibration({ logger });
+    await geometryCalibration.loadParameters();
+
+    pathFollowingConfig = new PathFollowingConfig({
+      logger,
+      parametersPath: process.env.MOWER_PATH_FOLLOWING_PARAMETERS_PATH,
+    });
+    await pathFollowingConfig.loadParameters();
 
     sensorGateway = await createPiSensorHardwareGateway(
       options.i2cBusNumber ?? 1,
@@ -827,8 +1018,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger,
       primitivesStore: primitives,
       gateway: sensorGateway,
+      imuCalibration: imuCalibration!,
       poseCalibration: poseCalibration!,
-      pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
+      geometryCalibration: geometryCalibration!,
+      pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS,
     });
     await sensorController.start();
 
@@ -857,15 +1050,17 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger,
       primitivesStore: primitives,
       gateway: sensorGateway,
+      imuCalibration: imuCalibration!,
       poseCalibration: poseCalibration!,
-      pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
+      geometryCalibration: geometryCalibration!,
+      pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS,
     });
     await sensorController.start();
 
     primitives.update({
       sensorController: {
         status: "error",
-        pollIntervalMs: options.sensorPollingIntervalMs ?? 33,
+        pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS,
         lastLoopDurationMs: null,
       },
       imu: {
@@ -928,6 +1123,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       poseCalibration: poseCalibration!,
     });
     await poseFusion.start();
+    const refreshPoseFusionPrimitive = () => {
+      primitives.update({
+        poseFusion: poseFusion?.getPrimitiveState() ?? primitives.snapshot().poseFusion,
+      });
+    };
+    poseFusion.on("poseUpdate", refreshPoseFusionPrimitive);
+    refreshPoseFusionPrimitive();
 
     turnValidationRunner = new TurnValidationRunner({
       turnController,
@@ -944,11 +1146,15 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         poseFusion: poseFusion!,
       });
 
+      const pathFollowingParameters = pathFollowingConfig?.getParameters();
       pathFollower = new PurePursuitFollower({
-        targetSpeed: MAX_WHEEL_SPEED_MPS_DEFAULT * 0.5,
+        targetSpeed: MAX_WHEEL_SPEED_MPS_DEFAULT * 0.8,
         wheelBase: 0.35,
-        controlRateHz: 10,
+        controlRateHz: 15,
         arrivalThreshold: 0.12,
+        minLookaheadMeters: pathFollowingParameters?.purePursuitMinLookaheadMeters,
+        baseLookaheadMeters: pathFollowingParameters?.purePursuitBaseLookaheadMeters,
+        maxLookaheadMeters: pathFollowingParameters?.purePursuitMaxLookaheadMeters,
         logger: logger.child({ context: "paths", source: "PathFollower" }),
       }, {
         pathStore: pathStore!,

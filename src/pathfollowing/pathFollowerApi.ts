@@ -37,6 +37,9 @@ export interface PathFollowerOptions {
   wheelBase: number; // meters
   controlRateHz: number; // control loop frequency
   arrivalThreshold: number; // meters - how close to consider "arrived"
+  minLookaheadMeters?: number; // pure pursuit minimum lookahead distance
+  baseLookaheadMeters?: number; // pure pursuit nominal lookahead distance
+  maxLookaheadMeters?: number; // pure pursuit maximum lookahead distance
   logger: LoggerScope;
 }
 

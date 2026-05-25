@@ -39,10 +39,13 @@ export class PurePursuitFollower implements IPathFollower {
   private readonly deps: PurePursuitDependencies;
 
   // Pure pursuit parameters
-  private readonly minLookahead: number = 0.5; // meters
-  private readonly maxLookahead: number = 2.0; // meters
-  private readonly baseLookahead: number = 1.0; // meters
+  private readonly minLookahead: number;
+  private readonly maxLookahead: number;
+  private readonly baseLookahead: number;
   private readonly tightTurnRadius: number = 0.5; // meters - threshold for pivot
+  private readonly retraceDurationMs: number = 3000;
+  private readonly retraceTrailRetentionMs: number = 5000;
+  private readonly retraceTrailMinSpacingMeters: number = 0.05;
 
   // State
   private isFollowing: boolean = false;
@@ -51,12 +54,17 @@ export class PurePursuitFollower implements IPathFollower {
   private currentWaypointIndex: number = 0;
   private motorOperationActive: boolean = false;
   private hasBeenAwayFromFinalPoint: boolean = false;
+  private recentTrail: PathPoint[] = [];
+  private passedWaypointIndexes: Set<number> = new Set();
 
   constructor(options: PathFollowerOptions, dependencies: PurePursuitDependencies) {
     this.targetSpeed = options.targetSpeed;
     this.wheelBase = options.wheelBase;
     this.controlRateHz = options.controlRateHz;
     this.arrivalThreshold = options.arrivalThreshold;
+    this.minLookahead = options.minLookaheadMeters ?? 0.5;
+    this.baseLookahead = options.baseLookaheadMeters ?? 1.0;
+    this.maxLookahead = options.maxLookaheadMeters ?? 2.0;
     this.logger = options.logger;
     this.deps = dependencies;
 
@@ -198,6 +206,8 @@ export class PurePursuitFollower implements IPathFollower {
     this.stopRequested = false;
     this.currentWaypointIndex = 0;
     this.hasBeenAwayFromFinalPoint = false;
+    this.recentTrail = [];
+    this.passedWaypointIndexes = new Set([0]);
 
     const startTime = Date.now();
     let distanceTraveled = 0;
@@ -206,12 +216,19 @@ export class PurePursuitFollower implements IPathFollower {
       while (this.currentWaypointIndex < waypoints.length - 1 && !this.stopRequested && !systemStop.isStopped()) {
         const currentPose = this.deps.getCurrentPose();
         const currentSpeed = this.deps.getCurrentSpeed();
+        this.recordRecentTrail(currentPose);
 
         // Update current waypoint index based on closest point
-        this.currentWaypointIndex = this.findClosestWaypointIndex(currentPose, waypoints);
+        const previousWaypointIndex = this.currentWaypointIndex;
+        this.currentWaypointIndex = this.findClosestWaypointIndex(
+          currentPose,
+          waypoints,
+          this.currentWaypointIndex,
+        );
+        this.markWaypointCoverage(previousWaypointIndex, this.currentWaypointIndex);
 
         // Check if reached end
-        if (this.hasReachedEnd(currentPose, waypoints)) {
+        if (this.hasReachedEnd(currentPose, waypoints, true)) {
           this.logger.info("pure_pursuit.reached_end", {
             finalWaypointIndex: this.currentWaypointIndex,
             distanceTraveled,
@@ -257,6 +274,9 @@ export class PurePursuitFollower implements IPathFollower {
             systemStopReason: stopState.reason,
           });
           await this.deps.motorController.stop();
+          if (obstructed) {
+            await this.reverseRetraceRecentTrail();
+          }
           return {
             completed: false,
             reason: obstructed ? "obstruction" : "user_stopped",
@@ -276,6 +296,9 @@ export class PurePursuitFollower implements IPathFollower {
           systemStopReason: stopState.reason,
         });
         await this.deps.motorController.stop();
+        if (obstructed) {
+          await this.reverseRetraceRecentTrail();
+        }
         return {
           completed: false,
           reason: obstructed ? "obstruction" : "user_stopped",
@@ -346,7 +369,12 @@ export class PurePursuitFollower implements IPathFollower {
   /**
    * Core Pure Pursuit algorithm: calculate curvature to reach lookahead point
    */
-  private calculateCurvature(pose: Pose, path: PathPoint[], lookahead: number): number {
+  private calculateCurvature(
+    pose: Pose,
+    path: PathPoint[],
+    lookahead: number,
+    travelDirectionSign: 1 | -1 = 1,
+  ): number {
     const lookaheadPoint = this.findLookaheadPoint(pose, path, lookahead);
 
     if (!lookaheadPoint) {
@@ -360,7 +388,7 @@ export class PurePursuitFollower implements IPathFollower {
 
     // Alpha: angle between heading and lookahead point
     const heading = unwrapInternalHeading(pose.heading);
-    const headingRad = (heading * Math.PI) / 180;
+    const headingRad = ((heading + (travelDirectionSign < 0 ? 180 : 0)) * Math.PI) / 180;
     const alpha = this.normalizeAngle(angleToLookahead - headingRad);
 
     // Distance to lookahead point
@@ -455,10 +483,13 @@ export class PurePursuitFollower implements IPathFollower {
   /**
    * Convert curvature to differential wheel speeds
    */
-  private calculateWheelSpeeds(curvature: number): { left: number; right: number } {
+  private calculateWheelSpeeds(curvature: number, travelDirectionSign: 1 | -1 = 1): { left: number; right: number } {
     if (Math.abs(curvature) < 0.001) {
       // Straight line
-      return { left: this.targetSpeed, right: this.targetSpeed };
+      return {
+        left: this.targetSpeed * travelDirectionSign,
+        right: this.targetSpeed * travelDirectionSign,
+      };
     }
 
     // Turning radius from curvature
@@ -466,15 +497,13 @@ export class PurePursuitFollower implements IPathFollower {
 
     // Check if turn is too tight - use pivot
     if (Math.abs(radius) < this.tightTurnRadius) {
-      return this.calculatePivotSpeeds(radius);
+      return this.calculatePivotSpeeds(radius, travelDirectionSign);
     }
 
-    // Differential drive arc
-    const leftRadius = radius - this.wheelBase / 2;
-    const rightRadius = radius + this.wheelBase / 2;
-
-    const leftSpeed = this.targetSpeed * (leftRadius / radius);
-    const rightSpeed = this.targetSpeed * (rightRadius / radius);
+    const signedLinearSpeed = this.targetSpeed * travelDirectionSign;
+    const angularSpeed = this.targetSpeed * curvature;
+    const leftSpeed = signedLinearSpeed - (angularSpeed * this.wheelBase / 2);
+    const rightSpeed = signedLinearSpeed + (angularSpeed * this.wheelBase / 2);
 
     // Clamp to reasonable values
     const maxSpeed = this.targetSpeed * 1.2;
@@ -487,26 +516,113 @@ export class PurePursuitFollower implements IPathFollower {
   /**
    * Calculate pivot speeds (one wheel stationary)
    */
-  private calculatePivotSpeeds(radius: number): { left: number; right: number } {
+  private calculatePivotSpeeds(radius: number, travelDirectionSign: 1 | -1 = 1): { left: number; right: number } {
     const turnDirection = radius > 0 ? "left" : "right";
 
     if (turnDirection === "left") {
       // Left turn - left wheel slower/stopped
-      return { left: 0, right: this.targetSpeed };
+      return { left: 0, right: this.targetSpeed * travelDirectionSign };
     } else {
       // Right turn - right wheel slower/stopped
-      return { left: this.targetSpeed, right: 0 };
+      return { left: this.targetSpeed * travelDirectionSign, right: 0 };
     }
+  }
+
+  private recordRecentTrail(pose: Pose): void {
+    const nowMs = Date.now();
+    const point: PathPoint = {
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+      capturedAt: nowMs,
+    };
+
+    const lastPoint = this.recentTrail[this.recentTrail.length - 1];
+    if (lastPoint) {
+      const dx = point.xMeters - lastPoint.xMeters;
+      const dy = point.yMeters - lastPoint.yMeters;
+      if (Math.hypot(dx, dy) < this.retraceTrailMinSpacingMeters) {
+        this.pruneRecentTrail(nowMs);
+        return;
+      }
+    }
+
+    this.recentTrail.push(point);
+    this.pruneRecentTrail(nowMs);
+  }
+
+  private pruneRecentTrail(nowMs: number): void {
+    const cutoff = nowMs - this.retraceTrailRetentionMs;
+    while (this.recentTrail.length > 0 && this.recentTrail[0].capturedAt < cutoff) {
+      this.recentTrail.shift();
+    }
+  }
+
+  private async reverseRetraceRecentTrail(): Promise<void> {
+    const cutoff = Date.now() - this.retraceDurationMs;
+    const retraceSegment = this.recentTrail
+      .filter((point) => point.capturedAt >= cutoff)
+      .reverse();
+
+    if (retraceSegment.length < 2) {
+      this.logger.warn("pure_pursuit.obstruction_retrace_skipped", {
+        availablePointCount: this.recentTrail.length,
+      });
+      return;
+    }
+
+    this.logger.info("pure_pursuit.obstruction_retrace_starting", {
+      pointCount: retraceSegment.length,
+      durationMs: this.retraceDurationMs,
+    });
+
+    systemStop.clearStop("path-obstruction-retrace");
+    this.hasBeenAwayFromFinalPoint = false;
+    this.currentWaypointIndex = 0;
+    this.passedWaypointIndexes = new Set([0]);
+
+    while (!this.stopRequested && !systemStop.isStopped()) {
+      const currentPose = this.deps.getCurrentPose();
+      const currentSpeed = Math.abs(this.deps.getCurrentSpeed());
+      const previousWaypointIndex = this.currentWaypointIndex;
+      this.currentWaypointIndex = this.findClosestWaypointIndex(
+        currentPose,
+        retraceSegment,
+        this.currentWaypointIndex,
+      );
+      this.markWaypointCoverage(previousWaypointIndex, this.currentWaypointIndex);
+
+      if (this.hasReachedEnd(currentPose, retraceSegment, false)) {
+        break;
+      }
+
+      const pathCurvature = this.estimatePathCurvature(currentPose, retraceSegment);
+      const lookahead = this.calculateAdaptiveLookahead(currentSpeed, pathCurvature);
+      const curvature = this.calculateCurvature(currentPose, retraceSegment, lookahead, -1);
+      const wheelSpeeds = this.calculateWheelSpeeds(curvature, -1);
+
+      await this.deps.motorController.setWheelSpeeds(wheelSpeeds.left, wheelSpeeds.right);
+
+      const loopDelayCompleted = await this.sleepWithStopChecks(1000 / this.controlRateHz);
+      if (!loopDelayCompleted) {
+        break;
+      }
+    }
+
+    await this.deps.motorController.stop();
+    this.logger.info("pure_pursuit.obstruction_retrace_completed", {
+      pointCount: retraceSegment.length,
+    });
   }
 
   /**
    * Find closest waypoint to current position
    */
-  private findClosestWaypointIndex(pose: Pose, path: PathPoint[]): number {
+  private findClosestWaypointIndex(pose: Pose, path: PathPoint[], startIndex = 0): number {
     let minDistance = Infinity;
-    let closestIndex = 0;
+    const boundedStartIndex = this.clamp(Math.floor(startIndex), 0, Math.max(0, path.length - 1));
+    let closestIndex = boundedStartIndex;
 
-    for (let i = 0; i < path.length; i++) {
+    for (let i = boundedStartIndex; i < path.length; i++) {
       const distance = this.distanceToPoint(pose.position, path[i]);
       if (distance < minDistance) {
         minDistance = distance;
@@ -517,12 +633,33 @@ export class PurePursuitFollower implements IPathFollower {
     return closestIndex;
   }
 
+  private markWaypointCoverage(previousIndex: number, currentIndex: number): void {
+    if (currentIndex < 0) {
+      return;
+    }
+
+    this.passedWaypointIndexes.add(currentIndex);
+    if (currentIndex <= previousIndex) {
+      return;
+    }
+
+    for (let index = previousIndex + 1; index <= currentIndex; index += 1) {
+      this.passedWaypointIndexes.add(index);
+    }
+  }
+
   /**
    * Check if reached end of path
    */
-  private hasReachedEnd(pose: Pose, path: PathPoint[]): boolean {
+  private hasReachedEnd(pose: Pose, path: PathPoint[], requireWaypointCoverage: boolean): boolean {
     if (path.length === 0) {
       return true;
+    }
+
+    const finalWaypointIndex = path.length - 1;
+    const nearFinalSegment = this.currentWaypointIndex >= Math.max(0, finalWaypointIndex - 1);
+    if (!nearFinalSegment) {
+      return false;
     }
 
     const lastPoint = path[path.length - 1];
@@ -530,6 +667,10 @@ export class PurePursuitFollower implements IPathFollower {
 
     if (distance >= this.arrivalThreshold) {
       this.hasBeenAwayFromFinalPoint = true;
+      return false;
+    }
+
+    if (requireWaypointCoverage && this.passedWaypointIndexes.size < path.length) {
       return false;
     }
 
