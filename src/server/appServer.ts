@@ -25,6 +25,8 @@ import { getDriveTuningPageHtml } from "./driveTuningPage.js";
 import { getSegmentTestingPageHtml } from "./segmentTestingPage.js";
 import { renderPathTracingPage } from "./pathTracingPage.js";
 import { getManualDrivePageHtml } from "./manualDrivePage.js";
+import { getDeadReckoningPageHtml } from "./deadReckoningPage.js";
+import { DeadReckoningCalibrator } from "../control/deadReckoningCalibrator.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition, unwrapMeters } from "../geometry/positionTypes.js";
@@ -186,6 +188,15 @@ export function routeServerRequest(
     };
   }
 
+  if (method === "GET" && pathname === "/dead-reckoning") {
+    return {
+      statusCode: 200,
+      contentType: "text/html; charset=utf-8",
+      body: getDeadReckoningPageHtml(),
+      logNotFound: false,
+    };
+  }
+
   if (method === "GET" && pathname === "/health") {
     return {
       statusCode: 200,
@@ -333,6 +344,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let driveLearningModel: DriveLearningModel | null = null;
   let driveController: DriveController | null = null;
   let segmentTestRunner: SegmentTestRunner | null = null;
+  let deadReckoningCalibrator: DeadReckoningCalibrator | null = null;
   let motorCalibration: MotorCalibration | null = null;
   let imuCalibration: ImuCalibration | null = null;
   let poseCalibration: PoseCalibration | null = null;
@@ -506,6 +518,15 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         const status = mowingExecutor ? mowingExecutor.getStatus() : mowingStatus;
         response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         response.end(encodeJson(status));
+        return;
+      }
+
+      if (requestUrl.pathname === "/api/dead-reckoning/status") {
+        const drState = deadReckoningCalibrator
+          ? deadReckoningCalibrator.getState()
+          : { running: false, phase: "idle", phaseMessage: "Calibrator not available.", gnssWarning: null, result: null, lastUpdated: null };
+        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson(drState));
         return;
       }
 
@@ -1482,6 +1503,62 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
+        // Start dead-reckoning calibration
+        if (requestUrl.pathname === "/api/dead-reckoning/start" && deadReckoningCalibrator) {
+          systemStop.clearStop("dead-reckoning-run");
+          // Fire-and-forget — the status endpoint is polled separately
+          deadReckoningCalibrator.run().catch((err) => {
+            logger.warn("dead_reckoning.run_error", { error: err instanceof Error ? err.message : String(err) });
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ started: true }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/dead-reckoning/start" && !deadReckoningCalibrator) {
+          response.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: "dead_reckoning_calibrator_not_available" }));
+          return;
+        }
+
+        // Stop dead-reckoning calibration
+        if (requestUrl.pathname === "/api/dead-reckoning/stop" && deadReckoningCalibrator) {
+          deadReckoningCalibrator.requestStop();
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ stopped: true }));
+          return;
+        }
+
+        // Apply suggested dead-reckoning calibration (per-wheel or shared scalar)
+        if (requestUrl.pathname === "/api/dead-reckoning/apply" && poseFusion && poseCalibration) {
+          const data = JSON.parse(body);
+          const leftMPT   = typeof data.leftMetersPerTick   === "number" ? data.leftMetersPerTick   : null;
+          const rightMPT  = typeof data.rightMetersPerTick  === "number" ? data.rightMetersPerTick  : null;
+          const wheelbase = typeof data.wheelbaseMeters     === "number" ? data.wheelbaseMeters     : null;
+          const sharedMPT = typeof data.encoderMetersPerTick === "number" ? data.encoderMetersPerTick : null;
+
+          if (leftMPT !== null && rightMPT !== null && wheelbase !== null &&
+              leftMPT > 0 && rightMPT > 0 && wheelbase > 0) {
+            await poseFusion.setPerWheelCalibration(leftMPT, rightMPT, wheelbase);
+            response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({
+              applied: true,
+              leftMetersPerTick: leftMPT,
+              rightMetersPerTick: rightMPT,
+              wheelbaseMeters: wheelbase,
+              encoderMetersPerTick: (leftMPT + rightMPT) / 2,
+            }));
+          } else if (sharedMPT !== null && sharedMPT > 0) {
+            await poseFusion.setEncoderCalibration(sharedMPT);
+            response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ applied: true, encoderMetersPerTick: sharedMPT }));
+          } else {
+            response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "invalid_calibration_values" }));
+          }
+          return;
+        }
+
         // Drive test pattern
         if (requestUrl.pathname === "/api/drive/test-pattern" && driveController) {
           const results = await driveController.runTestPattern();
@@ -1838,6 +1915,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       driveController,
       sensorController,
       poseProvider: () => poseFusion?.getCurrentPose() ?? null,
+      logger,
+    });
+
+    deadReckoningCalibrator = new DeadReckoningCalibrator({
+      sensorController,
+      poseFusion,
+      poseCalibration: poseCalibration!,
       logger,
     });
 

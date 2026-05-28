@@ -48,14 +48,10 @@ export type RawAngle = Brand<number, "RawAngle">;
  * Normalize an angle to the range (-180, 180]
  */
 export function normalizeAngleTo180(degrees: number): number {
-  let normalized = degrees;
-  while (normalized <= NORMALIZED_ANGLE_MIN) {
-    normalized += DEGREES_PER_CIRCLE;
-  }
-  while (normalized > NORMALIZED_ANGLE_MAX) {
-    normalized -= DEGREES_PER_CIRCLE;
-  }
-  return normalized;
+  let n = degrees % DEGREES_PER_CIRCLE;
+  if (n <= NORMALIZED_ANGLE_MIN) n += DEGREES_PER_CIRCLE;
+  else if (n > NORMALIZED_ANGLE_MAX) n -= DEGREES_PER_CIRCLE;
+  return n;
 }
 
 /**

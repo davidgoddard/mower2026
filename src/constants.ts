@@ -236,8 +236,10 @@ export const MOTOR_STALL_SPEED_THRESHOLD_MPS = 0.01;
 
 /**
  * Motor stall detection threshold for encoder deltas.
+ * A minimum of 3 ticks prevents a slowly-rotating blade or slight jitter
+ * from masking a genuine translational stall.
  */
-export const MOTOR_STALL_ENCODER_DELTA_THRESHOLD = 0;
+export const MOTOR_STALL_ENCODER_DELTA_THRESHOLD = 3;
 
 /**
  * Maximum GNSS position accuracy to trust for stall detection.
@@ -255,7 +257,10 @@ export const MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS = 0.1;
 export const MOTOR_STALL_OBSERVATION_WINDOW_MS = 4000;
 
 /**
- * Number of consecutive stationary samples before declaring a stall.
+ * Weighted sample accumulator threshold before declaring a stall.
+ * Normal stationary samples add 1; high-current / fault samples add 2,
+ * so a high-current stall triggers in ~6 samples (300 ms) while a
+ * current-free stall requires ~12 samples (600 ms).
  */
 export const MOTOR_STALL_CONSECUTIVE_SAMPLES = 12;
 
@@ -432,6 +437,12 @@ export const DRIVE_CTE_NONLINEARITY_DEFAULT = 3.0;
  * Default wheel base used by the regulated pure pursuit controller (meters)
  */
 export const DRIVE_WHEEL_BASE_METERS_DEFAULT = 0.35;
+
+/**
+ * Default wheel track / wheelbase for dead-reckoning differential odometry (meters).
+ * This is the centre-to-centre distance between the left and right wheels.
+ */
+export const WHEEL_BASE_METERS_DEFAULT = 0.35;
 
 /**
  * Fraction of maximum wheel speed used as the nominal target speed for regulated pure pursuit.

@@ -629,6 +629,10 @@ ${getLiveSensorWidgetsStyles()}
             <span class="nav-button-icon">🧭</span>
             <span>Drive &amp; Paths</span>
           </a>
+          <a href="/dead-reckoning" class="nav-button" title="Calibrate dead-reckoning: straight-line encoder calibration and arc tracking validation">
+            <span class="nav-button-icon">📐</span>
+            <span>Dead Reckoning</span>
+          </a>
         </div>
       </div>
     </div>

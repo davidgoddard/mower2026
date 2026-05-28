@@ -134,9 +134,8 @@ export function angleTo(from: Position, to: Position): InternalHeading {
   const angleRad = Math.atan2(dy, dx);
   const angleDeg = (angleRad * 180) / Math.PI;
 
-  // Import createInternalHeading but avoid circular dependency
-  // We know the result of atan2 is already in correct range
-  return angleDeg as any; // Will be properly typed when imported
+  // atan2 returns values in (-π, π] which maps exactly to (-180, 180]
+  return angleDeg as InternalHeading;
 }
 
 /**

@@ -71,10 +71,7 @@ import {
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
-
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
+import { defaultSleep } from "./sleep.js";
 
 export interface DriveLineRequest extends DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
@@ -115,6 +112,7 @@ export class DriveLineController {
   private totalErrorXMeters = 0;
   private totalErrorYMeters = 0;
 
+  private poseUpdateInFlight = false;
   private driveStartPosition: Position | null = null;
   private driveStartHeading: InternalHeading | null = null;
   private driveStartPoseQuality: "gnss" | "dead-reckoning" | "unknown" = "unknown";
@@ -144,81 +142,15 @@ export class DriveLineController {
     this.onPoseUpdate = this.onPoseUpdate.bind(this);
   }
 
-  async executeLineDrive(request: DriveLineRequest): Promise<DriveResult> {
-    return new Promise<DriveResult>(async (resolve) => {
-      let subscribed = false;
-
-      try {
-        this.stopRequested = false;
-        systemStop.clearStop("drive-line-execute");
-        this.beginMotorOperation();
-
-        this.currentDrive = request;
-        this.driveDirectionSign = request.driveDirectionSign ?? 1;
-        this.driveTimeoutMinimumMs = request.timeoutMinimumMs ?? 0;
-        this.driveTimeoutDisabled = request.disableTimeout ?? false;
-        this.driveStartTime = this.nowMillis();
-        this.driveResolve = resolve;
-        this.cteSamples = [];
-        this.totalEncoderTicks = 0;
-
-        const startPose = this.poseFusion.getCurrentPose();
-        this.driveStartPosition = startPose.position;
-        this.driveStartHeading = startPose.heading;
-        this.driveStartPoseQuality = startPose.quality;
-        this.driveTargetPosition = request.targetPosition;
-
-        this.logger.info("drive.line.started", {
-          startPosition: {
-            x: unwrapMeters(this.driveStartPosition.xMeters),
-            y: unwrapMeters(this.driveStartPosition.yMeters),
-          },
-          targetPosition: {
-            x: unwrapMeters(request.targetPosition.xMeters),
-            y: unwrapMeters(request.targetPosition.yMeters),
-          },
-          startHeading: unwrapInternalHeading(this.driveStartHeading),
-          driveDirectionSign: this.driveDirectionSign,
-        });
-
-        this.driveLineStart = this.driveStartPosition;
-        this.driveLineEnd = request.targetPosition;
-
-        this.poseFusion.on("poseUpdate", this.onPoseUpdate);
-        subscribed = true;
-
-        this.status = "driving";
-        const startSpeed = this.fullSpeedCommand * this.driveDirectionSign;
-        await this.sensorController.setMotorWheelOutputs(startSpeed, startSpeed);
-
-        this.logger.info("drive.line.driving", {
-          startPosition: {
-            x: unwrapMeters(this.driveStartPosition.xMeters),
-            y: unwrapMeters(this.driveStartPosition.yMeters),
-          },
-          heading: unwrapInternalHeading(this.driveStartHeading),
-          driveDirectionSign: this.driveDirectionSign,
-        });
-      } catch (error) {
-        if (subscribed) {
-          this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-        }
-        systemStop.requestStop("drive", "drive_line_error");
-        try {
-          await this.sensorController.stopMotors();
-        } catch (stopError) {
-          const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
-          this.logger.warn("drive.line.stop_failed", { error: stopMessage });
-        } finally {
-          await this.endMotorOperation();
-        }
-        this.status = "idle";
-        this.currentDrive = null;
-
+  executeLineDrive(request: DriveLineRequest): Promise<DriveResult> {
+    return new Promise<DriveResult>((resolve) => {
+      this.driveResolve = resolve;
+      this.startDriveAsync(request).catch((error) => {
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.logger.error("drive.line.error", { error: errorMessage });
-
-        resolve({
+        const r = this.driveResolve;
+        this.driveResolve = null;
+        r?.({
           startPosition: this.driveStartPosition ?? createPosition(0, 0),
           targetPosition: request.targetPosition,
           finalPosition: this.driveStartPosition ?? createPosition(0, 0),
@@ -232,9 +164,79 @@ export class DriveLineController {
           errorMessage,
           timestamp: new Date().toISOString(),
         });
-        this.driveResolve = null;
-      }
+      });
     });
+  }
+
+  private async startDriveAsync(request: DriveLineRequest): Promise<void> {
+    let subscribed = false;
+    try {
+      this.stopRequested = false;
+      systemStop.clearStop("drive-line-execute");
+      this.beginMotorOperation();
+
+      this.currentDrive = request;
+      this.driveDirectionSign = request.driveDirectionSign ?? 1;
+      this.driveTimeoutMinimumMs = request.timeoutMinimumMs ?? 0;
+      this.driveTimeoutDisabled = request.disableTimeout ?? false;
+      this.driveStartTime = this.nowMillis();
+      this.cteSamples = [];
+      this.totalEncoderTicks = 0;
+
+      const startPose = this.poseFusion.getCurrentPose();
+      this.driveStartPosition = startPose.position;
+      this.driveStartHeading = startPose.heading;
+      this.driveStartPoseQuality = startPose.quality;
+      this.driveTargetPosition = request.targetPosition;
+
+      this.logger.info("drive.line.started", {
+        startPosition: {
+          x: unwrapMeters(this.driveStartPosition.xMeters),
+          y: unwrapMeters(this.driveStartPosition.yMeters),
+        },
+        targetPosition: {
+          x: unwrapMeters(request.targetPosition.xMeters),
+          y: unwrapMeters(request.targetPosition.yMeters),
+        },
+        startHeading: unwrapInternalHeading(this.driveStartHeading),
+        driveDirectionSign: this.driveDirectionSign,
+      });
+
+      this.driveLineStart = this.driveStartPosition;
+      this.driveLineEnd = request.targetPosition;
+
+      this.poseFusion.on("poseUpdate", this.onPoseUpdate);
+      subscribed = true;
+
+      this.status = "driving";
+      const startSpeed = this.fullSpeedCommand * this.driveDirectionSign;
+      await this.sensorController.setMotorWheelOutputs(startSpeed, startSpeed);
+
+      this.logger.info("drive.line.driving", {
+        startPosition: {
+          x: unwrapMeters(this.driveStartPosition.xMeters),
+          y: unwrapMeters(this.driveStartPosition.yMeters),
+        },
+        heading: unwrapInternalHeading(this.driveStartHeading),
+        driveDirectionSign: this.driveDirectionSign,
+      });
+    } catch (error) {
+      if (subscribed) {
+        this.poseFusion.off("poseUpdate", this.onPoseUpdate);
+      }
+      systemStop.requestStop("drive", "drive_line_error");
+      try {
+        await this.sensorController.stopMotors();
+      } catch (stopError) {
+        const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
+        this.logger.warn("drive.line.stop_failed", { error: stopMessage });
+      } finally {
+        await this.endMotorOperation();
+      }
+      this.status = "idle";
+      this.currentDrive = null;
+      throw error;
+    }
   }
 
   async runShortDistanceTraining(options?: {
@@ -303,8 +305,9 @@ export class DriveLineController {
     for (const distanceMeters of distancePlan) {
       const directionSigns = includeReverseLegs ? ([1, -1] as const) : ([1] as const);
       let pairAttempt = 0;
+      const MAX_PAIR_ATTEMPTS = 10;
 
-      while (true) {
+      while (pairAttempt < MAX_PAIR_ATTEMPTS) {
         if (systemStop.isStopped()) {
           this.logger.warn("drive.line.short_training.stopped", {
             completed: results.length,
@@ -520,6 +523,18 @@ export class DriveLineController {
           break;
         }
 
+        if (pairAttempt >= MAX_PAIR_ATTEMPTS) {
+          this.logger.warn("drive.line.short_training.max_attempts_reached", {
+            distanceMeters, pairAttempt,
+          });
+          reportProgress(
+            "completed",
+            `Distance ${Math.round(distanceMeters * 100)} cm reached max ${MAX_PAIR_ATTEMPTS} attempts, moving on.`,
+            { distanceMeters, pairAttempt, completedDrives: results.length },
+          );
+          break;
+        }
+
         reportProgress(
           "pair_retry",
           `Distance ${Math.round(distanceMeters * 100)} cm pair attempt ${pairAttempt} missed target, retrying the forward/reverse pair.`,
@@ -593,6 +608,25 @@ export class DriveLineController {
   }
 
   private async onPoseUpdate(pose: Pose): Promise<void> {
+    if (this.poseUpdateInFlight) return;
+    if (
+      this.status !== "driving" ||
+      this.driveStartPosition === null ||
+      this.driveTargetPosition === null ||
+      this.driveLineStart === null ||
+      this.driveLineEnd === null
+    ) {
+      return;
+    }
+    this.poseUpdateInFlight = true;
+    try {
+      await this.onPoseUpdateInner(pose);
+    } finally {
+      this.poseUpdateInFlight = false;
+    }
+  }
+
+  private async onPoseUpdateInner(pose: Pose): Promise<void> {
     if (
       this.status !== "driving" ||
       this.driveStartPosition === null ||
@@ -829,8 +863,7 @@ export class DriveLineController {
       return;
     }
 
-    const rawCurvature = (2 * lookaheadFrame.y) / (lookaheadDistanceMeters * lookaheadDistanceMeters);
-    const curvature = rawCurvature;
+    const curvature = (2 * lookaheadFrame.y) / (lookaheadDistanceMeters * lookaheadDistanceMeters);
     const targetLinearSpeedMps = this.calculateTargetLinearSpeedMps(remainingAlongTrackDistance, curvature);
     const signedLinearSpeedMps = targetLinearSpeedMps * this.driveDirectionSign;
     const angularSpeedRadPerSec = targetLinearSpeedMps * curvature;
@@ -1062,7 +1095,15 @@ export class DriveLineController {
           brakeDistanceUsed: brakeDistance,
         });
 
-        if (this.driveStartPoseQuality === "gnss" && finalPose.quality === "gnss") {
+        // Only calibrate when both poses are GNSS-quality and the drive was
+        // substantially straight (avg CTE < 3 cm), so encoder ticks reflect
+        // path length ≈ displacement and we don't underestimate metersPerTick.
+        const avgCteForCalibration = unwrapMeters(avgCte);
+        if (
+          this.driveStartPoseQuality === "gnss" &&
+          finalPose.quality === "gnss" &&
+          Math.abs(avgCteForCalibration) < 0.03
+        ) {
           const actualDistance = distanceBetween(this.driveStartPosition, finalPosition);
           if (this.totalEncoderTicks > 0) {
             const measuredMetersPerTick = unwrapMeters(actualDistance) / this.totalEncoderTicks;
@@ -1072,6 +1113,7 @@ export class DriveLineController {
             this.logger.info("drive.line.encoder_calibrated", {
               actualDistance: unwrapMeters(actualDistance),
               encoderTicks: this.totalEncoderTicks,
+              avgCteMeters: avgCteForCalibration,
               newCalibration,
             });
           }
@@ -1233,32 +1275,14 @@ export class DriveLineController {
   }
 
   private beginMotorOperation(): void {
-    if (this.motorOperationActive) {
-      return;
-    }
-
+    if (this.motorOperationActive) return;
     this.motorOperationActive = true;
-    const beginMotorOperation = (this.sensorController as any).beginMotorOperation;
-    if (typeof beginMotorOperation === "function") {
-      beginMotorOperation.call(this.sensorController);
-    }
+    this.sensorController.beginMotorOperation();
   }
 
   private async endMotorOperation(): Promise<void> {
-    if (!this.motorOperationActive) {
-      return;
-    }
-
+    if (!this.motorOperationActive) return;
     this.motorOperationActive = false;
-    const endMotorOperation = (this.sensorController as any).endMotorOperation;
-    if (typeof endMotorOperation === "function") {
-      await endMotorOperation.call(this.sensorController);
-      return;
-    }
-
-    const stopMotors = (this.sensorController as any).stopMotors;
-    if (typeof stopMotors === "function") {
-      await stopMotors.call(this.sensorController);
-    }
+    await this.sensorController.endMotorOperation();
   }
 }

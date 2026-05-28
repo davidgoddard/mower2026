@@ -675,18 +675,12 @@ export class SensorController extends EventEmitter {
         ? null
         : Math.max(0, sample.timestampMillis - this.previousImuSampleMillis);
       const headingBeforeDeg = unwrapInternalHeading(this.imuHeading);
-      const computedPitchDeg = Math.atan2(
-        -(acceleration.xMetersPerSecondSquared / 9.80665),
-        Math.sqrt(
-          (acceleration.yMetersPerSecondSquared * acceleration.yMetersPerSecondSquared +
-            acceleration.zMetersPerSecondSquared * acceleration.zMetersPerSecondSquared) /
-            (9.80665 * 9.80665),
-        ),
-      ) * (180 / Math.PI);
-      const computedRollDeg = Math.atan2(
-        acceleration.yMetersPerSecondSquared / 9.80665,
-        acceleration.zMetersPerSecondSquared / 9.80665,
-      ) * (180 / Math.PI);
+      // Gravity terms cancel inside atan2 ratios so we work directly in m/s².
+      const ax = acceleration.xMetersPerSecondSquared;
+      const ay = acceleration.yMetersPerSecondSquared;
+      const az = acceleration.zMetersPerSecondSquared;
+      const computedPitchDeg = Math.atan2(-ax, Math.sqrt(ay * ay + az * az)) * (180 / Math.PI);
+      const computedRollDeg  = Math.atan2(ay, az) * (180 / Math.PI);
       const pitchDeg = sample.pitchDeg ?? computedPitchDeg;
       const rollDeg = sample.rollDeg ?? computedRollDeg;
       const rawYawRateDegPerSec = angularVelocity.zDegreesPerSecond;
@@ -846,9 +840,10 @@ export class SensorController extends EventEmitter {
   private async pollMotors(): Promise<void> {
     try {
       const sample = await this.gateway.readMotorFeedback();
-      const metersPerTick = this.poseCalibration?.getEncoderCalibration() ?? ENCODER_METERS_PER_TICK_DEFAULT;
-      const wheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.leftEncoderDelta, metersPerTick);
-      const rightWheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.rightEncoderDelta, metersPerTick);
+      const leftMetersPerTick  = this.poseCalibration?.getLeftEncoderMetersPerTick()  ?? ENCODER_METERS_PER_TICK_DEFAULT;
+      const rightMetersPerTick = this.poseCalibration?.getRightEncoderMetersPerTick() ?? ENCODER_METERS_PER_TICK_DEFAULT;
+      const wheelSpeed      = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.leftEncoderDelta,  leftMetersPerTick);
+      const rightWheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.rightEncoderDelta, rightMetersPerTick);
       this.previousMotorFeedbackTimestampMillis = sample.timestampMillis;
       const current = this.primitivesStore.snapshot().motors;
       this.primitivesStore.update({

@@ -1,11 +1,19 @@
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
-import { ENCODER_METERS_PER_TICK_DEFAULT, POSE_CALIBRATION_PATH } from "../constants.js";
+import {
+  ENCODER_METERS_PER_TICK_DEFAULT,
+  POSE_CALIBRATION_PATH,
+  WHEEL_BASE_METERS_DEFAULT,
+} from "../constants.js";
 import { readJsonFile, writeJsonFile } from "./jsonFileStore.js";
 
 export interface PoseCalibrationParameters {
   version: number;
+  /** Shared fallback used when per-wheel values are absent */
   encoderMetersPerTick: number;
+  leftEncoderMetersPerTick: number;
+  rightEncoderMetersPerTick: number;
+  wheelbaseMeters: number;
   updatedAt: string;
 }
 
@@ -17,6 +25,9 @@ export interface PoseCalibrationOptions {
 interface LegacyPoseCalibrationParameters {
   version?: unknown;
   encoderMetersPerTick?: unknown;
+  leftEncoderMetersPerTick?: unknown;
+  rightEncoderMetersPerTick?: unknown;
+  wheelbaseMeters?: unknown;
   updatedAt?: unknown;
 }
 
@@ -38,6 +49,9 @@ export class PoseCalibration {
       this.logger.info("pose.calibration.loaded", {
         path: this.parametersPath,
         encoderMetersPerTick: this.parameters.encoderMetersPerTick,
+        leftEncoderMetersPerTick: this.parameters.leftEncoderMetersPerTick,
+        rightEncoderMetersPerTick: this.parameters.rightEncoderMetersPerTick,
+        wheelbaseMeters: this.parameters.wheelbaseMeters,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -70,12 +84,37 @@ export class PoseCalibration {
     }
   }
 
+  /** Shared scalar — used by callers that don't distinguish left/right */
   getEncoderCalibration(): number {
     return this.parameters.encoderMetersPerTick;
   }
 
+  getLeftEncoderMetersPerTick(): number {
+    return this.parameters.leftEncoderMetersPerTick;
+  }
+
+  getRightEncoderMetersPerTick(): number {
+    return this.parameters.rightEncoderMetersPerTick;
+  }
+
+  getWheelbaseMeters(): number {
+    return this.parameters.wheelbaseMeters;
+  }
+
   setEncoderCalibration(metersPerTick: number): void {
+    // Shared setter intentionally overwrites per-wheel values.
+    // If per-wheel asymmetric calibration matters, use setPerWheelCalibration instead.
     this.parameters.encoderMetersPerTick = metersPerTick;
+    this.parameters.leftEncoderMetersPerTick = metersPerTick;
+    this.parameters.rightEncoderMetersPerTick = metersPerTick;
+  }
+
+  setPerWheelCalibration(leftMetersPerTick: number, rightMetersPerTick: number, wheelbaseMeters: number): void {
+    this.parameters.leftEncoderMetersPerTick = leftMetersPerTick;
+    this.parameters.rightEncoderMetersPerTick = rightMetersPerTick;
+    this.parameters.wheelbaseMeters = wheelbaseMeters;
+    // shared scalar = average
+    this.parameters.encoderMetersPerTick = (leftMetersPerTick + rightMetersPerTick) / 2;
   }
 
   getParameters(): PoseCalibrationParameters {
@@ -87,6 +126,7 @@ export class PoseCalibration {
     await this.saveParameters();
     this.logger.info("pose.calibration.reset", {
       encoderMetersPerTick: this.parameters.encoderMetersPerTick,
+      wheelbaseMeters: this.parameters.wheelbaseMeters,
     });
   }
 
@@ -96,9 +136,13 @@ export class PoseCalibration {
     }
 
     const legacy = raw as LegacyPoseCalibrationParameters;
+    const shared = this.readNumber(legacy.encoderMetersPerTick, ENCODER_METERS_PER_TICK_DEFAULT);
     return {
       version: this.readNumber(legacy.version, 1),
-      encoderMetersPerTick: this.readNumber(legacy.encoderMetersPerTick, ENCODER_METERS_PER_TICK_DEFAULT),
+      encoderMetersPerTick: shared,
+      leftEncoderMetersPerTick: this.readNumber(legacy.leftEncoderMetersPerTick, shared),
+      rightEncoderMetersPerTick: this.readNumber(legacy.rightEncoderMetersPerTick, shared),
+      wheelbaseMeters: this.readNumber(legacy.wheelbaseMeters, WHEEL_BASE_METERS_DEFAULT),
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };
   }
@@ -107,6 +151,9 @@ export class PoseCalibration {
     return {
       version: 1,
       encoderMetersPerTick: ENCODER_METERS_PER_TICK_DEFAULT,
+      leftEncoderMetersPerTick: ENCODER_METERS_PER_TICK_DEFAULT,
+      rightEncoderMetersPerTick: ENCODER_METERS_PER_TICK_DEFAULT,
+      wheelbaseMeters: WHEEL_BASE_METERS_DEFAULT,
       updatedAt: new Date().toISOString(),
     };
   }
