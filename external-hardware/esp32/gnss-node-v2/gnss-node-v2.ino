@@ -79,6 +79,8 @@ static uint32_t g_lastRtcmMillis = 0;
 static uint32_t g_lastRtcmLedPulseMillis = 0;
 static uint32_t g_totalRtcmMessagesVerified = 0;
 static uint32_t g_totalRtcmMessagesRejected = 0;
+static uint32_t g_totalRtcm1006Messages = 0;
+static uint32_t g_lastRtcm1006Millis = 0;
 
 // ===== LED status =====
 enum LedQualityState : uint8_t {
@@ -186,9 +188,17 @@ ParsedPvtsln g_latestPvtsln = { false, 0, FIX_NONE, 0.0, 0.0, 99.0f, 0.0f, false
 ParsedRectime g_latestRectime = { false, false, 0 };
 ParsedUniheading g_latestUniheading = { false, false, 0, 0.0f, 0.0f, 0.0f, false };
 
-bool g_haveDynamicOrigin = false;
+enum OriginSource : uint8_t {
+  ORIGIN_NONE = 0,
+  ORIGIN_CONFIG = 1,
+  ORIGIN_RTCM1006 = 2,
+  ORIGIN_DYNAMIC = 3,
+};
+
+OriginSource g_originSource = ORIGIN_NONE;
 double g_originLatitudeDegrees = 0.0;
 double g_originLongitudeDegrees = 0.0;
+double g_originHeightMeters = 0.0;
 
 uint16_t g_lastRequestSequence = 0;
 uint8_t g_txFrame[MAX_FRAME_SIZE];
@@ -418,6 +428,20 @@ const char *logVerificationLabel() {
   return "partial";
 }
 
+const char *originSourceLabel() {
+  switch (g_originSource) {
+    case ORIGIN_CONFIG:
+      return "config";
+    case ORIGIN_RTCM1006:
+      return "rtcm1006";
+    case ORIGIN_DYNAMIC:
+      return "dynamic";
+    case ORIGIN_NONE:
+    default:
+      return "none";
+  }
+}
+
 void printDebugStatus() {
   const uint32_t nowMillis = millis();
   if ((nowMillis - g_lastDebugPrintMillis) < 1000u) {
@@ -429,6 +453,7 @@ void printDebugStatus() {
   const uint32_t pvtslnaAgeMillis = g_latestPvtsln.valid ? nowMillis - g_latestPvtsln.localMillis : 0xFFFFFFFFu;
   const uint32_t uniheadingAgeMillis = g_latestUniheading.valid ? nowMillis - g_latestUniheading.localMillis : 0xFFFFFFFFu;
   const uint32_t rtcmAgeMillis = g_lastRtcmMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastRtcmMillis;
+  const uint32_t rtcm1006AgeMillis = g_lastRtcm1006Millis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastRtcm1006Millis;
   const uint32_t uniloglistAgeMillis = g_lastUniloglistMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastUniloglistMillis;
   const uint32_t deviceReadyAgeMillis = g_lastDeviceReadyMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastDeviceReadyMillis;
 
@@ -481,6 +506,23 @@ void printDebugStatus() {
   } else {
     Serial.print(rtcmAgeMillis);
   }
+  Serial.print(" rtcm1006=");
+  Serial.print(g_totalRtcm1006Messages);
+  Serial.print(" rtcm1006AgeMs=");
+  if (rtcm1006AgeMillis == 0xFFFFFFFFu) {
+    Serial.print("none");
+  } else {
+    Serial.print(rtcm1006AgeMillis);
+  }
+  Serial.print(" origin=");
+  Serial.print(originSourceLabel());
+  Serial.print("(");
+  Serial.print(g_originLatitudeDegrees, 8);
+  Serial.print(",");
+  Serial.print(g_originLongitudeDegrees, 8);
+  Serial.print(",");
+  Serial.print(g_originHeightMeters, 3);
+  Serial.print(")");
   Serial.print(" uniloglistAgeMs=");
   if (uniloglistAgeMillis == 0xFFFFFFFFu) {
     Serial.print("none");
@@ -678,26 +720,28 @@ void updateIndicatorLeds() {
 }
 
 void ensureOriginFromCurrentFix() {
-  if (g_haveDynamicOrigin) {
+  if (g_originSource != ORIGIN_NONE) {
     return;
   }
   if (BASE_LATITUDE_DEGREES != 0.0 || BASE_LONGITUDE_DEGREES != 0.0) {
     g_originLatitudeDegrees = BASE_LATITUDE_DEGREES;
     g_originLongitudeDegrees = BASE_LONGITUDE_DEGREES;
-    g_haveDynamicOrigin = true;
+    g_originHeightMeters = 0.0;
+    g_originSource = ORIGIN_CONFIG;
     return;
   }
   if (ALLOW_DYNAMIC_ORIGIN_IF_BASE_IS_ZERO && g_latestPvtsln.valid && g_latestPvtsln.fixType != FIX_NONE) {
     g_originLatitudeDegrees = g_latestPvtsln.latitudeDegrees;
     g_originLongitudeDegrees = g_latestPvtsln.longitudeDegrees;
-    g_haveDynamicOrigin = true;
+    g_originHeightMeters = 0.0;
+    g_originSource = ORIGIN_DYNAMIC;
   }
 }
 
 void localXYFromLatLon(double latitudeDegrees, double longitudeDegrees, int32_t &xMillimeters, int32_t &yMillimeters) {
   ensureOriginFromCurrentFix();
 
-  if (!g_haveDynamicOrigin) {
+  if (g_originSource == ORIGIN_NONE) {
     xMillimeters = 0;
     yMillimeters = 0;
     return;
@@ -712,8 +756,146 @@ void localXYFromLatLon(double latitudeDegrees, double longitudeDegrees, int32_t 
   double northMeters = dLat * earthRadiusMeters;
   double eastMeters = dLon * earthRadiusMeters * cos(originLatRad);
 
-  xMillimeters = static_cast<int32_t>(eastMeters * 1000.0);
-  yMillimeters = static_cast<int32_t>(northMeters * 1000.0);
+  double eastMillimeters = eastMeters * 1000.0;
+  double northMillimeters = northMeters * 1000.0;
+  if (
+    !isfinite(eastMillimeters) ||
+    !isfinite(northMillimeters) ||
+    eastMillimeters < static_cast<double>(INT32_MIN) ||
+    eastMillimeters >= static_cast<double>(INT32_MAX) ||
+    northMillimeters < static_cast<double>(INT32_MIN) ||
+    northMillimeters >= static_cast<double>(INT32_MAX)
+  ) {
+    xMillimeters = INT32_MAX;
+    yMillimeters = INT32_MAX;
+    return;
+  }
+
+  xMillimeters = static_cast<int32_t>(eastMillimeters);
+  yMillimeters = static_cast<int32_t>(northMillimeters);
+}
+
+uint64_t readRtcmBits(const uint8_t *payload, size_t bitOffset, size_t bitCount) {
+  uint64_t value = 0;
+  for (size_t index = 0; index < bitCount; index += 1) {
+    const size_t absoluteBit = bitOffset + index;
+    const uint8_t byteValue = payload[absoluteBit / 8];
+    const uint8_t bitValue = (byteValue >> (7 - (absoluteBit % 8))) & 0x01;
+    value = (value << 1) | bitValue;
+  }
+  return value;
+}
+
+int64_t readRtcmSignedBits(const uint8_t *payload, size_t bitOffset, size_t bitCount) {
+  uint64_t rawValue = readRtcmBits(payload, bitOffset, bitCount);
+  const uint64_t signBit = 1ULL << (bitCount - 1);
+  if ((rawValue & signBit) == 0) {
+    return static_cast<int64_t>(rawValue);
+  }
+  const uint64_t magnitude = (1ULL << bitCount) - rawValue;
+  return -static_cast<int64_t>(magnitude);
+}
+
+bool ecefToGeodetic(
+  double xMeters,
+  double yMeters,
+  double zMeters,
+  double &latitudeDegrees,
+  double &longitudeDegrees,
+  double &heightMeters
+) {
+  const double semiMajorAxisMeters = 6378137.0;
+  const double flattening = 1.0 / 298.257223563;
+  const double eccentricitySquared = flattening * (2.0 - flattening);
+  const double radToDeg = 180.0 / 3.14159265358979323846;
+
+  const double horizontalMeters = sqrt((xMeters * xMeters) + (yMeters * yMeters));
+  if (!isfinite(horizontalMeters) || horizontalMeters <= 0.0) {
+    return false;
+  }
+
+  double latitudeRadians = atan2(zMeters, horizontalMeters * (1.0 - eccentricitySquared));
+  const double longitudeRadians = atan2(yMeters, xMeters);
+  double height = 0.0;
+
+  for (uint8_t iteration = 0; iteration < 8; iteration += 1) {
+    const double sinLatitude = sin(latitudeRadians);
+    const double normalRadius =
+      semiMajorAxisMeters / sqrt(1.0 - (eccentricitySquared * sinLatitude * sinLatitude));
+    height = (horizontalMeters / cos(latitudeRadians)) - normalRadius;
+    latitudeRadians =
+      atan2(zMeters, horizontalMeters * (1.0 - (eccentricitySquared * normalRadius / (normalRadius + height))));
+  }
+
+  latitudeDegrees = latitudeRadians * radToDeg;
+  longitudeDegrees = longitudeRadians * radToDeg;
+  heightMeters = height;
+
+  return
+    isfinite(latitudeDegrees) &&
+    isfinite(longitudeDegrees) &&
+    isfinite(heightMeters) &&
+    latitudeDegrees >= -90.0 &&
+    latitudeDegrees <= 90.0 &&
+    longitudeDegrees >= -180.0 &&
+    longitudeDegrees <= 180.0;
+}
+
+bool noteRtcm1006BasePosition(const uint8_t *payload, int payloadLength) {
+  const int requiredBits = 12 + 12 + 6 + 1 + 1 + 1 + 1 + 38 + 1 + 1 + 38 + 2 + 38 + 16;
+  if (payloadLength * 8 < requiredBits) {
+    return false;
+  }
+
+  const uint16_t messageType = static_cast<uint16_t>(readRtcmBits(payload, 0, 12));
+  if (messageType != 1006) {
+    return false;
+  }
+
+  size_t bitOffset = 12 + 12 + 6 + 1 + 1 + 1 + 1;
+  const int64_t ecefXRaw = readRtcmSignedBits(payload, bitOffset, 38);
+  bitOffset += 38;
+  bitOffset += 1 + 1;
+  const int64_t ecefYRaw = readRtcmSignedBits(payload, bitOffset, 38);
+  bitOffset += 38;
+  bitOffset += 2;
+  const int64_t ecefZRaw = readRtcmSignedBits(payload, bitOffset, 38);
+  bitOffset += 38;
+  const uint16_t antennaHeightRaw = static_cast<uint16_t>(readRtcmBits(payload, bitOffset, 16));
+
+  const double ecefX = static_cast<double>(ecefXRaw) * 0.0001;
+  const double ecefY = static_cast<double>(ecefYRaw) * 0.0001;
+  const double ecefZ = static_cast<double>(ecefZRaw) * 0.0001;
+
+  double latitudeDegrees = 0.0;
+  double longitudeDegrees = 0.0;
+  double heightMeters = 0.0;
+  if (!ecefToGeodetic(ecefX, ecefY, ecefZ, latitudeDegrees, longitudeDegrees, heightMeters)) {
+    return false;
+  }
+
+  if (BASE_LATITUDE_DEGREES == 0.0 && BASE_LONGITUDE_DEGREES == 0.0) {
+    g_originLatitudeDegrees = latitudeDegrees;
+    g_originLongitudeDegrees = longitudeDegrees;
+    g_originHeightMeters = heightMeters;
+    g_originSource = ORIGIN_RTCM1006;
+  }
+
+  g_totalRtcm1006Messages += 1;
+  g_lastRtcm1006Millis = millis();
+
+  Serial.print("[RTCM1006] base=");
+  Serial.print(latitudeDegrees, 10);
+  Serial.print(",");
+  Serial.print(longitudeDegrees, 10);
+  Serial.print(",");
+  Serial.print(heightMeters, 3);
+  Serial.print(" antennaHeight=");
+  Serial.print(static_cast<double>(antennaHeightRaw) * 0.0001, 4);
+  Serial.print(" origin=");
+  Serial.println(originSourceLabel());
+
+  return true;
 }
 
 // ===== RTCM relay =====
@@ -762,6 +944,7 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
       const uint32_t actualCrc = crc24q(g_rtcmBuffer, totalLength - 3);
 
       if (actualCrc == expectedCrc) {
+        noteRtcm1006BasePosition(&g_rtcmBuffer[3], payloadLength);
         UM982.write(g_rtcmBuffer, totalLength);
         g_lastRtcmMillis = millis();
         g_lastRtcmLedPulseMillis = g_lastRtcmMillis;

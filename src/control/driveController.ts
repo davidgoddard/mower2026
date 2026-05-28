@@ -184,6 +184,9 @@ export class DriveController {
           targetPosition: request.targetPosition,
           learningEnabled: request.learningEnabled,
           driveDirectionSign: 1,
+          timeoutMinimumMs: request.timeoutMinimumMs,
+          disableTimeout: request.disableTimeout,
+          maxCrossTrackErrorMeters: request.maxCrossTrackErrorMeters,
         });
 
         if (lineResult.status === "success") {

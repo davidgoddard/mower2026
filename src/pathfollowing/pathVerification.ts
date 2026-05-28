@@ -376,29 +376,16 @@ export function buildVerificationApproachPlan(
     return null;
   }
 
-  let bestPlan: VerificationApproachCandidate | null = null;
-
-  for (let index = 0; index < normalized.length; index += 1) {
-    const forwardPlan = buildApproachPlanForDirection(normalized, pose, index, "forward", parameters);
-    const reversePlan = buildApproachPlanForDirection(normalized, pose, index, "reverse", parameters);
-
-    for (const candidate of [forwardPlan, reversePlan]) {
-      if (
-        bestPlan === null ||
-        candidate.approachAlignmentErrorDeg < bestPlan.approachAlignmentErrorDeg - 1e-6 ||
-        (
-          Math.abs(candidate.approachAlignmentErrorDeg - bestPlan.approachAlignmentErrorDeg) <= 1e-6 &&
-          candidate.distanceToJoinMeters < bestPlan.distanceToJoinMeters
-        )
-      ) {
-        bestPlan = candidate;
-      }
-    }
-  }
-
-  if (bestPlan === null) {
+  const nearestIndex = findNearestPathPointIndex(normalized, pose);
+  if (nearestIndex < 0) {
     return null;
   }
+
+  const forwardPlan = buildApproachPlanForDirection(normalized, pose, nearestIndex, "forward", parameters);
+  const reversePlan = buildApproachPlanForDirection(normalized, pose, nearestIndex, "reverse", parameters);
+  const bestPlan = forwardPlan.approachAlignmentErrorDeg <= reversePlan.approachAlignmentErrorDeg
+    ? forwardPlan
+    : reversePlan;
 
   const { approachAlignmentErrorDeg: _unused, ...plan } = bestPlan;
   return plan;

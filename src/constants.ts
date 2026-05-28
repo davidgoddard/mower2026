@@ -30,6 +30,13 @@ export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 5;
 export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
 
 /**
+ * Manual drive keepalive interval in milliseconds.
+ * Held non-zero wheel commands are re-sent before the motor node's command
+ * watchdog timeout so a steady joystick input does not expire on the ESP32.
+ */
+export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
+
+/**
  * Default IMU calibration sample count (design decision for accuracy vs time)
  */
 export const IMU_DEFAULT_CALIBRATION_SAMPLES = 240;
@@ -103,10 +110,25 @@ export const MANUAL_SPEED_DEADBAND = 0.05;
 export const MANUAL_TURN_DEADBAND = 0.05;
 
 /**
+ * Manual drive wheel-output quantization step.
+ * This coalesces tiny analogue joystick jitter into one stable command while
+ * preserving meaningful operator changes.
+ */
+export const MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT = 0.02;
+
+/**
  * Motor output deadband
  * Output commands at or below this magnitude are treated as zero.
  */
 export const MOTOR_OUTPUT_DEADBAND_PERCENT = 0.1;
+
+/**
+ * Minimum non-zero motor output.
+ * Any active motor command below this magnitude is raised to this value, and
+ * one-wheel commands are converted to a minimum arc command before reaching
+ * hardware.
+ */
+export const MOTOR_MIN_ACTIVE_OUTPUT_PERCENT = 0.3;
 
 /**
  * Manual drive threshold for entering spin mode

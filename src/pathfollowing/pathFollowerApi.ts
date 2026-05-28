@@ -14,6 +14,8 @@ export interface PathPoint {
   readonly capturedAt: number;
 }
 
+export type PathDriveAlgorithm = "pure_pursuit" | "segmented_drive";
+
 export interface StoredPath {
   readonly name: string;
   readonly points: PathPoint[];
@@ -21,6 +23,7 @@ export interface StoredPath {
   readonly metadata: {
     totalDistance: number;
     pointCount: number;
+    driveAlgorithm: PathDriveAlgorithm;
   };
 }
 
@@ -111,6 +114,8 @@ export interface IPathFollower {
  */
 export interface PathRecorderOptions {
   distanceThreshold: number; // minimum distance to record next point (meters)
+  maxSegmentDistanceMeters?: number; // maximum plausible distance between consecutive recorded points
+  requireGnssQuality?: boolean; // when true, ignore dead-reckoning as well as unknown poses during boundary recording
   logger: LoggerScope;
 }
 
@@ -150,7 +155,7 @@ export interface IPathStore {
   /**
    * Save a path to persistent storage
    */
-  savePath(name: string, points: PathPoint[]): Promise<void>;
+  savePath(name: string, points: PathPoint[], options?: { driveAlgorithm?: PathDriveAlgorithm }): Promise<void>;
 
   /**
    * Load a path from storage

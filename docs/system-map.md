@@ -62,6 +62,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/turnController.ts`: turn stop checks and stop handling.
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/purePursuitFollower.ts`: path-following stop checks and stop handling.
+- `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
 
 ## Pose Fusion
 - `src/sensing/poseFusion.ts`: fused pose estimate
@@ -184,12 +185,14 @@ This document maps problem domains to candidate files removing the need for Code
   - `IPathFollower`: interface for path following implementations (Pure Pursuit, Arc Interpolation, etc.)
   - `IPathRecorder`: interface for recording paths during manual driving
   - `IPathStore`: interface for persistent path storage
+  - `PathDriveAlgorithm`: persisted per-path drive mode, currently `pure_pursuit` or `segmented_drive`
   - API methods: `followPath()`, `followPathPoints()`, `resumeFromWaypoint()`, `retraceToWaypoint()`, `stop()`
   - State: current path, waypoint index, distance to target, cross-track error
 - `src/pathfollowing/purePursuitFollower.ts`: **PURE PURSUIT ALGORITHM IMPLEMENTATION**
   - adaptive lookahead distance loaded from path-following config and adjusted by speed/path curvature
   - smooth arc following using differential wheel speeds
-  - automatic pivot turns for tight radius (<0.5m) - one wheel stationary
+  - automatic in-place turns for tight radius (<0.5m); one-wheel stationary pivots are not emitted
+  - moving wheel commands are kept at or above the 30% minimum active motor output, with tighter arcs converted to turn-on-the-spot commands
   - waypoint progress is monotonic during a run so closed-loop verification stops at the duplicated join point instead of snapping back to the first copy and starting another lap
   - 20Hz control loop (configurable)
   - curvature calculation: κ = 2 * sin(α) / L (classic Pure Pursuit formula)
@@ -198,18 +201,34 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
   - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
   - in-memory caching for loaded paths
-  - path metadata: total distance, point count, creation timestamp
+  - path metadata: total distance, point count, creation timestamp, and selected drive algorithm
+  - legacy path metadata without a drive algorithm is normalized to `pure_pursuit` on load
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
+  - records fused GNSS and dead-reckoning poses, ignores unknown-quality poses, and skips implausible segment jumps while keeping skip counts in the stop summary
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification starts at the nearest point and loops back to the join point
+  - obstacle path verification chooses the nearest recorded point first, then chooses forward/reverse by tangent alignment at that point
   - verification approach stages to the outer edge of the join point from the mower's current position, then uses an on-the-spot turn if the arrival heading needs to be corrected
   - closed obstacle loops are expanded outward with inserted outward midpoints so recorded waypoints are treated as the inner safety limit rather than a smoothed centreline to cut through
   - mowing area perimeter helpers join the nearest recorded point directly, preserve the exact perimeter geometry without obstacle offsetting, and choose the follow direction from the mower's current heading
   - path safety distances are supplied from `PathFollowingConfig` rather than hard-coded in this helper
+- `src/pathfollowing/segmentedBoundaryExecutor.ts`: high-precision boundary retrace mode
+  - simplifies manually recorded near-linear or gentle-arc wiggles within the configured tolerance
+  - resamples long simplified spans into bounded segment-drive targets
+  - re-anchors target execution to the nearest target at runtime and skips targets already under the current pose
+  - applies a minimum timeout to short segment drives so ramp-up and pose updates have time to complete
+  - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
 - `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
   - normalizes the requested mowing axis to 0-180 degrees because opposite directions produce the same strip layout
   - clips parallel strips to the selected mowing area perimeter using the requested strip spacing, defaulting to 30cm spacing for the 40cm blade
+  - selects the nearest obstacle-clear line-of-sight area perimeter entry point for mow-start entry planning
+  - can re-anchor strip traversal around a preferred perimeter start point so mowing resumes near the entry location and still covers every strip
+  - sequences strips in locked normal-axis order and marks per-strip traversal direction for boustrophedon preview and execution
+  - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
   - returns logical strip segments for canvas preview and future execution planning
+- `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
+  - approaches the planned line-of-sight area perimeter standoff point before strip mowing
+  - traces the area perimeter first and marks it traced before continuing into strips
 - `src/server/manualDrivePage.ts`: combined Drive & Paths UI
   - live position map at the top of the page
   - manual-drive telemetry cards
@@ -217,18 +236,22 @@ This document maps problem domains to candidate files removing the need for Code
   - mowing area perimeter recording controls and stored perimeter management
   - mowing strip preview controls for selecting an area, setting strip width, and setting the strip angle with either a slider or a canvas drag gesture
   - drive and verify actions for stored paths
-  - canvas map auto-scales across live position history, obstacle paths, and mowing area perimeters
+  - canvas map auto-scales across live position history, obstacle paths, and mowing area perimeters, with a minimum view range and stationary jitter coalescing so centimetre-scale GNSS drift does not dominate the display
   - canvas map overlays generated mowing strips and obstacle-aware connectors for the selected area
+  - stored path and area-perimeter detail loads are skipped individually if invalid so one bad/missing file does not suppress all overlays
   - prominent stop button for path following aborts
 - `src/server/pathTracingPage.ts`: legacy wrapper that serves the combined Drive & Paths page
 - Path tracing server behavior:
   - drive immediately line-follows the stored path from the current position
   - verify first executes a segment-style approach to about 10cm short of the nearest point on the stored path
   - verify then follows the rotated loop back to the join point
+  - stored obstacle paths and mowing area perimeters choose between pure pursuit and segmented drive using their persisted `driveAlgorithm`
+  - the Drive & Paths page exposes the per-path drive mode and saves changes through algorithm update endpoints
+  - drive and verify route handlers always claim their API paths; when runtime controllers are not initialized they return a 503 JSON error with a `missing` dependency list rather than falling through to `not_found`
   - mowing area perimeter drive starts path following from the nearest perimeter point in the direction closest to the mower's current heading
   - mowing area perimeter verify segment-drives to the nearest perimeter point, turns to align with the chosen path direction, then follows the perimeter
   - mowing plan preview clips parallel strip lines to the selected mowing area perimeter, excludes stored obstacle perimeters, and returns the strips/connectors without starting motion
-  - startup seeds `Test Area` and `Test Perimeter` if those names are not already stored, giving the canvas a review fixture for mowing strip previews
+  - startup does not seed review fixture paths; mowing previews use only operator-recorded area perimeters and obstacle paths
 - Path-following API endpoints:
   - `GET /api/path/list` - list stored paths for the page
   - `POST /api/path/record/start` - start recording a named path
@@ -237,6 +260,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `GET /api/path/record/status` - current recording point count
   - `POST /api/path/drive` - drive a stored path from the current position
   - `POST /api/path/verify` - join a stored path at the nearest point and loop back to that join point
+  - `POST /api/path/algorithm` - update a stored obstacle path drive algorithm
   - `POST /api/path/stop` - stop active path following
   - `POST /api/path/delete` - delete a stored path
   - `GET /api/area-perimeters` - list stored mowing area perimeters
@@ -247,6 +271,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `GET /api/area-perimeter/record/status` - current mowing area perimeter recording point count
   - `POST /api/area-perimeter/drive` - follow a stored mowing area perimeter from the nearest point and current-facing direction
   - `POST /api/area-perimeter/verify` - drive to the nearest mowing area perimeter point, align, and follow it
+  - `POST /api/area-perimeter/algorithm` - update a stored mowing area perimeter drive algorithm
   - `POST /api/area-perimeter/delete` - delete a stored mowing area perimeter
   - `POST /api/mowing-plan/preview` - generate a strip preview for a selected mowing area perimeter, heading, and strip spacing
   - subscribes to `poseUpdate` events from pose fusion
@@ -271,6 +296,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/gnss/gnssProtocol.ts`: GNSS sample contract used by runtime.
 - `src/gnss/gnssCodec.ts`: GNSS payload decoding (supports both 36-byte and 38-byte payload layouts).
 - `src/gnss/gnssNodeClient.ts`: GNSS request/response polling client over I2C framed protocol.
+- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover GNSS firmware; relays verified RTCM to the UM982, decodes RTCM 1006 base-position messages for the local origin when no fixed base is configured, converts rover lat/lon to local X/Y, and serves framed GNSS samples over I2C.
 - `src/motors/motorProtocol.ts`: motor command/feedback contracts.
 - `src/motors/motorCodec.ts`: wheel-speed command encoding and motor-feedback payload decoding.
 - `src/motors/motorMapping.ts`: app-facing forward-positive wheel convention mapping to/from raw motor node direction signs.
@@ -280,6 +306,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
 - `src/control/manualDriveCoordinator.ts`: manual-drive loop; maps controller input to motor commands.
   - arm/disarm mapping: `right-top` arms, `left-top` disarms and stops.
+  - coalesces tiny held-stick command jitter while refreshing held non-zero commands before the motor-node watchdog expires.
   - safety behavior: controller disconnect while armed triggers disarm + stop.
 - `src/protocols/commonProtocol.ts`: shared node/message identifiers and frame header shape.
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
@@ -291,9 +318,10 @@ This document maps problem domains to candidate files removing the need for Code
   - IMU yaw integration: projects the 3-axis gyro vector onto the gravity axis derived from pitch and roll, then uses `addRelativeAngle()` with `RelativeAngle` deltas from that tilt-compensated yaw rate and applies the persisted IMU yaw scale factor before updating the heading.
   - buffered IMU diagnostics: retains a short in-memory window of recent gyro integrations, snapshots that window when motor motion stops, and can expose a compact summary for turn debugging without per-sample file writes.
   - heading rebase readiness: exposes whether GNSS heading may safely rebase the IMU; rebasing is blocked while a motor command is active or the latest tilt-compensated yaw rate exceeds 1 deg/s.
-  - GNSS geometry correction: applies the configured body-frame offset to raw GNSS reference coordinates before exposing them to the rest of the runtime.
+  - GNSS geometry correction: applies the configured body-frame offset to raw GNSS reference coordinates using the stable IMU/fused heading before exposing them to the rest of the runtime.
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
+  - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
   - motor API: `setMotorWheelOutputs(...)` and `stopMotors()` command passthrough to hardware boundary; operation end disables motors after any in-operation zero-speed stop has been requested
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.

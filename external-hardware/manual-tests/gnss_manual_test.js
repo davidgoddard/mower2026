@@ -2,6 +2,7 @@
 // Requires the `i2c-bus` package on the Pi.
 
 import i2c from "i2c-bus";
+import { decodeGnssSample, gnssPayloadLength } from "../../dist/gnss/gnssCodec.js";
 
 const BUS_NUMBER = 1;
 const I2C_ADDRESS = 0x52;
@@ -10,7 +11,11 @@ const PROTOCOL_START_OF_FRAME = 0x4d;
 const PROTOCOL_VERSION = 0x01;
 const NODE_ID_GNSS = 0x10;
 const MESSAGE_TYPE_GNSS_SAMPLE = 0x01;
-const FRAME_LENGTH = 9 + 36 + 2;
+const FRAME_HEADER_SIZE = 9;
+const FRAME_CRC_SIZE = 2;
+const GNSS_PAYLOAD_LENGTH_V1 = 36;
+const VALID_PAYLOAD_LENGTHS = new Set([GNSS_PAYLOAD_LENGTH_V1, gnssPayloadLength()]);
+const FRAME_LENGTH = FRAME_HEADER_SIZE + Math.max(...VALID_PAYLOAD_LENGTHS) + FRAME_CRC_SIZE;
 const SAMPLE_INTERVAL_MS = 500;
 const MAX_FRAME_ATTEMPTS = 4;
 const RETRY_DELAY_MS = 60;
@@ -57,7 +62,7 @@ function decodeFrame(frame) {
     throw new Error(`bad message type: ${frame[3]}`);
   }
   const payloadLength = frame.readUInt16LE(7);
-  if (payloadLength !== 36) {
+  if (!VALID_PAYLOAD_LENGTHS.has(payloadLength)) {
     throw new Error(`bad payload length: ${payloadLength}`);
   }
   const crc = frame.readUInt16LE(9 + payloadLength);
@@ -72,47 +77,17 @@ function decodeFrame(frame) {
   };
 }
 
-function decodeGnssPayload(payload) {
-  const headingRaw = payload.readInt16LE(12);
-  const pitchRaw = payload.readInt16LE(14);
-  const speedRaw = payload.readUInt16LE(16);
-  const headingAccuracyRaw = payload.readUInt16LE(20);
-  return {
-    timestampMillis: payload.readUInt32LE(0),
-    xMeters: payload.readInt32LE(4) / 1000,
-    yMeters: payload.readInt32LE(8) / 1000,
-    headingDegrees: headingRaw === 0x7fff ? null : headingRaw / 100,
-    pitchDegrees: pitchRaw === 0x7fff ? null : pitchRaw / 100,
-    groundSpeedMetersPerSecond: speedRaw === 0xffff ? null : speedRaw / 1000,
-    positionAccuracyMeters: payload.readUInt16LE(18) / 1000,
-    headingAccuracyDegrees: headingAccuracyRaw === 0xffff ? null : headingAccuracyRaw / 100,
-    fixType: payload[22],
-    satellitesInUse: payload[23],
-    sampleAgeMillis: payload.readUInt16LE(24),
-    debug: {
-      receiverLineAgeMillis: payload.readUInt16LE(26),
-      pvtslnaAgeMillis: payload.readUInt16LE(28),
-      uniheadingAgeMillis: payload.readUInt16LE(30),
-      rtcmAgeMillis: payload.readUInt16LE(32),
-      logConfigMask: payload.readUInt8(34),
-    },
-  };
-}
-
 function optionalAge(value) {
-  return value === 0xffff ? null : value;
+  return value == null || value === 0xffff ? null : value;
 }
 
 function describeFixType(fixType) {
   switch (fixType) {
-    case 0:
-      return "none";
-    case 1:
-      return "single";
-    case 2:
-      return "float";
-    case 3:
-      return "fixed";
+    case "none":
+    case "single":
+    case "float":
+    case "fixed":
+      return fixType;
     default:
       return `unknown(${fixType})`;
   }
@@ -120,12 +95,13 @@ function describeFixType(fixType) {
 
 function classifySample(sample) {
   const notes = [];
+  const debug = sample.debug ?? {};
 
-  if (sample.fixType <= 1) {
+  if (sample.fixType === "none" || sample.fixType === "single") {
     notes.push("Indoor testing may legitimately show no fix or only single-point GNSS.");
   }
 
-  if (sample.headingDegrees == null) {
+  if (sample.headingDegrees === undefined) {
     notes.push("Missing heading is expected indoors or when dual-antenna heading is not currently usable.");
   }
 
@@ -133,11 +109,11 @@ function classifySample(sample) {
     notes.push(`GNSS sample age is high (${sample.sampleAgeMillis} ms).`);
   }
 
-  const receiverLineAgeMillis = optionalAge(sample.debug.receiverLineAgeMillis);
-  const pvtslnaAgeMillis = optionalAge(sample.debug.pvtslnaAgeMillis);
-  const uniheadingAgeMillis = optionalAge(sample.debug.uniheadingAgeMillis);
-  const rtcmAgeMillis = optionalAge(sample.debug.rtcmAgeMillis);
-  const logConfigMask = sample.debug.logConfigMask ?? 0;
+  const receiverLineAgeMillis = optionalAge(debug.receiverLineAgeMillis);
+  const pvtslnaAgeMillis = optionalAge(debug.pvtslnaAgeMillis);
+  const uniheadingAgeMillis = optionalAge(debug.uniheadingAgeMillis);
+  const rtcmAgeMillis = optionalAge(debug.rtcmAgeMillis);
+  const logConfigMask = debug.logConfigMask ?? 0;
 
   if (receiverLineAgeMillis == null) {
     notes.push("No receiver lines have been seen by the rover ESP.");
@@ -186,7 +162,7 @@ async function requestSample(bus, sequence) {
       const decoded = decodeFrame(response);
       return {
         flags: decoded.flags,
-        sample: decodeGnssPayload(decoded.payload),
+        sample: decodeGnssSample(decoded.payload),
       };
     } catch (error) {
       lastError = error;
@@ -211,6 +187,7 @@ async function main() {
       try {
         const result = await requestSample(bus, sequence++);
         const classification = classifySample(result.sample);
+        const debug = result.sample.debug ?? {};
         console.log({
           flags: result.flags,
           commsHealthy: classification.commsHealthy,
@@ -218,11 +195,11 @@ async function main() {
           sample: {
             ...result.sample,
             debug: {
-              receiverLineAgeMillis: optionalAge(result.sample.debug.receiverLineAgeMillis),
-              pvtslnaAgeMillis: optionalAge(result.sample.debug.pvtslnaAgeMillis),
-              uniheadingAgeMillis: optionalAge(result.sample.debug.uniheadingAgeMillis),
-              rtcmAgeMillis: optionalAge(result.sample.debug.rtcmAgeMillis),
-              logConfigMask: result.sample.debug.logConfigMask,
+              receiverLineAgeMillis: optionalAge(debug.receiverLineAgeMillis),
+              pvtslnaAgeMillis: optionalAge(debug.pvtslnaAgeMillis),
+              uniheadingAgeMillis: optionalAge(debug.uniheadingAgeMillis),
+              rtcmAgeMillis: optionalAge(debug.rtcmAgeMillis),
+              logConfigMask: debug.logConfigMask,
             },
           },
           notes: classification.notes,

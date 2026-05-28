@@ -1219,6 +1219,34 @@ describe("DriveLineController", () => {
     await drivePromise;
   });
 
+  it("turns on the spot instead of issuing one-wheel line-drive corrections", () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
+    const mockLearning = createMockLearningModel();
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    controller.driveDirectionSign = 1;
+    const forwardCommand = controller.enforceMinimumActiveArcCommands(0.8, 0, 1);
+    assert.equal(forwardCommand.leftCommand < 0, true);
+    assert.equal(forwardCommand.rightCommand > 0, true);
+    assert.equal(Math.abs(forwardCommand.leftCommand) >= 0.3, true);
+    assert.equal(Math.abs(forwardCommand.rightCommand) >= 0.3, true);
+
+    controller.driveDirectionSign = -1;
+    const reverseCommand = controller.enforceMinimumActiveArcCommands(-0.8, 0, 1);
+    assert.equal(reverseCommand.leftCommand > 0, true);
+    assert.equal(reverseCommand.rightCommand < 0, true);
+    assert.equal(Math.abs(reverseCommand.leftCommand) >= 0.3, true);
+    assert.equal(Math.abs(reverseCommand.rightCommand) >= 0.3, true);
+  });
+
   it("slows down as it approaches the target while staying on line", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();

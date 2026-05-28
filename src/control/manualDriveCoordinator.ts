@@ -4,14 +4,22 @@ import { HidGameController, HidGameControllerSnapshot } from "../controller/hidG
 import { SensorController } from "../sensing/sensorController.js";
 import { computeManualDriveDemand, normalizeManualTurnDemand } from "./manualDriveProfile.js";
 import { systemStop } from "./systemStop.js";
-import { MANUAL_DRIVE_LOOP_INTERVAL_MS, DRIVE_FULL_SPEED_COMMAND_DEFAULT } from "../constants.js";
+import {
+  DRIVE_FULL_SPEED_COMMAND_DEFAULT,
+  MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS,
+  MANUAL_DRIVE_LOOP_INTERVAL_MS,
+  MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT,
+} from "../constants.js";
 
 interface ManualDriveCoordinatorOptions {
   logger: SessionLogger;
   sensorController: SensorController;
   hidController: HidGameController;
   controlIntervalMs?: number;
+  commandRefreshIntervalMs?: number;
+  outputQuantizationPercent?: number;
   maxWheelOutputPercent?: number;
+  nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
 }
 
@@ -39,7 +47,10 @@ export class ManualDriveCoordinator {
   private readonly sensorController: SensorController;
   private readonly hidController: HidGameController;
   private readonly controlIntervalMs: number;
+  private readonly commandRefreshIntervalMs: number;
+  private readonly outputQuantizationPercent: number;
   private readonly maxWheelOutputPercent: number;
+  private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
 
   private running = false;
@@ -49,6 +60,7 @@ export class ManualDriveCoordinator {
   private drivingActive = false;
   private lastCommandedLeftWheelOutputPercent: number | null = null;
   private lastCommandedRightWheelOutputPercent: number | null = null;
+  private lastCommandSentMillis: number | null = null;
   private motorOperationActive = false;
 
   constructor(options: ManualDriveCoordinatorOptions) {
@@ -56,7 +68,10 @@ export class ManualDriveCoordinator {
     this.sensorController = options.sensorController;
     this.hidController = options.hidController;
     this.controlIntervalMs = options.controlIntervalMs ?? MANUAL_DRIVE_LOOP_INTERVAL_MS;
+    this.commandRefreshIntervalMs = options.commandRefreshIntervalMs ?? MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS;
+    this.outputQuantizationPercent = options.outputQuantizationPercent ?? MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT;
     this.maxWheelOutputPercent = options.maxWheelOutputPercent ?? DRIVE_FULL_SPEED_COMMAND_DEFAULT;
+    this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
   }
 
@@ -148,24 +163,14 @@ export class ManualDriveCoordinator {
             this.lastCommandedLeftWheelOutputPercent !== 0 ||
             this.lastCommandedRightWheelOutputPercent !== 0
           ) {
-            this.drivingActive = true;
-            this.lastCommandedLeftWheelOutputPercent = 0;
-            this.lastCommandedRightWheelOutputPercent = 0;
-            await this.sensorController.setMotorWheelOutputs(0, 0);
+            await this.sendManualWheelCommand(0, 0);
           }
         } else {
-          const left = demand.requestedLeftWheelOutputPercent;
-          const right = demand.requestedRightWheelOutputPercent;
-          const commandChanged =
-            !this.drivingActive ||
-            this.lastCommandedLeftWheelOutputPercent !== left ||
-            this.lastCommandedRightWheelOutputPercent !== right;
+          const left = this.quantizeWheelOutput(demand.requestedLeftWheelOutputPercent);
+          const right = this.quantizeWheelOutput(demand.requestedRightWheelOutputPercent);
 
-          if (commandChanged) {
-            this.drivingActive = true;
-            this.lastCommandedLeftWheelOutputPercent = left;
-            this.lastCommandedRightWheelOutputPercent = right;
-            await this.sensorController.setMotorWheelOutputs(left, right);
+          if (this.shouldSendManualWheelCommand(left, right)) {
+            await this.sendManualWheelCommand(left, right);
           }
         }
       } catch (error) {
@@ -175,6 +180,41 @@ export class ManualDriveCoordinator {
 
       await this.sleep(this.controlIntervalMs);
     }
+  }
+
+  private quantizeWheelOutput(outputPercent: number): number {
+    if (outputPercent === 0 || this.outputQuantizationPercent <= 0) {
+      return outputPercent;
+    }
+
+    const quantized = Math.round(outputPercent / this.outputQuantizationPercent) * this.outputQuantizationPercent;
+    const normalized = Math.max(-this.maxWheelOutputPercent, Math.min(this.maxWheelOutputPercent, quantized));
+    return Object.is(normalized, -0) ? 0 : Number(normalized.toFixed(4));
+  }
+
+  private shouldSendManualWheelCommand(left: number, right: number): boolean {
+    if (
+      !this.drivingActive ||
+      this.lastCommandedLeftWheelOutputPercent !== left ||
+      this.lastCommandedRightWheelOutputPercent !== right
+    ) {
+      return true;
+    }
+
+    const commandIsMoving = left !== 0 || right !== 0;
+    if (!commandIsMoving || this.lastCommandSentMillis === null) {
+      return false;
+    }
+
+    return this.nowMillis() - this.lastCommandSentMillis >= this.commandRefreshIntervalMs;
+  }
+
+  private async sendManualWheelCommand(left: number, right: number): Promise<void> {
+    this.drivingActive = true;
+    this.lastCommandedLeftWheelOutputPercent = left;
+    this.lastCommandedRightWheelOutputPercent = right;
+    this.lastCommandSentMillis = this.nowMillis();
+    await this.sensorController.setMotorWheelOutputs(left, right);
   }
 
   private beginMotorOperation(): void {
@@ -221,6 +261,7 @@ export class ManualDriveCoordinator {
     this.drivingActive = false;
     this.lastCommandedLeftWheelOutputPercent = null;
     this.lastCommandedRightWheelOutputPercent = null;
+    this.lastCommandSentMillis = null;
     try {
       await this.sensorController.stopMotors();
     } catch (error) {

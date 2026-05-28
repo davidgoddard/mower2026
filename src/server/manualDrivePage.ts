@@ -425,6 +425,25 @@ export function getManualDrivePageHtml(): string {
       gap: 0.5rem;
       flex-wrap: wrap;
       justify-content: flex-end;
+      align-items: center;
+    }
+
+    .path-algorithm {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+
+    .path-algorithm select {
+      padding: 0.35rem 0.5rem;
+      border: 1px solid var(--border-color);
+      border-radius: 0.375rem;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-size: 0.75rem;
     }
 
     .path-toolbar {
@@ -739,6 +758,36 @@ ${getAppDialogScript()}
       return JSON.stringify(String(value));
     }
 
+    function htmlAttribute(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    const DRIVE_ALGORITHM_LABELS = {
+      pure_pursuit: 'Pure pursuit',
+      segmented_drive: 'Segmented drive',
+    };
+
+    function pathDriveAlgorithm(path) {
+      return path.metadata?.driveAlgorithm === 'segmented_drive' ? 'segmented_drive' : 'pure_pursuit';
+    }
+
+    function renderDriveAlgorithmSelect(path, changeHandlerName) {
+      const selectedAlgorithm = pathDriveAlgorithm(path);
+      return \`
+        <label class="path-algorithm">
+          <span>Drive mode</span>
+          <select onchange="\${changeHandlerName}(\${htmlAttribute(jsString(path.name))}, this.value)">
+            <option value="pure_pursuit"\${selectedAlgorithm === 'pure_pursuit' ? ' selected' : ''}>Pure pursuit</option>
+            <option value="segmented_drive"\${selectedAlgorithm === 'segmented_drive' ? ' selected' : ''}>Segmented drive</option>
+          </select>
+        </label>
+      \`;
+    }
+
     function normalizeAxisHeading(headingDeg) {
       const normalized = ((Number(headingDeg) % 180) + 180) % 180;
       return Number.isFinite(normalized) ? normalized : 0;
@@ -773,6 +822,9 @@ ${getAppDialogScript()}
     // Position history tracking
     const positionHistory = [];
     const MAX_HISTORY_MS = 10 * 60 * 1000; // 10 minutes
+    const MAP_MIN_VIEW_RANGE_METERS = 5;
+    const MAP_STATIONARY_POINT_SPACING_METERS = 0.03;
+    const MAP_HISTORY_RESET_DISTANCE_METERS = 2.0;
     const canvas = $("mapCanvas");
     const ctx = canvas.getContext("2d");
 
@@ -820,6 +872,20 @@ ${getAppDialogScript()}
     const previewMowingPlanBtn = $("previewMowingPlanBtn");
 
     function addPositionToHistory(x, y, heading, timestamp) {
+      const previous = positionHistory[positionHistory.length - 1];
+      if (previous) {
+        const movementMeters = Math.hypot(x - previous.x, y - previous.y);
+        if (movementMeters > MAP_HISTORY_RESET_DISTANCE_METERS) {
+          positionHistory.length = 0;
+          positionHistory.push({ x, y, heading, timestamp });
+          return;
+        }
+        if (movementMeters < MAP_STATIONARY_POINT_SPACING_METERS) {
+          positionHistory[positionHistory.length - 1] = { x, y, heading, timestamp };
+          return;
+        }
+      }
+
       positionHistory.push({ x, y, heading, timestamp });
 
       // Remove old points beyond 10 minutes
@@ -874,9 +940,21 @@ ${getAppDialogScript()}
         }
       }
 
+      // Keep stationary GNSS jitter from zooming the map into centimetres.
+      const rawRangeX = maxX - minX;
+      const rawRangeY = maxY - minY;
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const viewRangeX = Math.max(rawRangeX, MAP_MIN_VIEW_RANGE_METERS);
+      const viewRangeY = Math.max(rawRangeY, MAP_MIN_VIEW_RANGE_METERS);
+      minX = centerX - (viewRangeX / 2);
+      maxX = centerX + (viewRangeX / 2);
+      minY = centerY - (viewRangeY / 2);
+      maxY = centerY + (viewRangeY / 2);
+
       // Add padding to bounds
-      const rangeX = maxX - minX || 1;
-      const rangeY = maxY - minY || 1;
+      const rangeX = maxX - minX;
+      const rangeY = maxY - minY;
       minX -= rangeX * 0.1;
       maxX += rangeX * 0.1;
       minY -= rangeY * 0.1;
@@ -1076,9 +1154,9 @@ ${getAppDialogScript()}
         ctx.stroke();
 
         // Update stats
-        const distance = Math.max(rangeX, rangeY);
+        const distance = Math.max(rawRangeX, rawRangeY);
         const stripText = mowingPlanPreview ? \` | strips: \${mowingPlanPreview.stripCount}\` : '';
-        $("mapStats").textContent = \`\${positionHistory.length} points | range: \${format(distance, 2)}m | scale: \${format(1/scale, 3)}m/px | current: (\${format(current.x, 2)}, \${format(current.y, 2)})\${stripText}\`;
+        $("mapStats").textContent = \`\${positionHistory.length} points | movement: \${format(distance, 2)}m | view: \${format(Math.max(rangeX, rangeY), 2)}m | scale: \${format(1/scale, 3)}m/px | current: (\${format(current.x, 2)}, \${format(current.y, 2)})\${stripText}\`;
       } else {
         const storedCount = storedPaths.length + storedAreaPerimeters.length;
         const stripText = mowingPlanPreview ? \` | strips: \${mowingPlanPreview.stripCount}\` : '';
@@ -1096,19 +1174,16 @@ ${getAppDialogScript()}
       ctx.lineWidth = 2;
       ctx.setLineDash([10, 6]);
 
-      mowingPlanPreview.strips.forEach((strip, index) => {
-        const startX = toCanvasX(strip.start.xMeters);
-        const startY = toCanvasY(strip.start.yMeters);
-        const endX = toCanvasX(strip.end.xMeters);
-        const endY = toCanvasY(strip.end.yMeters);
+      mowingPlanPreview.strips.forEach((strip) => {
+        const traversalStart = strip.traversalReversed ? strip.end : strip.start;
+        const traversalEnd = strip.traversalReversed ? strip.start : strip.end;
+        const startX = toCanvasX(traversalStart.xMeters);
+        const startY = toCanvasY(traversalStart.yMeters);
+        const endX = toCanvasX(traversalEnd.xMeters);
+        const endY = toCanvasY(traversalEnd.yMeters);
         ctx.beginPath();
-        if (index % 2 === 0) {
-          ctx.moveTo(startX, startY);
-          ctx.lineTo(endX, endY);
-        } else {
-          ctx.moveTo(endX, endY);
-          ctx.lineTo(startX, startY);
-        }
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
         ctx.stroke();
       });
 
@@ -1146,18 +1221,53 @@ ${getAppDialogScript()}
       ctx.restore();
     }
 
+    function hasDrawablePathPoints(path) {
+      return Array.isArray(path?.points)
+        && path.points.length > 0
+        && path.points.every((point) =>
+          Number.isFinite(point?.xMeters) && Number.isFinite(point?.yMeters)
+        );
+    }
+
+    async function loadStoredPathDetail(pathInfo, endpointBase) {
+      const pathName = pathInfo?.name;
+      if (typeof pathName !== 'string' || pathName.length === 0) {
+        console.warn('Skipping stored path with missing name:', pathInfo);
+        return null;
+      }
+
+      try {
+        const pathResponse = await fetch(endpointBase + '/' + encodeURIComponent(pathName));
+        const path = await pathResponse.json().catch(() => null);
+
+        if (!pathResponse.ok || !hasDrawablePathPoints(path)) {
+          console.warn('Skipping stored path with invalid details:', {
+            name: pathName,
+            status: pathResponse.status,
+            path,
+          });
+          return null;
+        }
+
+        return path;
+      } catch (error) {
+        console.warn('Skipping stored path after detail load failure:', pathName, error);
+        return null;
+      }
+    }
+
     async function loadStoredPaths() {
       try {
         const response = await fetch('/api/paths');
+        if (!response.ok) {
+          throw new Error(\`Path list request failed with status \${response.status}\`);
+        }
         const data = await response.json();
 
-        // Load full path data for each path
-        const pathPromises = (data.paths ?? []).map(async (pathInfo) => {
-          const pathResponse = await fetch(\`/api/paths/\${encodeURIComponent(pathInfo.name)}\`);
-          return await pathResponse.json();
-        });
-
-        storedPaths = await Promise.all(pathPromises);
+        const pathResults = await Promise.all(
+          (data.paths ?? []).map((pathInfo) => loadStoredPathDetail(pathInfo, '/api/paths')),
+        );
+        storedPaths = pathResults.filter((path) => path !== null);
         renderPaths();
         drawMap();
       } catch (error) {
@@ -1168,14 +1278,15 @@ ${getAppDialogScript()}
     async function loadStoredAreaPerimeters() {
       try {
         const response = await fetch('/api/area-perimeters');
+        if (!response.ok) {
+          throw new Error(\`Area perimeter list request failed with status \${response.status}\`);
+        }
         const data = await response.json();
 
-        const pathPromises = (data.paths ?? []).map(async (pathInfo) => {
-          const pathResponse = await fetch(\`/api/area-perimeters/\${encodeURIComponent(pathInfo.name)}\`);
-          return await pathResponse.json();
-        });
-
-        storedAreaPerimeters = await Promise.all(pathPromises);
+        const pathResults = await Promise.all(
+          (data.paths ?? []).map((pathInfo) => loadStoredPathDetail(pathInfo, '/api/area-perimeters')),
+        );
+        storedAreaPerimeters = pathResults.filter((path) => path !== null);
         renderAreaPerimeters();
         renderMowingPlanAreaOptions();
         drawMap();
@@ -1188,7 +1299,7 @@ ${getAppDialogScript()}
       const previousSelection = selectedMowingPlanArea || mowingPlanAreaSelect.value;
       mowingPlanAreaSelect.innerHTML = storedAreaPerimeters.map((path) => {
         const selected = path.name === previousSelection ? ' selected' : '';
-        return \`<option value=\${jsString(path.name)}\${selected}>\${path.name}</option>\`;
+        return \`<option value="\${htmlAttribute(path.name)}"\${selected}>\${htmlAttribute(path.name)}</option>\`;
       }).join('');
 
       if (storedAreaPerimeters.length === 0) {
@@ -1326,6 +1437,7 @@ ${getAppDialogScript()}
         const pointTotal = path.points?.length ?? path.pointCount ?? 0;
         const totalDistance = path.metadata?.totalDistance ?? 0;
         const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
+        const driveAlgorithm = pathDriveAlgorithm(path);
 
         return \`
           <div class="path-item">
@@ -1333,17 +1445,18 @@ ${getAppDialogScript()}
               <div class="path-name">\${path.name}</div>
               <div class="path-meta">
                 \${pointTotal} points • \${totalDistance.toFixed(1)}m total distance
-                • Created \${createdAt}
+                • \${DRIVE_ALGORITHM_LABELS[driveAlgorithm]} • Created \${createdAt}
               </div>
             </div>
             <div class="path-actions">
-              <button class="button button-primary button-small" type="button" onclick="drivePath(\${jsString(path.name)})">
+              \${renderDriveAlgorithmSelect(path, 'setPathAlgorithm')}
+              <button class="button button-primary button-small" type="button" onclick="drivePath(\${htmlAttribute(jsString(path.name))})">
                 <span>▶️</span> Drive
               </button>
-              <button class="button button-success button-small" type="button" onclick="verifyPath(\${jsString(path.name)})">
+              <button class="button button-success button-small" type="button" onclick="verifyPath(\${htmlAttribute(jsString(path.name))})">
                 <span>✓</span> Verify
               </button>
-              <button class="button button-danger button-small" type="button" onclick="deletePath(\${jsString(path.name)})">
+              <button class="button button-danger button-small" type="button" onclick="deletePath(\${htmlAttribute(jsString(path.name))})">
                 <span>🗑️</span> Delete
               </button>
             </div>
@@ -1367,6 +1480,7 @@ ${getAppDialogScript()}
         const pointTotal = path.points?.length ?? path.pointCount ?? 0;
         const totalDistance = path.metadata?.totalDistance ?? 0;
         const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
+        const driveAlgorithm = pathDriveAlgorithm(path);
 
         return \`
           <div class="path-item">
@@ -1374,17 +1488,18 @@ ${getAppDialogScript()}
               <div class="path-name">\${path.name}</div>
               <div class="path-meta">
                 \${pointTotal} points • \${totalDistance.toFixed(1)}m perimeter
-                • Created \${createdAt}
+                • \${DRIVE_ALGORITHM_LABELS[driveAlgorithm]} • Created \${createdAt}
               </div>
             </div>
             <div class="path-actions">
-              <button class="button button-primary button-small" type="button" onclick="driveAreaPerimeter(\${jsString(path.name)})">
+              \${renderDriveAlgorithmSelect(path, 'setAreaPerimeterAlgorithm')}
+              <button class="button button-primary button-small" type="button" onclick="driveAreaPerimeter(\${htmlAttribute(jsString(path.name))})">
                 <span>▶️</span> Drive
               </button>
-              <button class="button button-success button-small" type="button" onclick="verifyAreaPerimeter(\${jsString(path.name)})">
+              <button class="button button-success button-small" type="button" onclick="verifyAreaPerimeter(\${htmlAttribute(jsString(path.name))})">
                 <span>✓</span> Verify
               </button>
-              <button class="button button-danger button-small" type="button" onclick="deleteAreaPerimeter(\${jsString(path.name)})">
+              <button class="button button-danger button-small" type="button" onclick="deleteAreaPerimeter(\${htmlAttribute(jsString(path.name))})">
                 <span>🗑️</span> Delete
               </button>
             </div>
@@ -1446,6 +1561,7 @@ ${getAppDialogScript()}
 
     const MOWING_PHASE_LABELS = {
       idle: 'Idle',
+      approaching_area_perimeter: 'Approaching area perimeter',
       approaching_strip: 'Approaching strip',
       tracing_boundary: 'Tracing boundary',
       mowing_strip: 'Mowing strip',
@@ -1515,7 +1631,7 @@ ${getAppDialogScript()}
           throw new Error(result.error || 'Failed to start mowing');
         }
 
-        updateMowingStatusUi({ phase: 'approaching_strip', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
+        updateMowingStatusUi({ phase: 'approaching_area_perimeter', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
         if (mowingStatusInterval) clearInterval(mowingStatusInterval);
         mowingStatusInterval = setInterval(pollMowingStatus, 1000);
       } catch (error) {
@@ -1796,10 +1912,14 @@ ${getAppDialogScript()}
 
         const result = await response.json();
         if (!response.ok) {
-          throw new Error(result.error || 'Failed to start path action');
+          const missing = Array.isArray(result.missing) && result.missing.length > 0
+            ? \` (missing: \${result.missing.join(', ')})\`
+            : '';
+          throw new Error((result.error || 'Failed to start path action') + missing);
         }
 
-        const reason = result.completed ? '' : \`\nReason: \${result.reason ?? 'unknown'}\`;
+        const failureDetail = result.error || result.failedSegment?.errorMessage || result.reason || 'unknown';
+        const reason = result.completed ? '' : \`\nReason: \${failureDetail}\`;
         alert(\`\${successLabel}: \${pathName}\${reason}\`);
       } catch (error) {
         alert(\`Failed to \${actionName} path: \${error.message}\`);
@@ -1821,6 +1941,37 @@ ${getAppDialogScript()}
       } catch (error) {
         alert('Failed to stop path operation: ' + error.message);
       }
+    };
+
+    async function updatePathAlgorithm(endpoint, pathName, driveAlgorithm, reloadFn) {
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pathName, driveAlgorithm }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || 'Failed to update drive mode');
+        }
+
+        await reloadFn();
+      } catch (error) {
+        alert('Failed to update drive mode: ' + error.message);
+        await reloadFn();
+      }
+    }
+
+    window.setPathAlgorithm = async function(pathName, driveAlgorithm) {
+      await updatePathAlgorithm('/api/path/algorithm', pathName, driveAlgorithm, loadStoredPaths);
+    };
+
+    window.setAreaPerimeterAlgorithm = async function(pathName, driveAlgorithm) {
+      await updatePathAlgorithm('/api/area-perimeter/algorithm', pathName, driveAlgorithm, async () => {
+        await loadStoredAreaPerimeters();
+        await requestMowingPlanPreview();
+      });
     };
 
     window.deletePath = async function(pathName) {

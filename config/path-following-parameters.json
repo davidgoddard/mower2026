@@ -8,5 +8,9 @@
   "purePursuitMinLookaheadMeters": 0.5,
   "purePursuitBaseLookaheadMeters": 1,
   "purePursuitMaxLookaheadMeters": 2,
+  "segmentedDriveSimplificationToleranceMeters": 0.025,
+  "segmentedDriveMaxSegmentLengthMeters": 0.5,
+  "segmentedDriveMinSegmentLengthMeters": 0.05,
+  "segmentedDriveMaxCteMeters": 0.05,
   "updatedAt": "2026-05-24T00:00:00.000Z"
 }

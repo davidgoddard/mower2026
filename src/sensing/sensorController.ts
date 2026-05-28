@@ -38,6 +38,7 @@ import {
   MOTOR_STALL_CURRENT_THRESHOLD_AMPS,
   MOTOR_STALL_STARTUP_GRACE_MS,
   MOTOR_OUTPUT_DEADBAND_PERCENT,
+  MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 import {
   SensorControllerEvents,
@@ -312,8 +313,15 @@ export class SensorController extends EventEmitter {
       throw new Error("motor operation not active");
     }
 
-    const normalizedLeftWheelOutputPercent = this.applyMotorOutputDeadband(leftWheelOutputPercent);
-    const normalizedRightWheelOutputPercent = this.applyMotorOutputDeadband(rightWheelOutputPercent);
+    const deadbandedLeftWheelOutputPercent = this.applyMotorOutputDeadband(leftWheelOutputPercent);
+    const deadbandedRightWheelOutputPercent = this.applyMotorOutputDeadband(rightWheelOutputPercent);
+    const {
+      leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
+      rightWheelOutputPercent: normalizedRightWheelOutputPercent,
+    } = this.applyMinimumActiveMotorOutputs(
+      deadbandedLeftWheelOutputPercent,
+      deadbandedRightWheelOutputPercent,
+    );
     const isActiveCommand =
       Math.max(
         Math.abs(normalizedLeftWheelOutputPercent),
@@ -375,6 +383,42 @@ export class SensorController extends EventEmitter {
         commandedRightWheelOutputPercent: normalizedRightWheelOutputPercent,
       },
     });
+  }
+
+  private applyMinimumActiveMotorOutputs(
+    leftWheelOutputPercent: number,
+    rightWheelOutputPercent: number,
+  ): { leftWheelOutputPercent: number; rightWheelOutputPercent: number } {
+    if (leftWheelOutputPercent === 0 && rightWheelOutputPercent === 0) {
+      return { leftWheelOutputPercent: 0, rightWheelOutputPercent: 0 };
+    }
+
+    if (leftWheelOutputPercent === 0) {
+      return {
+        leftWheelOutputPercent: Math.sign(rightWheelOutputPercent) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
+        rightWheelOutputPercent: this.applyMinimumActiveMagnitude(rightWheelOutputPercent),
+      };
+    }
+
+    if (rightWheelOutputPercent === 0) {
+      return {
+        leftWheelOutputPercent: this.applyMinimumActiveMagnitude(leftWheelOutputPercent),
+        rightWheelOutputPercent: Math.sign(leftWheelOutputPercent) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
+      };
+    }
+
+    return {
+      leftWheelOutputPercent: this.applyMinimumActiveMagnitude(leftWheelOutputPercent),
+      rightWheelOutputPercent: this.applyMinimumActiveMagnitude(rightWheelOutputPercent),
+    };
+  }
+
+  private applyMinimumActiveMagnitude(value: number): number {
+    if (value === 0 || Math.abs(value) >= MOTOR_MIN_ACTIVE_OUTPUT_PERCENT) {
+      return value;
+    }
+
+    return Math.sign(value) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT;
   }
 
   beginMotorOperation(): void {
@@ -739,14 +783,13 @@ export class SensorController extends EventEmitter {
         internalHeadingDeg = unwrapInternalHeading(internalHeading);
       }
 
-      const geometryHeading = internalHeading ?? this.imuHeading;
       const geometryOffset = createBodyFrameOffset(
         this.geometryCalibration?.getPositionOffsetForwardMeters() ?? 0,
         this.geometryCalibration?.getPositionOffsetRightMeters() ?? 0,
       );
       const adjustedPosition = translatePositionByHeading(
         createPosition(sample.xMeters, sample.yMeters),
-        geometryHeading,
+        this.imuHeading,
         geometryOffset,
       );
       const adjustedXMeters = unwrapMeters(adjustedPosition.xMeters);

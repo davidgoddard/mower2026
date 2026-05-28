@@ -14,6 +14,10 @@ export interface PathFollowingParameters {
   purePursuitBaseLookaheadMeters: number;
   purePursuitMaxLookaheadMeters: number;
   mowingStandoffMeters: number;
+  segmentedDriveSimplificationToleranceMeters: number;
+  segmentedDriveMaxSegmentLengthMeters: number;
+  segmentedDriveMinSegmentLengthMeters: number;
+  segmentedDriveMaxCteMeters: number;
   updatedAt: string;
 }
 
@@ -28,6 +32,10 @@ export const DEFAULT_PATH_FOLLOWING_PARAMETERS: PathFollowingParameters = {
   purePursuitBaseLookaheadMeters: 1.0,
   purePursuitMaxLookaheadMeters: 2.0,
   mowingStandoffMeters: 0.15,
+  segmentedDriveSimplificationToleranceMeters: 0.025,
+  segmentedDriveMaxSegmentLengthMeters: 0.5,
+  segmentedDriveMinSegmentLengthMeters: 0.05,
+  segmentedDriveMaxCteMeters: 0.05,
   updatedAt: new Date().toISOString(),
 };
 
@@ -47,6 +55,10 @@ interface LegacyPathFollowingParameters {
   purePursuitBaseLookaheadMeters?: unknown;
   purePursuitMaxLookaheadMeters?: unknown;
   mowingStandoffMeters?: unknown;
+  segmentedDriveSimplificationToleranceMeters?: unknown;
+  segmentedDriveMaxSegmentLengthMeters?: unknown;
+  segmentedDriveMinSegmentLengthMeters?: unknown;
+  segmentedDriveMaxCteMeters?: unknown;
   updatedAt?: unknown;
 }
 
@@ -75,6 +87,8 @@ export class PathFollowingConfig {
         purePursuitMinLookaheadMeters: this.parameters.purePursuitMinLookaheadMeters,
         purePursuitBaseLookaheadMeters: this.parameters.purePursuitBaseLookaheadMeters,
         purePursuitMaxLookaheadMeters: this.parameters.purePursuitMaxLookaheadMeters,
+        segmentedDriveSimplificationToleranceMeters: this.parameters.segmentedDriveSimplificationToleranceMeters,
+        segmentedDriveMaxSegmentLengthMeters: this.parameters.segmentedDriveMaxSegmentLengthMeters,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -123,6 +137,8 @@ export class PathFollowingConfig {
       purePursuitMinLookaheadMeters: this.parameters.purePursuitMinLookaheadMeters,
       purePursuitBaseLookaheadMeters: this.parameters.purePursuitBaseLookaheadMeters,
       purePursuitMaxLookaheadMeters: this.parameters.purePursuitMaxLookaheadMeters,
+      segmentedDriveSimplificationToleranceMeters: this.parameters.segmentedDriveSimplificationToleranceMeters,
+      segmentedDriveMaxSegmentLengthMeters: this.parameters.segmentedDriveMaxSegmentLengthMeters,
     });
   }
 
@@ -169,6 +185,22 @@ export class PathFollowingConfig {
       mowingStandoffMeters: this.readPositiveNumber(
         legacy.mowingStandoffMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.mowingStandoffMeters,
+      ),
+      segmentedDriveSimplificationToleranceMeters: this.readPositiveNumber(
+        legacy.segmentedDriveSimplificationToleranceMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveSimplificationToleranceMeters,
+      ),
+      segmentedDriveMaxSegmentLengthMeters: this.readPositiveNumber(
+        legacy.segmentedDriveMaxSegmentLengthMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveMaxSegmentLengthMeters,
+      ),
+      segmentedDriveMinSegmentLengthMeters: this.readPositiveNumber(
+        legacy.segmentedDriveMinSegmentLengthMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveMinSegmentLengthMeters,
+      ),
+      segmentedDriveMaxCteMeters: this.readPositiveNumber(
+        legacy.segmentedDriveMaxCteMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveMaxCteMeters,
       ),
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };

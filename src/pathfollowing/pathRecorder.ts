@@ -7,6 +7,8 @@ import { Pose } from "../geometry/positionTypes.js";
 import { unwrapMeters } from "../geometry/positionTypes.js";
 import { LoggerScope } from "../logging/types.js";
 
+const DEFAULT_MAX_RECORDED_SEGMENT_DISTANCE_METERS = 1.0;
+
 export interface PathRecorderDependencies {
   pathStore: IPathStore;
   poseFusion: {
@@ -17,6 +19,8 @@ export interface PathRecorderDependencies {
 
 export class PathRecorder implements IPathRecorder {
   private readonly distanceThreshold: number;
+  private readonly maxSegmentDistanceMeters: number;
+  private readonly requireGnssQuality: boolean;
   private readonly logger: LoggerScope;
   private readonly deps: PathRecorderDependencies;
 
@@ -25,9 +29,13 @@ export class PathRecorder implements IPathRecorder {
   private currentPathName: string = "";
   private lastRecordedPosition: { xMeters: number; yMeters: number } | null = null;
   private boundOnPoseUpdate: ((pose: Pose) => void) | null = null;
+  private skippedUntrustedPoseCount = 0;
+  private skippedImplausibleJumpCount = 0;
 
   constructor(options: PathRecorderOptions, dependencies: PathRecorderDependencies) {
     this.distanceThreshold = options.distanceThreshold;
+    this.maxSegmentDistanceMeters = options.maxSegmentDistanceMeters ?? DEFAULT_MAX_RECORDED_SEGMENT_DISTANCE_METERS;
+    this.requireGnssQuality = options.requireGnssQuality ?? false;
     this.logger = options.logger;
     this.deps = dependencies;
   }
@@ -42,6 +50,8 @@ export class PathRecorder implements IPathRecorder {
     this.currentPath = [];
     this.currentPathName = pathName;
     this.lastRecordedPosition = null;
+    this.skippedUntrustedPoseCount = 0;
+    this.skippedImplausibleJumpCount = 0;
 
     // Subscribe to pose updates
     this.boundOnPoseUpdate = this.onPoseUpdate.bind(this);
@@ -71,6 +81,8 @@ export class PathRecorder implements IPathRecorder {
     this.logger.info("path_recorder.stopping", {
       pathName: this.currentPathName,
       pointCount,
+      skippedUntrustedPoseCount: this.skippedUntrustedPoseCount,
+      skippedImplausibleJumpCount: this.skippedImplausibleJumpCount,
     });
 
     // Save path
@@ -88,6 +100,8 @@ export class PathRecorder implements IPathRecorder {
     this.currentPath = [];
     this.currentPathName = "";
     this.lastRecordedPosition = null;
+    this.skippedUntrustedPoseCount = 0;
+    this.skippedImplausibleJumpCount = 0;
 
     return savedPath;
   }
@@ -109,12 +123,16 @@ export class PathRecorder implements IPathRecorder {
     this.logger.info("path_recorder.cancelled", {
       pathName: this.currentPathName,
       pointsDiscarded: this.currentPath.length,
+      skippedUntrustedPoseCount: this.skippedUntrustedPoseCount,
+      skippedImplausibleJumpCount: this.skippedImplausibleJumpCount,
     });
 
     // Clear state
     this.currentPath = [];
     this.currentPathName = "";
     this.lastRecordedPosition = null;
+    this.skippedUntrustedPoseCount = 0;
+    this.skippedImplausibleJumpCount = 0;
   }
 
   isRecording(): boolean {
@@ -133,6 +151,11 @@ export class PathRecorder implements IPathRecorder {
       return;
     }
 
+    if (pose.quality === "unknown" || (this.requireGnssQuality && pose.quality !== "gnss")) {
+      this.skippedUntrustedPoseCount += 1;
+      return;
+    }
+
     const position = {
       xMeters: unwrapMeters(pose.position.xMeters),
       yMeters: unwrapMeters(pose.position.yMeters),
@@ -146,6 +169,16 @@ export class PathRecorder implements IPathRecorder {
 
     // Only record if moved more than threshold
     const distance = this.distanceBetween(position, this.lastRecordedPosition);
+    if (distance > this.maxSegmentDistanceMeters) {
+      this.skippedImplausibleJumpCount += 1;
+      if (this.currentPath.length <= 1) {
+        this.currentPath = [];
+        this.lastRecordedPosition = null;
+        this.recordPoint(position);
+      }
+      return;
+    }
+
     if (distance >= this.distanceThreshold) {
       this.recordPoint(position);
     }

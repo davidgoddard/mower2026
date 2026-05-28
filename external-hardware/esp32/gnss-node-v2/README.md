@@ -39,8 +39,9 @@ Check the development configuration section at the top of the sketch:
 
 Recommended usage:
 
-- for real lawn operation, set the fixed base latitude/longitude
-- for quick bring-up, leave base at zero and allow dynamic origin
+- for a surveyed fixed base, set the fixed base latitude/longitude in the sketch
+- for a base that emits RTCM 1006, leave the fixed base values at zero; the rover will decode verified RTCM 1006 messages and use that base position as the local origin
+- for quick bring-up without RTCM 1006, leave base at zero and allow dynamic origin
 
 Also confirm the current wiring assumptions in the sketch:
 
@@ -127,6 +128,12 @@ Interpretation:
   - milliseconds since the last parsed `UNIHEADINGA`
 - `rtcmAgeMs`
   - milliseconds since the last verified RTCM message was forwarded to the UM982
+- `rtcm1006`
+  - count of verified RTCM 1006 base-position messages decoded by the rover
+- `rtcm1006AgeMs`
+  - milliseconds since the last verified RTCM 1006 message was decoded
+- `origin`
+  - local coordinate origin source and current latitude/longitude/height; expected values are `config`, `rtcm1006`, `dynamic`, or `none`
 - `uniloglistAgeMs`
   - milliseconds since the last parsed `UNILOGLIST` response
 
@@ -140,6 +147,8 @@ Useful failure patterns:
   - parser is running, but the receiver solution itself is not usable
 - `rtcmAgeMs=none`
   - rover has not recently received verified RTCM correction messages
+- `rtcmAgeMs` fresh but `origin=dynamic`
+  - RTCM is arriving, but no RTCM 1006 base-position message has been decoded yet; the rover is still using the first usable rover fix as its local origin
 
 Startup diagnostics were also extended:
 

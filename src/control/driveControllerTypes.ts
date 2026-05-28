@@ -7,6 +7,9 @@ import { Position, Meters } from "../geometry/positionTypes.js";
 export interface DriveRequest {
   readonly targetPosition: Position;
   readonly learningEnabled?: boolean; // Default true
+  readonly timeoutMinimumMs?: number;
+  readonly disableTimeout?: boolean;
+  readonly maxCrossTrackErrorMeters?: number;
 }
 
 export interface DriveResult {

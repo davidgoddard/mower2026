@@ -17,6 +17,7 @@ import { Pose, Position, createPosition, distanceBetween, unwrapMeters } from ".
 import { LoggerScope } from "../logging/types.js";
 import { unwrapInternalHeading } from "../geometry/headingTypes.js";
 import { systemStop } from "../control/systemStop.js";
+import { MAX_WHEEL_SPEED_MPS_DEFAULT, MOTOR_MIN_ACTIVE_OUTPUT_PERCENT } from "../constants.js";
 
 export interface PurePursuitDependencies {
   pathStore: IPathStore;
@@ -43,6 +44,7 @@ export class PurePursuitFollower implements IPathFollower {
   private readonly maxLookahead: number;
   private readonly baseLookahead: number;
   private readonly tightTurnRadius: number = 0.5; // meters - threshold for pivot
+  private readonly minActiveWheelSpeed: number = MAX_WHEEL_SPEED_MPS_DEFAULT * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT;
   private readonly retraceDurationMs: number = 3000;
   private readonly retraceTrailRetentionMs: number = 5000;
   private readonly retraceTrailMinSpacingMeters: number = 0.05;
@@ -109,12 +111,14 @@ export class PurePursuitFollower implements IPathFollower {
       metadata: {
         totalDistance: this.calculateTotalDistance(waypoints),
         pointCount: waypoints.length,
+        driveAlgorithm: "pure_pursuit",
       },
     };
 
+    const currentPath = this.currentPath;
     this.logger.info("pure_pursuit.path_prepared", {
       waypointCount: waypoints.length,
-      totalDistance: this.currentPath.metadata.totalDistance,
+      totalDistance: currentPath.metadata.totalDistance,
     });
 
     systemStop.clearStop("path-following-start");
@@ -487,15 +491,15 @@ export class PurePursuitFollower implements IPathFollower {
     if (Math.abs(curvature) < 0.001) {
       // Straight line
       return {
-        left: this.targetSpeed * travelDirectionSign,
-        right: this.targetSpeed * travelDirectionSign,
+        left: this.applyMinimumActiveWheelSpeed(this.targetSpeed * travelDirectionSign),
+        right: this.applyMinimumActiveWheelSpeed(this.targetSpeed * travelDirectionSign),
       };
     }
 
     // Turning radius from curvature
     const radius = 1.0 / curvature;
 
-    // Check if turn is too tight - use pivot
+    // Check if turn is too tight - use an in-place turn.
     if (Math.abs(radius) < this.tightTurnRadius) {
       return this.calculatePivotSpeeds(radius, travelDirectionSign);
     }
@@ -507,25 +511,51 @@ export class PurePursuitFollower implements IPathFollower {
 
     // Clamp to reasonable values
     const maxSpeed = this.targetSpeed * 1.2;
-    return {
+    const wheelSpeeds = {
       left: this.clamp(leftSpeed, -maxSpeed, maxSpeed),
       right: this.clamp(rightSpeed, -maxSpeed, maxSpeed),
     };
+    return this.enforceMinimumActiveArc(wheelSpeeds, radius, travelDirectionSign);
   }
 
   /**
-   * Calculate pivot speeds (one wheel stationary)
+   * Calculate in-place turn speeds. One-wheel pivots are intentionally avoided
+   * because the mower can stall when only one motor is active.
    */
   private calculatePivotSpeeds(radius: number, travelDirectionSign: 1 | -1 = 1): { left: number; right: number } {
-    const turnDirection = radius > 0 ? "left" : "right";
+    const turnSign = radius > 0 ? 1 : -1;
+    const speed = Math.max(this.targetSpeed, this.minActiveWheelSpeed);
 
-    if (turnDirection === "left") {
-      // Left turn - left wheel slower/stopped
-      return { left: 0, right: this.targetSpeed * travelDirectionSign };
-    } else {
-      // Right turn - right wheel slower/stopped
-      return { left: this.targetSpeed * travelDirectionSign, right: 0 };
+    return {
+      left: -turnSign * speed * travelDirectionSign,
+      right: turnSign * speed * travelDirectionSign,
+    };
+  }
+
+  private enforceMinimumActiveArc(
+    wheelSpeeds: { left: number; right: number },
+    radius: number,
+    travelDirectionSign: 1 | -1,
+  ): { left: number; right: number } {
+    const leftSign = Math.sign(wheelSpeeds.left);
+    const rightSign = Math.sign(wheelSpeeds.right);
+
+    if (leftSign === 0 || rightSign === 0 || leftSign !== rightSign) {
+      return this.calculatePivotSpeeds(radius, travelDirectionSign);
     }
+
+    return {
+      left: this.applyMinimumActiveWheelSpeed(wheelSpeeds.left),
+      right: this.applyMinimumActiveWheelSpeed(wheelSpeeds.right),
+    };
+  }
+
+  private applyMinimumActiveWheelSpeed(value: number): number {
+    if (value === 0 || Math.abs(value) >= this.minActiveWheelSpeed) {
+      return value;
+    }
+
+    return Math.sign(value) * this.minActiveWheelSpeed;
   }
 
   private recordRecentTrail(pose: Pose): void {

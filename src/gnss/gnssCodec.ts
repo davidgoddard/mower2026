@@ -12,6 +12,7 @@ const GNSS_PAYLOAD_LENGTH_V2 = 38;
 // GNSS codec scaling factors (implementation details)
 const POSITION_SCALE_MM_TO_M = 1000;
 const HEADING_SCALE_CENTIDEG_TO_DEG = 100;
+const MAX_REASONABLE_LOCAL_POSITION_METERS = 10_000;
 
 const codeToFixType: Record<number, GnssFixType> = {
   0: "none",
@@ -49,11 +50,22 @@ export function decodeGnssSample(payload: Uint8Array): GnssSample {
   const uniheadingAgeMillis = decodeOptionalUint16(view, usesV2Layout ? 32 : 30, 1);
   const rtcmAgeMillis = decodeOptionalUint16(view, usesV2Layout ? 34 : 32, 1);
   const logConfigMask = view.getUint8(usesV2Layout ? 36 : 34);
+  const xMeters = decodeOptionalInt32(view, 4, POSITION_SCALE_MM_TO_M);
+  const yMeters = decodeOptionalInt32(view, 8, POSITION_SCALE_MM_TO_M);
+
+  if (
+    xMeters === undefined ||
+    yMeters === undefined ||
+    Math.abs(xMeters) > MAX_REASONABLE_LOCAL_POSITION_METERS ||
+    Math.abs(yMeters) > MAX_REASONABLE_LOCAL_POSITION_METERS
+  ) {
+    throw new Error(`Invalid GNSS local position x=${xMeters ?? "sentinel"} y=${yMeters ?? "sentinel"}`);
+  }
 
   return {
     timestampMillis: view.getUint32(0, true),
-    xMeters: view.getInt32(4, true) / POSITION_SCALE_MM_TO_M,
-    yMeters: view.getInt32(8, true) / POSITION_SCALE_MM_TO_M,
+    xMeters,
+    yMeters,
     positionAccuracyMeters: view.getUint16(usesV2Layout ? 20 : 18, true) / POSITION_SCALE_MM_TO_M,
     fixType,
     satellitesInUse: view.getUint8(usesV2Layout ? 25 : 23),

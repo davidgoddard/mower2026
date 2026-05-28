@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMowingPlan, normalizeAxisHeading } from "../dist/pathfollowing/mowingPlanner.js";
+import { buildMowingInitialEntryPlan, buildMowingPlan, normalizeAxisHeading } from "../dist/pathfollowing/mowingPlanner.js";
 
 const square = [
   { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -54,6 +54,26 @@ test("buildMowingPlan rotates strip direction with heading", () => {
       [1, 0, 1, 1],
       [0.5, 0, 0.5, 1],
       [0, 0, 0, 1],
+    ],
+  );
+  assert.deepEqual(
+    plan.strips.map((strip) => strip.traversalReversed),
+    [true, false, true],
+  );
+  assert.deepEqual(
+    plan.connectors.map((connector) => connector.map((point) => [
+      Number(point.xMeters.toFixed(2)),
+      Number(point.yMeters.toFixed(2)),
+    ])),
+    [
+      [
+        [1, 0.15],
+        [0.5, 0.15],
+      ],
+      [
+        [0.5, 0.85],
+        [0, 0.85],
+      ],
     ],
   );
 });
@@ -159,4 +179,162 @@ test("buildMowingPlan penalises connectors that cross already-mown strips", () =
   const offsets = plan.strips.map((s) => s.centerOffsetMeters);
   const sorted = offsets.slice().sort((a, b) => a - b);
   assert.deepEqual(offsets, sorted, "strips should be sequenced in offset order, not skipping over mown strips");
+});
+
+test("buildMowingPlan does not skip lanes in the 90 degree seeded test area plan", () => {
+  const capturedAt = 1;
+  const area = [
+    { xMeters: 0.5, yMeters: 0.5, capturedAt },
+    { xMeters: 9.5, yMeters: 0.5, capturedAt: capturedAt + 1 },
+    { xMeters: 9.5, yMeters: 5.5, capturedAt: capturedAt + 2 },
+    { xMeters: 0.5, yMeters: 5.5, capturedAt: capturedAt + 3 },
+    { xMeters: 0.5, yMeters: 0.5, capturedAt: capturedAt + 4 },
+  ];
+  const obstacle = [
+    { xMeters: 4.1, yMeters: 2.0, capturedAt: capturedAt + 5 },
+    { xMeters: 5.7, yMeters: 2.0, capturedAt: capturedAt + 6 },
+    { xMeters: 6.0, yMeters: 3.0, capturedAt: capturedAt + 7 },
+    { xMeters: 5.4, yMeters: 4.0, capturedAt: capturedAt + 8 },
+    { xMeters: 3.9, yMeters: 3.7, capturedAt: capturedAt + 9 },
+    { xMeters: 3.6, yMeters: 2.7, capturedAt: capturedAt + 10 },
+    { xMeters: 4.1, yMeters: 2.0, capturedAt: capturedAt + 11 },
+  ];
+
+  const plan = buildMowingPlan(area, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.3,
+    obstacles: [obstacle],
+  });
+
+  assert.ok(plan.stripCount > 20);
+  for (let index = 1; index < plan.strips.length; index += 1) {
+    const previous = plan.strips[index - 1];
+    const current = plan.strips[index];
+    const offsetDelta = current.centerOffsetMeters - previous.centerOffsetMeters;
+    assert.ok(offsetDelta >= -1e-9, "90 degree test plan should keep progressing across offsets");
+    assert.ok(offsetDelta <= 0.300000001, "90 degree test plan should not skip intermediate lanes");
+  }
+});
+
+test("buildMowingPlan uses configured mowing standoff for same-boundary connectors", () => {
+  const plan = buildMowingPlan(square, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.5,
+    mowingStandoffMeters: 0.25,
+  });
+
+  assert.deepEqual(
+    plan.connectors[0].map((point) => [
+      Number(point.xMeters.toFixed(2)),
+      Number(point.yMeters.toFixed(2)),
+    ]),
+    [
+      [1, 0.25],
+      [0.5, 0.25],
+    ],
+  );
+});
+
+test("buildMowingPlan reanchors strip order around the preferred perimeter start point", () => {
+  const plan = buildMowingPlan(square, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.5,
+    preferredStartPoint: { xMeters: 0.5, yMeters: 0 },
+  });
+
+  assert.equal(plan.stripCount, 3);
+  assert.deepEqual(
+    [
+      Number(plan.strips[0].start.xMeters.toFixed(2)),
+      Number(plan.strips[0].start.yMeters.toFixed(2)),
+      Number(plan.strips[0].end.xMeters.toFixed(2)),
+      Number(plan.strips[0].end.yMeters.toFixed(2)),
+      plan.strips[0].traversalReversed,
+    ],
+    [0.5, 0, 0.5, 1, false],
+  );
+  assert.deepEqual(
+    plan.strips.map((strip) => Number(strip.centerOffsetMeters.toFixed(2))),
+    [-0.5, 0, -1],
+  );
+  assert.equal(plan.connectors.length, 2);
+});
+
+test("buildMowingInitialEntryPlan selects nearest projected area perimeter point", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 3, capturedAt: 3 },
+    { xMeters: 0, yMeters: 3, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+
+  const plan = buildMowingInitialEntryPlan(area, { xMeters: 2, yMeters: 1 });
+
+  assert.ok(plan);
+  assert.equal(plan.segmentIndex, 0);
+  assert.deepEqual(
+    [
+      Number(plan.entryPoint.xMeters.toFixed(2)),
+      Number(plan.entryPoint.yMeters.toFixed(2)),
+      Number(plan.approachTarget.xMeters.toFixed(2)),
+      Number(plan.approachTarget.yMeters.toFixed(2)),
+      Number(plan.distanceMeters.toFixed(2)),
+    ],
+    [2, 0, 2, 0.15, 1],
+  );
+});
+
+test("buildMowingInitialEntryPlan rejects obstacle-blocked perimeter approaches", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 3, capturedAt: 3 },
+    { xMeters: 0, yMeters: 3, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const blockingObstacle = [
+    { xMeters: 1.8, yMeters: 0.3, capturedAt: 6 },
+    { xMeters: 2.2, yMeters: 0.3, capturedAt: 7 },
+    { xMeters: 2.2, yMeters: 0.7, capturedAt: 8 },
+    { xMeters: 1.8, yMeters: 0.7, capturedAt: 9 },
+    { xMeters: 1.8, yMeters: 0.3, capturedAt: 10 },
+  ];
+
+  const plan = buildMowingInitialEntryPlan(area, { xMeters: 2, yMeters: 1 }, {
+    obstacles: [blockingObstacle],
+  });
+
+  assert.ok(plan);
+  assert.equal(plan.segmentIndex, 1);
+  assert.deepEqual(
+    [
+      Number(plan.entryPoint.xMeters.toFixed(2)),
+      Number(plan.entryPoint.yMeters.toFixed(2)),
+    ],
+    [4, 1],
+  );
+});
+
+test("buildMowingInitialEntryPlan returns null when no line-of-sight perimeter point exists", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 4, capturedAt: 3 },
+    { xMeters: 0, yMeters: 4, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const enclosingObstacle = [
+    { xMeters: 1, yMeters: 1, capturedAt: 6 },
+    { xMeters: 3, yMeters: 1, capturedAt: 7 },
+    { xMeters: 3, yMeters: 3, capturedAt: 8 },
+    { xMeters: 1, yMeters: 3, capturedAt: 9 },
+    { xMeters: 1, yMeters: 1, capturedAt: 10 },
+  ];
+
+  const plan = buildMowingInitialEntryPlan(area, { xMeters: 2, yMeters: 2 }, {
+    obstacles: [enclosingObstacle],
+  });
+
+  assert.equal(plan, null);
 });

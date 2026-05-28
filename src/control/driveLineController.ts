@@ -68,6 +68,7 @@ import {
   DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
   DRIVE_PURSUIT_PIVOT_SPEED_SCALE,
   DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS,
+  MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
 
@@ -802,9 +803,7 @@ export class DriveLineController {
 
     if (headingErrorDeg >= DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG && remainingAlongTrackDistance > DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS) {
       const turnSign = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)) >= 0 ? 1 : -1;
-      const pivotSpeed = this.fullSpeedCommand * DRIVE_PURSUIT_PIVOT_SPEED_SCALE;
-      const leftCommand = this.clampNormalizedSpeed(-turnSign * pivotSpeed);
-      const rightCommand = this.clampNormalizedSpeed(turnSign * pivotSpeed);
+      const { leftCommand, rightCommand } = this.calculatePivotCommands(turnSign, false);
       await this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
       return;
     }
@@ -840,8 +839,16 @@ export class DriveLineController {
 
     const leftCommand = this.clampNormalizedSpeed(leftWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
     const rightCommand = this.clampNormalizedSpeed(rightWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
+    const normalizedCommands = this.enforceMinimumActiveArcCommands(
+      leftCommand,
+      rightCommand,
+      curvature,
+    );
 
-    await this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
+    await this.sensorController.setMotorWheelOutputs(
+      normalizedCommands.leftCommand,
+      normalizedCommands.rightCommand,
+    );
   }
 
   private getDriveLineHeading(): InternalHeading {
@@ -926,6 +933,52 @@ export class DriveLineController {
 
   private clampNormalizedSpeed(speed: number): number {
     return this.clamp(speed, -this.fullSpeedCommand, this.fullSpeedCommand);
+  }
+
+  private enforceMinimumActiveArcCommands(
+    leftCommand: number,
+    rightCommand: number,
+    curvature: number,
+  ): { leftCommand: number; rightCommand: number } {
+    if (leftCommand === 0 && rightCommand === 0) {
+      return { leftCommand: 0, rightCommand: 0 };
+    }
+
+    const leftSign = Math.sign(leftCommand);
+    const rightSign = Math.sign(rightCommand);
+    if (leftSign === 0 || rightSign === 0 || leftSign !== rightSign) {
+      const turnSign = curvature >= 0 ? 1 : -1;
+      return this.calculatePivotCommands(turnSign, true);
+    }
+
+    return {
+      leftCommand: this.applyMinimumActiveCommand(leftCommand),
+      rightCommand: this.applyMinimumActiveCommand(rightCommand),
+    };
+  }
+
+  private calculatePivotCommands(
+    turnSign: 1 | -1,
+    followTravelDirection: boolean,
+  ): { leftCommand: number; rightCommand: number } {
+    const pivotSpeed = Math.max(
+      MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
+      this.fullSpeedCommand * DRIVE_PURSUIT_PIVOT_SPEED_SCALE,
+    );
+    const directionSign = followTravelDirection ? this.driveDirectionSign : 1;
+
+    return {
+      leftCommand: this.clampNormalizedSpeed(-turnSign * pivotSpeed * directionSign),
+      rightCommand: this.clampNormalizedSpeed(turnSign * pivotSpeed * directionSign),
+    };
+  }
+
+  private applyMinimumActiveCommand(command: number): number {
+    if (command === 0 || Math.abs(command) >= MOTOR_MIN_ACTIVE_OUTPUT_PERCENT) {
+      return command;
+    }
+
+    return Math.sign(command) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT;
   }
 
   private clamp(value: number, min: number, max: number): number {

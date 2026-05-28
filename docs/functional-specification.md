@@ -277,6 +277,8 @@ Joystick speed/steering demands shall be mapped to left/right wheel speed target
 
 Manual-drive commands must never bypass the motor node control path.
 
+Manual-drive output commands shall be coalesced so tiny analogue stick jitter does not create unnecessary I2C writes, but a held non-zero manual command shall still be refreshed before the motor node watchdog timeout so steady operator input remains alive.
+
 If controller connectivity is lost while manual drive is armed, manual drive shall disarm and issue a motor stop command.
 
 #### IMU interface
@@ -489,6 +491,7 @@ A path driving component is required which will take an array of path points whi
 ### Tracing
 
 The user will be able to use manual driving or simply dragging the mower around an obstacle. The position part only is obtained and logged every time it moves more than 10cm.
+Path and area-perimeter recording shall accept fused GNSS and dead-reckoning poses from pose fusion, shall ignore unknown-quality poses, and shall reject implausible jumps between consecutive recorded points, so degraded positioning cannot write large spikes into saved boundaries.
 
 The web page will offer a button to open a combined drive-and-paths page for this purpose, with the live manual-drive canvas at the top and the path recording and management controls alongside it.  
 
@@ -512,15 +515,19 @@ There will also be a button to 'Verify'.
 The drive button will immediately line-follow the stored path from the mower's current position.
 The verify button will first execute a segment-style approach to about 10cm short of the nearest point, then continue around the stored path until it returns to that join point.
 
+Stored obstacle perimeters and mowing area perimeters shall persist the drive algorithm used when retracing them. The operator shall be able to choose between pure-pursuit retrace and segmented-drive retrace on the Drive & Paths page for each saved path independently.
+
+Pure-pursuit retrace shall keep the existing smooth continuous path follower behavior. Segmented-drive retrace shall simplify small manually driven wiggles that are within a configurable tolerance, split the simplified boundary into bounded straight segment targets, and execute those targets using the calibrated segment drive and turn controllers. At execution time, segmented-drive retrace shall re-anchor the target list to the nearest target to the mower's current pose and skip targets already reached, so it resumes from where the mower meets the boundary rather than returning to the saved path's first point. Short segmented drives shall use a minimum timeout that allows motor ramp-up and pose feedback to occur. Segmented-drive retrace shall abort if the measured segment cross-track error exceeds the configured path-following limit.
+
 For closed obstacle perimeters, the recorded path points shall be treated as the inner safety boundary. The runtime shall bias the followed path outward from the closed loop and insert conservative outward points between recorded samples, so smoothing and interpolation do not cut inside the traced obstacle perimeter.
 
 For mowing area perimeters, the recorded points are the boundary to follow and shall not receive the obstacle outward offset. Driving a mowing area perimeter assumes the mower is already on or close to the perimeter: the runtime shall choose the nearest recorded perimeter point and continue in the direction that best matches the mower's current heading. Verifying a mowing area perimeter shall segment-drive to the nearest perimeter point, stop there, turn to align with the chosen path direction, and then switch to the path follower.
 
 Generated strip previews define geometry only. They do not start mowing motion until an execution workflow is added.
 
-The closed-loop tolerance, closed-loop detection tolerance, verification approach standoff, verification turn-only distance, obstacle outward offset, and pure-pursuit lookahead distances shall be loaded from persisted path-following configuration rather than being hard-coded in the path helpers.
+The closed-loop tolerance, closed-loop detection tolerance, verification approach standoff, verification turn-only distance, obstacle outward offset, pure-pursuit lookahead distances, segmented-drive simplification tolerance, segmented-drive maximum segment length, segmented-drive minimum segment length, and segmented-drive maximum CTE shall be loaded from persisted path-following configuration rather than being hard-coded in the path helpers.
 
-The drive will perform a smooth line-follower algorithm but only resort to 'turn-on-the-spot' when the direction to the next point requires a turn greater than can be achieved using an arc - arc is preferred.   With one heel stationary the mower will pivot around that wheel so it can produce very tight circles.
+The drive will perform a smooth line-follower algorithm but only resort to 'turn-on-the-spot' when the direction to the next point requires a turn greater than can be achieved using an arc - arc is preferred. Motion commands shall not intentionally drive with only one active motor. Any moving wheel command shall be at least 30% of full output; if the requested arc would require one stationary wheel or a lower active output, the controller shall either widen the arc to that minimum active command or flip into a turn-on-the-spot command using opposing wheels.
 
 A "Stop" button will be prominant on the screen and immediately terminate a drive.
 

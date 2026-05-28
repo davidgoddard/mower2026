@@ -1,5 +1,5 @@
 import { PathPoint, IPathFollower } from "./pathFollowerApi.js";
-import { MowingPlan } from "./mowingPlanner.js";
+import type { MowingInitialEntryPlan, MowingPlan } from "./mowingPlanner.js";
 import { buildPerimeterPathPointsFromPlan, buildPerimeterJoinPlan } from "./pathVerification.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
@@ -13,6 +13,7 @@ import { DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig
 
 export type MowingPhase =
   | "idle"
+  | "approaching_area_perimeter"
   | "approaching_strip"
   | "tracing_boundary"
   | "mowing_strip"
@@ -31,6 +32,7 @@ export interface MowingStatus {
 
 export interface MowingExecutorOptions {
   readonly plan: MowingPlan;
+  readonly initialEntryPlan?: MowingInitialEntryPlan;
   readonly areaPoints: ReadonlyArray<PathPoint>;
   readonly obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
   readonly driveController: DriveController;
@@ -42,9 +44,11 @@ export interface MowingExecutorOptions {
 }
 
 const TURN_ALIGNMENT_THRESHOLD_DEG = 2;
+const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
 export class MowingExecutor {
   private readonly plan: MowingPlan;
+  private readonly initialEntryPlan: MowingInitialEntryPlan | null;
   private readonly areaPoints: ReadonlyArray<PathPoint>;
   private readonly obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
   private readonly driveController: DriveController;
@@ -62,6 +66,7 @@ export class MowingExecutor {
 
   constructor(options: MowingExecutorOptions) {
     this.plan = options.plan;
+    this.initialEntryPlan = options.initialEntryPlan ?? null;
     this.areaPoints = options.areaPoints;
     this.obstaclePointsArray = options.obstaclePointsArray;
     this.driveController = options.driveController;
@@ -92,6 +97,11 @@ export class MowingExecutor {
     this.logger.info("mowing.execute.start", { stripCount: this.plan.strips.length });
 
     try {
+      const initialEntryStatus = await this.executeInitialEntry();
+      if (initialEntryStatus) {
+        return initialEntryStatus;
+      }
+
       for (let index = 0; index < this.plan.strips.length; index += 1) {
         if (this.isStopped()) {
           this.phase = "stopped";
@@ -100,13 +110,15 @@ export class MowingExecutor {
 
         this.currentStripIndex = index;
         const strip = this.plan.strips[index];
+        const stripStart = strip.traversalReversed ? strip.end : strip.start;
+        const stripEnd = strip.traversalReversed ? strip.start : strip.end;
         const dir = normalise({
-          x: strip.end.xMeters - strip.start.xMeters,
-          y: strip.end.yMeters - strip.start.yMeters,
+          x: stripEnd.xMeters - stripStart.xMeters,
+          y: stripEnd.yMeters - stripStart.yMeters,
         });
 
-        const entryStandoff = offsetPoint(strip.start, dir, this.standoff);
-        const exitStandoff = offsetPoint(strip.end, dir, -this.standoff);
+        const entryStandoff = offsetPoint(stripStart, dir, this.standoff);
+        const exitStandoff = offsetPoint(stripEnd, dir, -this.standoff);
 
         // 1. Segment-drive to entry standoff point
         this.phase = "approaching_strip";
@@ -124,9 +136,9 @@ export class MowingExecutor {
         }
 
         // 2. First encounter of start boundary → trace full loop
-        const startBoundaryKey = this.nearestBoundaryKey(strip.start);
+        const startBoundaryKey = this.nearestBoundaryKey(stripStart);
         if (!this.tracedBoundaries.has(startBoundaryKey)) {
-          const traceResult = await this.traceBoundary(startBoundaryKey, strip.start);
+          const traceResult = await this.traceBoundary(startBoundaryKey, stripStart);
           if (!traceResult) {
             return this.getStatus();
           }
@@ -162,9 +174,9 @@ export class MowingExecutor {
         }
 
         // 4. First encounter of end boundary → trace full loop
-        const endBoundaryKey = this.nearestBoundaryKey(strip.end);
+        const endBoundaryKey = this.nearestBoundaryKey(stripEnd);
         if (!this.tracedBoundaries.has(endBoundaryKey)) {
-          const traceResult = await this.traceBoundary(endBoundaryKey, strip.end);
+          const traceResult = await this.traceBoundary(endBoundaryKey, stripEnd);
           if (!traceResult) {
             return this.getStatus();
           }
@@ -206,18 +218,76 @@ export class MowingExecutor {
     }
   }
 
+  private async executeInitialEntry(): Promise<MowingStatus | null> {
+    if (!this.initialEntryPlan) {
+      return null;
+    }
+    if (this.isStopped()) {
+      this.phase = "stopped";
+      return this.getStatus();
+    }
+
+    this.phase = "approaching_area_perimeter";
+    this.currentStripIndex = 0;
+    this.logger.info("mowing.initial_entry.start", {
+      segmentIndex: this.initialEntryPlan.segmentIndex,
+      entryX: this.initialEntryPlan.entryPoint.xMeters,
+      entryY: this.initialEntryPlan.entryPoint.yMeters,
+      approachX: this.initialEntryPlan.approachTarget.xMeters,
+      approachY: this.initialEntryPlan.approachTarget.yMeters,
+      distanceMeters: this.initialEntryPlan.distanceMeters,
+    });
+
+    const approachResult = await this.driveController.executeDrive({
+      targetPosition: createPosition(
+        this.initialEntryPlan.approachTarget.xMeters,
+        this.initialEntryPlan.approachTarget.yMeters,
+      ),
+      learningEnabled: true,
+    });
+    if (approachResult.status !== "success") {
+      if (approachResult.status === "stopped") {
+        this.phase = "stopped";
+        return this.getStatus();
+      }
+      this.phase = "error";
+      return { ...this.getStatus(), error: `initial_entry_failed:${approachResult.status}` };
+    }
+
+    if (this.isStopped()) {
+      this.phase = "stopped";
+      return this.getStatus();
+    }
+
+    const traceResult = await this.traceBoundary("area", this.initialEntryPlan.entryPoint);
+    if (!traceResult) {
+      return this.getStatus();
+    }
+
+    this.tracedBoundaries.add("area");
+    this.logger.info("mowing.initial_entry.done", {
+      tracedBoundary: "area",
+      segmentIndex: this.initialEntryPlan.segmentIndex,
+    });
+    return null;
+  }
+
   private async traceBoundary(boundaryKey: string, nearPoint: PathPoint): Promise<boolean> {
     this.phase = "tracing_boundary";
-    this.logger.info("mowing.trace_boundary.start", { boundary: boundaryKey });
+    this.logger.info("mowing.trace_boundary.start", {
+      boundary: boundaryKey,
+      nearX: nearPoint.xMeters,
+      nearY: nearPoint.yMeters,
+    });
 
-    const boundaryPoints = this.getBoundaryPoints(boundaryKey);
+    const boundaryPoints = insertPreferredBoundaryPoint(this.getBoundaryPoints(boundaryKey), nearPoint);
     if (boundaryPoints.length < 3) {
       this.logger.warn("mowing.trace_boundary.too_short", { boundary: boundaryKey });
       return true;
     }
 
     const currentPose = this.poseFusion.getCurrentPose();
-    const joinPlan = buildPerimeterJoinPlan(boundaryPoints as PathPoint[], currentPose, this.parameters);
+    const joinPlan = buildPerimeterJoinPlan(boundaryPoints, currentPose, this.parameters);
     if (!joinPlan) {
       this.logger.warn("mowing.trace_boundary.no_join_plan", { boundary: boundaryKey });
       return true;
@@ -243,7 +313,7 @@ export class MowingExecutor {
       return false;
     }
 
-    const loopPoints = buildPerimeterPathPointsFromPlan(boundaryPoints as PathPoint[], joinPlan, this.parameters);
+    const loopPoints = buildPerimeterPathPointsFromPlan(boundaryPoints, joinPlan, this.parameters);
     if (loopPoints.length < 2) {
       return true;
     }
@@ -300,7 +370,7 @@ export class MowingExecutor {
   }
 
   private isStopped(): boolean {
-    return this.stopRequested || systemStop.isStopRequested();
+    return this.stopRequested || systemStop.isStopped();
   }
 }
 
@@ -322,4 +392,59 @@ function pointToPathDistance(point: PathPoint, path: ReadonlyArray<PathPoint>): 
     }
   }
   return nearest;
+}
+
+function insertPreferredBoundaryPoint(boundaryPoints: ReadonlyArray<PathPoint>, preferredPoint: PathPoint): PathPoint[] {
+  if (boundaryPoints.length < 2) {
+    return boundaryPoints.slice();
+  }
+
+  const points = boundaryPoints.slice();
+  const first = points[0];
+  const last = points[points.length - 1];
+  const wasClosed = pointDistance(first, last) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS;
+  if (wasClosed) {
+    points.pop();
+  }
+
+  if (points.some((point) => pointDistance(point, preferredPoint) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS)) {
+    return wasClosed ? points.concat([points[0]]) : points;
+  }
+
+  let nearestSegmentIndex = 0;
+  let nearestDistance = Infinity;
+  const segmentCount = wasClosed ? points.length : points.length - 1;
+  for (let index = 0; index < segmentCount; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const distance = pointToSegmentDistance(preferredPoint, current, next);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestSegmentIndex = index;
+    }
+  }
+
+  points.splice(nearestSegmentIndex + 1, 0, preferredPoint);
+  return wasClosed ? points.concat([points[0]]) : points;
+}
+
+function pointToSegmentDistance(point: PathPoint, start: PathPoint, end: PathPoint): number {
+  const segmentX = end.xMeters - start.xMeters;
+  const segmentY = end.yMeters - start.yMeters;
+  const lengthSquared = (segmentX * segmentX) + (segmentY * segmentY);
+  if (lengthSquared <= 1e-9) {
+    return pointDistance(point, start);
+  }
+
+  const t = Math.max(0, Math.min(1, (((point.xMeters - start.xMeters) * segmentX) + ((point.yMeters - start.yMeters) * segmentY)) / lengthSquared));
+  const projected = {
+    xMeters: start.xMeters + (segmentX * t),
+    yMeters: start.yMeters + (segmentY * t),
+    capturedAt: point.capturedAt,
+  };
+  return pointDistance(point, projected);
+}
+
+function pointDistance(a: PathPoint, b: PathPoint): number {
+  return Math.hypot(a.xMeters - b.xMeters, a.yMeters - b.yMeters);
 }

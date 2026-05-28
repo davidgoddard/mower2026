@@ -12,6 +12,10 @@ import {
   buildVerificationPathPointsFromPlan,
   findNearestPathPointIndex,
 } from "../dist/pathfollowing/pathVerification.js";
+import {
+  buildSegmentedBoundaryExecutionTargets,
+  buildSegmentedBoundaryTargets,
+} from "../dist/pathfollowing/segmentedBoundaryExecutor.js";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPose } from "../dist/geometry/positionTypes.js";
 
@@ -222,10 +226,26 @@ test("buildVerificationApproachPlan stages to the outer edge with a tangential j
   assert.ok(nearPlan);
   assert.equal(nearPlan.turnOnly, false);
   assert.equal(nearPlan.pathDirection, "forward");
-  assert.equal(nearPlan.joinPoint.xMeters, 1);
+  assert.equal(nearPlan.joinPoint.xMeters, 0);
   assert.equal(nearPlan.joinPoint.yMeters, 0);
-  assert.equal(nearPlan.approachTarget.xMeters, 1);
-  assert.equal(nearPlan.approachTarget.yMeters, -0.1);
+  assert.equal(nearPlan.approachTarget.xMeters, -0.1);
+  assert.equal(nearPlan.approachTarget.yMeters, 0);
+});
+
+test("buildVerificationApproachPlan chooses nearest point before heading alignment", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 2, yMeters: 0, capturedAt: 3 },
+  ];
+  const pose = createPose(0.1, 0.05, createInternalHeading(90), "gnss");
+
+  const plan = buildVerificationApproachPlan(points, pose);
+
+  assert.ok(plan);
+  assert.equal(plan.nearestIndex, 0);
+  assert.equal(plan.joinPoint.xMeters, 0);
+  assert.equal(plan.joinPoint.yMeters, 0);
 });
 
 test("buildVerificationPathPointsFromPlan preserves the chosen direction", () => {
@@ -244,5 +264,75 @@ test("buildVerificationPathPointsFromPlan preserves the chosen direction", () =>
   assert.deepEqual(
     verificationPoints.map((point) => point.xMeters),
     [2, 1, 0, 3, 2],
+  );
+});
+
+test("buildSegmentedBoundaryTargets smooths wiggle and bounds segment length", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.2, yMeters: 0.01, capturedAt: 2 },
+    { xMeters: 0.4, yMeters: -0.01, capturedAt: 3 },
+    { xMeters: 1, yMeters: 0, capturedAt: 4 },
+  ];
+
+  const targets = buildSegmentedBoundaryTargets(points, {
+    version: 1,
+    closedLoopToleranceMeters: 0.05,
+    closedLoopDetectionToleranceMeters: 0.35,
+    verificationApproachStandoffMeters: 0.1,
+    verificationTurnOnlyDistanceMeters: 0.3,
+    obstacleOutwardOffsetMeters: 0.5,
+    purePursuitMinLookaheadMeters: 0.5,
+    purePursuitBaseLookaheadMeters: 1,
+    purePursuitMaxLookaheadMeters: 2,
+    mowingStandoffMeters: 0.15,
+    segmentedDriveSimplificationToleranceMeters: 0.025,
+    segmentedDriveMaxSegmentLengthMeters: 0.5,
+    segmentedDriveMinSegmentLengthMeters: 0.05,
+    segmentedDriveMaxCteMeters: 0.05,
+    updatedAt: "2026-05-26T00:00:00.000Z",
+  });
+
+  assert.deepEqual(targets.map((point) => point.yMeters), [0, 0, 0]);
+  assert.deepEqual(targets.map((point) => point.xMeters), [0, 0.5, 1]);
+});
+
+test("buildSegmentedBoundaryExecutionTargets resumes from the nearest target and skips the current pose", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const pose = createPose(1.01, 0.01, createInternalHeading(0), "gnss");
+  const parameters = {
+    version: 1,
+    closedLoopToleranceMeters: 0.05,
+    closedLoopDetectionToleranceMeters: 0.35,
+    verificationApproachStandoffMeters: 0.1,
+    verificationTurnOnlyDistanceMeters: 0.3,
+    obstacleOutwardOffsetMeters: 0.5,
+    purePursuitMinLookaheadMeters: 0.5,
+    purePursuitBaseLookaheadMeters: 1,
+    purePursuitMaxLookaheadMeters: 2,
+    mowingStandoffMeters: 0.15,
+    segmentedDriveSimplificationToleranceMeters: 0,
+    segmentedDriveMaxSegmentLengthMeters: 2,
+    segmentedDriveMinSegmentLengthMeters: 0.05,
+    segmentedDriveMaxCteMeters: 0.05,
+    updatedAt: "2026-05-26T00:00:00.000Z",
+  };
+
+  const targets = buildSegmentedBoundaryExecutionTargets(points, parameters, pose);
+
+  assert.deepEqual(
+    targets.map((point) => [point.xMeters, point.yMeters]),
+    [
+      [1, 1],
+      [0, 1],
+      [0, 0],
+      [1, 0],
+    ],
   );
 });

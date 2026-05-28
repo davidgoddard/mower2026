@@ -78,6 +78,51 @@ test("uses configured pure pursuit lookahead limits", () => {
   assert.equal(follower.maxLookahead, 1.8);
 });
 
+test("uses in-place turns instead of one-wheel pivots for tight pure pursuit curvature", () => {
+  const follower = createFollower();
+
+  const wheelSpeeds = follower.calculateWheelSpeeds(10);
+
+  assert.equal(wheelSpeeds.left < 0, true);
+  assert.equal(wheelSpeeds.right > 0, true);
+  assert.equal(Math.abs(wheelSpeeds.left) >= follower.minActiveWheelSpeed, true);
+  assert.equal(Math.abs(wheelSpeeds.right) >= follower.minActiveWheelSpeed, true);
+});
+
+test("keeps both pure pursuit wheels at the minimum active speed or higher", () => {
+  const follower = new PurePursuitFollower(
+    {
+      targetSpeed: 0.1,
+      wheelBase: 0.35,
+      controlRateHz: 15,
+      arrivalThreshold: 0.12,
+      logger: createLogger(),
+    },
+    {
+      pathStore: {
+        async loadPath() {
+          throw new Error("not_used");
+        },
+      },
+      motorController: {
+        async setWheelSpeeds() {},
+        async stop() {},
+      },
+      getCurrentPose() {
+        return createPose(0, 0, createInternalHeading(0), "gnss");
+      },
+      getCurrentSpeed() {
+        return 0;
+      },
+    },
+  );
+
+  const straightSpeeds = follower.calculateWheelSpeeds(0);
+
+  assert.equal(straightSpeeds.left, follower.minActiveWheelSpeed);
+  assert.equal(straightSpeeds.right, follower.minActiveWheelSpeed);
+});
+
 test("does not declare path completion before reaching the final segment", () => {
   const follower = createFollower();
   const pose = createPose(0.05, 0, createInternalHeading(0), "gnss");

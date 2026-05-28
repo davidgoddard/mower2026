@@ -117,6 +117,7 @@ The controller exposes motor command methods:
 `stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands.
 The stationary pose-fusion timer is armed by either an explicit zero-output command or the hard motor-disable stop path, so a mower that has been stopped by the controller can still qualify for a GNSS heading rebase after the timeout.
 Motor output commands at or below 10% magnitude are treated as zero before transmission, which gives the controller a little tolerance around the joystick center and helps stationary detection settle cleanly.
+Non-zero motor output commands are raised to at least 30% magnitude before transmission. A one-wheel motion command is converted into a minimum active arc command so the hardware is not asked to move with only one active motor.
 The stationary timer uses the controller clock rather than the GNSS sample timestamp, so a stale GNSS receiver time cannot suppress the stop timeout.
 The motor node command payload sent over I2C uses normalized percentages, where `1.0` is full output and `0.0` is stop.
 
@@ -126,7 +127,7 @@ The sensor controller raises a stall obstruction when:
 
 - one or both wheels are commanded hard but the mower does not make progress over the observation window
 
-That keeps the normal one-wheel steering corrections available, while still catching a mower that is slipping or stuck and no longer advancing on GNSS even though motion is still being commanded.
+That keeps normal steering corrections available while still catching a mower that is slipping or stuck and no longer advancing on GNSS even though motion is still being commanded.
 
 ## Heading Convention
 
@@ -337,6 +338,10 @@ The mapping follows the previous working model:
 - Speed deadband near center: magnitude under `0.02` is treated as `0`
 
 Manual demand shaping then converts speed + turn demand into wheel targets (straight/arc/spin modes) and sends those targets through the normal motor command path.
+Manual wheel outputs are quantized into small 2% steps before comparison so tiny held-stick jitter is coalesced instead of creating unnecessary I2C writes.
+A held non-zero manual command is still refreshed every 150ms, which keeps the motor node watchdog alive while remaining below the default 300ms command timeout.
+
+Path and perimeter recording consumes fused poses, but it only writes GNSS-quality poses and skips implausible jumps between consecutive recorded points. This prevents degraded GNSS or dead-reckoning drift from being persisted as long spikes in saved boundaries.
 
 ### Motion path
 
