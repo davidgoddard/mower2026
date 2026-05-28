@@ -524,6 +524,56 @@ ${getLiveSensorWidgetsStyles()}
         gap: 0.5rem;
       }
 
+      .timeline-section {
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 0.75rem;
+        padding: 1.25rem;
+        box-shadow: var(--shadow-sm);
+        margin-bottom: 1.5rem;
+      }
+
+      .timeline-section-title {
+        font-size: 1rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-secondary);
+        margin-bottom: 0.75rem;
+      }
+
+      .timeline-canvas {
+        width: 100%;
+        display: block;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+      }
+
+      .timeline-legend {
+        display: flex;
+        gap: 1.25rem;
+        margin-top: 0.5rem;
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+      }
+
+      .legend-swatch {
+        display: inline-block;
+        width: 18px;
+        height: 3px;
+        vertical-align: middle;
+        margin-right: 4px;
+        border-radius: 2px;
+      }
+
+      .timeline-stats {
+        margin-top: 0.375rem;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+
       @media (max-width: 1024px) {
         .dashboard-grid {
           grid-template-columns: 1fr;
@@ -687,6 +737,26 @@ ${getLiveSensorWidgetsHtml({
           <div id="motor-error" class="error-message" style="display: none;"></div>
         </div>
       </div>
+      <!-- Heading Timeline -->
+      <div class="timeline-section">
+        <div class="timeline-section-title">Heading History (last hour)</div>
+        <canvas id="headingCanvas" class="timeline-canvas" height="200"></canvas>
+        <div class="timeline-legend">
+          <span><span class="legend-swatch" style="background:#2563eb;"></span>IMU (fused)</span>
+          <span><span class="legend-swatch" style="background:#f59e0b;"></span>GNSS heading ± accuracy</span>
+        </div>
+        <div class="timeline-stats" id="headingStats">Waiting for heading data…</div>
+      </div>
+
+      <!-- Position Accuracy Timeline -->
+      <div class="timeline-section">
+        <div class="timeline-section-title">Position Accuracy History (last hour)</div>
+        <canvas id="posAccCanvas" class="timeline-canvas" height="140"></canvas>
+        <div class="timeline-legend">
+          <span><span class="legend-swatch" style="background:#10b981;"></span>GNSS position accuracy (m)</span>
+        </div>
+        <div class="timeline-stats" id="posAccStats">Waiting for accuracy data…</div>
+      </div>
     </div>
 
     <div class="footer">
@@ -775,6 +845,193 @@ ${getLiveSensorWidgetsScript()}
         peakText.textContent = newPeak.toFixed(2) + 'A';
 
         return newPeak;
+      }
+
+      // ── Timeline history ──────────────────────────────────────────────────
+      const MAX_TIMELINE_POINTS = 3600;
+
+      // Each entry: { imuDeg, gnssDeg, gnssAccDeg, posAccM } — all InternalHeading, all nullable
+      const timelineHistory = [];
+
+      const headingCanvas = document.getElementById('headingCanvas');
+      const headingCtx = headingCanvas.getContext('2d');
+      const posAccCanvas = document.getElementById('posAccCanvas');
+      const posAccCtx = posAccCanvas.getContext('2d');
+
+      // InternalHeading (-180..180 Cartesian) → FieldHeading (0..360 N=0)
+      function internalToField(deg) {
+        return ((90 - deg) % 360 + 360) % 360;
+      }
+
+      function syncCanvasWidth(canvas) {
+        const w = canvas.clientWidth || canvas.parentElement.clientWidth || 900;
+        if (canvas.width !== w) canvas.width = w;
+        return canvas.width;
+      }
+
+      function addTimelinePoint(imuDeg, gnssDeg, gnssAccDeg, posAccM) {
+        timelineHistory.push({ imuDeg, gnssDeg, gnssAccDeg, posAccM });
+        if (timelineHistory.length > MAX_TIMELINE_POINTS) timelineHistory.shift();
+      }
+
+      function drawHeadingTimeline() {
+        const W = syncCanvasWidth(headingCanvas);
+        const H = headingCanvas.height;
+        const padL = 46, padR = 10, padT = 10, padB = 22;
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
+        const n = timelineHistory.length;
+
+        headingCtx.clearRect(0, 0, W, H);
+        headingCtx.fillStyle = 'var(--bg-secondary)';
+        headingCtx.fillRect(0, 0, W, H);
+
+        const yFor = (deg) => padT + plotH - (deg / 360) * plotH;
+        const xFor = (i) => padL + (i / Math.max(n - 1, 1)) * plotW;
+
+        // Grid lines every 45°
+        headingCtx.strokeStyle = 'rgba(0,0,0,0.07)';
+        headingCtx.lineWidth = 1;
+        headingCtx.fillStyle = '#6b7280';
+        headingCtx.font = '10px system-ui,sans-serif';
+        headingCtx.textAlign = 'right';
+        for (let ang = 0; ang <= 360; ang += 45) {
+          const y = yFor(ang);
+          headingCtx.beginPath();
+          headingCtx.moveTo(padL, y);
+          headingCtx.lineTo(padL + plotW, y);
+          headingCtx.stroke();
+          headingCtx.fillText(ang + '°', padL - 4, y + 3.5);
+        }
+
+        if (n === 0) return;
+
+        // GNSS accuracy band — one ImageData column per point
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.gnssDeg === null || pt.gnssAccDeg === null) continue;
+          const cx = Math.round(xFor(i));
+          const cyCentre = yFor(pt.gnssDeg) - padT; // relative to plot area
+          const halfBandPx = (pt.gnssAccDeg / 360) * plotH;
+          const col = new Uint8ClampedArray(plotH * 4);
+          for (let py = 0; py < plotH; py++) {
+            const dist = Math.abs(py - cyCentre);
+            const a = halfBandPx > 0 ? Math.max(0, 1 - dist / halfBandPx) * 100 : 0;
+            const idx = py * 4;
+            col[idx] = 245; col[idx + 1] = 158; col[idx + 2] = 11; col[idx + 3] = Math.round(a);
+          }
+          headingCtx.putImageData(new ImageData(col, 1, plotH), cx, padT);
+        }
+
+        // IMU line
+        headingCtx.strokeStyle = '#2563eb';
+        headingCtx.lineWidth = 1.5;
+        headingCtx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.imuDeg === null) { started = false; continue; }
+          const x = xFor(i), y = yFor(internalToField(pt.imuDeg));
+          if (!started) { headingCtx.moveTo(x, y); started = true; } else headingCtx.lineTo(x, y);
+        }
+        headingCtx.stroke();
+
+        // GNSS heading line
+        headingCtx.strokeStyle = '#f59e0b';
+        headingCtx.lineWidth = 2;
+        headingCtx.beginPath();
+        started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.gnssDeg === null) { started = false; continue; }
+          const x = xFor(i), y = yFor(internalToField(pt.gnssDeg));
+          if (!started) { headingCtx.moveTo(x, y); started = true; } else headingCtx.lineTo(x, y);
+        }
+        headingCtx.stroke();
+
+        // Y-axis label
+        headingCtx.save();
+        headingCtx.fillStyle = '#9ca3af';
+        headingCtx.font = '10px system-ui,sans-serif';
+        headingCtx.textAlign = 'center';
+        headingCtx.translate(8, padT + plotH / 2);
+        headingCtx.rotate(-Math.PI / 2);
+        headingCtx.fillText('Heading (°)', 0, 0);
+        headingCtx.restore();
+
+        const last = timelineHistory[n - 1];
+        document.getElementById('headingStats').textContent =
+          n + ' points' +
+          (last.imuDeg !== null ? ' | IMU: ' + internalToField(last.imuDeg).toFixed(1) + '°' : '') +
+          (last.gnssDeg !== null ? ' | GNSS: ' + internalToField(last.gnssDeg).toFixed(1) + '°' +
+            (last.gnssAccDeg !== null ? ' ±' + last.gnssAccDeg.toFixed(1) + '°' : '') : '');
+      }
+
+      let posAccMaxM = 0.5;
+
+      function drawPosAccTimeline() {
+        const W = syncCanvasWidth(posAccCanvas);
+        const H = posAccCanvas.height;
+        const padL = 52, padR = 10, padT = 10, padB = 22;
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
+        const n = timelineHistory.length;
+
+        posAccCtx.clearRect(0, 0, W, H);
+        posAccCtx.fillStyle = 'var(--bg-secondary)';
+        posAccCtx.fillRect(0, 0, W, H);
+
+        for (const pt of timelineHistory) {
+          if (pt.posAccM !== null && pt.posAccM > posAccMaxM) {
+            posAccMaxM = Math.ceil(pt.posAccM * 2) / 2;
+          }
+        }
+
+        const yFor = (m) => padT + plotH - (m / posAccMaxM) * plotH;
+        const xFor = (i) => padL + (i / Math.max(n - 1, 1)) * plotW;
+
+        const step = posAccMaxM <= 0.5 ? 0.1 : posAccMaxM <= 2 ? 0.5 : 1;
+        posAccCtx.strokeStyle = 'rgba(0,0,0,0.07)';
+        posAccCtx.lineWidth = 1;
+        posAccCtx.fillStyle = '#6b7280';
+        posAccCtx.font = '10px system-ui,sans-serif';
+        posAccCtx.textAlign = 'right';
+        for (let m = 0; m <= posAccMaxM + 0.001; m = Math.round((m + step) * 1000) / 1000) {
+          const y = yFor(m);
+          posAccCtx.beginPath();
+          posAccCtx.moveTo(padL, y);
+          posAccCtx.lineTo(padL + plotW, y);
+          posAccCtx.stroke();
+          posAccCtx.fillText(m.toFixed(2) + 'm', padL - 4, y + 3.5);
+        }
+
+        if (n === 0) return;
+
+        posAccCtx.strokeStyle = '#10b981';
+        posAccCtx.lineWidth = 1.5;
+        posAccCtx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.posAccM === null) { started = false; continue; }
+          const x = xFor(i), y = yFor(pt.posAccM);
+          if (!started) { posAccCtx.moveTo(x, y); started = true; } else posAccCtx.lineTo(x, y);
+        }
+        posAccCtx.stroke();
+
+        posAccCtx.save();
+        posAccCtx.fillStyle = '#9ca3af';
+        posAccCtx.font = '10px system-ui,sans-serif';
+        posAccCtx.textAlign = 'center';
+        posAccCtx.translate(8, padT + plotH / 2);
+        posAccCtx.rotate(-Math.PI / 2);
+        posAccCtx.fillText('Acc (m)', 0, 0);
+        posAccCtx.restore();
+
+        const last = timelineHistory[n - 1];
+        document.getElementById('posAccStats').textContent =
+          n + ' points | current: ' + (last.posAccM !== null ? last.posAccM.toFixed(3) + ' m' : 'n/a') +
+          ' | scale: 0–' + posAccMaxM.toFixed(2) + ' m';
       }
 
       async function updateDashboard() {
@@ -894,6 +1151,16 @@ ${getLiveSensorWidgetsScript()}
           document.getElementById('motor-faults').textContent = motors.faultFlags !== null
             ? '0x' + motors.faultFlags.toString(16).toUpperCase()
             : '—';
+
+          // Update timelines
+          addTimelinePoint(
+            imu.status !== 'error' ? imu.headingDeg : null,
+            gnss.status !== 'error' ? gnss.headingDeg : null,
+            gnss.status !== 'error' ? gnss.headingAccuracyDeg : null,
+            gnss.status !== 'error' ? gnss.positionAccuracyMeters : null
+          );
+          drawHeadingTimeline();
+          drawPosAccTimeline();
 
           // Update footer
           const serverStatusDot = document.getElementById('server-status');
