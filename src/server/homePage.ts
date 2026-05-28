@@ -545,7 +545,7 @@ ${getLiveSensorWidgetsStyles()}
       .timeline-canvas {
         width: 100%;
         display: block;
-        background: var(--bg-secondary);
+        background: #ffffff;
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
       }
@@ -883,7 +883,7 @@ ${getLiveSensorWidgetsScript()}
         const n = timelineHistory.length;
 
         headingCtx.clearRect(0, 0, W, H);
-        headingCtx.fillStyle = 'var(--bg-secondary)';
+        headingCtx.fillStyle = '#ffffff';
         headingCtx.fillRect(0, 0, W, H);
 
         const yFor = (deg) => padT + plotH - (deg / 360) * plotH;
@@ -892,7 +892,7 @@ ${getLiveSensorWidgetsScript()}
         // Grid lines every 45°
         headingCtx.strokeStyle = 'rgba(0,0,0,0.07)';
         headingCtx.lineWidth = 1;
-        headingCtx.fillStyle = '#6b7280';
+        headingCtx.fillStyle = '#111827';
         headingCtx.font = '10px system-ui,sans-serif';
         headingCtx.textAlign = 'right';
         for (let ang = 0; ang <= 360; ang += 45) {
@@ -951,7 +951,7 @@ ${getLiveSensorWidgetsScript()}
 
         // Y-axis label
         headingCtx.save();
-        headingCtx.fillStyle = '#9ca3af';
+        headingCtx.fillStyle = '#111827';
         headingCtx.font = '10px system-ui,sans-serif';
         headingCtx.textAlign = 'center';
         headingCtx.translate(8, padT + plotH / 2);
@@ -978,7 +978,7 @@ ${getLiveSensorWidgetsScript()}
         const n = timelineHistory.length;
 
         posAccCtx.clearRect(0, 0, W, H);
-        posAccCtx.fillStyle = 'var(--bg-secondary)';
+        posAccCtx.fillStyle = '#ffffff';
         posAccCtx.fillRect(0, 0, W, H);
 
         for (const pt of timelineHistory) {
@@ -993,7 +993,7 @@ ${getLiveSensorWidgetsScript()}
         const step = posAccMaxM <= 0.5 ? 0.1 : posAccMaxM <= 2 ? 0.5 : 1;
         posAccCtx.strokeStyle = 'rgba(0,0,0,0.07)';
         posAccCtx.lineWidth = 1;
-        posAccCtx.fillStyle = '#6b7280';
+        posAccCtx.fillStyle = '#111827';
         posAccCtx.font = '10px system-ui,sans-serif';
         posAccCtx.textAlign = 'right';
         for (let m = 0; m <= posAccMaxM + 0.001; m = Math.round((m + step) * 1000) / 1000) {
@@ -1020,7 +1020,7 @@ ${getLiveSensorWidgetsScript()}
         posAccCtx.stroke();
 
         posAccCtx.save();
-        posAccCtx.fillStyle = '#9ca3af';
+        posAccCtx.fillStyle = '#111827';
         posAccCtx.font = '10px system-ui,sans-serif';
         posAccCtx.textAlign = 'center';
         posAccCtx.translate(8, padT + plotH / 2);
