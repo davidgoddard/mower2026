@@ -224,16 +224,22 @@ export class PoseFusion extends EventEmitter {
     if (canTrustPosition) {
       this.currentPosition = createPosition(event.xMeters, event.yMeters);
       this.currentQuality = "gnss";
-    } else if (this.currentQuality === "gnss") {
-      // Position quality has degraded, so keep the heading sync but fall back to
-      // dead-reckoning until position quality recovers.
-      this.currentQuality = "dead-reckoning";
-      this.logger.warn("pose_fusion.gnss_quality_degraded", {
-        fixType: event.fixType,
-        positionAccuracyMeters: event.positionAccuracyMeters,
-        headingAccuracyDeg: event.headingAccuracyDeg,
-        hasHeading: event.heading !== null,
-      });
+    } else {
+      // Position quality insufficient — use encoder dead-reckoning regardless of
+      // whether quality was previously "gnss" or never reached it ("unknown").
+      // This ensures encoders are always active when GNSS position can't be trusted,
+      // not only when quality degrades from an already-good state.
+      if (this.currentQuality === "gnss") {
+        this.logger.warn("pose_fusion.gnss_quality_degraded", {
+          fixType: event.fixType,
+          positionAccuracyMeters: event.positionAccuracyMeters,
+          headingAccuracyDeg: event.headingAccuracyDeg,
+          hasHeading: event.heading !== null,
+        });
+      }
+      if (this.currentQuality !== "dead-reckoning") {
+        this.currentQuality = "dead-reckoning";
+      }
     }
 
     // Heading quality is what lets us rebase the IMU.

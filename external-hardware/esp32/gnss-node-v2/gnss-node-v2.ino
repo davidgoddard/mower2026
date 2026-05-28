@@ -44,11 +44,13 @@ static const uint32_t UM982_UART_BAUD = 460800;
 
 HardwareSerial UM982(2);
 
-// ===== Development configuration =====
-// Replace these with the actual fixed base station coordinates for production use.
-static const double BASE_LATITUDE_DEGREES = 0.0;
-static const double BASE_LONGITUDE_DEGREES = 0.0;
-static const bool ALLOW_DYNAMIC_ORIGIN_IF_BASE_IS_ZERO = true;
+// ===== Origin configuration =====
+// The local X/Y origin is always taken from the RTCM1006 base station message when
+// available, giving a stable coordinate frame that is consistent across power cycles
+// as long as the base station hasn't moved. If RTCM1006 has not yet arrived the origin
+// falls back to the mower's own first fix so that coordinates are at least valid; it
+// will be corrected to the true base-station origin as soon as the first RTCM1006 is
+// received (typically within a few seconds of boot).
 
 // If you know the antenna baseline more precisely, update the command below too.
 static const float ANTENNA_BASELINE_METERS = 0.30f;
@@ -190,9 +192,8 @@ ParsedUniheading g_latestUniheading = { false, false, 0, 0.0f, 0.0f, 0.0f, false
 
 enum OriginSource : uint8_t {
   ORIGIN_NONE = 0,
-  ORIGIN_CONFIG = 1,
-  ORIGIN_RTCM1006 = 2,
-  ORIGIN_DYNAMIC = 3,
+  ORIGIN_RTCM1006 = 1,
+  ORIGIN_DYNAMIC = 2,
 };
 
 OriginSource g_originSource = ORIGIN_NONE;
@@ -430,8 +431,6 @@ const char *logVerificationLabel() {
 
 const char *originSourceLabel() {
   switch (g_originSource) {
-    case ORIGIN_CONFIG:
-      return "config";
     case ORIGIN_RTCM1006:
       return "rtcm1006";
     case ORIGIN_DYNAMIC:
@@ -720,17 +719,12 @@ void updateIndicatorLeds() {
 }
 
 void ensureOriginFromCurrentFix() {
-  if (g_originSource != ORIGIN_NONE) {
+  // Only use the dynamic fallback if RTCM1006 has never arrived. Once a real
+  // base-station origin is established it is never replaced by a dynamic one.
+  if (g_originSource == ORIGIN_RTCM1006 || g_originSource == ORIGIN_DYNAMIC) {
     return;
   }
-  if (BASE_LATITUDE_DEGREES != 0.0 || BASE_LONGITUDE_DEGREES != 0.0) {
-    g_originLatitudeDegrees = BASE_LATITUDE_DEGREES;
-    g_originLongitudeDegrees = BASE_LONGITUDE_DEGREES;
-    g_originHeightMeters = 0.0;
-    g_originSource = ORIGIN_CONFIG;
-    return;
-  }
-  if (ALLOW_DYNAMIC_ORIGIN_IF_BASE_IS_ZERO && g_latestPvtsln.valid && g_latestPvtsln.fixType != FIX_NONE) {
+  if (g_latestPvtsln.valid && g_latestPvtsln.fixType != FIX_NONE) {
     g_originLatitudeDegrees = g_latestPvtsln.latitudeDegrees;
     g_originLongitudeDegrees = g_latestPvtsln.longitudeDegrees;
     g_originHeightMeters = 0.0;
@@ -874,12 +868,10 @@ bool noteRtcm1006BasePosition(const uint8_t *payload, int payloadLength) {
     return false;
   }
 
-  if (BASE_LATITUDE_DEGREES == 0.0 && BASE_LONGITUDE_DEGREES == 0.0) {
-    g_originLatitudeDegrees = latitudeDegrees;
-    g_originLongitudeDegrees = longitudeDegrees;
-    g_originHeightMeters = heightMeters;
-    g_originSource = ORIGIN_RTCM1006;
-  }
+  g_originLatitudeDegrees = latitudeDegrees;
+  g_originLongitudeDegrees = longitudeDegrees;
+  g_originHeightMeters = heightMeters;
+  g_originSource = ORIGIN_RTCM1006;
 
   g_totalRtcm1006Messages += 1;
   g_lastRtcm1006Millis = millis();

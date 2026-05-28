@@ -10,6 +10,7 @@ export interface DriveRequest {
   readonly timeoutMinimumMs?: number;
   readonly disableTimeout?: boolean;
   readonly maxCrossTrackErrorMeters?: number;
+  readonly alwaysTurnToFaceTarget?: boolean; // When true, always pivot to face the target regardless of heading error magnitude
 }
 
 export interface DriveResult {

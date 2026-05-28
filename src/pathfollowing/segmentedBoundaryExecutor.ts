@@ -106,6 +106,7 @@ export async function executeSegmentedBoundaryPath(
       learningEnabled: options.learningEnabled ?? true,
       timeoutMinimumMs: SEGMENTED_DRIVE_TIMEOUT_MINIMUM_MS,
       maxCrossTrackErrorMeters: parameters.segmentedDriveMaxCteMeters,
+      alwaysTurnToFaceTarget: true,
     });
 
     if (driveResult.status !== "success") {

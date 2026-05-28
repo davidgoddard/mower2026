@@ -164,8 +164,9 @@ export class DriveController {
         const headingError = headingDifference(this.driveStartHeading, angleToTarget);
         const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingError));
 
-        // 3. If >5 degrees, turn to face target
-        if (headingErrorDeg > DRIVE_INITIAL_TURN_THRESHOLD_DEG) {
+        // 3. Turn to face target — always when alwaysTurnToFaceTarget is set (e.g. short
+        //    boundary segments), otherwise only when error exceeds the threshold.
+        if (request.alwaysTurnToFaceTarget || headingErrorDeg > DRIVE_INITIAL_TURN_THRESHOLD_DEG) {
           this.status = "turning";
           this.logger.info("drive.turning", {
             headingError: unwrapRelativeAngle(headingError),
