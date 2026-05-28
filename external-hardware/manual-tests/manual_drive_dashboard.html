@@ -133,6 +133,27 @@
         border: 1px solid var(--line);
         display: block;
       }
+      .timeline-canvas {
+        width: 100%;
+        display: block;
+        background: rgba(255, 255, 255, 0.5);
+        border: 1px solid var(--line);
+      }
+      .timeline-legend {
+        display: flex;
+        gap: 18px;
+        margin-top: 8px;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+      .legend-swatch {
+        display: inline-block;
+        width: 20px;
+        height: 3px;
+        vertical-align: middle;
+        margin-right: 4px;
+        border-radius: 2px;
+      }
     </style>
   </head>
   <body>
@@ -148,6 +169,25 @@
         <div class="label">Position Map (Last 10 Minutes)</div>
         <canvas id="mapCanvas" width="1200" height="800"></canvas>
         <div class="sub" id="mapStats">Waiting for position data...</div>
+      </section>
+
+      <section class="card wide">
+        <div class="label">Heading History (last hour)</div>
+        <canvas id="headingCanvas" class="timeline-canvas" height="200"></canvas>
+        <div class="timeline-legend">
+          <span><span class="legend-swatch" style="background:#175d7a;"></span>IMU (fused)</span>
+          <span><span class="legend-swatch" style="background:#c56d28;"></span>GNSS heading ± accuracy</span>
+        </div>
+        <div class="sub" id="headingStats">Waiting for heading data...</div>
+      </section>
+
+      <section class="card wide">
+        <div class="label">Position Accuracy History (last hour)</div>
+        <canvas id="posAccCanvas" class="timeline-canvas" height="140"></canvas>
+        <div class="timeline-legend">
+          <span><span class="legend-swatch" style="background:#2b8960;"></span>GNSS position accuracy (m)</span>
+        </div>
+        <div class="sub" id="posAccStats">Waiting for accuracy data...</div>
       </section>
 
       <section class="row">
@@ -431,6 +471,26 @@
         const imu = state.imu;
         const estimate = state.estimate;
 
+        // Collect timeline data point
+        {
+          // estimate.sample.headingDegrees is InternalHeading (Cartesian, -180..180)
+          const imuFieldDeg = (estimate.ok && estimate.sample?.headingDegrees != null)
+            ? internalToField(estimate.sample.headingDegrees)
+            : null;
+          const gnssFieldDeg = (gnss.ok && gnss.sample?.headingDegrees != null)
+            ? gnss.sample.headingDegrees  // already FieldHeading [0,360)
+            : null;
+          const gnssAccDeg = (gnss.ok && gnss.sample?.headingAccuracyDegrees != null)
+            ? gnss.sample.headingAccuracyDegrees
+            : null;
+          const posAccM = (gnss.ok && gnss.sample?.positionAccuracyMeters != null)
+            ? gnss.sample.positionAccuracyMeters
+            : null;
+          addTimelinePoint(state.serverTimestampMillis, imuFieldDeg, gnssFieldDeg, gnssAccDeg, posAccM);
+          drawHeadingTimeline();
+          drawPosAccTimeline();
+        }
+
         setHtml("controllerStatus", badge(controller.connected ? (controller.manualDriveEnabled ? "Live + Armed" : "Live") : "Disconnected", controller.connected ? (controller.manualDriveEnabled ? "warn" : "ok") : "bad"));
         $("controllerSummary").textContent = controller.product ? `${controller.product} | speed ${format(controller.speed, 2)} | angle ${format(controller.angleDegrees, 1)} deg` : "Controller unavailable";
 
@@ -504,6 +564,237 @@
 
         $("notes").innerHTML = state.notes.map((note) => `<li>${note}</li>`).join("");
         $("sessionPath").textContent = `Session telemetry: ${state.sessionLogPath}`;
+      }
+
+      // ── Timeline history ─────────────────────────────────────────────────
+      const MAX_TIMELINE_POINTS = 3600; // ~1 hour at 1 Hz SSE cadence
+
+      // Each entry: { t, imuDeg, gnssDeg, gnssAccDeg, posAccM }
+      // Fields may be null when sensor not available.
+      const timelineHistory = [];
+
+      const headingCanvas = $("headingCanvas");
+      const headingCtx = headingCanvas.getContext("2d");
+      const posAccCanvas = $("posAccCanvas");
+      const posAccCtx = posAccCanvas.getContext("2d");
+
+      // InternalHeading (Cartesian, -180..180) → FieldHeading (0..360, N=0)
+      function internalToField(deg) {
+        let f = 90 - deg;
+        if (f < 0) f += 360;
+        if (f >= 360) f -= 360;
+        return f;
+      }
+
+      function addTimelinePoint(t, imuDeg, gnssDeg, gnssAccDeg, posAccM) {
+        timelineHistory.push({ t, imuDeg, gnssDeg, gnssAccDeg, posAccM });
+        while (timelineHistory.length > MAX_TIMELINE_POINTS) {
+          timelineHistory.shift();
+        }
+      }
+
+      // Resize a canvas to match its CSS display width.
+      function syncCanvasWidth(canvas) {
+        const w = canvas.clientWidth || canvas.parentElement.clientWidth || 900;
+        if (canvas.width !== w) {
+          canvas.width = w;
+        }
+        return canvas.width;
+      }
+
+      // ── Heading timeline ─────────────────────────────────────────────────
+      function drawHeadingTimeline() {
+        const W = syncCanvasWidth(headingCanvas);
+        const H = headingCanvas.height;
+        const padLeft = 48;
+        const padRight = 12;
+        const padTop = 10;
+        const padBottom = 24;
+        const plotW = W - padLeft - padRight;
+        const plotH = H - padTop - padBottom;
+
+        headingCtx.clearRect(0, 0, W, H);
+
+        // Background
+        headingCtx.fillStyle = "rgba(255,255,255,0.5)";
+        headingCtx.fillRect(0, 0, W, H);
+
+        const n = timelineHistory.length;
+        const hasAny = n > 0;
+
+        // Y-axis: 0..360 degrees, Y=0 at top=360, Y=plotH at 0
+        const yFor = (deg) => padTop + plotH - (deg / 360) * plotH;
+        const xFor = (i) => padLeft + (i / Math.max(n - 1, 1)) * plotW;
+
+        // Grid lines every 45°
+        headingCtx.strokeStyle = "rgba(31,40,32,0.08)";
+        headingCtx.lineWidth = 1;
+        headingCtx.fillStyle = "#637063";
+        headingCtx.font = "10px monospace";
+        headingCtx.textAlign = "right";
+        for (let ang = 0; ang <= 360; ang += 45) {
+          const y = yFor(ang);
+          headingCtx.beginPath();
+          headingCtx.moveTo(padLeft, y);
+          headingCtx.lineTo(padLeft + plotW, y);
+          headingCtx.stroke();
+          headingCtx.fillText(ang + "°", padLeft - 4, y + 4);
+        }
+
+        if (!hasAny) return;
+
+        // GNSS accuracy gradient band (drawn before the lines)
+        // For each x column draw a vertical gradient centred on gnssDeg ± gnssAccDeg
+        const imgData = headingCtx.createImageData(1, plotH);
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.gnssDeg === null || pt.gnssAccDeg === null) continue;
+          const cx = Math.round(xFor(i));
+          const cy = yFor(pt.gnssDeg); // canvas y of centre
+
+          // Half-band in pixels
+          const halfBandPx = (pt.gnssAccDeg / 360) * plotH;
+
+          // Fill a 1-pixel-wide column with the gradient
+          const colData = new Uint8ClampedArray(plotH * 4);
+          for (let py = 0; py < plotH; py++) {
+            // Canvas y=0 is 360°, canvas y=plotH is 0°
+            const distPx = Math.abs(py - (cy - padTop));
+            const alpha = halfBandPx > 0
+              ? Math.max(0, 1 - distPx / halfBandPx) * 110
+              : 0;
+            const idx = py * 4;
+            // Orange: 197, 109, 40
+            colData[idx] = 197;
+            colData[idx + 1] = 109;
+            colData[idx + 2] = 40;
+            colData[idx + 3] = Math.round(alpha);
+          }
+          const col = new ImageData(colData, 1, plotH);
+          headingCtx.putImageData(col, cx, padTop);
+        }
+
+        // IMU line (blue)
+        headingCtx.strokeStyle = "#175d7a";
+        headingCtx.lineWidth = 1.5;
+        headingCtx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.imuDeg === null) { started = false; continue; }
+          const x = xFor(i);
+          const y = yFor(pt.imuDeg);
+          if (!started) { headingCtx.moveTo(x, y); started = true; }
+          else headingCtx.lineTo(x, y);
+        }
+        headingCtx.stroke();
+
+        // GNSS heading line (orange, thicker, on top of band)
+        headingCtx.strokeStyle = "#c56d28";
+        headingCtx.lineWidth = 2;
+        headingCtx.beginPath();
+        started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.gnssDeg === null) { started = false; continue; }
+          const x = xFor(i);
+          const y = yFor(pt.gnssDeg);
+          if (!started) { headingCtx.moveTo(x, y); started = true; }
+          else headingCtx.lineTo(x, y);
+        }
+        headingCtx.stroke();
+
+        // Axis label
+        headingCtx.save();
+        headingCtx.fillStyle = "#637063";
+        headingCtx.font = "10px monospace";
+        headingCtx.textAlign = "center";
+        headingCtx.translate(10, padTop + plotH / 2);
+        headingCtx.rotate(-Math.PI / 2);
+        headingCtx.fillText("Heading (°)", 0, 0);
+        headingCtx.restore();
+
+        const last = timelineHistory[n - 1];
+        $("headingStats").textContent =
+          `${n} points | IMU: ${last.imuDeg !== null ? format(last.imuDeg, 1) + "°" : "n/a"} | GNSS: ${last.gnssDeg !== null ? format(last.gnssDeg, 1) + "° ±" + format(last.gnssAccDeg, 1) + "°" : "n/a"}`;
+      }
+
+      // ── Position accuracy timeline ────────────────────────────────────────
+      let posAccMaxM = 0.5; // auto-expanding, starts at 50 cm
+
+      function drawPosAccTimeline() {
+        const W = syncCanvasWidth(posAccCanvas);
+        const H = posAccCanvas.height;
+        const padLeft = 54;
+        const padRight = 12;
+        const padTop = 10;
+        const padBottom = 24;
+        const plotW = W - padLeft - padRight;
+        const plotH = H - padTop - padBottom;
+
+        posAccCtx.clearRect(0, 0, W, H);
+        posAccCtx.fillStyle = "rgba(255,255,255,0.5)";
+        posAccCtx.fillRect(0, 0, W, H);
+
+        const n = timelineHistory.length;
+
+        // Expand scale if any value exceeds it
+        for (const pt of timelineHistory) {
+          if (pt.posAccM !== null && pt.posAccM > posAccMaxM) {
+            // Round up to next 0.5 m increment
+            posAccMaxM = Math.ceil(pt.posAccM * 2) / 2;
+          }
+        }
+
+        const yFor = (m) => padTop + plotH - (m / posAccMaxM) * plotH;
+        const xFor = (i) => padLeft + (i / Math.max(n - 1, 1)) * plotW;
+
+        // Grid lines
+        const step = posAccMaxM <= 0.5 ? 0.1 : posAccMaxM <= 2 ? 0.5 : 1;
+        posAccCtx.strokeStyle = "rgba(31,40,32,0.08)";
+        posAccCtx.lineWidth = 1;
+        posAccCtx.fillStyle = "#637063";
+        posAccCtx.font = "10px monospace";
+        posAccCtx.textAlign = "right";
+        for (let m = 0; m <= posAccMaxM + 0.001; m = Math.round((m + step) * 1000) / 1000) {
+          const y = yFor(m);
+          posAccCtx.beginPath();
+          posAccCtx.moveTo(padLeft, y);
+          posAccCtx.lineTo(padLeft + plotW, y);
+          posAccCtx.stroke();
+          posAccCtx.fillText(m.toFixed(2) + "m", padLeft - 4, y + 4);
+        }
+
+        if (n === 0) return;
+
+        // Position accuracy line (green)
+        posAccCtx.strokeStyle = "#2b8960";
+        posAccCtx.lineWidth = 1.5;
+        posAccCtx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = timelineHistory[i];
+          if (pt.posAccM === null) { started = false; continue; }
+          const x = xFor(i);
+          const y = yFor(pt.posAccM);
+          if (!started) { posAccCtx.moveTo(x, y); started = true; }
+          else posAccCtx.lineTo(x, y);
+        }
+        posAccCtx.stroke();
+
+        // Axis label
+        posAccCtx.save();
+        posAccCtx.fillStyle = "#637063";
+        posAccCtx.font = "10px monospace";
+        posAccCtx.textAlign = "center";
+        posAccCtx.translate(10, padTop + plotH / 2);
+        posAccCtx.rotate(-Math.PI / 2);
+        posAccCtx.fillText("Acc (m)", 0, 0);
+        posAccCtx.restore();
+
+        const last = timelineHistory[n - 1];
+        $("posAccStats").textContent =
+          `${n} points | current: ${last.posAccM !== null ? format(last.posAccM, 3) + " m" : "n/a"} | scale: 0–${posAccMaxM.toFixed(2)} m`;
       }
 
       const source = new EventSource("/events");
