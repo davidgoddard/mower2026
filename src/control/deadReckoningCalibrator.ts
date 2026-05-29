@@ -281,17 +281,17 @@ export class DeadReckoningCalibrator {
       // Phase 1 – straight line
       // ------------------------------------------------------------------
       this.setPhase("straight", "Phase 1: Driving straight forward…");
-      straightPhase = await this.runDrivePhase(this.fullSpeed, this.fullSpeed);
+      straightPhase = await this.runDrivePhase(this.fullSpeed, this.fullSpeed, preRunAnchor);
       if (this.stopRequested) {
         this.setPhase("stopped", "Stopped after straight phase.");
         return this.buildResult(straightPhase, null, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
       straightPhase = this.analyseStraightPhase(straightPhase, warnings);
 
-      // Wait for pose to settle again before arc phases
+      // Wait for pose to settle — anchor is used as start of next phase
       this.setPhase("waiting-for-fix", "Settling between phases…");
-      await this.waitForSettledPose();
-      if (this.stopRequested) {
+      const preArcRightAnchor = await this.waitForSettledPose();
+      if (!preArcRightAnchor || this.stopRequested) {
         this.setPhase("stopped", "Stopped during settle.");
         return this.buildResult(straightPhase, null, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
@@ -300,7 +300,7 @@ export class DeadReckoningCalibrator {
       // Phase 2 – arc right (left=full, right=inner)
       // ------------------------------------------------------------------
       this.setPhase("arc-right", "Phase 2: Arc right (left=100%, right=40%)…");
-      arcRightPhase = await this.runDrivePhase(this.fullSpeed, this.arcInnerSpeed);
+      arcRightPhase = await this.runDrivePhase(this.fullSpeed, this.arcInnerSpeed, preArcRightAnchor);
       if (this.stopRequested) {
         this.setPhase("stopped", "Stopped after arc-right phase.");
         return this.buildResult(straightPhase, arcRightPhase, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
@@ -308,8 +308,8 @@ export class DeadReckoningCalibrator {
       arcRightPhase = this.analyseArcPhase(arcRightPhase, "right", warnings);
 
       this.setPhase("waiting-for-fix", "Settling between phases…");
-      await this.waitForSettledPose();
-      if (this.stopRequested) {
+      const preArcLeftAnchor = await this.waitForSettledPose();
+      if (!preArcLeftAnchor || this.stopRequested) {
         this.setPhase("stopped", "Stopped during settle.");
         return this.buildResult(straightPhase, arcRightPhase, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
@@ -318,7 +318,7 @@ export class DeadReckoningCalibrator {
       // Phase 3 – arc left (right=full, left=inner)
       // ------------------------------------------------------------------
       this.setPhase("arc-left", "Phase 3: Arc left (right=100%, left=40%)…");
-      arcLeftPhase = await this.runDrivePhase(this.arcInnerSpeed, this.fullSpeed);
+      arcLeftPhase = await this.runDrivePhase(this.arcInnerSpeed, this.fullSpeed, preArcLeftAnchor);
       if (this.stopRequested) {
         this.setPhase("stopped", "Stopped after arc-left phase.");
         return this.buildResult(straightPhase, arcRightPhase, arcLeftPhase, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
@@ -353,7 +353,7 @@ export class DeadReckoningCalibrator {
   // Drive phase execution
   // ---------------------------------------------------------------------------
 
-  private async runDrivePhase(leftPercent: number, rightPercent: number): Promise<RunPhaseResult> {
+  private async runDrivePhase(leftPercent: number, rightPercent: number, preDriveAnchor: GnssAnchor): Promise<RunPhaseResult> {
     this.gnssAnchors = [];
     this.arcSamples = [];
     this.leftTicksAccum = 0;
@@ -362,9 +362,6 @@ export class DeadReckoningCalibrator {
     this.sensorController.on(SENSOR_EVENTS.GNSS_POSITION_UPDATE, this.onGnssUpdate);
     this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
     this.sensorController.on(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onMotorFeedback);
-
-    // Snapshot settled anchor before drive starts
-    const preDriveAnchor = this.buildCurrentAnchor();
 
     try {
       this.driveStartMs = Date.now();
