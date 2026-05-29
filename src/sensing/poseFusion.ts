@@ -1,6 +1,10 @@
 /**
  * Pose Fusion — DR-primary sensor fusion.
  *
+ * Coordinate frame: ENU (X=East, Y=North). Internal headings are Cartesian —
+ * 0° points along +X (East) and 90° along +Y (North), so position integration
+ * uses dx = d·cos(h), dy = d·sin(h).
+ *
  * Architecture:
  *
  *   IMU owns heading — always. The IMU heading drives all position integration
@@ -11,6 +15,11 @@
  *   Encoders own distance magnitude — always. Every motor feedback event
  *   advances the DR position regardless of GNSS quality.
  *
+ *   Encoder-only DR track is maintained in parallel as a diagnostic — it
+ *   integrates wheel differentials independently and exposes drConfidence
+ *   based on how well its turn rate matches the IMU. It does not feed back
+ *   into the fused pose; it is observed for slip detection only.
+ *
  *   Per-wheel odometry with slip detection:
  *     avgDistance = (leftTicks × leftMPerTick + rightTicks × rightMPerTick) / 2
  *     impliedTurnRateDeg = (rightDist - leftDist) / wheelbase × (180/π)
@@ -19,13 +28,21 @@
  *     is flagged. Position still advances using IMU heading + avg encoder distance
  *     (second-order error only).
  *
- *   GNSS correction — two gates:
- *     Gate 1 (quality): fixType fixed/float AND posAccuracy ≤ maxGnssAccuracyMeters
- *     Gate 2 (agreement): |gnssPos - drPos| ≤ gnssAgreementThresholdMeters
- *     Both must pass to blend DR toward GNSS.
- *     Gate 1 pass + Gate 2 fail → outlier logged, GNSS ignored.
- *     After a long GNSS outage (quality was never good), Gate 2 is bypassed once
- *     to re-anchor.
+ *   GNSS correction gates (all must pass):
+ *     Gate 0 (freshness): nowMs - sample.timestampMillis ≤ GNSS_MAX_SAMPLE_AGE_MS
+ *     Gate 1 (quality):   fixType fixed/float AND posAccuracy ≤ MAX_GNSS_POSITION_ACCURACY_METERS
+ *     Gate 2 (agreement): |gnssPos - drPos| ≤ GNSS_AGREEMENT_THRESHOLD_METERS
+ *     Gate 1 fail → DR continues unaided, outage flagged.
+ *     Gate 2 fail → outlier logged, GNSS ignored, DR continues.
+ *     After an outage (Gate 1 was failing), Gate 2 is replaced by a wider
+ *     re-anchor threshold so DR drift can be corrected in one snap.
+ *
+ *   Quality reporting:
+ *     "gnss"            — last good GNSS fix arrived within GNSS_STALE_TIMEOUT_MS
+ *     "dead-reckoning"  — no recent GNSS, but pose is being integrated from encoders/IMU
+ *     "unknown"         — no GNSS baseline ever established
+ *     Quality is computed lazily on each pose read so silent GNSS gaps demote
+ *     the reported quality even without a triggering bad-quality message.
  */
 
 import { EventEmitter } from "node:events";
@@ -102,6 +119,19 @@ const DR_HEADING_SYNC_THRESHOLD_DEG = 15;
 // Position agreement threshold for the synced highlight (metres).
 const DR_POSITION_SYNC_THRESHOLD_METERS = 0.5;
 
+// Steady-state GNSS/DR agreement gate.
+// A good-quality GNSS fix that disagrees with the DR estimate by more than this
+// is treated as an outlier and ignored (logged but not applied).
+const GNSS_AGREEMENT_THRESHOLD_METERS = 0.30;
+
+// GNSS sample maximum age. Samples older than this relative to the sensor
+// controller clock are rejected to avoid timestamp-misaligned corrections.
+const GNSS_MAX_SAMPLE_AGE_MS = 500;
+
+// If no good GNSS position has been received for this long, drop quality to
+// dead-reckoning so consumers know the pose is no longer GNSS-corrected.
+const GNSS_STALE_TIMEOUT_MS = 2_000;
+
 // GNSS heading rebase — preserve the existing stability-based logic.
 const GNSS_STATIONARY_REBASE_TIMEOUT_MS = 10_000;
 const GNSS_OFFSET_REBASE_MIN_DURATION_MS = 1_500;
@@ -133,6 +163,8 @@ export interface PoseFusionPrimitiveState {
   readonly speedMetersPerSecond: number | null;
   readonly usingGnssHeading: boolean;
   readonly wheelSlipSuspected: boolean;
+  /** Milliseconds since the last accepted good-quality GNSS position fix, or null if never received */
+  readonly gnssPositionAgeMs: number | null;
   /** Encoder-only dead-reckoning position, never corrected by GNSS or IMU */
   readonly encoderOnlyXMeters: number | null;
   readonly encoderOnlyYMeters: number | null;
@@ -237,12 +269,33 @@ export class PoseFusion extends EventEmitter {
   }
 
   getCurrentPose(): Pose {
+    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
     return createPose(
       unwrapMeters(this.currentPosition.xMeters),
       unwrapMeters(this.currentPosition.yMeters),
       this.currentHeading,
-      this.currentQuality,
+      this.currentQualityWithStalenessCheck(nowMs),
     );
+  }
+
+  private currentQualityWithStalenessCheck(nowMs: number): "gnss" | "dead-reckoning" | "unknown" {
+    if (
+      this.currentQuality === "gnss" &&
+      this.lastGnssSyncTimeMs !== null &&
+      nowMs - this.lastGnssSyncTimeMs > GNSS_STALE_TIMEOUT_MS
+    ) {
+      // Demote internally too so the outage flag is set for the next good fix
+      this.currentQuality = "dead-reckoning";
+      if (this.gnssQualityLostTimeMs === null) {
+        this.gnssQualityLostTimeMs = this.lastGnssSyncTimeMs + GNSS_STALE_TIMEOUT_MS;
+        this.logger.warn("pose_fusion.gnss_position_silent", {
+          ageMs: nowMs - this.lastGnssSyncTimeMs,
+          threshold: GNSS_STALE_TIMEOUT_MS,
+        });
+      }
+      return "dead-reckoning";
+    }
+    return this.currentQuality;
   }
 
   getPrimitiveState(): PoseFusionPrimitiveState {
@@ -261,16 +314,20 @@ export class PoseFusion extends EventEmitter {
         ? Math.hypot(this.encoderOnlyX - fusedX, this.encoderOnlyY - fusedY) <= DR_POSITION_SYNC_THRESHOLD_METERS
         : false;
 
+    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
+    const gnssPositionAgeMs = this.lastGnssSyncTimeMs !== null ? nowMs - this.lastGnssSyncTimeMs : null;
+
     return {
       status: this.running ? "ok" : "idle",
       error: null,
       xMeters: fusedX,
       yMeters: fusedY,
       headingDeg: fusedHeadingDeg,
-      quality: pose.quality,
+      quality: this.currentQualityWithStalenessCheck(nowMs),
       speedMetersPerSecond: null,
       usingGnssHeading: this.isUsingGnssHeading,
       wheelSlipSuspected: this.wheelSlipSuspected,
+      gnssPositionAgeMs,
       encoderOnlyXMeters: this.encoderOnlyX,
       encoderOnlyYMeters: this.encoderOnlyY,
       encoderOnlyHeadingDeg: encoderHeadingDeg,
@@ -448,10 +505,12 @@ export class PoseFusion extends EventEmitter {
     if (passesGate1) {
       this.applyGnssPositionCorrection(event);
     } else {
-      // Quality insufficient — DR continues unaided; quality stays as-is
+      // Quality insufficient — DR continues unaided; mark outage so the next
+      // good fix can re-anchor.
+      const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
       if (this.currentQuality === "gnss") {
         this.currentQuality = "dead-reckoning";
-        this.gnssQualityLostTimeMs = Date.now();
+        this.gnssQualityLostTimeMs = nowMs;
         this.logger.warn("pose_fusion.gnss_quality_degraded", {
           fixType: event.fixType,
           positionAccuracyMeters: event.positionAccuracyMeters,
@@ -470,6 +529,19 @@ export class PoseFusion extends EventEmitter {
   }
 
   private applyGnssPositionCorrection(event: GnssPositionUpdateEvent): void {
+    // Reject stale samples — GNSS latency or a timestamp mismatch would blend
+    // a past position into the current DR estimate causing path drag.
+    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
+    const gnssAgeMs = nowMs - event.timestampMillis;
+    if (gnssAgeMs < 0 || gnssAgeMs > GNSS_MAX_SAMPLE_AGE_MS) {
+      this.logger.warn("pose_fusion.gnss_position_stale", {
+        gnssAgeMs,
+        timestampMillis: event.timestampMillis,
+        nowMs,
+      });
+      return;
+    }
+
     const gnssX = event.xMeters;
     const gnssY = event.yMeters;
     const drX = unwrapMeters(this.currentPosition.xMeters);
@@ -483,7 +555,7 @@ export class PoseFusion extends EventEmitter {
       this.hasGnssPositionBaseline = true;
       this.gnssQualityLostTimeMs = null;
       this.currentQuality = "gnss";
-      this.lastGnssSyncTimeMs = Date.now();
+      this.lastGnssSyncTimeMs = nowMs;
       // Seed encoder-only track from this GNSS anchor so it shows a position
       // immediately rather than waiting for the first wheel movement.
       if (this.encoderOnlyX === null) {
@@ -522,12 +594,36 @@ export class PoseFusion extends EventEmitter {
       this.logger.info("pose_fusion.gnss_position_reanchored_after_outage", {
         separation,
         gnssX, gnssY, drX, drY,
-        outageDurationMs: Date.now() - this.gnssQualityLostTimeMs!,
+        outageDurationMs: nowMs - this.gnssQualityLostTimeMs!,
       });
       this.currentPosition = createPosition(gnssX, gnssY);
       this.gnssQualityLostTimeMs = null;
       this.currentQuality = "gnss";
-      this.lastGnssSyncTimeMs = Date.now();
+      this.lastGnssSyncTimeMs = nowMs;
+      return;
+    }
+
+    // Gate 2: steady-state agreement check.
+    // If the DR estimate and GNSS disagree by more than the threshold, the GNSS
+    // reading is likely from a different epoch or has a position jump — ignore it.
+    if (separation > GNSS_AGREEMENT_THRESHOLD_METERS) {
+      this.logger.warn("pose_fusion.gnss_position_disagrees_with_dr", {
+        separation,
+        threshold: GNSS_AGREEMENT_THRESHOLD_METERS,
+        gnssX, gnssY, drX, drY,
+      });
+      return;
+    }
+
+    // Gate 2: steady-state agreement check.
+    // If the DR estimate and GNSS disagree by more than the threshold, the GNSS
+    // reading is likely from a different epoch or has a position jump — ignore it.
+    if (separation > GNSS_AGREEMENT_THRESHOLD_METERS) {
+      this.logger.warn("pose_fusion.gnss_position_disagrees_with_dr", {
+        separation,
+        threshold: GNSS_AGREEMENT_THRESHOLD_METERS,
+        gnssX, gnssY, drX, drY,
+      });
       return;
     }
 
@@ -541,7 +637,7 @@ export class PoseFusion extends EventEmitter {
     this.currentPosition = createPosition(blendedX, blendedY);
 
     this.currentQuality = "gnss";
-    this.lastGnssSyncTimeMs = Date.now();
+    this.lastGnssSyncTimeMs = nowMs;
   }
 
   // ---------------------------------------------------------------------------
