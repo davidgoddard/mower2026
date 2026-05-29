@@ -29,6 +29,7 @@ import { LoggerScope } from "../logging/types.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
+import { MotorCalibration } from "../config/motorCalibration.js";
 import {
   SENSOR_EVENTS,
   GnssPositionUpdateEvent,
@@ -137,11 +138,15 @@ export interface DeadReckoningCalibratorOptions {
   sensorController: SensorController;
   poseFusion: PoseFusion;
   poseCalibration: PoseCalibration;
+  motorCalibration?: MotorCalibration;
   logger: SessionLogger;
   driveDurationMs?: number;
   steadyStateStartMs?: number;
   steadyStateEndMs?: number;
-  settleMs?: number;
+  /** How long usingGnssHeading must be continuously true before a pose is trusted (ms) */
+  poseSteadyDwellMs?: number;
+  /** Timeout waiting for a settled pose before each phase (ms) */
+  poseSettleTimeoutMs?: number;
   maxAnchorAccuracyMeters?: number;
   fullSpeed?: number;
   arcInnerSpeed?: number;
@@ -163,10 +168,12 @@ export class DeadReckoningCalibrator {
   private readonly sensorController: SensorController;
   private readonly poseFusion: PoseFusion;
   private readonly poseCalibration: PoseCalibration;
+  private readonly motorCalibration: MotorCalibration | null;
   private readonly driveDurationMs: number;
   private readonly steadyStateStartMs: number;
   private readonly steadyStateEndMs: number;
-  private readonly settleMs: number;
+  private readonly poseSteadyDwellMs: number;
+  private readonly poseSettleTimeoutMs: number;
   private readonly maxAnchorAccuracyMeters: number;
   private readonly fullSpeed: number;
   private readonly arcInnerSpeed: number;
@@ -192,10 +199,12 @@ export class DeadReckoningCalibrator {
     this.sensorController = options.sensorController;
     this.poseFusion = options.poseFusion;
     this.poseCalibration = options.poseCalibration;
+    this.motorCalibration = options.motorCalibration ?? null;
     this.driveDurationMs = options.driveDurationMs ?? 3000;
     this.steadyStateStartMs = options.steadyStateStartMs ?? 1000;
     this.steadyStateEndMs = options.steadyStateEndMs ?? 2000;
-    this.settleMs = options.settleMs ?? 800;
+    this.poseSteadyDwellMs = options.poseSteadyDwellMs ?? 2000;
+    this.poseSettleTimeoutMs = options.poseSettleTimeoutMs ?? 30_000;
     this.maxAnchorAccuracyMeters = options.maxAnchorAccuracyMeters ?? 0.10;
     this.fullSpeed = options.fullSpeed ?? 1.0;
     this.arcInnerSpeed = options.arcInnerSpeed ?? 0.4;
@@ -244,12 +253,23 @@ export class DeadReckoningCalibrator {
     let arcRightPhase: RunPhaseResult | null = null;
     let arcLeftPhase: RunPhaseResult | null = null;
 
+    // Open a single motor operation that spans the entire calibration run.
+    // Motors are never disabled mid-run — zero-speed commands ramp down naturally.
+    this.sensorController.beginMotorOperation();
+    this.motorOperationActive = true;
+
     try {
-      this.setPhase("waiting-for-fix", "Waiting for good GNSS fix (fixed/float, ≤10 cm)…");
-      const initialAnchor = await this.waitForGoodAnchor(10_000);
-      if (!initialAnchor) {
-        warnings.push("Could not obtain a good GNSS anchor within 10 s. Results may be unreliable.");
-        this.gnssWarning = "GNSS quality insufficient. Proceeding anyway — calibration accuracy will be reduced.";
+      // ------------------------------------------------------------------
+      // Wait for a settled pose (GNSS rebasing IMU, sustained for dwell period)
+      // before taking any measurement.
+      // ------------------------------------------------------------------
+      this.setPhase("waiting-for-fix", "Waiting for settled pose (GNSS and IMU in agreement)…");
+      const preRunAnchor = await this.waitForSettledPose();
+      if (!preRunAnchor) {
+        warnings.push(`Could not obtain a settled pose within ${this.poseSettleTimeoutMs / 1000} s. Ensure a good RTK fix and stationary mower before starting.`);
+        this.gnssWarning = "Pose not settled. Calibration aborted.";
+        this.setPhase("error", "Pose not settled — start again once GNSS and IMU widgets show green.");
+        return this.buildResult(null, null, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
 
       if (this.stopRequested) {
@@ -268,7 +288,13 @@ export class DeadReckoningCalibrator {
       }
       straightPhase = this.analyseStraightPhase(straightPhase, warnings);
 
-      await this.sleep(1500);
+      // Wait for pose to settle again before arc phases
+      this.setPhase("waiting-for-fix", "Settling between phases…");
+      await this.waitForSettledPose();
+      if (this.stopRequested) {
+        this.setPhase("stopped", "Stopped during settle.");
+        return this.buildResult(straightPhase, null, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
+      }
 
       // ------------------------------------------------------------------
       // Phase 2 – arc right (left=full, right=inner)
@@ -279,10 +305,14 @@ export class DeadReckoningCalibrator {
         this.setPhase("stopped", "Stopped after arc-right phase.");
         return this.buildResult(straightPhase, arcRightPhase, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
-      // For arc-right: left is outer, right is inner
       arcRightPhase = this.analyseArcPhase(arcRightPhase, "right", warnings);
 
-      await this.sleep(1500);
+      this.setPhase("waiting-for-fix", "Settling between phases…");
+      await this.waitForSettledPose();
+      if (this.stopRequested) {
+        this.setPhase("stopped", "Stopped during settle.");
+        return this.buildResult(straightPhase, arcRightPhase, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
+      }
 
       // ------------------------------------------------------------------
       // Phase 3 – arc left (right=full, left=inner)
@@ -293,7 +323,6 @@ export class DeadReckoningCalibrator {
         this.setPhase("stopped", "Stopped after arc-left phase.");
         return this.buildResult(straightPhase, arcRightPhase, arcLeftPhase, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
-      // For arc-left: right is outer, left is inner
       arcLeftPhase = this.analyseArcPhase(arcLeftPhase, "left", warnings);
 
       this.setPhase("analysing", "Analysing results…");
@@ -334,36 +363,35 @@ export class DeadReckoningCalibrator {
     this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
     this.sensorController.on(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onMotorFeedback);
 
-    // Snapshot anchor before motors start
+    // Snapshot settled anchor before drive starts
     const preDriveAnchor = this.buildCurrentAnchor();
 
     try {
-      this.sensorController.beginMotorOperation();
-      this.motorOperationActive = true;
       this.driveStartMs = Date.now();
 
       await this.sensorController.setMotorWheelOutputs(leftPercent, rightPercent);
       await this.sleep(this.driveDurationMs);
+
+      // Ramp to zero — let the motor node ramp-down naturally, do not cut power
       await this.sensorController.setMotorWheelOutputs(0, 0);
-      await this.sensorController.endMotorOperation();
-      this.motorOperationActive = false;
+      const rampDownMs = this.motorCalibration?.getRampDownTime() ?? 1000;
+      await this.sleep(rampDownMs * 2);
 
-      await this.sleep(this.settleMs);
+      // Wait for pose to settle (GNSS rebasing IMU) before snapping end anchor
+      const endAnchor = await this.waitForSettledPose() ?? this.buildCurrentAnchor();
 
-      const postDriveAnchor = this.buildCurrentAnchor();
-
-      const dx = postDriveAnchor.xMeters - preDriveAnchor.xMeters;
-      const dy = postDriveAnchor.yMeters - preDriveAnchor.yMeters;
+      const dx = endAnchor.xMeters - preDriveAnchor.xMeters;
+      const dy = endAnchor.yMeters - preDriveAnchor.yMeters;
       const gnssDistanceMeters = Math.hypot(dx, dy);
       const gnssHeadingChangeDeg = normalizeAngle180(
-        (postDriveAnchor.headingDeg ?? 0) - (preDriveAnchor.headingDeg ?? 0)
+        (endAnchor.headingDeg ?? 0) - (preDriveAnchor.headingDeg ?? 0)
       );
 
       const steadySamples = this.arcSamples.filter((s) => s.inSteadyState);
 
       return {
         startAnchor: preDriveAnchor,
-        endAnchor: postDriveAnchor,
+        endAnchor,
         gnssDistanceMeters,
         gnssHeadingChangeDeg,
         leftTotalTicks: this.leftTicksAccum,
@@ -378,10 +406,6 @@ export class DeadReckoningCalibrator {
       this.sensorController.off(SENSOR_EVENTS.GNSS_POSITION_UPDATE, this.onGnssUpdate);
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
       this.sensorController.off(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onMotorFeedback);
-      if (this.motorOperationActive) {
-        await this.sensorController.endMotorOperation();
-        this.motorOperationActive = false;
-      }
     }
   }
 
@@ -391,6 +415,11 @@ export class DeadReckoningCalibrator {
 
   private analyseStraightPhase(phase: RunPhaseResult, warnings: string[]): RunPhaseResult {
     const { leftTotalTicks, rightTotalTicks, gnssDistanceMeters } = phase;
+    const goodFix = (f: string) => f === "fixed" || f === "float" || f === "rtk-fixed" || f === "rtk-float";
+    if (!goodFix(phase.startAnchor.fixType) || !goodFix(phase.endAnchor.fixType)) {
+      warnings.push("Straight phase: GNSS fix not available at start or end anchor — encoder calibration skipped. Ensure a good RTK fix before running calibration.");
+      return phase;
+    }
     const avgTicks = (leftTotalTicks + rightTotalTicks) / 2;
     if (avgTicks < 1 || gnssDistanceMeters < 0.01) {
       warnings.push("Straight phase: insufficient ticks or GNSS distance — encoder calibration skipped.");
@@ -425,6 +454,12 @@ export class DeadReckoningCalibrator {
     const imuHeadingChangeDeg = Math.abs(
       normalizeAngle180(allSamples[allSamples.length - 1].imuHeadingDeg - allSamples[0].imuHeadingDeg)
     );
+
+    const goodFix = (f: string) => f === "fixed" || f === "float" || f === "rtk-fixed" || f === "rtk-float";
+    if (!goodFix(phase.startAnchor.fixType) || !goodFix(phase.endAnchor.fixType)) {
+      warnings.push(`Arc-${direction}: GNSS fix not available at start or end anchor — geometry skipped. Ensure a good RTK fix before running calibration.`);
+      return phase;
+    }
 
     if (imuHeadingChangeDeg < 5 || gnssDistanceMeters < 0.05 || leftTotalTicks < 1 || rightTotalTicks < 1) {
       warnings.push(`Arc-${direction}: insufficient motion for geometry — phase skipped.`);
@@ -691,9 +726,8 @@ export class DeadReckoningCalibrator {
         (a.positionAccuracyMeters === null || a.positionAccuracyMeters <= this.maxAnchorAccuracyMeters),
     );
     if (goodAnchors.length > 0) return goodAnchors[goodAnchors.length - 1];
-    if (this.gnssAnchors.length > 0) return this.gnssAnchors[this.gnssAnchors.length - 1];
-    // Last resort: pose fusion's current estimate
-    const pose = this.poseFusion.getCurrentPose();
+    // No good fix available — return a sentinel with fixType "none".
+    // Callers that use the anchor for geometry must check fixType before trusting the coordinates.
     return {
       xMeters: 0,
       yMeters: 0,
@@ -704,44 +738,66 @@ export class DeadReckoningCalibrator {
     };
   }
 
-  private async waitForGoodAnchor(timeoutMs: number): Promise<GnssAnchor | null> {
-    const deadline = Date.now() + timeoutMs;
+  /**
+   * Wait until poseFusion is actively rebasing the IMU from GNSS
+   * (usingGnssHeading === true) and that condition has held continuously
+   * for poseSteadyDwellMs. This guarantees the pose is settled and both
+   * sensors agree before taking any calibration anchor.
+   *
+   * Returns the current fused pose as a GNSS anchor, or null on timeout/stop.
+   */
+  private async waitForSettledPose(): Promise<GnssAnchor | null> {
+    const deadline = Date.now() + this.poseSettleTimeoutMs;
+    let dwellStartMs: number | null = null;
+
+    this.logger.info("dead_reckoning.waiting_for_settled_pose", {
+      dwellMs: this.poseSteadyDwellMs,
+      timeoutMs: this.poseSettleTimeoutMs,
+    });
+
     while (Date.now() < deadline) {
       if (this.stopRequested) return null;
-      const found = await new Promise<GnssAnchor | null>((resolve) => {
-        let resolved = false;
-        const handler = (event: GnssPositionUpdateEvent) => {
-          const isGoodFix =
-            event.fixType === "fixed" || event.fixType === "float" ||
-            event.fixType === "rtk-fixed" || event.fixType === "rtk-float";
-          const isGoodAccuracy =
-            event.positionAccuracyMeters !== null &&
-            event.positionAccuracyMeters <= this.maxAnchorAccuracyMeters;
-          if (isGoodFix && isGoodAccuracy && !resolved) {
-            resolved = true;
-            this.sensorController.off(SENSOR_EVENTS.GNSS_POSITION_UPDATE, handler);
-            resolve({
-              xMeters: event.xMeters,
-              yMeters: event.yMeters,
-              headingDeg: event.heading !== null ? unwrapInternalHeading(event.heading) : null,
-              positionAccuracyMeters: event.positionAccuracyMeters,
-              fixType: event.fixType,
-              timestampMillis: event.timestampMillis,
-            });
-          }
-        };
-        this.sensorController.on(SENSOR_EVENTS.GNSS_POSITION_UPDATE, handler);
-        setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            this.sensorController.off(SENSOR_EVENTS.GNSS_POSITION_UPDATE, handler);
-            resolve(null);
-          }
-        }, Math.min(2000, Math.max(0, deadline - Date.now())));
-      });
-      if (found) return found;
+
+      const state = this.poseFusion.getPrimitiveState();
+      const isSettled =
+        state.usingGnssHeading &&
+        state.quality === "gnss" &&
+        state.xMeters !== null &&
+        state.yMeters !== null;
+
+      if (isSettled) {
+        if (dwellStartMs === null) {
+          dwellStartMs = Date.now();
+        } else if (Date.now() - dwellStartMs >= this.poseSteadyDwellMs) {
+          // Sustained agreement — snapshot the current fused pose as the anchor
+          const pose = this.poseFusion.getCurrentPose();
+          const anchor: GnssAnchor = {
+            xMeters: state.xMeters!,
+            yMeters: state.yMeters!,
+            headingDeg: state.headingDeg,
+            positionAccuracyMeters: null,
+            fixType: "fixed",
+            timestampMillis: Date.now(),
+          };
+          this.logger.info("dead_reckoning.pose_settled", {
+            xMeters: anchor.xMeters,
+            yMeters: anchor.yMeters,
+            headingDeg: anchor.headingDeg,
+            dwellMs: Date.now() - dwellStartMs,
+          });
+          return anchor;
+        }
+      } else {
+        // Any interruption resets the dwell clock
+        dwellStartMs = null;
+      }
+
       await this.sleep(100);
     }
+
+    this.logger.warn("dead_reckoning.pose_settle_timeout", {
+      timeoutMs: this.poseSettleTimeoutMs,
+    });
     return null;
   }
 

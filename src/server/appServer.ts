@@ -1933,6 +1933,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       sensorController,
       poseFusion,
       poseCalibration: poseCalibration!,
+      motorCalibration: motorCalibration ?? undefined,
       logger,
     });
 
