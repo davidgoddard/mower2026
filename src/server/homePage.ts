@@ -646,79 +646,83 @@ ${getSensorWidgetScriptTag()}
         <gnss-position-widget id="gnss-widget"></gnss-position-widget>
 
         <!-- Motors Card -->
-        <div class="sensor-card">
-          <div class="sensor-header">
-            <div class="sensor-title">Motor Status</div>
-            <span class="status-dot" id="motor-status"></span>
-          </div>
-          <div class="metric-grid" style="grid-template-columns: repeat(2, 1fr);">
-            <div class="metric">
-              <div class="metric-label">Left Speed</div>
-              <div class="metric-value" id="motor-left">—</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Right Speed</div>
-              <div class="metric-value" id="motor-right">—</div>
-            </div>
-          </div>
+        <div style="display: flex; flex-direction: column; gap: 1rem;">
+          <motor-odometry-widget id="motor-odometry-widget"></motor-odometry-widget>
 
-          <!-- VU Meters for Current -->
-          <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
-            <div class="vu-meter-container">
-              <div class="vu-meter-label">
-                <span>Left Motor Current</span>
-                <span class="vu-meter-values"><span id="motor-left-current">—</span> / <span id="motor-left-peak">—</span></span>
+          <div class="sensor-card">
+            <div class="sensor-header">
+              <div class="sensor-title">Motor Status</div>
+              <span class="status-dot" id="motor-status"></span>
+            </div>
+            <div class="metric-grid" style="grid-template-columns: repeat(2, 1fr);">
+              <div class="metric">
+                <div class="metric-label">Left Speed</div>
+                <div class="metric-value" id="motor-left">—</div>
               </div>
-              <div class="vu-meter-track">
-                <div class="vu-meter-scale">
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                </div>
-                <div class="vu-meter-bar" id="motor-left-vu-bar"></div>
-                <div class="vu-meter-peak" id="motor-left-vu-peak"></div>
+              <div class="metric">
+                <div class="metric-label">Right Speed</div>
+                <div class="metric-value" id="motor-right">—</div>
               </div>
             </div>
-            <div class="vu-meter-container">
-              <div class="vu-meter-label">
-                <span>Right Motor Current</span>
-                <span class="vu-meter-values"><span id="motor-right-current">—</span> / <span id="motor-right-peak">—</span></span>
-              </div>
-              <div class="vu-meter-track">
-                <div class="vu-meter-scale">
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                  <div class="vu-meter-tick"></div>
-                </div>
-                <div class="vu-meter-bar" id="motor-right-vu-bar"></div>
-                <div class="vu-meter-peak" id="motor-right-vu-peak"></div>
-              </div>
-            </div>
-          </div>
 
-          <div class="metric-grid" style="margin-top: 1rem;">
-            <div class="metric">
-              <div class="metric-label">Left PWM</div>
-              <div class="metric-value" style="font-size: 1rem;" id="motor-left-pwm">—</div>
+            <!-- VU Meters for Current -->
+            <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+              <div class="vu-meter-container">
+                <div class="vu-meter-label">
+                  <span>Left Motor Current</span>
+                  <span class="vu-meter-values"><span id="motor-left-current">—</span> / <span id="motor-left-peak">—</span></span>
+                </div>
+                <div class="vu-meter-track">
+                  <div class="vu-meter-scale">
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                  </div>
+                  <div class="vu-meter-bar" id="motor-left-vu-bar"></div>
+                  <div class="vu-meter-peak" id="motor-left-vu-peak"></div>
+                </div>
+              </div>
+              <div class="vu-meter-container">
+                <div class="vu-meter-label">
+                  <span>Right Motor Current</span>
+                  <span class="vu-meter-values"><span id="motor-right-current">—</span> / <span id="motor-right-peak">—</span></span>
+                </div>
+                <div class="vu-meter-track">
+                  <div class="vu-meter-scale">
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                    <div class="vu-meter-tick"></div>
+                  </div>
+                  <div class="vu-meter-bar" id="motor-right-vu-bar"></div>
+                  <div class="vu-meter-peak" id="motor-right-vu-peak"></div>
+                </div>
+              </div>
             </div>
-            <div class="metric">
-              <div class="metric-label">Right PWM</div>
-              <div class="metric-value" style="font-size: 1rem;" id="motor-right-pwm">—</div>
+
+            <div class="metric-grid" style="margin-top: 1rem;">
+              <div class="metric">
+                <div class="metric-label">Left PWM</div>
+                <div class="metric-value" style="font-size: 1rem;" id="motor-left-pwm">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Right PWM</div>
+                <div class="metric-value" style="font-size: 1rem;" id="motor-right-pwm">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Watchdog</div>
+                <div class="metric-value" style="font-size: 1rem;" id="motor-watchdog">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">Faults</div>
+                <div class="metric-value" style="font-size: 1rem;" id="motor-faults">—</div>
+              </div>
             </div>
-            <div class="metric">
-              <div class="metric-label">Watchdog</div>
-              <div class="metric-value" style="font-size: 1rem;" id="motor-watchdog">—</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Faults</div>
-              <div class="metric-value" style="font-size: 1rem;" id="motor-faults">—</div>
-            </div>
+            <div id="motor-error" class="error-message" style="display: none;"></div>
           </div>
-          <div id="motor-error" class="error-message" style="display: none;"></div>
         </div>
       </div>
       <!-- Heading Timeline -->
@@ -1013,6 +1017,17 @@ ${getSensorWidgetScriptTag()}
             if (gnss.fixType != null) gnssWidget.setAttribute('fix-type', gnss.fixType);
             if (gnss.satellitesInUse != null) gnssWidget.setAttribute('satellites', gnss.satellitesInUse);
             gnssWidget.setAttribute('synced', poseFusion.usingGnssHeading === true ? 'true' : 'false');
+          }
+
+          // Update motor odometry widget
+          const motorOdoWidget = document.getElementById('motor-odometry-widget');
+          if (motorOdoWidget) {
+            motorOdoWidget.setAttribute('status', poseFusion.status || 'idle');
+            if (poseFusion.encoderOnlyHeadingDeg != null) motorOdoWidget.setAttribute('heading-deg', poseFusion.encoderOnlyHeadingDeg);
+            if (poseFusion.encoderOnlyXMeters != null) motorOdoWidget.setAttribute('x-meters', poseFusion.encoderOnlyXMeters);
+            if (poseFusion.encoderOnlyYMeters != null) motorOdoWidget.setAttribute('y-meters', poseFusion.encoderOnlyYMeters);
+            motorOdoWidget.setAttribute('confidence', poseFusion.drConfidence ?? 1);
+            motorOdoWidget.setAttribute('synced', poseFusion.encoderSynced === true ? 'true' : 'false');
           }
 
           // Update Motors

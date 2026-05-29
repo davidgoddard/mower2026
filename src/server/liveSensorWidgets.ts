@@ -407,8 +407,115 @@ export const SENSOR_WIDGETS_JS: string = `
     }
   }
 
+  // ── <motor-odometry-widget> ───────────────────────────────────────────────
+
+  class MotorOdometryWidget extends HTMLElement {
+    static get observedAttributes() {
+      return ['status','error','heading-deg','x-meters','y-meters','confidence','synced'];
+    }
+    constructor() {
+      super();
+      this.attachShadow({ mode: 'open' });
+      this.shadowRoot.innerHTML = \`
+        <style>
+          \${SHARED_CSS}
+          .confidence-track {
+            width: 100%; height: 10px;
+            background: var(--_bg-tertiary);
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 0.25rem;
+            border: 1px solid var(--_border-color);
+          }
+          .confidence-bar {
+            height: 100%;
+            width: 100%;
+            background: linear-gradient(to right, var(--_danger-color) 0%, var(--_warning-color,#f59e0b) 50%, var(--_success-color) 100%);
+            transform-origin: left center;
+            transform: scaleX(var(--conf, 1));
+            transition: transform 0.4s ease-out;
+          }
+          .conf-row { display: flex; flex-direction: column; gap: 0.3rem; }
+          .conf-label { font-size: 0.6875rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--_text-secondary); display: flex; justify-content: space-between; }
+        </style>
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Motor Odometry</span>
+            <span class="status-dot"></span>
+          </div>
+          <div class="top-row">
+            <div class="compass">
+              <div class="compass-circle">
+                <span class="compass-label n">N</span>
+                <span class="compass-label e">E</span>
+                <span class="compass-label s">S</span>
+                <span class="compass-label w">W</span>
+                <div class="compass-needle"></div>
+                <div class="compass-center"></div>
+              </div>
+            </div>
+            <div class="top-metrics one">
+              <div class="metric">
+                <div class="metric-label">Heading</div>
+                <div class="metric-value large" data-part="heading-value">—</div>
+              </div>
+            </div>
+          </div>
+          <div class="gnss-section">
+            <div class="gnss-row two">
+              <div class="metric"><div class="metric-label">X</div><div class="metric-value" data-part="x-value">—</div></div>
+              <div class="metric"><div class="metric-label">Y</div><div class="metric-value" data-part="y-value">—</div></div>
+            </div>
+            <div class="metric conf-row">
+              <div class="conf-label">
+                <span>DR Confidence</span>
+                <span data-part="conf-text">—</span>
+              </div>
+              <div class="confidence-track">
+                <div class="confidence-bar" data-part="conf-bar"></div>
+              </div>
+            </div>
+          </div>
+          <div class="error-msg"></div>
+        </div>
+      \`;
+    }
+    attributeChangedCallback(name, _old, value) {
+      const r = this.shadowRoot;
+      if (name === 'status') {
+        const dot = r.querySelector('.status-dot');
+        if (dot) dot.className = 'status-dot ' + (value || 'idle');
+        const err = r.querySelector('.error-msg');
+        if (err) err.style.display = value === 'error' ? 'block' : 'none';
+      } else if (name === 'error') {
+        const err = r.querySelector('.error-msg');
+        if (err) err.textContent = value || '';
+      } else if (name === 'heading-deg') {
+        const nav = (value !== null && value !== '' && !isNaN(Number(value))) ? internalToNavHeading(Number(value)) : null;
+        const needle = r.querySelector('.compass-needle');
+        if (needle) needle.style.setProperty('--heading-deg', (nav !== null ? nav : 0) + 'deg');
+        const hv = r.querySelector('[data-part="heading-value"]');
+        if (hv) hv.textContent = nav !== null ? fmtDegrees(nav) : '\\u2014';
+      } else if (name === 'x-meters') {
+        const el = r.querySelector('[data-part="x-value"]');
+        if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtMeters(Number(value)) : '\\u2014';
+      } else if (name === 'y-meters') {
+        const el = r.querySelector('[data-part="y-value"]');
+        if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtMeters(Number(value)) : '\\u2014';
+      } else if (name === 'confidence') {
+        const n = (value !== null && value !== '' && !isNaN(Number(value))) ? Math.max(0, Math.min(1, Number(value))) : null;
+        const bar = r.querySelector('[data-part="conf-bar"]');
+        if (bar) bar.style.setProperty('--conf', n !== null ? n : 1);
+        const txt = r.querySelector('[data-part="conf-text"]');
+        if (txt) txt.textContent = n !== null ? Math.round(n * 100) + '%' : '\\u2014';
+      }
+      // synced: handled entirely by :host([synced="..."]) CSS
+    }
+  }
+
   customElements.define('imu-sensor-widget', ImuSensorWidget);
   customElements.define('gnss-position-widget', GnssPositionWidget);
+  customElements.define('motor-odometry-widget', MotorOdometryWidget);
 })();
 `;
 
@@ -432,7 +539,8 @@ export function getSensorWidgetScriptTag(): string {
 export function getSensorWidgetLayoutStyles(): string {
   return `
     imu-sensor-widget,
-    gnss-position-widget {
+    gnss-position-widget,
+    motor-odometry-widget {
       display: block;
       width: 100%;
       min-width: 0;

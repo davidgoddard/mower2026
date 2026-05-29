@@ -89,6 +89,19 @@ const WHEEL_SLIP_THRESHOLD_DEG = 10;
 // (below this the numbers are noise, not signal).
 const SLIP_CHECK_MIN_DISTANCE_METERS = 0.001;
 
+// DR confidence decay/recovery per motor feedback sample.
+// On a slip event the confidence drops by DECAY; on agreement it recovers by RECOVER.
+// With 200 Hz polling: DECAY 0.05 → confidence hits zero in ~1 s of sustained slip;
+// RECOVER 0.005 → full recovery takes ~100 s of clean movement (~20 000 samples).
+const DR_CONFIDENCE_DECAY = 0.05;
+const DR_CONFIDENCE_RECOVER = 0.005;
+
+// Heading agreement threshold for the synced highlight on the widget (degrees).
+// If encoder-DR heading vs IMU heading differ by more than this, show amber.
+const DR_HEADING_SYNC_THRESHOLD_DEG = 15;
+// Position agreement threshold for the synced highlight (metres).
+const DR_POSITION_SYNC_THRESHOLD_METERS = 0.5;
+
 // GNSS heading rebase — preserve the existing stability-based logic.
 const GNSS_STATIONARY_REBASE_TIMEOUT_MS = 10_000;
 const GNSS_OFFSET_REBASE_MIN_DURATION_MS = 1_500;
@@ -120,6 +133,19 @@ export interface PoseFusionPrimitiveState {
   readonly speedMetersPerSecond: number | null;
   readonly usingGnssHeading: boolean;
   readonly wheelSlipSuspected: boolean;
+  /** Encoder-only dead-reckoning position, never corrected by GNSS or IMU */
+  readonly encoderOnlyXMeters: number | null;
+  readonly encoderOnlyYMeters: number | null;
+  /** Encoder-only dead-reckoning heading derived from differential wheel counts */
+  readonly encoderOnlyHeadingDeg: number | null;
+  /**
+   * Confidence [0..1] in the encoder dead-reckoning estimate.
+   * Decays toward 0 each time encoder-implied turn disagrees with IMU;
+   * recovers toward 1 on each sample where they agree.
+   */
+  readonly drConfidence: number;
+  /** True when encoder heading is close to IMU heading and DR position is close to fused position */
+  readonly encoderSynced: boolean;
 }
 
 export class PoseFusion extends EventEmitter {
@@ -150,6 +176,12 @@ export class PoseFusion extends EventEmitter {
   // Slip detection
   private wheelSlipSuspected = false;
   private lastImuHeadingForSlip: InternalHeading | null = null;
+
+  // Encoder-only odometry — independent track, never nudged by GNSS or IMU
+  private encoderOnlyX: number | null = null;
+  private encoderOnlyY: number | null = null;
+  private encoderOnlyHeadingDeg: number | null = null;
+  private drConfidence = 1.0;
 
   // GNSS heading stability tracking (unchanged from previous implementation)
   private lastGnssHeading: InternalHeading | null = null;
@@ -215,17 +247,43 @@ export class PoseFusion extends EventEmitter {
 
   getPrimitiveState(): PoseFusionPrimitiveState {
     const pose = this.getCurrentPose();
+    const fusedX = unwrapMeters(pose.position.xMeters);
+    const fusedY = unwrapMeters(pose.position.yMeters);
+    const fusedHeadingDeg = unwrapInternalHeading(pose.heading);
+
+    const encoderHeadingDeg = this.encoderOnlyHeadingDeg;
+    const headingAgreement =
+      encoderHeadingDeg !== null
+        ? Math.abs(this.normalizeAngle180(encoderHeadingDeg - fusedHeadingDeg)) <= DR_HEADING_SYNC_THRESHOLD_DEG
+        : false;
+    const positionAgreement =
+      this.encoderOnlyX !== null && this.encoderOnlyY !== null
+        ? Math.hypot(this.encoderOnlyX - fusedX, this.encoderOnlyY - fusedY) <= DR_POSITION_SYNC_THRESHOLD_METERS
+        : false;
+
     return {
       status: this.running ? "ok" : "idle",
       error: null,
-      xMeters: unwrapMeters(pose.position.xMeters),
-      yMeters: unwrapMeters(pose.position.yMeters),
-      headingDeg: unwrapInternalHeading(pose.heading),
+      xMeters: fusedX,
+      yMeters: fusedY,
+      headingDeg: fusedHeadingDeg,
       quality: pose.quality,
       speedMetersPerSecond: null,
       usingGnssHeading: this.isUsingGnssHeading,
       wheelSlipSuspected: this.wheelSlipSuspected,
+      encoderOnlyXMeters: this.encoderOnlyX,
+      encoderOnlyYMeters: this.encoderOnlyY,
+      encoderOnlyHeadingDeg: encoderHeadingDeg,
+      drConfidence: this.drConfidence,
+      encoderSynced: headingAgreement && positionAgreement,
     };
+  }
+
+  private normalizeAngle180(deg: number): number {
+    let d = deg % 360;
+    if (d > 180) d -= 360;
+    if (d <= -180) d += 360;
+    return d;
   }
 
   setPosition(position: Position): void {
@@ -296,9 +354,28 @@ export class PoseFusion extends EventEmitter {
     // --- Slip detection ---
     // Compare encoder-implied heading change with what the IMU reported since
     // the last feedback sample.
-    if (Math.abs(avgDist) >= SLIP_CHECK_MIN_DISTANCE_METERS && this.wheelbaseMeters > 0) {
-      const encoderImpliedTurnDeg = ((dRight - dLeft) / this.wheelbaseMeters) / DEG_TO_RAD;
+    // --- Encoder-only odometry ---
+    // Seed heading from IMU on the first encoder sample so the encoder track
+    // starts aligned; after that it integrates purely from wheel differentials.
+    if (this.encoderOnlyHeadingDeg === null) {
+      this.encoderOnlyHeadingDeg = unwrapInternalHeading(this.currentHeading);
+      this.encoderOnlyX = unwrapMeters(this.currentPosition.xMeters);
+      this.encoderOnlyY = unwrapMeters(this.currentPosition.yMeters);
+    }
 
+    let encoderImpliedTurnDeg = 0;
+    if (this.wheelbaseMeters > 0) {
+      encoderImpliedTurnDeg = ((dRight - dLeft) / this.wheelbaseMeters) / DEG_TO_RAD;
+    }
+
+    // Advance encoder-only position using encoder-only heading
+    this.encoderOnlyHeadingDeg = this.normalizeAngle180(this.encoderOnlyHeadingDeg + encoderImpliedTurnDeg);
+    const encHeadingRad = this.encoderOnlyHeadingDeg * DEG_TO_RAD;
+    this.encoderOnlyX = (this.encoderOnlyX ?? 0) + avgDist * Math.cos(encHeadingRad);
+    this.encoderOnlyY = (this.encoderOnlyY ?? 0) + avgDist * Math.sin(encHeadingRad);
+
+    // --- Slip detection and confidence ---
+    if (Math.abs(avgDist) >= SLIP_CHECK_MIN_DISTANCE_METERS && this.wheelbaseMeters > 0) {
       if (this.lastImuHeadingForSlip !== null) {
         // Use the signed IMU delta so opposite-direction disagreements (encoder
         // implies +5° but IMU shows -5°) are counted as a 10° mismatch, not 0.
@@ -316,10 +393,10 @@ export class PoseFusion extends EventEmitter {
             });
           }
           this.wheelSlipSuspected = true;
-          // IMU already owns direction so heading is correct.
-          // avgDist still gives a usable (second-order accurate) distance.
+          this.drConfidence = Math.max(0, this.drConfidence - DR_CONFIDENCE_DECAY);
         } else {
           this.wheelSlipSuspected = false;
+          this.drConfidence = Math.min(1, this.drConfidence + DR_CONFIDENCE_RECOVER);
         }
       }
       this.lastImuHeadingForSlip = this.currentHeading;

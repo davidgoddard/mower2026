@@ -524,3 +524,155 @@ test("PoseFusion rebases from GNSS after a consistent mirrored offset", async ()
 
   await fusion.stop();
 });
+
+// ── Encoder-only odometry and DR confidence ─────────────────────────────────
+
+test("PoseFusion initialises encoder-only track from first IMU heading on first encoder sample", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+  await fusion.start();
+
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(45),
+    pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
+  });
+
+  // Straight forward: equal ticks on both wheels, no turn.
+  sensorController.emit("motorFeedbackUpdate", {
+    leftEncoderDelta: 100, rightEncoderDelta: 100,
+    leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+    leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
+    leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+    watchdogHealthy: true, faultFlags: 0,
+    timestampMillis: 200,
+  });
+
+  const state = fusion.getPrimitiveState();
+  assert.ok(state.encoderOnlyXMeters !== null, "encoderOnlyX should be set");
+  assert.ok(state.encoderOnlyYMeters !== null, "encoderOnlyY should be set");
+  assert.ok(state.encoderOnlyHeadingDeg !== null, "encoderOnlyHeadingDeg should be set");
+
+  await fusion.stop();
+});
+
+test("PoseFusion drConfidence starts at 1 and remains at 1 when encoders agree with IMU", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+  await fusion.start();
+
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(0),
+    pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
+  });
+
+  // Drive straight — equal ticks, no IMU turn, so no disagreement.
+  for (let i = 0; i < 20; i++) {
+    sensorController.emit("imuHeadingUpdate", {
+      heading: createInternalHeading(0),
+      pitchDeg: 0, rollDeg: 0, timestampMillis: 100 + i * 5,
+    });
+    sensorController.emit("motorFeedbackUpdate", {
+      leftEncoderDelta: 10, rightEncoderDelta: 10,
+      leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
+      leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+      watchdogHealthy: true, faultFlags: 0,
+      timestampMillis: 105 + i * 5,
+    });
+  }
+
+  const state = fusion.getPrimitiveState();
+  assert.ok(state.drConfidence > 0.9, `confidence should stay near 1 but got ${state.drConfidence}`);
+
+  await fusion.stop();
+});
+
+test("PoseFusion drConfidence decays when encoder-implied turn disagrees with IMU", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+  await fusion.start();
+
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(0),
+    pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
+  });
+
+  // Emit encoder samples that imply a large turn while IMU stays straight.
+  // Large left-right asymmetry implies wheel slip: one wheel much faster than the other
+  // while IMU reports no heading change.
+  for (let i = 0; i < 30; i++) {
+    // IMU stays at heading 0 throughout (no turn)
+    sensorController.emit("imuHeadingUpdate", {
+      heading: createInternalHeading(0),
+      pitchDeg: 0, rollDeg: 0, timestampMillis: 100 + i * 5,
+    });
+    // Encoders imply a big differential (right >> left → large rightward turn implied)
+    sensorController.emit("motorFeedbackUpdate", {
+      leftEncoderDelta: 5, rightEncoderDelta: 200,
+      leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
+      leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+      watchdogHealthy: true, faultFlags: 0,
+      timestampMillis: 105 + i * 5,
+    });
+  }
+
+  const state = fusion.getPrimitiveState();
+  assert.ok(state.drConfidence < 0.5, `confidence should have decayed but got ${state.drConfidence}`);
+  assert.equal(state.wheelSlipSuspected, true);
+
+  await fusion.stop();
+});
+
+test("PoseFusion drConfidence recovers after slip resolves", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+  await fusion.start();
+
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(0),
+    pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
+  });
+
+  // Phase 1: cause slip to drive confidence down
+  for (let i = 0; i < 20; i++) {
+    sensorController.emit("imuHeadingUpdate", {
+      heading: createInternalHeading(0),
+      pitchDeg: 0, rollDeg: 0, timestampMillis: 100 + i * 5,
+    });
+    sensorController.emit("motorFeedbackUpdate", {
+      leftEncoderDelta: 5, rightEncoderDelta: 200,
+      leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
+      leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+      watchdogHealthy: true, faultFlags: 0,
+      timestampMillis: 105 + i * 5,
+    });
+  }
+  const confidenceAfterSlip = fusion.getPrimitiveState().drConfidence;
+  assert.ok(confidenceAfterSlip < 0.9, "confidence should have dropped");
+
+  // Phase 2: agree for many samples to recover
+  for (let i = 0; i < 200; i++) {
+    sensorController.emit("imuHeadingUpdate", {
+      heading: createInternalHeading(0),
+      pitchDeg: 0, rollDeg: 0, timestampMillis: 300 + i * 5,
+    });
+    sensorController.emit("motorFeedbackUpdate", {
+      leftEncoderDelta: 10, rightEncoderDelta: 10,
+      leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
+      leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+      watchdogHealthy: true, faultFlags: 0,
+      timestampMillis: 305 + i * 5,
+    });
+  }
+  const confidenceAfterRecovery = fusion.getPrimitiveState().drConfidence;
+  assert.ok(confidenceAfterRecovery > confidenceAfterSlip, "confidence should have recovered");
+
+  await fusion.stop();
+});

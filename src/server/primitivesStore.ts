@@ -33,6 +33,11 @@ export interface PrimitiveSnapshot {
     quality: "gnss" | "dead-reckoning" | "unknown";
     speedMetersPerSecond: number | null;
     usingGnssHeading: boolean;
+    encoderOnlyXMeters: number | null;
+    encoderOnlyYMeters: number | null;
+    encoderOnlyHeadingDeg: number | null;
+    drConfidence: number;
+    encoderSynced: boolean;
   };
   motors: {
     status: "idle" | "running" | "error";
@@ -131,6 +136,11 @@ export class PrimitivesStore {
         quality: "unknown",
         speedMetersPerSecond: null,
         usingGnssHeading: false,
+        encoderOnlyXMeters: null,
+        encoderOnlyYMeters: null,
+        encoderOnlyHeadingDeg: null,
+        drConfidence: 1.0,
+        encoderSynced: false,
       },
       motors: {
         status: "idle",

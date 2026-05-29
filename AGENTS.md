@@ -57,6 +57,8 @@
 - npm run lint
 - npm run typecheck
 
+**Important**: Only run builds or tests when the working directory is `/home/mower/mower`. If you are working in any other directory (e.g. a Windows development path), do not attempt to build or run tests — switch to source inspection instead and note that build/test verification could not be run.
+
 ## Documentation
 - Treat docs/functional-specification.md as the source of truth.
 - If code and spec disagree, ask before changing behaviour unless the task explicitly says to align code to spec.
