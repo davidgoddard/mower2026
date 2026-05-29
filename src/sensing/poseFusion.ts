@@ -484,6 +484,13 @@ export class PoseFusion extends EventEmitter {
       this.gnssQualityLostTimeMs = null;
       this.currentQuality = "gnss";
       this.lastGnssSyncTimeMs = Date.now();
+      // Seed encoder-only track from this GNSS anchor so it shows a position
+      // immediately rather than waiting for the first wheel movement.
+      if (this.encoderOnlyX === null) {
+        this.encoderOnlyX = gnssX;
+        this.encoderOnlyY = gnssY;
+        this.encoderOnlyHeadingDeg = unwrapInternalHeading(this.currentHeading);
+      }
       return;
     }
 
@@ -617,6 +624,16 @@ export class PoseFusion extends EventEmitter {
     this.lastGnssHeading = gnssHeading;
     this.lastGnssHeadingTime = timestampMillis;
     this.resetOffsetTracking();
+
+    // Re-anchor encoder-only track to the current fused position and the
+    // freshly rebased heading.  This closes the previous DR segment cleanly
+    // and starts a new one from a known-good origin, preventing unbounded
+    // drift.  Confidence is also partially restored because the uncertainty
+    // has been resolved by the stationary GNSS fix.
+    this.encoderOnlyX = unwrapMeters(this.currentPosition.xMeters);
+    this.encoderOnlyY = unwrapMeters(this.currentPosition.yMeters);
+    this.encoderOnlyHeadingDeg = unwrapInternalHeading(gnssHeading);
+    this.drConfidence = Math.min(1, this.drConfidence + 0.5);
   }
 
   private resetOffsetTracking(): void {

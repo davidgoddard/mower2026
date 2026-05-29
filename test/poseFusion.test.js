@@ -676,3 +676,64 @@ test("PoseFusion drConfidence recovers after slip resolves", async () => {
 
   await fusion.stop();
 });
+
+test("PoseFusion re-anchors encoder-only track and boosts confidence when GNSS rebases IMU heading", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  sensorController.getMotorZeroCommandSinceMillis = () => 0;
+  sensorController.getCurrentTimeMillis = () => 99999;
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+  await fusion.start();
+
+  // Prime IMU and anchor GNSS position
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(0), pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
+  });
+  sensorController.emit("gnssPositionUpdate", {
+    xMeters: 10, yMeters: 20,
+    heading: createInternalHeading(0),
+    positionAccuracyMeters: 0.02, headingAccuracyDeg: 0.5,
+    fixType: "fixed", satellitesInUse: 20, timestampMillis: 200,
+  });
+
+  // Artificially drift the encoder-only position to simulate movement
+  fusion.getPrimitiveState(); // ensure seeded
+  // Drive forward a bit via encoder events to drift the encoder track
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(0), pitchDeg: 0, rollDeg: 0, timestampMillis: 300,
+  });
+  sensorController.emit("motorFeedbackUpdate", {
+    leftEncoderDelta: 500, rightEncoderDelta: 500,
+    leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+    leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
+    leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+    watchdogHealthy: true, faultFlags: 0, timestampMillis: 350,
+  });
+
+  const stateBefore = fusion.getPrimitiveState();
+  const encXBefore = stateBefore.encoderOnlyXMeters;
+
+  // Now trigger a GNSS heading rebase — same heading so alignmentDelta = 0,
+  // which means it will rebase unconditionally (within-threshold path).
+  sensorController.emit("gnssPositionUpdate", {
+    xMeters: 10, yMeters: 20,
+    heading: createInternalHeading(0),
+    positionAccuracyMeters: 0.02, headingAccuracyDeg: 0.5,
+    fixType: "fixed", satellitesInUse: 20, timestampMillis: 400,
+  });
+
+  const stateAfter = fusion.getPrimitiveState();
+
+  // Encoder X should have been snapped back to the fused position (10 m), not left at the drifted value
+  assert.ok(
+    Math.abs((stateAfter.encoderOnlyXMeters ?? 0) - 10) < 0.01,
+    `encoderOnlyX should be re-anchored to fused X=10 but got ${stateAfter.encoderOnlyXMeters}`,
+  );
+  assert.ok(
+    stateAfter.encoderOnlyXMeters !== encXBefore,
+    "encoder X should have changed from drifted value after rebase",
+  );
+
+  await fusion.stop();
+});
