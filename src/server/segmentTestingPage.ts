@@ -1,4 +1,4 @@
-import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles } from "./liveSensorWidgets.js";
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles, getLiveSensorWidgetsWidgetIds } from "./liveSensorWidgets.js";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 
 /**
@@ -8,6 +8,31 @@ import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appD
  * It shows the live IMU/GNSS widgets on the left and the segment test flow on
  * the right.
  */
+
+const SEGMENT_TESTING_WIDGET_OPTIONS = {
+  imuCardId: "imu-card",
+  imuCompassId: "imu-compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+} as const;
 
 export function getSegmentTestingPageHtml(): string {
   return `<!doctype html>
@@ -543,30 +568,7 @@ ${getAppDialogStyles()}
     <div class="container">
       <div class="page-layout">
         <div class="sidebar-column">
-${getLiveSensorWidgetsHtml({
-  imuCardId: "imu-card",
-  imuCompassId: "imu-compass",
-  imuHeadingId: "imu-heading",
-  imuPitchId: "imu-pitch",
-  imuRollId: "imu-roll",
-  imuPitchIndicatorId: "pitch-indicator",
-  imuRollIndicatorId: "roll-indicator",
-  imuStatusId: "imu-status",
-  imuErrorId: "imu-error",
-  gnssCardId: "gnss-card",
-  gnssCompassId: "gnss-compass",
-  gnssHeadingId: "gnss-heading",
-  gnssHeadingAccuracyId: "gnss-heading-accuracy",
-  gnssAccuracyId: "gnss-accuracy",
-  gnssStatusId: "gnss-status",
-  gnssErrorId: "gnss-error",
-  gnssFixId: "gnss-fix",
-  gnssSatsId: "gnss-sats",
-  gnssXMetersId: "gnss-x",
-  gnssYMetersId: "gnss-y",
-  includeGnsPosition: true,
-  includeTilt: true,
-})}
+${getLiveSensorWidgetsHtml(SEGMENT_TESTING_WIDGET_OPTIONS)}
         </div>
 
         <div class="main-column">
@@ -648,7 +650,9 @@ ${getAppDialogHtml()}
 
     <script>
 ${getAppDialogScript()}
-      function formatDegrees(value) {
+${getLiveSensorWidgetsScript()}
+
+      function formatSignedDegrees(value) {
         if (value === null || value === undefined || Number.isNaN(value)) {
           return "—";
         }
@@ -670,11 +674,10 @@ ${getAppDialogScript()}
         ) {
           return "—";
         }
-        return formatDegrees(normalizeSignedDegrees(achievedDeg - requiredDeg));
+        return formatSignedDegrees(normalizeSignedDegrees(achievedDeg - requiredDeg));
       }
-${getLiveSensorWidgetsScript()}
 
-      function formatMeters(value) {
+      function formatMeters2dp(value) {
         if (value === null || value === undefined || Number.isNaN(value)) {
           return "—";
         }
@@ -716,79 +719,13 @@ ${getLiveSensorWidgetsScript()}
         }
       }
 
-      function applyFixStyle(element, fixType) {
-        if (!element) {
-          return;
-        }
-        const classes = ["gnss-fix-unknown", "gnss-fix-none", "gnss-fix-single", "gnss-fix-float", "gnss-fix-fixed", "gnss-fix-rtk-fixed", "gnss-fix-rtk-float"];
-        element.classList.remove(...classes);
-        element.classList.add("gnss-fix-" + String(fixType || "unknown"));
-      }
+      const WIDGET_IDS = ${getLiveSensorWidgetsWidgetIds(SEGMENT_TESTING_WIDGET_OPTIONS)};
 
       function updateSidebar(primitives) {
         const imu = primitives?.imu ?? {};
         const gnss = primitives?.gnss ?? {};
-
-        const imuStatusDot = document.getElementById("imu-status");
-        if (imuStatusDot) {
-          imuStatusDot.className = "status-dot " + (imu.status || "idle");
-        }
-        const imuError = document.getElementById("imu-error");
-      if (imu.status === "error") {
-        if (imuError) {
-          imuError.textContent = imu.error || "IMU error";
-          imuError.style.display = "block";
-        }
-      } else if (imuError) {
-        imuError.style.display = "none";
-      }
-      const imuNavHeading = updateWidgetHeading("imu-compass", "imu-heading", imu.status === "error" ? null : imu.headingDeg);
-      updateTiltIndicator("pitch-indicator", "imu-pitch", imu.status === "error" ? null : imu.pitchDeg);
-      updateTiltIndicator("roll-indicator", "imu-roll", imu.status === "error" ? null : imu.rollDeg);
-
-        const gnssStatusDot = document.getElementById("gnss-status");
-        if (gnssStatusDot) {
-          gnssStatusDot.className = "status-dot " + (gnss.status || "idle");
-        }
-        const gnssError = document.getElementById("gnss-error");
-        if (gnss.status === "error") {
-          if (gnssError) {
-            gnssError.textContent = gnss.error || "GNSS error";
-            gnssError.style.display = "block";
-          }
-        } else if (gnssError) {
-          gnssError.style.display = "none";
-        }
-
-        const gnssX = document.getElementById("gnss-x");
-        const gnssY = document.getElementById("gnss-y");
-        const gnssAccuracy = document.getElementById("gnss-accuracy");
-        const gnssHeadingAccuracy = document.getElementById("gnss-heading-accuracy");
-        const gnssSats = document.getElementById("gnss-sats");
-        const gnssFix = document.getElementById("gnss-fix");
-
-        if (gnssX) gnssX.textContent = formatMeters(gnss.xMeters);
-        if (gnssY) gnssY.textContent = formatMeters(gnss.yMeters);
-        if (gnssFix) gnssFix.textContent = gnss.fixType || "—";
-        applyFixStyle(gnssFix, gnss.fixType);
-        if (gnssAccuracy) {
-          gnssAccuracy.textContent = gnss.positionAccuracyMeters !== null && gnss.positionAccuracyMeters !== undefined
-            ? formatMeters(gnss.positionAccuracyMeters)
-            : "—";
-        }
-        if (gnssHeadingAccuracy) {
-          gnssHeadingAccuracy.textContent = gnss.headingAccuracyDeg !== null && gnss.headingAccuracyDeg !== undefined
-            ? formatDegrees(gnss.headingAccuracyDeg)
-            : "—";
-        }
-        if (gnssSats) {
-          gnssSats.textContent = gnss.satellitesInUse !== null && gnss.satellitesInUse !== undefined
-            ? gnss.satellitesInUse
-            : "—";
-        }
-        const gnssNavHeading = updateWidgetHeading("gnss-compass", "gnss-heading", gnss.status === "error" ? null : gnss.headingDeg);
-        const poseFusion = primitives.poseFusion ?? {};
-        updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
+        const poseFusion = primitives?.poseFusion ?? {};
+        updateLiveSensorWidgets(imu, gnss, poseFusion, WIDGET_IDS);
       }
 
       async function fetchStatus() {
@@ -863,9 +800,9 @@ ${getLiveSensorWidgetsScript()}
               "<td>" + formatTime(item.timestamp) + "</td>",
               "<td>" + item.phase + "</td>",
               "<td>" + item.waypointLabel + "</td>",
-              "<td>" + formatMeters(item.distanceToWaypointMeters) + "</td>",
-              "<td>" + formatDegrees(item.requiredHeadingChangeDeg) + "</td>",
-              "<td>" + formatDegrees(item.achievedHeadingChangeDeg) + "</td>",
+              "<td>" + formatMeters2dp(item.distanceToWaypointMeters) + "</td>",
+              "<td>" + formatSignedDegrees(item.requiredHeadingChangeDeg) + "</td>",
+              "<td>" + formatSignedDegrees(item.achievedHeadingChangeDeg) + "</td>",
               "<td>" + formatHeadingDifference(item.requiredHeadingChangeDeg, item.achievedHeadingChangeDeg) + "</td>",
               '<td class="' + qualityClass + '">' + item.driveStatus + '</td>',
               "<td>" + formatCentimeters(item.cteMeters) + "</td>",

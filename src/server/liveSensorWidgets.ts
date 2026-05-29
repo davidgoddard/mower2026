@@ -23,6 +23,41 @@ export interface LiveSensorWidgetOptions {
   readonly includeTilt: boolean;
 }
 
+/**
+ * Returns a JS object literal string (no trailing semicolon) containing the
+ * widget element-ID map derived from the same options passed to
+ * getLiveSensorWidgetsHtml().  Embed this in a page script as:
+ *
+ *   const WIDGET_IDS = ${getLiveSensorWidgetsWidgetIds(options)};
+ *
+ * This keeps the HTML-rendered IDs and the JS update-function IDs in sync
+ * from a single source of truth.
+ */
+export function getLiveSensorWidgetsWidgetIds(options: LiveSensorWidgetOptions): string {
+  return `{
+        imuStatusId: ${JSON.stringify(options.imuStatusId)},
+        imuErrorId: ${JSON.stringify(options.imuErrorId)},
+        imuCompassId: ${JSON.stringify(options.imuCompassId)},
+        imuHeadingId: ${JSON.stringify(options.imuHeadingId)},
+        imuPitchIndicatorId: ${JSON.stringify(options.imuPitchIndicatorId)},
+        imuPitchId: ${JSON.stringify(options.imuPitchId)},
+        imuRollIndicatorId: ${JSON.stringify(options.imuRollIndicatorId)},
+        imuRollId: ${JSON.stringify(options.imuRollId)},
+        imuCardId: ${JSON.stringify(options.imuCardId)},
+        gnssStatusId: ${JSON.stringify(options.gnssStatusId)},
+        gnssErrorId: ${JSON.stringify(options.gnssErrorId)},
+        gnssCompassId: ${JSON.stringify(options.gnssCompassId)},
+        gnssHeadingId: ${JSON.stringify(options.gnssHeadingId)},
+        gnssHeadingAccuracyId: ${JSON.stringify(options.gnssHeadingAccuracyId)},
+        gnssAccuracyId: ${JSON.stringify(options.gnssAccuracyId)},
+        gnssXMetersId: ${JSON.stringify(options.gnssXMetersId ?? 'gnss-x')},
+        gnssYMetersId: ${JSON.stringify(options.gnssYMetersId ?? 'gnss-y')},
+        gnssFixId: ${JSON.stringify(options.gnssFixId)},
+        gnssSatsId: ${JSON.stringify(options.gnssSatsId)},
+        gnssCardId: ${JSON.stringify(options.gnssCardId)},
+      }`;
+}
+
 export function getLiveSensorWidgetsStyles(): string {
   return `
     .widget-sync-ok .sensor-card,
@@ -286,30 +321,92 @@ export function getLiveSensorWidgetsScript(): string {
       return (90 - headingDeg + 360) % 360;
     }
 
-    function setWidgetSyncState(widgetIds, isSynced) {
+    function formatMeters(v) {
+      if (v === null || v === undefined) return '—';
+      return v.toFixed(3) + ' m';
+    }
+
+    function formatDegrees(v) {
+      if (v === null || v === undefined) return '—';
+      return v.toFixed(1) + '°';
+    }
+
+    function getGnssFixClass(fixType) {
+      switch ((fixType || 'unknown').toLowerCase()) {
+        case 'fixed':     return 'gnss-fix-fixed';
+        case 'rtk-fixed': return 'gnss-fix-rtk-fixed';
+        case 'float':     return 'gnss-fix-float';
+        case 'rtk-float': return 'gnss-fix-rtk-float';
+        case 'single':    return 'gnss-fix-single';
+        case 'none':      return 'gnss-fix-none';
+        default:          return 'gnss-fix-unknown';
+      }
+    }
+
+    /**
+     * Update all IMU and GNSS widget elements from live primitive data.
+     *
+     * ids must match the element IDs passed to getLiveSensorWidgetsHtml:
+     *   imuStatusId, imuErrorId, imuCompassId, imuHeadingId,
+     *   imuPitchIndicatorId, imuPitchId, imuRollIndicatorId, imuRollId,
+     *   gnssStatusId, gnssErrorId, gnssCompassId, gnssHeadingId,
+     *   gnssHeadingAccuracyId, gnssAccuracyId, gnssXMetersId, gnssYMetersId,
+     *   gnssFixId, gnssSatsId, imuCardId, gnssCardId
+     */
+    function updateLiveSensorWidgets(imu, gnss, poseFusion, ids) {
+      // IMU status + error
+      const imuStatus = document.getElementById(ids.imuStatusId);
+      if (imuStatus) imuStatus.className = 'status-dot ' + (imu.status || 'idle');
+      const imuError = document.getElementById(ids.imuErrorId);
+      if (imuError) {
+        imuError.textContent = imu.error || '';
+        imuError.style.display = imu.status === 'error' ? 'block' : 'none';
+      }
+
+      // IMU heading + tilt
+      updateWidgetHeading(ids.imuCompassId, ids.imuHeadingId, imu.status === 'error' ? null : imu.headingDeg);
+      if (ids.imuPitchIndicatorId) updateTiltIndicator(ids.imuPitchIndicatorId, ids.imuPitchId, imu.status === 'error' ? null : imu.pitchDeg);
+      if (ids.imuRollIndicatorId)  updateTiltIndicator(ids.imuRollIndicatorId,  ids.imuRollId,  imu.status === 'error' ? null : imu.rollDeg);
+
+      // GNSS status + error
+      const gnssStatus = document.getElementById(ids.gnssStatusId);
+      if (gnssStatus) gnssStatus.className = 'status-dot ' + (gnss.status || 'idle');
+      const gnssError = document.getElementById(ids.gnssErrorId);
+      if (gnssError) {
+        gnssError.textContent = gnss.error || '';
+        gnssError.style.display = gnss.status === 'error' ? 'block' : 'none';
+      }
+
+      // GNSS metrics
+      const gnssX    = document.getElementById(ids.gnssXMetersId);
+      const gnssY    = document.getElementById(ids.gnssYMetersId);
+      const gnssAcc  = document.getElementById(ids.gnssAccuracyId);
+      const gnssHAcc = document.getElementById(ids.gnssHeadingAccuracyId);
+      const gnssSats = document.getElementById(ids.gnssSatsId);
+      const gnssFix  = document.getElementById(ids.gnssFixId);
+
+      if (gnssX)    gnssX.textContent = formatMeters(gnss.xMeters);
+      if (gnssY)    gnssY.textContent = formatMeters(gnss.yMeters);
+      if (gnssAcc)  gnssAcc.textContent  = gnss.positionAccuracyMeters != null ? formatMeters(gnss.positionAccuracyMeters) : '—';
+      if (gnssHAcc) gnssHAcc.textContent = gnss.headingAccuracyDeg     != null ? formatDegrees(gnss.headingAccuracyDeg)    : '—';
+      if (gnssSats) gnssSats.textContent = gnss.satellitesInUse        != null ? gnss.satellitesInUse : '—';
+      if (gnssFix) {
+        gnssFix.textContent = gnss.fixType || '—';
+        gnssFix.className = 'metric-value gnss-fix-value ' + getGnssFixClass(gnss.fixType);
+      }
+
+      // GNSS compass
+      updateWidgetHeading(ids.gnssCompassId, ids.gnssHeadingId, gnss.status === 'error' ? null : gnss.headingDeg);
+
+      // IMU/GNSS sync border highlight — CSS classes carry the visual styles
+      const isSynced = poseFusion.usingGnssHeading === true;
       const stateClass = isSynced ? "widget-sync-ok" : "widget-sync-warning";
-      const background = isSynced
-        ? "linear-gradient(180deg, rgba(34, 197, 94, 0.14), rgba(16, 185, 129, 0.06))"
-        : "linear-gradient(180deg, rgba(249, 115, 22, 0.16), rgba(245, 158, 11, 0.08))";
-      const borderColor = isSynced
-        ? "rgba(34, 197, 94, 0.42)"
-        : "rgba(249, 115, 22, 0.42)";
-      const boxShadow = isSynced
-        ? "0 0 0 1px rgba(34, 197, 94, 0.12), var(--shadow-sm)"
-        : "0 0 0 1px rgba(249, 115, 22, 0.12), var(--shadow-sm)";
-      for (const widgetId of widgetIds) {
+      for (const widgetId of [ids.imuCardId, ids.gnssCardId]) {
         const root = document.getElementById(widgetId);
         if (!root) continue;
         root.classList.remove("widget-sync-ok", "widget-sync-warning");
         root.classList.add(stateClass);
-        root.style.background = background;
-        root.style.borderColor = borderColor;
-        root.style.boxShadow = boxShadow;
       }
-    }
-
-    function updateWidgetSyncState(widgetIds, usingGnssHeading) {
-      setWidgetSyncState(widgetIds, usingGnssHeading === true);
     }
 
     function updateWidgetHeading(compassId, headingId, headingDeg) {

@@ -368,16 +368,39 @@ This document maps problem domains to candidate files removing the need for Code
 ## Operation And Server Entry
 - `src/server/main.ts`: production server entrypoint (compiled to `dist/server/main.js`).
 - `src/server/appServer.ts`: HTTP server bootstrapping, routing, and graceful shutdown.
+  - wires all HTTP routes for all pages and API endpoints
+  - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
+  - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
+  - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
 - `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab.
+- `src/server/deadReckoningPage.ts`: dead-reckoning calibration page — three-phase calibration procedure UI (straight line, arc right, arc left); live IMU/GNSS sidebar widgets; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
+- `src/server/liveSensorWidgets.ts`: **SHARED LIVE WIDGET MODULE** — server-side TypeScript that generates all reusable IMU/GNSS sensor widget HTML, CSS, and client-side JS.
+  - `getLiveSensorWidgetsHtml(options)`: renders IMU card and GNSS card DOM with configurable element IDs
+  - `getLiveSensorWidgetsStyles()`: CSS for widget layout, compass, tilt indicators, GNSS fix colour pills, sync highlight
+  - `getLiveSensorWidgetsScript()`: inlined client-side JS bundle — `updateLiveSensorWidgets(imu, gnss, poseFusion, ids)`, `updateWidgetHeading`, `updateTiltIndicator`, `formatMeters`, `formatDegrees`, `getGnssFixClass`
+  - `getLiveSensorWidgetsWidgetIds(options)`: returns a JS object-literal string derived from the same options passed to `getLiveSensorWidgetsHtml`; pages embed this as `const WIDGET_IDS = ${getLiveSensorWidgetsWidgetIds(OPTIONS)};` to keep HTML element IDs and JS update IDs in sync from a single source of truth
+  - `LiveSensorWidgetOptions` TypeScript interface: typed options for HTML generator and widget-ID generator; controls which fields are rendered (tilt indicators, GNSS X/Y position)
+  - used by: deadReckoningPage, driveTuningPage, homePage, segmentTestingPage, turnTuningPage
 - `src/server/primitivesStore.ts`: in-memory primitives state holder.
   - primitives payload shape contains `imu`, `gnss`, `poseFusion`, and `motors` sections.
   - `poseFusion.usingGnssHeading` is the app-level flag consumed by the live widgets to show whether GNSS is currently rebasing the IMU heading.
+  - all four sections (`imu`, `gnss`, `poseFusion`, `motors`) are guaranteed non-null objects — initialised with defaults at construction and deep-merged on update.
 - `docs/sensors.md`: sensor boundary/API contract, heading convention, GNSS frame/payload documentation, and primitive field purpose.
 - `scripts/mower-launch.sh`: launcher used by both `npm run start` and systemd; pins `MOWER_LOG_DIR` to the repo `logs/` folder by default.
 - `systemd/mower.service.template`: systemd unit template for runtime process management; explicitly sets `MOWER_LOG_DIR` to the repo `logs/` folder.
 - `systemd/install-mower-service.sh`: installer for `/etc/systemd/system/mower.service`.
 - `test/server.test.js`: server unit/integration tests.
+
+## Dead-Reckoning Calibration
+- `src/control/deadReckoningCalibrator.ts`: three-phase dead-reckoning calibration procedure
+  - Phase 1 (straight line): drives ~3 s forward; divides GNSS chord by average encoder ticks to derive a first-pass `encoderMetersPerTick`; per-wheel values derived from left/right tick ratio and chord
+  - Phase 2 (arc right): drives a timed arc (left=full, right=arcInnerSpeed); computes arc geometry from IMU heading change + GNSS chord (`arcRadius`, `arcLength`, `wheelbase`, per-wheel m/tick); integrates DR position to measure endpoint error vs GNSS anchor
+  - Phase 3 (arc left): mirror of phase 2
+  - outputs suggested per-wheel m/tick, wheelbase, and DR endpoint error for operator review before applying
+  - integrates with `systemStop` for safe abort during any phase
+  - API: `run()`, `requestStop()`, `getState()`
+- `src/server/deadReckoningPage.ts`: dead-reckoning calibration web UI (see Operation And Server Entry above)
 
 ## Project Build And Test Tooling
 - `package.json`:

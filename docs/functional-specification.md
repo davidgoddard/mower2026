@@ -503,8 +503,6 @@ For a selected mowing area perimeter, the page shall be able to preview logical 
 
 Mowing strip previews shall treat recorded obstacle perimeters as exclusion zones. Strips shall be split rather than crossing obstacle boundaries, and connector previews between strips shall route around an obstacle perimeter when the direct connector would cross the obstacle.
 
-The server shall seed a `Test Area` mowing area perimeter and a `Test Perimeter` obstacle perimeter when those names are not already stored, so the operator can review strip clipping and obstacle routing on the canvas without first recording a real lawn.
-
 ### Re-tracing
 
 From the same page as for tracing the obstacle's perimeter, there will be a button to 'Drive'.
@@ -557,10 +555,6 @@ Once all strips are computed the planner sequences them for the shortest total t
 
 Within each strip the mower always enters at one end and exits at the other, giving a boustrophedon (back-and-forth) pattern across the area.  Where two candidate strips have equal connector cost, the planner prefers the strip with the smallest offset difference from the current strip (i.e. the immediately adjacent strip) to avoid skipping over uncut ground.
 
-### Already-mown crossing penalty
-
-When the connector path between the end of one strip and the start of the next passes over a strip that has already been mown, the mower re-cuts that ground unnecessarily and wastes battery.  The planner therefore adds a penalty to the connector cost for each already-mown strip the connector crosses.  The penalty is multiplied by the number of times that strip has already been crossed, so a strip crossed once costs one penalty unit, a strip crossed twice costs two penalty units, and so on.  This escalating cost strongly biases the planner toward routes that travel along the perimeter edge or in gaps between unmown strips rather than cutting back through completed ground.  The penalty magnitude is set well above the geometric cost of a typical detour so it always dominates unless no clean path exists at all.
-
 ### Boundary standoff distance
 
 No mowing strip or connector segment shall bring the mower closer than 15 cm to any recorded boundary (area perimeter or obstacle perimeter) unless that boundary is being explicitly driven as part of a boundary-tracing pass (see below).  This standoff gives the mower sufficient room to execute a turn-on-the-spot at a strip end without fouling the boundary.  The standoff distance of 15 cm is a configurable parameter stored in the path-following configuration.
@@ -592,8 +586,6 @@ This means inter-strip travel is always composed of two phases: a boundary-follo
 
 ### Cost model summary
 
-The total connector cost between two strips is the sum of:
-- the geometric path length of the connector (Euclidean distance or obstacle-perimeter walk distance when a direct line would cross an obstacle), plus
-- for each already-mown strip the connector crosses: `penalty × crossing_count`, where `crossing_count` is incremented each time a connector passes over that strip.
+The total connector cost between two strips is the geometric path length of the connector: the Euclidean distance, or the obstacle-perimeter walk distance when a direct line would cross an obstacle.
 
-The planner selects the traversal sequence that minimises total connector cost across all strip transitions, which simultaneously minimises total non-mowing travel distance and re-mowing of already-cut ground.
+The planner selects the traversal sequence that minimises total connector cost across all strip transitions, minimising total non-mowing travel distance.

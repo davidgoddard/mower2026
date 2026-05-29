@@ -1,4 +1,29 @@
-import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsStyles, getLiveSensorWidgetsScript } from "./liveSensorWidgets.js";
+import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsStyles, getLiveSensorWidgetsScript, getLiveSensorWidgetsWidgetIds } from "./liveSensorWidgets.js";
+
+const HOME_WIDGET_OPTIONS = {
+  imuCardId: "imu-card",
+  imuCompassId: "compass",
+  imuHeadingId: "imu-heading",
+  imuPitchId: "imu-pitch",
+  imuRollId: "imu-roll",
+  imuPitchIndicatorId: "pitch-indicator",
+  imuRollIndicatorId: "roll-indicator",
+  imuStatusId: "imu-status",
+  imuErrorId: "imu-error",
+  gnssCardId: "gnss-card",
+  gnssCompassId: "gnss-compass",
+  gnssHeadingId: "gnss-heading",
+  gnssHeadingAccuracyId: "gnss-heading-accuracy",
+  gnssAccuracyId: "gnss-accuracy",
+  gnssStatusId: "gnss-status",
+  gnssErrorId: "gnss-error",
+  gnssFixId: "gnss-fix",
+  gnssSatsId: "gnss-sats",
+  gnssXMetersId: "gnss-x",
+  gnssYMetersId: "gnss-y",
+  includeGnsPosition: true,
+  includeTilt: true,
+} as const;
 
 export function renderHomePage(): string {
   return `<!doctype html>
@@ -640,30 +665,7 @@ ${getLiveSensorWidgetsStyles()}
     <div class="container">
       <!-- Sensor Dashboard -->
       <div class="dashboard-grid">
-${getLiveSensorWidgetsHtml({
-  imuCardId: "imu-card",
-  imuCompassId: "compass",
-  imuHeadingId: "imu-heading",
-  imuPitchId: "imu-pitch",
-  imuRollId: "imu-roll",
-  imuPitchIndicatorId: "pitch-indicator",
-  imuRollIndicatorId: "roll-indicator",
-  imuStatusId: "imu-status",
-  imuErrorId: "imu-error",
-  gnssCardId: "gnss-card",
-  gnssCompassId: "gnss-compass",
-  gnssHeadingId: "gnss-heading",
-  gnssHeadingAccuracyId: "gnss-heading-accuracy",
-  gnssAccuracyId: "gnss-accuracy",
-  gnssStatusId: "gnss-status",
-  gnssErrorId: "gnss-error",
-  gnssFixId: "gnss-fix",
-  gnssSatsId: "gnss-sats",
-  gnssXMetersId: "gnss-x",
-  gnssYMetersId: "gnss-y",
-  includeGnsPosition: true,
-  includeTilt: true,
-})}
+${getLiveSensorWidgetsHtml(HOME_WIDGET_OPTIONS)}
 
         <!-- Motors Card -->
         <div class="sensor-card">
@@ -774,42 +776,9 @@ ${getLiveSensorWidgetsHtml({
     </div>
 
     <script>
-      function formatMeters(value) {
-        if (value === null || value === undefined) return '—';
-        return value.toFixed(3) + ' m';
-      }
-
-      function formatDegrees(value) {
-        if (value === null || value === undefined) return '—';
-        return value.toFixed(1) + '°';
-      }
-
-      function getGnssFixClass(fixType) {
-        switch ((fixType || 'unknown').toLowerCase()) {
-          case 'fixed':
-            return 'gnss-fix-fixed';
-          case 'rtk-fixed':
-            return 'gnss-fix-rtk-fixed';
-          case 'float':
-            return 'gnss-fix-float';
-          case 'rtk-float':
-            return 'gnss-fix-rtk-float';
-          case 'single':
-            return 'gnss-fix-single';
-          case 'none':
-            return 'gnss-fix-none';
-          default:
-            return 'gnss-fix-unknown';
-        }
-      }
-
-      function applyGnssFixStyle(fixType) {
-        const fixValue = document.getElementById('gnss-fix');
-        const fixClass = getGnssFixClass(fixType);
-
-        fixValue.className = 'metric-value gnss-fix-value ' + fixClass;
-      }
 ${getLiveSensorWidgetsScript()}
+
+      const WIDGET_IDS = ${getLiveSensorWidgetsWidgetIds(HOME_WIDGET_OPTIONS)};
 
       // Peak tracking for motor current VU meters
       const MOTOR_CURRENT_MAX_AMPS = 10.0; // Maximum expected current for scale
@@ -1045,52 +1014,14 @@ ${getLiveSensorWidgetsScript()}
             fetch('/health').then(r => r.json())
           ]);
 
-          // Update IMU
-          const imu = primitives.primitives.imu;
-          const imuStatusDot = document.getElementById('imu-status');
-          imuStatusDot.className = 'status-dot ' + (imu.status || 'idle');
-
-          if (imu.status === 'error') {
-            document.getElementById('imu-error').textContent = imu.error;
-            document.getElementById('imu-error').style.display = 'block';
-          } else {
-            document.getElementById('imu-error').style.display = 'none';
-          }
-          const imuNavHeading = updateWidgetHeading('compass', 'imu-heading', imu.status === 'error' ? null : imu.headingDeg);
-          updateTiltIndicator('pitch-indicator', 'imu-pitch', imu.status === 'error' ? null : imu.pitchDeg);
-          updateTiltIndicator('roll-indicator', 'imu-roll', imu.status === 'error' ? null : imu.rollDeg);
-
-          // Update GNSS
-          const gnss = primitives.primitives.gnss;
-          const gnssStatusDot = document.getElementById('gnss-status');
-          gnssStatusDot.className = 'status-dot ' + (gnss.status || 'idle');
-
-          if (gnss.status === 'error') {
-            document.getElementById('gnss-error').textContent = gnss.error;
-            document.getElementById('gnss-error').style.display = 'block';
-          } else {
-            document.getElementById('gnss-error').style.display = 'none';
-          }
-
-          document.getElementById('gnss-x').textContent = formatMeters(gnss.xMeters);
-          document.getElementById('gnss-y').textContent = formatMeters(gnss.yMeters);
-          document.getElementById('gnss-fix').textContent = gnss.fixType || '—';
-          applyGnssFixStyle(gnss.fixType);
-          document.getElementById('gnss-accuracy').textContent = gnss.positionAccuracyMeters !== null
-            ? formatMeters(gnss.positionAccuracyMeters)
-            : '—';
-          document.getElementById('gnss-heading-accuracy').textContent = gnss.headingAccuracyDeg !== null
-            ? formatDegrees(gnss.headingAccuracyDeg)
-            : '—';
-          document.getElementById('gnss-sats').textContent = gnss.satellitesInUse !== null
-            ? gnss.satellitesInUse
-            : '—';
-          const gnssNavHeading = updateWidgetHeading('gnss-compass', 'gnss-heading', gnss.status === 'error' ? null : gnss.headingDeg);
+          // Update IMU + GNSS widgets
+          const imu = primitives.primitives.imu ?? {};
+          const gnss = primitives.primitives.gnss ?? {};
           const poseFusion = primitives.primitives.poseFusion ?? {};
-          updateWidgetSyncState(["imu-card", "gnss-card"], poseFusion.usingGnssHeading === true);
+          updateLiveSensorWidgets(imu, gnss, poseFusion, WIDGET_IDS);
 
           // Update Motors
-          const motors = primitives.primitives.motors;
+          const motors = primitives.primitives.motors ?? {};
           const motorStatusDot = document.getElementById('motor-status');
           motorStatusDot.className = 'status-dot ' + (motors.status || 'idle');
 
