@@ -1043,10 +1043,10 @@ ${getSensorWidgetScriptTag()}
           }
 
           document.getElementById('motor-left').textContent = motors.leftWheelSpeedMetersPerSecond !== null
-            ? formatMeters(motors.leftWheelSpeedMetersPerSecond).replace(' m', ' m/s')
+            ? motors.leftWheelSpeedMetersPerSecond.toFixed(3) + ' m/s'
             : '—';
           document.getElementById('motor-right').textContent = motors.rightWheelSpeedMetersPerSecond !== null
-            ? formatMeters(motors.rightWheelSpeedMetersPerSecond).replace(' m', ' m/s')
+            ? motors.rightWheelSpeedMetersPerSecond.toFixed(3) + ' m/s'
             : '—';
 
           // Update VU meters with peak tracking
