@@ -61,6 +61,7 @@ export const SENSOR_WIDGETS_JS: string = `
 
     .card {
       width: 100%;
+      height: 100%;
       box-sizing: border-box;
       background: var(--_bg-primary);
       border: 1px solid var(--_border-color);
@@ -167,13 +168,11 @@ export const SENSOR_WIDGETS_JS: string = `
       font-size: 0.6875rem; font-weight: 500;
       text-transform: uppercase; letter-spacing: 0.06em;
       color: var(--_text-secondary);
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .metric-value {
       font-size: clamp(1.05rem, 1.1vw, 1.35rem);
       font-weight: 600; color: var(--_text-primary);
       font-variant-numeric: tabular-nums; line-height: 1.1;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .metric-value.large { font-size: clamp(1.35rem, 1.8vw, 1.8rem); }
 
@@ -346,7 +345,7 @@ export const SENSOR_WIDGETS_JS: string = `
                 <div class="metric-value large" data-part="heading-value">—</div>
               </div>
               <div class="metric">
-                <div class="metric-label">Heading Accuracy</div>
+                <div class="metric-label">Accuracy</div>
                 <div class="metric-value" data-part="heading-accuracy-value">—</div>
               </div>
             </div>
@@ -355,7 +354,7 @@ export const SENSOR_WIDGETS_JS: string = `
             <div class="gnss-row three">
               <div class="metric"><div class="metric-label">X</div><div class="metric-value" data-part="x-value">—</div></div>
               <div class="metric"><div class="metric-label">Y</div><div class="metric-value" data-part="y-value">—</div></div>
-              <div class="metric"><div class="metric-label">Position Accuracy</div><div class="metric-value" data-part="accuracy-value">—</div></div>
+              <div class="metric"><div class="metric-label">Accuracy</div><div class="metric-value" data-part="accuracy-value">—</div></div>
             </div>
             <div class="gnss-row two">
               <div class="metric"><div class="metric-label">Fix Type</div><div class="fix-pill gnss-fix-unknown" data-part="fix-value">—</div></div>
@@ -438,6 +437,7 @@ export function getSensorWidgetLayoutStyles(): string {
       width: 100%;
       min-width: 0;
       box-sizing: border-box;
+      height: 100%;
     }
   `;
 }

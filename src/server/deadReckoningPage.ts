@@ -88,8 +88,8 @@ ${getAppDialogStyles()}
       .sidebar-column {
         position: sticky;
         top: 5.5rem;
-        display: flex;
-        flex-direction: column;
+        display: grid;
+        grid-template-rows: 1fr 1fr;
         gap: 1rem;
         align-self: start;
       }
