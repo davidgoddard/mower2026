@@ -44,7 +44,7 @@ export const SENSOR_WIDGETS_JS: string = `
   }
 
   const SHARED_CSS = \`
-    :host { display: block; }
+    :host { display: block; width: 100%; box-sizing: border-box; }
 
     :host {
       --_bg-primary:     var(--bg-primary,     #ffffff);
@@ -60,6 +60,8 @@ export const SENSOR_WIDGETS_JS: string = `
     }
 
     .card {
+      width: 100%;
+      box-sizing: border-box;
       background: var(--_bg-primary);
       border: 1px solid var(--_border-color);
       border-radius: 0.75rem;
@@ -162,7 +164,7 @@ export const SENSOR_WIDGETS_JS: string = `
     .metric-label {
       font-size: 0.6875rem; font-weight: 500;
       text-transform: uppercase; letter-spacing: 0.06em;
-      color: var(--_text-secondary); white-space: nowrap;
+      color: var(--_text-secondary);
     }
     .metric-value {
       font-size: clamp(1.05rem, 1.1vw, 1.35rem);
@@ -426,6 +428,8 @@ export function getSensorWidgetLayoutStyles(): string {
     imu-sensor-widget,
     gnss-position-widget {
       display: block;
+      width: 100%;
+      min-width: 0;
     }
   `;
 }
