@@ -148,7 +148,7 @@ export const SENSOR_WIDGETS_JS: string = `
     .compass-label.w { left: 8px;   top:  50%; transform: translateY(-50%); }
 
     .top-row { display: flex; align-items: center; gap: 1rem; margin-top: 0.75rem; }
-    .top-metrics { flex: 1; display: grid; gap: 0.75rem; }
+    .top-metrics { flex: 1; display: grid; gap: 0.75rem; min-width: 0; }
     .top-metrics.one { grid-template-columns: minmax(0,1fr); }
     .top-metrics.two { grid-template-columns: repeat(2, minmax(0,1fr)); }
 
@@ -160,16 +160,20 @@ export const SENSOR_WIDGETS_JS: string = `
       border-radius: 0.75rem;
       box-shadow: 0 1px 0 rgba(255,255,255,0.45) inset, 0 1px 2px rgba(15,23,42,0.05);
       display: flex; flex-direction: column; gap: 0.25rem;
+      min-width: 0;
+      overflow: hidden;
     }
     .metric-label {
       font-size: 0.6875rem; font-weight: 500;
       text-transform: uppercase; letter-spacing: 0.06em;
       color: var(--_text-secondary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .metric-value {
       font-size: clamp(1.05rem, 1.1vw, 1.35rem);
       font-weight: 600; color: var(--_text-primary);
       font-variant-numeric: tabular-nums; line-height: 1.1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .metric-value.large { font-size: clamp(1.35rem, 1.8vw, 1.8rem); }
 
@@ -380,7 +384,10 @@ export const SENSOR_WIDGETS_JS: string = `
         if (hv) hv.textContent = nav !== null ? fmtDegrees(nav) : '\\u2014';
       } else if (name === 'heading-accuracy-deg') {
         const el = r.querySelector('[data-part="heading-accuracy-value"]');
-        if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtDegrees(Number(value)) : '\\u2014';
+        if (el) {
+          const n = Number(value);
+          el.textContent = (value !== null && value !== '' && !isNaN(n) && n < 180) ? fmtDegrees(n) : '\\u2014';
+        }
       } else if (name === 'x-meters') {
         const el = r.querySelector('[data-part="x-value"]');
         if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtMeters(Number(value)) : '\\u2014';
@@ -430,6 +437,7 @@ export function getSensorWidgetLayoutStyles(): string {
       display: block;
       width: 100%;
       min-width: 0;
+      box-sizing: border-box;
     }
   `;
 }
