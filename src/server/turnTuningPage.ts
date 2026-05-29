@@ -1,34 +1,10 @@
-import { getLiveSensorWidgetsHtml, getLiveSensorWidgetsScript, getLiveSensorWidgetsStyles, getLiveSensorWidgetsWidgetIds } from "./liveSensorWidgets.js";
+import { getSensorWidgetScriptTag, getSensorWidgetLayoutStyles } from "./liveSensorWidgets.js";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 
 /**
  * Turn tuning web page - modern, responsive UI for turn controller
  */
 
-const TURN_TUNING_WIDGET_OPTIONS = {
-  imuCardId: "imu-card",
-  imuCompassId: "compass",
-  imuHeadingId: "imu-heading",
-  imuPitchId: "imu-pitch",
-  imuRollId: "imu-roll",
-  imuPitchIndicatorId: "pitch-indicator",
-  imuRollIndicatorId: "roll-indicator",
-  imuStatusId: "imu-status",
-  imuErrorId: "imu-error",
-  gnssCardId: "gnss-card",
-  gnssCompassId: "gnss-compass",
-  gnssHeadingId: "gnss-heading",
-  gnssHeadingAccuracyId: "gnss-heading-accuracy",
-  gnssAccuracyId: "gnss-accuracy",
-  gnssStatusId: "gnss-status",
-  gnssErrorId: "gnss-error",
-  gnssFixId: "gnss-fix",
-  gnssSatsId: "gnss-sats",
-  gnssXMetersId: "gnss-x",
-  gnssYMetersId: "gnss-y",
-  includeGnsPosition: true,
-  includeTilt: true,
-} as const;
 
 export function getTurnTuningPageHtml(): string {
   return `
@@ -39,7 +15,7 @@ export function getTurnTuningPageHtml(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Turn Tuning - Mower Control</title>
   <style>
-${getLiveSensorWidgetsStyles()}
+${getSensorWidgetLayoutStyles()}
 ${getAppDialogStyles()}
     :root {
       --primary-color: #2563eb;
@@ -803,6 +779,7 @@ ${getAppDialogStyles()}
       to { transform: rotate(360deg); }
     }
   </style>
+${getSensorWidgetScriptTag()}
 </head>
 <body>
   <div class="header">
@@ -821,7 +798,8 @@ ${getAppDialogStyles()}
       <div class="container">
         <div class="page-layout">
           <aside class="sidebar-column" aria-label="Live primitives">
-${getLiveSensorWidgetsHtml(TURN_TUNING_WIDGET_OPTIONS)}
+            <imu-sensor-widget id="imu-widget"></imu-sensor-widget>
+            <gnss-position-widget id="gnss-widget"></gnss-position-widget>
       </aside>
 
       <main class="main-column">
@@ -960,6 +938,7 @@ ${getAppDialogHtml()}
 ${getAppDialogScript()}
     let updateInterval = null;
 
+
     // Format time
     function formatTime(isoString) {
       const date = new Date(isoString);
@@ -985,16 +964,33 @@ ${getAppDialogScript()}
       return 'status-stopped';
     }
 
-${getLiveSensorWidgetsScript()}
-
-    const WIDGET_IDS = ${getLiveSensorWidgetsWidgetIds(TURN_TUNING_WIDGET_OPTIONS)};
-
     function updateSensorWidgets(primitivesPayload) {
       const primitives = primitivesPayload?.primitives ?? {};
       const imu = primitives.imu ?? {};
       const gnss = primitives.gnss ?? {};
       const poseFusion = primitives.poseFusion ?? {};
-      updateLiveSensorWidgets(imu, gnss, poseFusion, WIDGET_IDS);
+      const imuWidget = document.getElementById('imu-widget');
+      const gnssWidget = document.getElementById('gnss-widget');
+      if (imuWidget) {
+        imuWidget.setAttribute('status', imu.status || 'idle');
+        if (imu.error != null) imuWidget.setAttribute('error', imu.error);
+        if (imu.headingDeg != null) imuWidget.setAttribute('heading-deg', imu.headingDeg);
+        if (imu.pitchDeg != null) imuWidget.setAttribute('pitch-deg', imu.pitchDeg);
+        if (imu.rollDeg != null) imuWidget.setAttribute('roll-deg', imu.rollDeg);
+        imuWidget.setAttribute('synced', poseFusion.usingGnssHeading === true ? 'true' : 'false');
+      }
+      if (gnssWidget) {
+        gnssWidget.setAttribute('status', gnss.status || 'idle');
+        if (gnss.error != null) gnssWidget.setAttribute('error', gnss.error);
+        if (gnss.headingDeg != null) gnssWidget.setAttribute('heading-deg', gnss.headingDeg);
+        if (gnss.headingAccuracyDeg != null) gnssWidget.setAttribute('heading-accuracy-deg', gnss.headingAccuracyDeg);
+        if (gnss.xMeters != null) gnssWidget.setAttribute('x-meters', gnss.xMeters);
+        if (gnss.yMeters != null) gnssWidget.setAttribute('y-meters', gnss.yMeters);
+        if (gnss.positionAccuracyMeters != null) gnssWidget.setAttribute('position-accuracy-meters', gnss.positionAccuracyMeters);
+        if (gnss.fixType != null) gnssWidget.setAttribute('fix-type', gnss.fixType);
+        if (gnss.satellitesInUse != null) gnssWidget.setAttribute('satellites', gnss.satellitesInUse);
+        gnssWidget.setAttribute('synced', poseFusion.usingGnssHeading === true ? 'true' : 'false');
+      }
     }
 
     function formatValidationStatus(validationState) {

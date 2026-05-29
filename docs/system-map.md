@@ -375,12 +375,17 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab.
 - `src/server/deadReckoningPage.ts`: dead-reckoning calibration page — three-phase calibration procedure UI (straight line, arc right, arc left); live IMU/GNSS sidebar widgets; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
-- `src/server/liveSensorWidgets.ts`: **SHARED LIVE WIDGET MODULE** — server-side TypeScript that generates all reusable IMU/GNSS sensor widget HTML, CSS, and client-side JS.
-  - `getLiveSensorWidgetsHtml(options)`: renders IMU card and GNSS card DOM with configurable element IDs
-  - `getLiveSensorWidgetsStyles()`: CSS for widget layout, compass, tilt indicators, GNSS fix colour pills, sync highlight
-  - `getLiveSensorWidgetsScript()`: inlined client-side JS bundle — `updateLiveSensorWidgets(imu, gnss, poseFusion, ids)`, `updateWidgetHeading`, `updateTiltIndicator`, `formatMeters`, `formatDegrees`, `getGnssFixClass`
-  - `getLiveSensorWidgetsWidgetIds(options)`: returns a JS object-literal string derived from the same options passed to `getLiveSensorWidgetsHtml`; pages embed this as `const WIDGET_IDS = ${getLiveSensorWidgetsWidgetIds(OPTIONS)};` to keep HTML element IDs and JS update IDs in sync from a single source of truth
-  - `LiveSensorWidgetOptions` TypeScript interface: typed options for HTML generator and widget-ID generator; controls which fields are rendered (tilt indicators, GNSS X/Y position)
+- `src/server/sensorWidgets.js`: **WEB COMPONENT DEFINITIONS** — pure static JS served at `GET /sensor-widgets.js` (cached 1 hour).
+  - `<imu-sensor-widget>`: custom element with shadow DOM; attributes: `status`, `error`, `heading-deg`, `pitch-deg`, `roll-deg`, `synced`
+  - `<gnss-position-widget>`: custom element with shadow DOM; attributes: `status`, `error`, `heading-deg`, `heading-accuracy-deg`, `x-meters`, `y-meters`, `position-accuracy-meters`, `fix-type`, `satellites`, `synced`
+  - Both components own all their CSS inside shadow DOM — page styles cannot reach in, so appearance is identical on every page by construction
+  - CSS custom properties (`--primary-color`, `--bg-primary`, etc.) pierce the shadow boundary so the shared colour palette still applies
+  - `synced="true"` attribute triggers a green border highlight; `synced="false"` triggers an amber border highlight via `:host([synced="..."])` CSS selectors
+  - Pages update widgets via `element.setAttribute('heading-deg', value)` — no element ID bookkeeping needed
+- `src/server/liveSensorWidgets.ts`: **WIDGET MODULE BRIDGE** — thin TypeScript module that serves the web component bundle and provides page helpers.
+  - `SENSOR_WIDGETS_JS`: `Buffer` of `sensorWidgets.js` read once at startup; served by appServer at `/sensor-widgets.js`
+  - `getSensorWidgetScriptTag()`: returns `<script src="/sensor-widgets.js" defer></script>` for page `<head>`
+  - `getSensorWidgetLayoutStyles()`: returns minimal layout CSS (flex/grid placement of the custom elements); contains no typography or colour rules so it cannot override component shadow CSS
   - used by: deadReckoningPage, driveTuningPage, homePage, segmentTestingPage, turnTuningPage
 - `src/server/primitivesStore.ts`: in-memory primitives state holder.
   - primitives payload shape contains `imu`, `gnss`, `poseFusion`, and `motors` sections.

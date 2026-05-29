@@ -26,6 +26,7 @@ import { getSegmentTestingPageHtml } from "./segmentTestingPage.js";
 import { renderPathTracingPage } from "./pathTracingPage.js";
 import { getManualDrivePageHtml } from "./manualDrivePage.js";
 import { getDeadReckoningPageHtml } from "./deadReckoningPage.js";
+import { SENSOR_WIDGETS_JS } from "./liveSensorWidgets.js";
 import { DeadReckoningCalibrator } from "../control/deadReckoningCalibrator.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
@@ -376,6 +377,16 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
     // Handle async GET endpoints
     if (method === "GET") {
+      // Static web-component bundle — cached for 1 hour in the browser
+      if (requestUrl.pathname === "/sensor-widgets.js") {
+        response.writeHead(200, {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Cache-Control": "public, max-age=3600",
+        });
+        response.end(SENSOR_WIDGETS_JS);
+        return;
+      }
+
       // List all paths
       if (requestUrl.pathname === "/api/paths" && pathStore) {
         try {
