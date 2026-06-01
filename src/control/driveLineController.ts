@@ -127,6 +127,11 @@ export class DriveLineController {
   private driveDirectionSign: 1 | -1 = 1;
   private driveTimeoutMinimumMs = 0;
   private driveTimeoutDisabled = false;
+  // Drive heartbeat — the per-drive diagnostic record.  Captures every
+  // contributor to fused pose at ~5 Hz so the next failure can be diagnosed
+  // from the log alone.
+  private lastHeartbeatMs = 0;
+  private static readonly HEARTBEAT_INTERVAL_MS = 200;
 
   constructor(options: DriveLineControllerOptions) {
     this.logger = options.logger.child({ context: "control", source: "DriveLineController" });
@@ -189,6 +194,24 @@ export class DriveLineController {
       this.driveStartPoseQuality = startPose.quality;
       this.driveTargetPosition = request.targetPosition;
 
+      // Calibration banner — captures the encoder/wheelbase values that this
+      // drive will run with so a corrupted calibration is visible at a glance
+      // alongside the failure event.  Plausibility flags pre-empt the
+      // post-mortem question "was the wheelbase even sensible?"
+      const calibrationDiag = this.poseFusion.getDiagnosticSnapshot().calibration;
+      const wheelbasePlausible = calibrationDiag.wheelbaseMeters >= 0.20 && calibrationDiag.wheelbaseMeters <= 1.5;
+      const leftMtPlausible = calibrationDiag.leftMetersPerTick >= 1e-5 && calibrationDiag.leftMetersPerTick <= 1e-2;
+      const rightMtPlausible = calibrationDiag.rightMetersPerTick >= 1e-5 && calibrationDiag.rightMetersPerTick <= 1e-2;
+      this.logger.info("drive.line.calibration_state", {
+        leftMetersPerTick: calibrationDiag.leftMetersPerTick,
+        rightMetersPerTick: calibrationDiag.rightMetersPerTick,
+        wheelbaseMeters: calibrationDiag.wheelbaseMeters,
+        plausible: wheelbasePlausible && leftMtPlausible && rightMtPlausible,
+        wheelbasePlausible,
+        leftMtPlausible,
+        rightMtPlausible,
+      });
+
       this.logger.info("drive.line.started", {
         startPosition: {
           x: unwrapMeters(this.driveStartPosition.xMeters),
@@ -201,6 +224,7 @@ export class DriveLineController {
         startHeading: unwrapInternalHeading(this.driveStartHeading),
         driveDirectionSign: this.driveDirectionSign,
       });
+      this.lastHeartbeatMs = 0;
 
       this.driveLineStart = this.driveStartPosition;
       this.driveLineEnd = request.targetPosition;
@@ -703,6 +727,8 @@ export class DriveLineController {
     const cte = crossTrackError(currentPosition, this.driveLineStart, this.driveLineEnd);
     this.cteSamples.push(cte);
 
+    this.emitHeartbeatIfDue(pose, cte);
+
     const maxCrossTrackErrorMeters = this.currentDrive?.maxCrossTrackErrorMeters;
     if (
       maxCrossTrackErrorMeters !== undefined &&
@@ -893,6 +919,50 @@ export class DriveLineController {
     const dy = unwrapMeters(this.driveLineEnd.yMeters) - unwrapMeters(this.driveLineStart.yMeters);
 
     return createInternalHeading((Math.atan2(dy, dx) * 180) / Math.PI);
+  }
+
+  /**
+   * Emit a per-drive diagnostic heartbeat at HEARTBEAT_INTERVAL_MS cadence.
+   * Captures the contributions of every sensor source so a failed drive can
+   * be diagnosed from the log alone — see redesign notes in CLAUDE.md.
+   */
+  private emitHeartbeatIfDue(pose: Pose, cte: Meters): void {
+    const now = this.nowMillis();
+    if (now - this.lastHeartbeatMs < DriveLineController.HEARTBEAT_INTERVAL_MS) {
+      return;
+    }
+    this.lastHeartbeatMs = now;
+
+    const diag = this.poseFusion.getDiagnosticSnapshot();
+    this.logger.info("drive.line.heartbeat", {
+      tSinceStartMs: now - this.driveStartTime,
+      cteMeters: unwrapMeters(cte),
+      fused: {
+        x: diag.fused.x,
+        y: diag.fused.y,
+        headingDeg: diag.fused.headingDeg,
+        quality: diag.fused.quality,
+        usingGnssHeading: diag.fused.usingGnssHeading,
+      },
+      encoder: {
+        onlyX: diag.encoder.onlyX,
+        onlyY: diag.encoder.onlyY,
+        onlyHeadingDeg: diag.encoder.onlyHeadingDeg,
+        drConfidence: diag.encoder.drConfidence,
+        encoderSynced: diag.encoder.encoderSynced,
+        wheelSlipSuspected: diag.encoder.wheelSlipSuspected,
+        lastLeftDelta: diag.encoder.lastLeftDelta,
+        lastRightDelta: diag.encoder.lastRightDelta,
+      },
+      gnss: {
+        gnssToFusedSeparationMeters: diag.gnss.gnssToFusedSeparationMeters,
+        lastAcceptedAgoMs: diag.gnss.lastAcceptedAgoMs,
+        lastRejectionReason: diag.gnss.lastRejectionReason,
+        lastRejectionAgoMs: diag.gnss.lastRejectionAgoMs,
+        lastBlendFactor: diag.gnss.lastBlendFactor,
+        raw: diag.gnss.raw,
+      },
+    });
   }
 
   private projectAlongTrackDistance(position: Position): number {

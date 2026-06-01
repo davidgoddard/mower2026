@@ -215,6 +215,28 @@ export class PoseFusion extends EventEmitter {
   private encoderOnlyHeadingDeg: number | null = null;
   private drConfidence = 1.0;
 
+  // GNSS gate diagnostics — populated on every accept/reject so the heartbeat
+  // can show the most-recent reason without spamming per-sample logs.
+  private lastGnssAcceptedAtMs: number | null = null;
+  private lastGnssRejectionReason:
+    | "stale"
+    | "quality"
+    | "agreement"
+    | "implausible"
+    | "reanchor_too_large"
+    | null = null;
+  private lastGnssRejectionAtMs: number | null = null;
+  private lastGnssRejectionLogAtMs: Map<string, number> = new Map();
+  private lastGnssBlendSeparation: number | null = null;
+  private lastGnssBlendFactor: number | null = null;
+  // Most recent raw GNSS event seen by the fusion layer — surfaced via the
+  // diagnostic snapshot so the drive heartbeat can compare what GNSS reported
+  // against what reached fused pose.
+  private lastGnssEvent: GnssPositionUpdateEvent | null = null;
+  // Most recent encoder feedback delta — surfaced for the heartbeat so we can
+  // see the per-wheel ticks that drove the latest DR step.
+  private lastMotorFeedback: { leftEncoderDelta: number; rightEncoderDelta: number } | null = null;
+
   // GNSS heading stability tracking (unchanged from previous implementation)
   private lastGnssHeading: InternalHeading | null = null;
   private lastGnssHeadingTime: number | null = null;
@@ -336,6 +358,97 @@ export class PoseFusion extends EventEmitter {
     };
   }
 
+  /**
+   * Diagnostic snapshot for the drive heartbeat.  Captures the contributions of
+   * each sensor source so a single log record per heartbeat answers
+   * "what is each subsystem feeding fused pose right now, and is GNSS reaching
+   * the fused state?"  Designed to be called at ~5 Hz during an active drive.
+   */
+  getDiagnosticSnapshot(): {
+    fused: { x: number; y: number; headingDeg: number; quality: "gnss" | "dead-reckoning" | "unknown"; usingGnssHeading: boolean };
+    encoder: { onlyX: number | null; onlyY: number | null; onlyHeadingDeg: number | null; drConfidence: number; encoderSynced: boolean; wheelSlipSuspected: boolean; lastLeftDelta: number | null; lastRightDelta: number | null };
+    calibration: { leftMetersPerTick: number; rightMetersPerTick: number; wheelbaseMeters: number };
+    gnss: {
+      gnssToFusedSeparationMeters: number | null;
+      lastAcceptedAgoMs: number | null;
+      lastRejectionReason: string | null;
+      lastRejectionAgoMs: number | null;
+      lastBlendSeparation: number | null;
+      lastBlendFactor: number | null;
+      raw: {
+        x: number;
+        y: number;
+        fixType: string;
+        positionAccuracyMeters: number | null;
+        headingDeg: number | null;
+        headingAccuracyDeg: number | null;
+        sampleAgeMs: number | null;
+        timestampMillis: number;
+      } | null;
+    };
+  } {
+    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
+    const pose = this.getCurrentPose();
+    const fusedX = unwrapMeters(pose.position.xMeters);
+    const fusedY = unwrapMeters(pose.position.yMeters);
+    const fusedHeadingDeg = unwrapInternalHeading(pose.heading);
+
+    const encoderHeadingDeg = this.encoderOnlyHeadingDeg;
+    const headingAgreement =
+      encoderHeadingDeg !== null
+        ? Math.abs(this.normalizeAngle180(encoderHeadingDeg - fusedHeadingDeg)) <= DR_HEADING_SYNC_THRESHOLD_DEG
+        : false;
+    const positionAgreement =
+      this.encoderOnlyX !== null && this.encoderOnlyY !== null
+        ? Math.hypot(this.encoderOnlyX - fusedX, this.encoderOnlyY - fusedY) <= DR_POSITION_SYNC_THRESHOLD_METERS
+        : false;
+
+    return {
+      fused: {
+        x: fusedX,
+        y: fusedY,
+        headingDeg: fusedHeadingDeg,
+        quality: this.currentQualityWithStalenessCheck(nowMs),
+        usingGnssHeading: this.isUsingGnssHeading,
+      },
+      encoder: {
+        onlyX: this.encoderOnlyX,
+        onlyY: this.encoderOnlyY,
+        onlyHeadingDeg: encoderHeadingDeg,
+        drConfidence: this.drConfidence,
+        encoderSynced: headingAgreement && positionAgreement,
+        wheelSlipSuspected: this.wheelSlipSuspected,
+        lastLeftDelta: this.lastMotorFeedback?.leftEncoderDelta ?? null,
+        lastRightDelta: this.lastMotorFeedback?.rightEncoderDelta ?? null,
+      },
+      calibration: {
+        leftMetersPerTick: this.leftEncoderMetersPerTick,
+        rightMetersPerTick: this.rightEncoderMetersPerTick,
+        wheelbaseMeters: this.wheelbaseMeters,
+      },
+      gnss: {
+        gnssToFusedSeparationMeters: this.lastGnssEvent === null
+          ? null
+          : Math.hypot(this.lastGnssEvent.xMeters - fusedX, this.lastGnssEvent.yMeters - fusedY),
+        lastAcceptedAgoMs: this.lastGnssAcceptedAtMs === null ? null : nowMs - this.lastGnssAcceptedAtMs,
+        lastRejectionReason: this.lastGnssRejectionReason,
+        lastRejectionAgoMs: this.lastGnssRejectionAtMs === null ? null : nowMs - this.lastGnssRejectionAtMs,
+        lastBlendSeparation: this.lastGnssBlendSeparation,
+        lastBlendFactor: this.lastGnssBlendFactor,
+        raw: this.lastGnssEvent === null ? null : {
+          x: this.lastGnssEvent.xMeters,
+          y: this.lastGnssEvent.yMeters,
+          fixType: this.lastGnssEvent.fixType,
+          positionAccuracyMeters: this.lastGnssEvent.positionAccuracyMeters,
+          headingDeg: this.lastGnssEvent.heading === null ? null : unwrapInternalHeading(this.lastGnssEvent.heading),
+          headingAccuracyDeg: this.lastGnssEvent.headingAccuracyDeg,
+          sampleAgeMs: nowMs - this.lastGnssEvent.timestampMillis,
+          timestampMillis: this.lastGnssEvent.timestampMillis,
+        },
+      },
+    };
+  }
+
   private normalizeAngle180(deg: number): number {
     let d = deg % 360;
     if (d > 180) d -= 360;
@@ -401,6 +514,11 @@ export class PoseFusion extends EventEmitter {
 
   private onMotorFeedbackUpdate(event: MotorFeedbackUpdateEvent): void {
     if (!this.running) return;
+
+    this.lastMotorFeedback = {
+      leftEncoderDelta: event.leftEncoderDelta,
+      rightEncoderDelta: event.rightEncoderDelta,
+    };
 
     const dLeft  = event.leftEncoderDelta  * this.leftEncoderMetersPerTick;
     const dRight = event.rightEncoderDelta * this.rightEncoderMetersPerTick;
@@ -488,6 +606,7 @@ export class PoseFusion extends EventEmitter {
 
   private onGnssPositionUpdate(event: GnssPositionUpdateEvent): void {
     if (!this.running) return;
+    this.lastGnssEvent = event;
 
     const isGoodFix =
       event.fixType === "fixed" || event.fixType === "float" ||
@@ -508,13 +627,14 @@ export class PoseFusion extends EventEmitter {
       // Quality insufficient — DR continues unaided; mark outage so the next
       // good fix can re-anchor.
       const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
+      this.recordGnssRejection("quality", nowMs, {
+        fixType: event.fixType,
+        positionAccuracyMeters: event.positionAccuracyMeters,
+        headingAccuracyDeg: event.headingAccuracyDeg,
+      });
       if (this.currentQuality === "gnss") {
         this.currentQuality = "dead-reckoning";
         this.gnssQualityLostTimeMs = nowMs;
-        this.logger.warn("pose_fusion.gnss_quality_degraded", {
-          fixType: event.fixType,
-          positionAccuracyMeters: event.positionAccuracyMeters,
-        });
       }
     }
 
@@ -534,7 +654,7 @@ export class PoseFusion extends EventEmitter {
     const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
     const gnssAgeMs = nowMs - event.timestampMillis;
     if (gnssAgeMs < 0 || gnssAgeMs > GNSS_MAX_SAMPLE_AGE_MS) {
-      this.logger.warn("pose_fusion.gnss_position_stale", {
+      this.recordGnssRejection("stale", nowMs, {
         gnssAgeMs,
         timestampMillis: event.timestampMillis,
         nowMs,
@@ -556,6 +676,8 @@ export class PoseFusion extends EventEmitter {
       this.gnssQualityLostTimeMs = null;
       this.currentQuality = "gnss";
       this.lastGnssSyncTimeMs = nowMs;
+      this.lastGnssAcceptedAtMs = nowMs;
+      this.lastGnssRejectionReason = null;
       // Seed encoder-only track from this GNSS anchor so it shows a position
       // immediately rather than waiting for the first wheel movement.
       if (this.encoderOnlyX === null) {
@@ -572,7 +694,7 @@ export class PoseFusion extends EventEmitter {
     // message than accumulated DR drift, so skip and wait for confirmation.
     const wasInOutage = this.gnssQualityLostTimeMs !== null;
     if (separation > GNSS_IMPLAUSIBLE_SEPARATION_METERS) {
-      this.logger.warn("pose_fusion.gnss_position_implausible", {
+      this.recordGnssRejection("implausible", nowMs, {
         separation,
         threshold: GNSS_IMPLAUSIBLE_SEPARATION_METERS,
         gnssX, gnssY, drX, drY,
@@ -581,7 +703,7 @@ export class PoseFusion extends EventEmitter {
     }
 
     if (wasInOutage && separation > GNSS_REANCHOR_MAX_SEPARATION_METERS) {
-      this.logger.warn("pose_fusion.gnss_reanchor_separation_too_large", {
+      this.recordGnssRejection("reanchor_too_large", nowMs, {
         separation,
         threshold: GNSS_REANCHOR_MAX_SEPARATION_METERS,
         gnssX, gnssY, drX, drY,
@@ -600,6 +722,10 @@ export class PoseFusion extends EventEmitter {
       this.gnssQualityLostTimeMs = null;
       this.currentQuality = "gnss";
       this.lastGnssSyncTimeMs = nowMs;
+      this.lastGnssAcceptedAtMs = nowMs;
+      this.lastGnssRejectionReason = null;
+      this.lastGnssBlendSeparation = separation;
+      this.lastGnssBlendFactor = 1.0;
       return;
     }
 
@@ -607,22 +733,11 @@ export class PoseFusion extends EventEmitter {
     // If the DR estimate and GNSS disagree by more than the threshold, the GNSS
     // reading is likely from a different epoch or has a position jump — ignore it.
     if (separation > GNSS_AGREEMENT_THRESHOLD_METERS) {
-      this.logger.warn("pose_fusion.gnss_position_disagrees_with_dr", {
+      this.recordGnssRejection("agreement", nowMs, {
         separation,
         threshold: GNSS_AGREEMENT_THRESHOLD_METERS,
         gnssX, gnssY, drX, drY,
-      });
-      return;
-    }
-
-    // Gate 2: steady-state agreement check.
-    // If the DR estimate and GNSS disagree by more than the threshold, the GNSS
-    // reading is likely from a different epoch or has a position jump — ignore it.
-    if (separation > GNSS_AGREEMENT_THRESHOLD_METERS) {
-      this.logger.warn("pose_fusion.gnss_position_disagrees_with_dr", {
-        separation,
-        threshold: GNSS_AGREEMENT_THRESHOLD_METERS,
-        gnssX, gnssY, drX, drY,
+        positionAccuracyMeters: event.positionAccuracyMeters,
       });
       return;
     }
@@ -638,6 +753,29 @@ export class PoseFusion extends EventEmitter {
 
     this.currentQuality = "gnss";
     this.lastGnssSyncTimeMs = nowMs;
+    this.lastGnssAcceptedAtMs = nowMs;
+    this.lastGnssRejectionReason = null;
+    this.lastGnssBlendSeparation = separation;
+    this.lastGnssBlendFactor = blendFactor;
+  }
+
+  /**
+   * Record a GNSS-rejection reason and emit a rate-limited warn line. Each
+   * reason logs at most once per second; the diagnostic heartbeat surfaces
+   * the most recent reason for the in-between samples.
+   */
+  private recordGnssRejection(
+    reason: "stale" | "quality" | "agreement" | "implausible" | "reanchor_too_large",
+    nowMs: number,
+    data: Record<string, unknown>,
+  ): void {
+    this.lastGnssRejectionReason = reason;
+    this.lastGnssRejectionAtMs = nowMs;
+    const lastLogged = this.lastGnssRejectionLogAtMs.get(reason);
+    if (lastLogged === undefined || nowMs - lastLogged >= 1000) {
+      this.logger.warn(`pose_fusion.gnss_rejected.${reason}`, data);
+      this.lastGnssRejectionLogAtMs.set(reason, nowMs);
+    }
   }
 
   // ---------------------------------------------------------------------------

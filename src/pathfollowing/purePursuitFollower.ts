@@ -254,13 +254,6 @@ export class PurePursuitFollower implements IPathFollower {
         // Pure Pursuit: calculate curvature to lookahead point
         const curvature = this.calculateCurvature(currentPose, waypoints, lookahead);
 
-        this.logger.debug("pure_pursuit.control_step", {
-          waypointIndex: this.currentWaypointIndex,
-          lookahead,
-          curvature,
-          currentSpeed,
-        });
-
         // Convert curvature to wheel speeds
         const wheelSpeeds = this.calculateWheelSpeeds(curvature);
 

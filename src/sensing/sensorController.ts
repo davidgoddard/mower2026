@@ -148,8 +148,6 @@ export class SensorController extends EventEmitter {
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   private previousImuSampleMillis: number | null = null;
-  private lastImuHeadingLogMillis: number | null = null;
-  private lastImuHeadingLogValue: InternalHeading | null = null;
   private readonly imuDiagnosticSamples: Array<ImuDiagnosticSample | null> = new Array(IMU_DIAGNOSTIC_MAX_SAMPLES).fill(null);
   private imuDiagnosticNextIndex = 0;
   private imuDiagnosticSampleCount = 0;
@@ -341,11 +339,23 @@ export class SensorController extends EventEmitter {
     const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
     const isZeroCommand = normalizedLeftWheelOutputPercent === 0 && normalizedRightWheelOutputPercent === 0;
 
-    this.logger.info("motors.commanded", {
-      leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
-      rightWheelOutputPercent: normalizedRightWheelOutputPercent,
-      callStack: this.captureCallStack(),
-    });
+    // Log only on a meaningful transition — motion start, stop, or sign change.
+    // Per-tick PWM is captured by the drive heartbeat so this avoids drowning the log.
+    const previousLeft = this.lastMotorCommand?.kind === "output" ? this.lastMotorCommand.leftWheelOutputPercent : null;
+    const previousRight = this.lastMotorCommand?.kind === "output" ? this.lastMotorCommand.rightWheelOutputPercent : null;
+    const motionChanged =
+      previousLeft === null ||
+      previousRight === null ||
+      Math.sign(previousLeft) !== Math.sign(normalizedLeftWheelOutputPercent) ||
+      Math.sign(previousRight) !== Math.sign(normalizedRightWheelOutputPercent) ||
+      isZeroCommand !== wasZeroCommand ||
+      isActiveCommand !== wasActiveCommand;
+    if (motionChanged) {
+      this.logger.info("motors.commanded", {
+        leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
+        rightWheelOutputPercent: normalizedRightWheelOutputPercent,
+      });
+    }
     this.stopRequestLogged = false;
     this.lastMotorCommand = {
       kind: "output",
@@ -427,9 +437,7 @@ export class SensorController extends EventEmitter {
 
   async endMotorOperation(): Promise<void> {
     if (this.motorOperationDepth === 0) {
-      this.logger.warn("motors.operation_end_without_start", {
-        callStack: this.captureCallStack(),
-      });
+      this.logger.warn("motors.operation_end_without_start", {});
       return;
     }
 
@@ -449,7 +457,6 @@ export class SensorController extends EventEmitter {
       this.logger.warn("motors.stop_requested", {
         currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
         currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
-        callStack: this.captureCallStack(),
       });
       this.stopRequestLogged = true;
     }
@@ -593,22 +600,6 @@ export class SensorController extends EventEmitter {
     this.imuDiagnosticLatestTimestampMillis = sample.timestampMillis;
   }
 
-  /**
-   * Capture a short stack trace for motor control diagnostics.
-   */
-  private captureCallStack(): string {
-    const stack = new Error().stack;
-    if (!stack) {
-      return "stack_unavailable";
-    }
-
-    return stack
-      .split("\n")
-      .slice(2, 8)
-      .map((line) => line.trim())
-      .join("\n");
-  }
-
   private async runLoop(): Promise<void> {
     let nextTickMillis = this.nowMillis();
     let loopCount = 0;
@@ -722,26 +713,9 @@ export class SensorController extends EventEmitter {
         },
       });
 
-      const shouldLogImuHeading =
-        this.lastImuHeadingLogMillis === null ||
-        sample.timestampMillis - this.lastImuHeadingLogMillis >= 1000;
-      if (shouldLogImuHeading) {
-        const currentHeadingDeg = headingAfterDeg;
-        const headingChangeDeg = this.lastImuHeadingLogValue === null
-          ? 0
-          : Math.abs(unwrapRelativeAngle(headingDifference(this.lastImuHeadingLogValue, this.imuHeading)));
-        this.logger.info("sensor.imu.heading_sample", {
-          headingDeg: currentHeadingDeg,
-          headingChangeSinceLastLogDeg: headingChangeDeg,
-          rawYawRateDegPerSec,
-          tiltCompensatedYawRateDegPerSec,
-          pitchDeg,
-          rollDeg,
-          sampleDeltaMs,
-        });
-        this.lastImuHeadingLogMillis = sample.timestampMillis;
-        this.lastImuHeadingLogValue = this.imuHeading;
-      }
+      // IMU heading sampling no longer logged here — the drive heartbeat
+      // captures heading at higher signal-to-noise during active drives, and
+      // the periodic 1 Hz emission was drowning the failure window.
 
       // Emit heading update event
       this.emit(SENSOR_EVENTS.IMU_HEADING_UPDATE, {
