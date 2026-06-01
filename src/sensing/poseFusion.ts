@@ -1,48 +1,35 @@
 /**
- * Pose Fusion — DR-primary sensor fusion.
+ * Pose Fusion — GNSS-primary sensor fusion with IMU/encoder fallback.
  *
  * Coordinate frame: ENU (X=East, Y=North). Internal headings are Cartesian —
  * 0° points along +X (East) and 90° along +Y (North), so position integration
  * uses dx = d·cos(h), dy = d·sin(h).
  *
- * Architecture:
+ * Trust hierarchy:
  *
- *   IMU owns heading — always. The IMU heading drives all position integration
- *   and is never overridden by GNSS unilaterally. GNSS heading is used only
- *   to slowly rebase the IMU when both sensors have been stable for long enough
- *   (existing logic preserved below).
+ *   GNSS is the source of truth when validated.  The GnssValidator state
+ *   machine encapsulates the UM982 acceptance rules — fix type, RTK
+ *   reliability, satellites, HDOP, accuracy, baseline, IMU consistency —
+ *   and only promotes a sample to TRUSTED after the required number of
+ *   consecutive valid epochs.  When position is TRUSTED the fused position
+ *   snaps to GNSS; when heading is TRUSTED the IMU is rebased from GNSS.
  *
- *   Encoders own distance magnitude — always. Every motor feedback event
- *   advances the DR position regardless of GNSS quality.
+ *   IMU owns heading between TRUSTED GNSS epochs.  It integrates yaw
+ *   continuously and is the live heading source consumers see.  GNSS does
+ *   not write the IMU heading directly except on rebase events.
  *
- *   Encoder-only DR track is maintained in parallel as a diagnostic — it
- *   integrates wheel differentials independently and exposes drConfidence
- *   based on how well its turn rate matches the IMU. It does not feed back
- *   into the fused pose; it is observed for slip detection only.
- *
- *   Per-wheel odometry with slip detection:
- *     avgDistance = (leftTicks × leftMPerTick + rightTicks × rightMPerTick) / 2
- *     impliedTurnRateDeg = (rightDist - leftDist) / wheelbase × (180/π)
- *     If |impliedTurnRate - imuHeadingDelta| > slipThreshold → wheel slip suspected.
- *     On slip: direction still comes from IMU (correct), but distance confidence
- *     is flagged. Position still advances using IMU heading + avg encoder distance
- *     (second-order error only).
- *
- *   GNSS correction gates (all must pass):
- *     Gate 0 (freshness): nowMs - sample.timestampMillis ≤ GNSS_MAX_SAMPLE_AGE_MS
- *     Gate 1 (quality):   fixType fixed/float AND posAccuracy ≤ MAX_GNSS_POSITION_ACCURACY_METERS
- *     Gate 2 (agreement): |gnssPos - drPos| ≤ GNSS_AGREEMENT_THRESHOLD_METERS
- *     Gate 1 fail → DR continues unaided, outage flagged.
- *     Gate 2 fail → outlier logged, GNSS ignored, DR continues.
- *     After an outage (Gate 1 was failing), Gate 2 is replaced by a wider
- *     re-anchor threshold so DR drift can be corrected in one snap.
+ *   Encoders integrate position between TRUSTED GNSS epochs only.  When
+ *   GNSS is TRUSTED the encoder integration is shadowed by the snap; when
+ *   GNSS is REJECTED the encoder track keeps the position estimate alive
+ *   using IMU heading and the per-wheel distance values from
+ *   poseCalibration.  No DR-vs-GNSS agreement gate exists — the validator
+ *   is the only authority on whether GNSS is good enough.
  *
  *   Quality reporting:
- *     "gnss"            — last good GNSS fix arrived within GNSS_STALE_TIMEOUT_MS
- *     "dead-reckoning"  — no recent GNSS, but pose is being integrated from encoders/IMU
+ *     "gnss"            — last GNSS sample was TRUSTED within GNSS_STALE_TIMEOUT_MS
+ *     "dead-reckoning"  — no recent TRUSTED GNSS, pose is being integrated
+ *                         from encoders/IMU
  *     "unknown"         — no GNSS baseline ever established
- *     Quality is computed lazily on each pose read so silent GNSS gaps demote
- *     the reported quality even without a triggering bad-quality message.
  */
 
 import { EventEmitter } from "node:events";
@@ -74,28 +61,7 @@ import {
   WHEEL_BASE_METERS_DEFAULT,
 } from "../constants.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
-
-// GNSS quality thresholds
-const MAX_GNSS_POSITION_ACCURACY_METERS = 0.05;
-const MAX_GNSS_HEADING_ACCURACY_DEGREES = 5;
-const MAX_GNSS_IMU_ALIGNMENT_DEGREES = 3;
-
-// Blend reference for proportional GNSS correction.
-// A fix at this accuracy level is applied at full weight; fixes at
-// MAX_GNSS_POSITION_ACCURACY_METERS get proportionally less.
-const GNSS_BLEND_REFERENCE_ACCURACY_METERS = 0.02;
-
-// Maximum DR drift before bypassing the agreement gate on GNSS re-anchor.
-// After a long GNSS outage, if the first returning good fix is within this
-// distance we still trust it. Beyond this we log an implausible-separation
-// warning and keep DR as-is.
-const GNSS_REANCHOR_MAX_SEPARATION_METERS = 2.0;
-
-// Sanity-check threshold — a separation larger than this between a good-quality
-// GNSS fix and the DR estimate is implausible and indicates a corrupted message
-// or a coordinate system problem, not normal DR drift.  At this scale we skip
-// the reading and log it rather than making a huge position jump.
-const GNSS_IMPLAUSIBLE_SEPARATION_METERS = 5.0;
+import { GnssValidator, GnssValidationResult } from "./gnssValidator.js";
 
 // Slip detection — encoder-implied turn rate vs IMU heading rate disagreement threshold.
 // Units: degrees. If the two sources disagree by more than this over a single feedback
@@ -106,40 +72,20 @@ const WHEEL_SLIP_THRESHOLD_DEG = 10;
 // (below this the numbers are noise, not signal).
 const SLIP_CHECK_MIN_DISTANCE_METERS = 0.001;
 
-// DR confidence decay/recovery per motor feedback sample.
+// Encoder-only DR confidence decay/recovery per motor feedback sample.
 // On a slip event the confidence drops by DECAY; on agreement it recovers by RECOVER.
-// With 200 Hz polling: DECAY 0.05 → confidence hits zero in ~1 s of sustained slip;
-// RECOVER 0.005 → full recovery takes ~100 s of clean movement (~20 000 samples).
 const DR_CONFIDENCE_DECAY = 0.05;
 const DR_CONFIDENCE_RECOVER = 0.005;
 
-// Heading agreement threshold for the synced highlight on the widget (degrees).
-// If encoder-DR heading vs IMU heading differ by more than this, show amber.
+// Heading/position agreement thresholds for the encoder-synced widget highlight.
 const DR_HEADING_SYNC_THRESHOLD_DEG = 15;
-// Position agreement threshold for the synced highlight (metres).
 const DR_POSITION_SYNC_THRESHOLD_METERS = 0.5;
 
-// Steady-state GNSS/DR agreement gate.
-// A good-quality GNSS fix that disagrees with the DR estimate by more than this
-// is treated as an outlier and ignored (logged but not applied).
-const GNSS_AGREEMENT_THRESHOLD_METERS = 0.30;
-
-// GNSS sample maximum age. Samples older than this relative to the sensor
-// controller clock are rejected to avoid timestamp-misaligned corrections.
-const GNSS_MAX_SAMPLE_AGE_MS = 500;
-
-// If no good GNSS position has been received for this long, drop quality to
-// dead-reckoning so consumers know the pose is no longer GNSS-corrected.
+// Maximum sample-to-sample staleness on the Pi clock.  Reaching this means
+// the GNSS link is effectively dead.  This is wallclock arrival, not the
+// receiver-claimed sample age (which the validator handles via
+// sampleAgeMillis when present).
 const GNSS_STALE_TIMEOUT_MS = 2_000;
-
-// GNSS heading rebase — preserve the existing stability-based logic.
-const GNSS_STATIONARY_REBASE_TIMEOUT_MS = 10_000;
-const GNSS_OFFSET_REBASE_MIN_DURATION_MS = 1_500;
-const GNSS_OFFSET_REBASE_MIN_SAMPLES = 6;
-const GNSS_OFFSET_REBASE_MAX_SAMPLE_GAP_MS = 500;
-const GNSS_OFFSET_REBASE_MAX_OFFSET_DRIFT_DEGREES = 4;
-const GNSS_OFFSET_REBASE_MAX_DELTA_MISMATCH_DEGREES = 2.5;
-const GNSS_OFFSET_REBASE_MIN_SIGNIFICANT_DELTA_DEGREES = 0.2;
 
 const DEG_TO_RAD = Math.PI / 180;
 
@@ -184,6 +130,8 @@ export class PoseFusion extends EventEmitter {
   private readonly logger: LoggerScope;
   private readonly sensorController: SensorController;
   private readonly poseCalibration: PoseCalibration | null;
+  private readonly gnssValidator: GnssValidator;
+  private lastValidation: GnssValidationResult | null = null;
 
   private running = false;
 
@@ -218,15 +166,13 @@ export class PoseFusion extends EventEmitter {
   // GNSS gate diagnostics — populated on every accept/reject so the heartbeat
   // can show the most-recent reason without spamming per-sample logs.
   private lastGnssAcceptedAtMs: number | null = null;
-  private lastGnssRejectionReason:
-    | "stale"
-    | "quality"
-    | "agreement"
-    | "implausible"
-    | "reanchor_too_large"
-    | null = null;
+  private lastGnssRejectionReason: string | null = null;
   private lastGnssRejectionAtMs: number | null = null;
   private lastGnssRejectionLogAtMs: Map<string, number> = new Map();
+  /**
+   * Distance between the most recent accepted GNSS sample and the fused
+   * position at that moment.  Diagnostic only — no longer used for gating.
+   */
   private lastGnssBlendSeparation: number | null = null;
   private lastGnssBlendFactor: number | null = null;
   // Most recent raw GNSS event seen by the fusion layer — surfaced via the
@@ -237,16 +183,6 @@ export class PoseFusion extends EventEmitter {
   // see the per-wheel ticks that drove the latest DR step.
   private lastMotorFeedback: { leftEncoderDelta: number; rightEncoderDelta: number } | null = null;
 
-  // GNSS heading stability tracking (unchanged from previous implementation)
-  private lastGnssHeading: InternalHeading | null = null;
-  private lastGnssHeadingTime: number | null = null;
-  private offsetTrackingStartTime: number | null = null;
-  private offsetTrackingSampleCount = 0;
-  private offsetTrackingReferenceDeltaDeg: number | null = null;
-  private offsetTrackingLastImuHeading: InternalHeading | null = null;
-  private offsetTrackingLastGnssHeading: InternalHeading | null = null;
-  private offsetTrackingLastTimestampMs: number | null = null;
-
   declare on: <K extends keyof PoseFusionEvents>(event: K, listener: (data: PoseFusionEvents[K]) => void) => this;
   declare off: <K extends keyof PoseFusionEvents>(event: K, listener: (data: PoseFusionEvents[K]) => void) => this;
   declare emit: <K extends keyof PoseFusionEvents>(event: K, data: PoseFusionEvents[K]) => boolean;
@@ -256,6 +192,7 @@ export class PoseFusion extends EventEmitter {
     this.logger = options.logger.child({ context: "sensing", source: "PoseFusion" });
     this.sensorController = options.sensorController;
     this.poseCalibration = options.poseCalibration ?? null;
+    this.gnssValidator = new GnssValidator({ logger: this.logger });
 
     const cal = options.poseCalibration;
     this.leftEncoderMetersPerTick  = cal?.getLeftEncoderMetersPerTick()  ?? ENCODER_METERS_PER_TICK_DEFAULT;
@@ -470,6 +407,15 @@ export class PoseFusion extends EventEmitter {
     return (this.leftEncoderMetersPerTick + this.rightEncoderMetersPerTick) / 2;
   }
 
+  /**
+   * Live wheelbase used for differential odometry and consumed by the
+   * regulated pure-pursuit controllers so a calibration update takes effect
+   * mid-session without restart.
+   */
+  getWheelbaseMeters(): number {
+    return this.wheelbaseMeters;
+  }
+
   async setEncoderCalibration(metersPerTick: number): Promise<void> {
     const hadAsymmetricCalibration =
       this.leftEncoderMetersPerTick !== this.rightEncoderMetersPerTick;
@@ -601,353 +547,107 @@ export class PoseFusion extends EventEmitter {
   }
 
   // ---------------------------------------------------------------------------
-  // GNSS position update — two-gate correction of DR position
+  // GNSS position update — validator-driven, no DR-based gating
   // ---------------------------------------------------------------------------
 
   private onGnssPositionUpdate(event: GnssPositionUpdateEvent): void {
     if (!this.running) return;
     this.lastGnssEvent = event;
 
-    const isGoodFix =
-      event.fixType === "fixed" || event.fixType === "float" ||
-      event.fixType === "rtk-fixed" || event.fixType === "rtk-float";
-    const isGoodPositionAccuracy =
-      event.positionAccuracyMeters !== null &&
-      event.positionAccuracyMeters <= MAX_GNSS_POSITION_ACCURACY_METERS;
-    const isGoodHeadingAccuracy =
-      event.heading !== null &&
-      event.headingAccuracyDeg !== null &&
-      event.headingAccuracyDeg <= MAX_GNSS_HEADING_ACCURACY_DEGREES;
+    const validation = this.gnssValidator.validate(event, this.currentHeading);
+    this.lastValidation = validation;
+    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
 
-    const passesGate1 = isGoodFix && isGoodPositionAccuracy;
-
-    if (passesGate1) {
-      this.applyGnssPositionCorrection(event);
+    if (validation.position === "TRUSTED") {
+      // Position is trusted — snap fused pose to GNSS.  No blending against
+      // DR, no agreement gate.  GNSS is the truth.
+      const preSnapX = unwrapMeters(this.currentPosition.xMeters);
+      const preSnapY = unwrapMeters(this.currentPosition.yMeters);
+      this.lastGnssBlendSeparation = Math.hypot(event.xMeters - preSnapX, event.yMeters - preSnapY);
+      this.lastGnssBlendFactor = 1.0;
+      this.currentPosition = createPosition(event.xMeters, event.yMeters);
+      if (!this.hasGnssPositionBaseline) {
+        this.hasGnssPositionBaseline = true;
+        this.logger.info("pose_fusion.gnss_position_anchored", {
+          gnssX: event.xMeters,
+          gnssY: event.yMeters,
+        });
+      }
+      this.currentQuality = "gnss";
+      this.lastGnssSyncTimeMs = nowMs;
+      this.lastGnssAcceptedAtMs = nowMs;
+      this.lastGnssRejectionReason = null;
+      this.gnssQualityLostTimeMs = null;
+      // Seed the encoder-only track from this anchor on first sample so the
+      // diagnostic widget shows a position immediately.
+      if (this.encoderOnlyX === null) {
+        this.encoderOnlyX = event.xMeters;
+        this.encoderOnlyY = event.yMeters;
+        this.encoderOnlyHeadingDeg = unwrapInternalHeading(this.currentHeading);
+      }
     } else {
-      // Quality insufficient — DR continues unaided; mark outage so the next
-      // good fix can re-anchor.
-      const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
-      this.recordGnssRejection("quality", nowMs, {
-        fixType: event.fixType,
-        positionAccuracyMeters: event.positionAccuracyMeters,
-        headingAccuracyDeg: event.headingAccuracyDeg,
-      });
-      if (this.currentQuality === "gnss") {
-        this.currentQuality = "dead-reckoning";
+      // Validator rejected this sample.  Pose continues from IMU+encoder
+      // integration.  Surface the most-recent rejection reason for the
+      // diagnostic snapshot — the validator already logs promotion/demotion
+      // events for the state machine itself.
+      this.recordValidationRejection(validation, nowMs);
+      if (this.currentQuality === "gnss" && this.gnssQualityLostTimeMs === null) {
         this.gnssQualityLostTimeMs = nowMs;
       }
     }
 
-    // Heading rebase logic (unchanged — slow, stability-gated)
-    this.isUsingGnssHeading = false;
-    const canTrustHeading = isGoodFix && isGoodHeadingAccuracy && event.heading !== null;
-    if (canTrustHeading) {
-      this.updateHeadingFromGnss(event.heading!, event.timestampMillis);
+    if (validation.heading === "TRUSTED" && event.heading !== null) {
+      // Heading is trusted — rebase the IMU.  The validator already verified
+      // |GNSS - IMU| ≤ disagreement threshold so this is a small step.
+      this.applyGnssHeadingRebase(event.heading, event.timestampMillis);
+      this.isUsingGnssHeading = true;
+    } else {
+      this.isUsingGnssHeading = false;
     }
 
     this.emit("poseUpdate", this.getCurrentPose());
   }
 
-  private applyGnssPositionCorrection(event: GnssPositionUpdateEvent): void {
-    // Reject stale samples — GNSS latency or a timestamp mismatch would blend
-    // a past position into the current DR estimate causing path drag.
-    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
-    const gnssAgeMs = nowMs - event.timestampMillis;
-    if (gnssAgeMs < 0 || gnssAgeMs > GNSS_MAX_SAMPLE_AGE_MS) {
-      this.recordGnssRejection("stale", nowMs, {
-        gnssAgeMs,
-        timestampMillis: event.timestampMillis,
-        nowMs,
-      });
-      return;
-    }
+  private recordValidationRejection(validation: GnssValidationResult, nowMs: number): void {
+    const reasons = validation.position === "TRUSTED"
+      ? validation.headingRejections
+      : validation.positionRejections;
+    if (reasons.length === 0) return;
 
-    const gnssX = event.xMeters;
-    const gnssY = event.yMeters;
-    const drX = unwrapMeters(this.currentPosition.xMeters);
-    const drY = unwrapMeters(this.currentPosition.yMeters);
-    const separation = Math.hypot(gnssX - drX, gnssY - drY);
-
-    if (!this.hasGnssPositionBaseline) {
-      // First good fix — hard anchor. DR has no reliable origin yet.
-      this.logger.info("pose_fusion.gnss_position_anchored", { gnssX, gnssY });
-      this.currentPosition = createPosition(gnssX, gnssY);
-      this.hasGnssPositionBaseline = true;
-      this.gnssQualityLostTimeMs = null;
-      this.currentQuality = "gnss";
-      this.lastGnssSyncTimeMs = nowMs;
-      this.lastGnssAcceptedAtMs = nowMs;
-      this.lastGnssRejectionReason = null;
-      // Seed encoder-only track from this GNSS anchor so it shows a position
-      // immediately rather than waiting for the first wheel movement.
-      if (this.encoderOnlyX === null) {
-        this.encoderOnlyX = gnssX;
-        this.encoderOnlyY = gnssY;
-        this.encoderOnlyHeadingDeg = unwrapInternalHeading(this.currentHeading);
-      }
-      return;
-    }
-
-    // After a GNSS outage, the first returning fix may be further from DR than
-    // normal because DR has drifted. Allow re-anchor up to GNSS_REANCHOR_MAX_SEPARATION_METERS
-    // so we recover quickly. Beyond that the separation is more likely a corrupt
-    // message than accumulated DR drift, so skip and wait for confirmation.
-    const wasInOutage = this.gnssQualityLostTimeMs !== null;
-    if (separation > GNSS_IMPLAUSIBLE_SEPARATION_METERS) {
-      this.recordGnssRejection("implausible", nowMs, {
-        separation,
-        threshold: GNSS_IMPLAUSIBLE_SEPARATION_METERS,
-        gnssX, gnssY, drX, drY,
-      });
-      return;
-    }
-
-    if (wasInOutage && separation > GNSS_REANCHOR_MAX_SEPARATION_METERS) {
-      this.recordGnssRejection("reanchor_too_large", nowMs, {
-        separation,
-        threshold: GNSS_REANCHOR_MAX_SEPARATION_METERS,
-        gnssX, gnssY, drX, drY,
-      });
-      return;
-    }
-
-    if (wasInOutage) {
-      // Re-anchor after outage — jump to GNSS to eliminate accumulated DR drift.
-      this.logger.info("pose_fusion.gnss_position_reanchored_after_outage", {
-        separation,
-        gnssX, gnssY, drX, drY,
-        outageDurationMs: nowMs - this.gnssQualityLostTimeMs!,
-      });
-      this.currentPosition = createPosition(gnssX, gnssY);
-      this.gnssQualityLostTimeMs = null;
-      this.currentQuality = "gnss";
-      this.lastGnssSyncTimeMs = nowMs;
-      this.lastGnssAcceptedAtMs = nowMs;
-      this.lastGnssRejectionReason = null;
-      this.lastGnssBlendSeparation = separation;
-      this.lastGnssBlendFactor = 1.0;
-      return;
-    }
-
-    // Gate 2: steady-state agreement check.
-    // If the DR estimate and GNSS disagree by more than the threshold, the GNSS
-    // reading is likely from a different epoch or has a position jump — ignore it.
-    if (separation > GNSS_AGREEMENT_THRESHOLD_METERS) {
-      this.recordGnssRejection("agreement", nowMs, {
-        separation,
-        threshold: GNSS_AGREEMENT_THRESHOLD_METERS,
-        gnssX, gnssY, drX, drY,
-        positionAccuracyMeters: event.positionAccuracyMeters,
-      });
-      return;
-    }
-
-    // Steady-state: blend proportional to accuracy.
-    // GNSS_BLEND_REFERENCE_ACCURACY_METERS (2 cm) → blendFactor 1.0 (full snap).
-    // Fixes near MAX_GNSS_POSITION_ACCURACY_METERS (5 cm) → proportionally less.
-    const accuracy = event.positionAccuracyMeters ?? MAX_GNSS_POSITION_ACCURACY_METERS;
-    const blendFactor = Math.min(1, GNSS_BLEND_REFERENCE_ACCURACY_METERS / Math.max(accuracy, 0.001));
-    const blendedX = drX + blendFactor * (gnssX - drX);
-    const blendedY = drY + blendFactor * (gnssY - drY);
-    this.currentPosition = createPosition(blendedX, blendedY);
-
-    this.currentQuality = "gnss";
-    this.lastGnssSyncTimeMs = nowMs;
-    this.lastGnssAcceptedAtMs = nowMs;
-    this.lastGnssRejectionReason = null;
-    this.lastGnssBlendSeparation = separation;
-    this.lastGnssBlendFactor = blendFactor;
-  }
-
-  /**
-   * Record a GNSS-rejection reason and emit a rate-limited warn line. Each
-   * reason logs at most once per second; the diagnostic heartbeat surfaces
-   * the most recent reason for the in-between samples.
-   */
-  private recordGnssRejection(
-    reason: "stale" | "quality" | "agreement" | "implausible" | "reanchor_too_large",
-    nowMs: number,
-    data: Record<string, unknown>,
-  ): void {
+    // Use the first reason as the canonical "why" for the heartbeat snapshot.
+    const reason = reasons[0];
     this.lastGnssRejectionReason = reason;
     this.lastGnssRejectionAtMs = nowMs;
     const lastLogged = this.lastGnssRejectionLogAtMs.get(reason);
     if (lastLogged === undefined || nowMs - lastLogged >= 1000) {
-      this.logger.warn(`pose_fusion.gnss_rejected.${reason}`, data);
+      this.logger.warn(`pose_fusion.gnss_rejected.${reason}`, {
+        positionState: validation.position,
+        headingState: validation.heading,
+        positionRejections: validation.positionRejections,
+        headingRejections: validation.headingRejections,
+      });
       this.lastGnssRejectionLogAtMs.set(reason, nowMs);
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // GNSS heading rebase (unchanged logic from original implementation)
-  // ---------------------------------------------------------------------------
-
-  private updateHeadingFromGnss(gnssHeading: InternalHeading, timestampMillis: number): void {
-    const alignmentDeltaDeg = Math.abs(
-      unwrapRelativeAngle(headingDifference(this.currentHeading, gnssHeading))
-    );
-    const motorZeroCommandSinceMillis = this.sensorController.getMotorZeroCommandSinceMillis?.() ?? null;
-    const currentTimeMillis = this.sensorController.getCurrentTimeMillis?.() ?? timestampMillis;
-    const stationaryZeroCommandAgeMs =
-      motorZeroCommandSinceMillis === null ? null : Math.max(0, currentTimeMillis - motorZeroCommandSinceMillis);
-    const stationaryTimeoutReached =
-      stationaryZeroCommandAgeMs !== null &&
-      stationaryZeroCommandAgeMs >= GNSS_STATIONARY_REBASE_TIMEOUT_MS;
-    const rebaseReadiness = this.sensorController.getHeadingRebaseReadiness?.() ?? null;
-
-    if (rebaseReadiness !== null && !rebaseReadiness.safe) {
-      this.lastGnssHeading = gnssHeading;
-      this.lastGnssHeadingTime = timestampMillis;
-      this.resetOffsetTracking();
-      this.isUsingGnssHeading = false;
-      return;
-    }
-
-    if (!this.hasGnssHeadingBaseline) {
-      this.logger.info("pose_fusion.gnss_heading_primed", {
-        alignmentDeltaDeg,
-        currentHeadingDeg: unwrapInternalHeading(this.currentHeading),
-        gnssHeadingDeg: unwrapInternalHeading(gnssHeading),
-      });
-      this.applyGnssHeadingRebase(gnssHeading, timestampMillis);
-      this.hasGnssHeadingBaseline = true;
-      this.isUsingGnssHeading = true;
-      return;
-    }
-
-    if (this.lastGnssHeading !== null && this.lastGnssHeadingTime !== null) {
-      const timeDeltaMs = timestampMillis - this.lastGnssHeadingTime;
-      if (timeDeltaMs > 0) {
-        const headingChangeDeg = Math.abs(unwrapRelativeAngle(headingDifference(this.lastGnssHeading, gnssHeading)));
-        if ((headingChangeDeg / timeDeltaMs) * 1000 > 30) {
-          this.logger.warn("pose_fusion.gnss_heading_unstable", { headingChangeDeg, timeDeltaMs });
-          this.resetOffsetTracking();
-          return;
-        }
-      }
-    }
-
-    const consistentOffset = this.updateOffsetTracking(gnssHeading, timestampMillis, alignmentDeltaDeg);
-
-    if (alignmentDeltaDeg > MAX_GNSS_IMU_ALIGNMENT_DEGREES && !stationaryTimeoutReached && !consistentOffset.consistent) {
-      this.isUsingGnssHeading = false;
-      return;
-    }
-
-    if (alignmentDeltaDeg > MAX_GNSS_IMU_ALIGNMENT_DEGREES && stationaryTimeoutReached) {
-      this.logger.info("pose_fusion.gnss_heading_rebased_after_stop", {
-        alignmentDeltaDeg,
-        stationaryZeroCommandAgeMs,
-      });
-    }
-    if (alignmentDeltaDeg > MAX_GNSS_IMU_ALIGNMENT_DEGREES && consistentOffset.consistent) {
-      this.logger.info("pose_fusion.gnss_heading_rebased_after_consistent_offset", {
-        alignmentDeltaDeg,
-        consistentOffsetDurationMs: consistentOffset.durationMs,
-      });
-    }
-
-    this.applyGnssHeadingRebase(gnssHeading, timestampMillis);
-    this.isUsingGnssHeading = true;
   }
 
   private applyGnssHeadingRebase(gnssHeading: InternalHeading, timestampMillis: number): void {
     const rebaseTimestampMillis = this.sensorController.getCurrentTimeMillis?.() ?? timestampMillis;
     this.sensorController.setHeading(gnssHeading, rebaseTimestampMillis);
     this.currentHeading = gnssHeading;
-    this.lastGnssHeading = gnssHeading;
-    this.lastGnssHeadingTime = timestampMillis;
-    this.resetOffsetTracking();
 
-    // Re-anchor encoder-only track to the current fused position and the
-    // freshly rebased heading.  This closes the previous DR segment cleanly
-    // and starts a new one from a known-good origin, preventing unbounded
-    // drift.  Confidence is also partially restored because the uncertainty
-    // has been resolved by the stationary GNSS fix.
+    // Re-anchor encoder-only track to the freshly rebased heading and current
+    // fused position.  This closes the previous DR segment cleanly and starts
+    // a new one from a known-good origin, preventing unbounded drift.
     this.encoderOnlyX = unwrapMeters(this.currentPosition.xMeters);
     this.encoderOnlyY = unwrapMeters(this.currentPosition.yMeters);
     this.encoderOnlyHeadingDeg = unwrapInternalHeading(gnssHeading);
     this.drConfidence = Math.min(1, this.drConfidence + 0.5);
-  }
 
-  private resetOffsetTracking(): void {
-    this.offsetTrackingStartTime = null;
-    this.offsetTrackingSampleCount = 0;
-    this.offsetTrackingReferenceDeltaDeg = null;
-    this.offsetTrackingLastImuHeading = null;
-    this.offsetTrackingLastGnssHeading = null;
-    this.offsetTrackingLastTimestampMs = null;
-  }
-
-  private updateOffsetTracking(
-    gnssHeading: InternalHeading,
-    timestampMillis: number,
-    alignmentDeltaDeg: number,
-  ): { consistent: boolean; durationMs: number; sampleCount: number } {
-    if (
-      this.offsetTrackingLastImuHeading === null ||
-      this.offsetTrackingLastGnssHeading === null ||
-      this.offsetTrackingLastTimestampMs === null ||
-      this.offsetTrackingReferenceDeltaDeg === null ||
-      this.offsetTrackingStartTime === null
-    ) {
-      this.offsetTrackingStartTime = timestampMillis;
-      this.offsetTrackingSampleCount = 1;
-      this.offsetTrackingReferenceDeltaDeg = alignmentDeltaDeg;
-      this.offsetTrackingLastImuHeading = this.currentHeading;
-      this.offsetTrackingLastGnssHeading = gnssHeading;
-      this.offsetTrackingLastTimestampMs = timestampMillis;
-      return { consistent: false, durationMs: 0, sampleCount: 1 };
+    if (!this.hasGnssHeadingBaseline) {
+      this.hasGnssHeadingBaseline = true;
+      this.logger.info("pose_fusion.gnss_heading_primed", {
+        headingDeg: unwrapInternalHeading(gnssHeading),
+      });
     }
-
-    const timeDeltaMs = timestampMillis - this.offsetTrackingLastTimestampMs;
-    if (timeDeltaMs <= 0 || timeDeltaMs > GNSS_OFFSET_REBASE_MAX_SAMPLE_GAP_MS) {
-      this.resetOffsetTracking();
-      this.offsetTrackingStartTime = timestampMillis;
-      this.offsetTrackingSampleCount = 1;
-      this.offsetTrackingReferenceDeltaDeg = alignmentDeltaDeg;
-      this.offsetTrackingLastImuHeading = this.currentHeading;
-      this.offsetTrackingLastGnssHeading = gnssHeading;
-      this.offsetTrackingLastTimestampMs = timestampMillis;
-      return { consistent: false, durationMs: 0, sampleCount: 1 };
-    }
-
-    const imuDeltaDeg  = unwrapRelativeAngle(headingDifference(this.offsetTrackingLastImuHeading,  this.currentHeading));
-    const gnssDeltaDeg = unwrapRelativeAngle(headingDifference(this.offsetTrackingLastGnssHeading, gnssHeading));
-    const absImuDelta  = Math.abs(imuDeltaDeg);
-    const absGnssDelta = Math.abs(gnssDeltaDeg);
-    const bothNearlyStill =
-      absImuDelta  <= GNSS_OFFSET_REBASE_MIN_SIGNIFICANT_DELTA_DEGREES &&
-      absGnssDelta <= GNSS_OFFSET_REBASE_MIN_SIGNIFICANT_DELTA_DEGREES;
-    const sameTurnDirection = bothNearlyStill || Math.sign(imuDeltaDeg) === Math.sign(gnssDeltaDeg);
-    const deltaMismatch = Math.abs(absImuDelta - absGnssDelta);
-    const offsetDrift   = Math.abs(alignmentDeltaDeg - this.offsetTrackingReferenceDeltaDeg);
-
-    if (
-      !sameTurnDirection ||
-      deltaMismatch > GNSS_OFFSET_REBASE_MAX_DELTA_MISMATCH_DEGREES ||
-      offsetDrift   > GNSS_OFFSET_REBASE_MAX_OFFSET_DRIFT_DEGREES
-    ) {
-      this.resetOffsetTracking();
-      this.offsetTrackingStartTime = timestampMillis;
-      this.offsetTrackingSampleCount = 1;
-      this.offsetTrackingReferenceDeltaDeg = alignmentDeltaDeg;
-      this.offsetTrackingLastImuHeading = this.currentHeading;
-      this.offsetTrackingLastGnssHeading = gnssHeading;
-      this.offsetTrackingLastTimestampMs = timestampMillis;
-      return { consistent: false, durationMs: 0, sampleCount: 1 };
-    }
-
-    this.offsetTrackingSampleCount += 1;
-    this.offsetTrackingLastImuHeading = this.currentHeading;
-    this.offsetTrackingLastGnssHeading = gnssHeading;
-    this.offsetTrackingLastTimestampMs = timestampMillis;
-
-    const durationMs = timestampMillis - this.offsetTrackingStartTime;
-    const consistent =
-      durationMs >= GNSS_OFFSET_REBASE_MIN_DURATION_MS &&
-      this.offsetTrackingSampleCount >= GNSS_OFFSET_REBASE_MIN_SAMPLES;
-
-    return { consistent, durationMs, sampleCount: this.offsetTrackingSampleCount };
   }
 }

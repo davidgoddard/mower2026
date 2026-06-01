@@ -434,3 +434,51 @@ When the GNSS ESP rewrite starts:
 3. capture example decoded samples
 4. validate local `x/y` conversion against a fixed base origin
 5. lock the final Pi-facing compact message
+
+## Pi-facing payload layout (single version, 40 bytes)
+
+The GNSS ESP emits one fixed payload layout — there is no version negotiation and no v1/v2 fallback.  When the layout needs to change, the firmware and Pi codec are updated together.
+
+| Off | Sz | Field | Encoding |
+|---|---|---|---|
+| 0 | 8 | `gpsTimeMillis` | uint64 LE — Unix epoch ms from `RECTIMEA` UTC fields; `0` when receiver UTC is not yet valid |
+| 8 | 4 | `xMeters × 1000` | int32 LE mm |
+| 12 | 4 | `yMeters × 1000` | int32 LE mm |
+| 16 | 4 | `headingDegrees × 100` | int32 LE centideg; sentinel `0x7FFFFFFF` |
+| 20 | 2 | `pitchDegrees × 100` | int16 LE centideg; sentinel `0x7FFF` |
+| 22 | 2 | `groundSpeedMps × 1000` | uint16 LE mm/s; sentinel `0xFFFF` |
+| 24 | 2 | `positionAccuracyMeters × 1000` | uint16 LE mm |
+| 26 | 2 | `headingAccuracyDeg × 100` | uint16 LE centideg; sentinel `0xFFFF` |
+| 28 | 2 | `headingBaselineMeters × 1000` | uint16 LE mm from `UNIHEADINGA.length`; sentinel `0xFFFF` |
+| 30 | 2 | `sampleAgeMillis` | uint16 LE — ms since the most recent `PVTSLNA` line |
+| 32 | 1 | `fixType` | `0=none, 1=single, 2=float, 3=fixed` |
+| 33 | 1 | `satellitesInUse` | uint8 — `bestpos_solnsvs` from `PVTSLNA` |
+| 34 | 1 | flags | bit0 utc-valid, bit1 heading-valid, bit2 baseline-valid |
+| 35 | 1 | log config mask | bit0 PVTSLNA active, bit1 RECTIMEA active, bit2 UNIHEADINGA active |
+| 36 | 4 | reserved | zero-filled |
+
+### Why these fields and no others
+
+Only fields the receiver *actually exposes* in the configured log set are included:
+
+- `gpsTimeMillis` from `RECTIMEA` — only honest source of fix time; the Pi uses it for sanity checks and (optionally) clock sync.
+- `headingBaselineMeters` from `UNIHEADINGA.length` — directly observable; lets the validator confirm the dual-antenna geometry matches what the firmware was configured with.
+- `headingValid` flag from `UNIHEADINGA` solution status — set when `sol stat` is anything other than `INSUFFICIENT_OBS` and `pos type` is anything other than `NONE`.
+- `fixType`, `positionAccuracyMeters`, `satellitesInUse`, `headingAccuracyDegrees` — already supplied by `PVTSLNA` / `UNIHEADINGA` and trusted by the validator.
+
+Fields *not* in the payload because the configured logs do not produce them honestly:
+
+- **HDOP** is not part of `PVTSLNA`, `RECTIMEA` or `UNIHEADINGA` field lists.  Position accuracy from `latstd/lonstd` covers the same concern.
+- **RTK reliability** is a *receiver configuration* (`CONFIG RTK RELIABILITY 3 1`), not a per-sample field.  Once that threshold is set the receiver implicitly enforces it; samples below it never reach RTK Fixed.
+
+### Pi clock domain
+
+The Pi-side codec stamps `timestampMillis` from `Date.now()` at decode time so GNSS, IMU and encoder timestamps share the same clock.  The receiver UTC is exposed separately as `gpsTimeMillis`.  When UTC is available and the Pi clock is more than a few seconds off, the Pi can sync `gpsTimeMillis` into the system clock at startup; this is optional and not yet implemented.
+
+### Receiver fields actually consumed
+
+Per [`buildGnssPayload`](../external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino) the GNSS ESP reads these fields from the receiver logs:
+
+- `PVTSLNA`: `bestpos_type`, `bestpos_lat`, `bestpos_lon`, `bestpos_latstd`, `bestpos_lonstd`, `bestpos_solnsvs`, `psrvel_ground`, `heading_type`, `heading`, `pitch`
+- `RECTIMEA`: `clock status`, `utc year/month/day/hour/min/ms`, `utc status`
+- `UNIHEADINGA`: `sol stat`, `pos type`, `length`, `heading`, `pitch`, `hdgstddev`

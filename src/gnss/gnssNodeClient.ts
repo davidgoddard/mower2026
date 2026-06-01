@@ -14,6 +14,11 @@ interface GnssNodeClientOptions {
   maxAttempts?: number;
   retryDelayMs?: number;
   sleep?: (delayMs: number) => Promise<void>;
+  /**
+   * Source for the Pi-side wallclock used to stamp the decoded sample.
+   * Defaults to Date.now().  Override in tests for determinism.
+   */
+  nowMillis?: () => number;
 }
 
 function defaultSleep(delayMs: number): Promise<void> {
@@ -27,6 +32,7 @@ export class GnssNodeClient {
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly nowMillis: () => number;
 
   constructor(controller: I2cBusController, options: GnssNodeClientOptions) {
     this.controller = controller;
@@ -34,6 +40,7 @@ export class GnssNodeClient {
     this.maxAttempts = options.maxAttempts ?? GNSS_DEFAULT_MAX_ATTEMPTS;
     this.retryDelayMs = options.retryDelayMs ?? GNSS_RETRY_DELAY_MS;
     this.sleep = options.sleep ?? defaultSleep;
+    this.nowMillis = options.nowMillis ?? (() => Date.now());
   }
 
   async refresh(): Promise<GnssSample> {
@@ -66,7 +73,7 @@ export class GnssNodeClient {
           throw new Error("Unexpected GNSS response frame");
         }
 
-        return decodeGnssSample(decoded.payload);
+        return decodeGnssSample(decoded.payload, { nowMillis: this.nowMillis() });
       } catch (error) {
         lastError = error;
         if (attempt < this.maxAttempts) {

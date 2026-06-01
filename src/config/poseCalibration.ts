@@ -2,8 +2,12 @@ import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import {
   ENCODER_METERS_PER_TICK_DEFAULT,
+  ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE,
+  ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE,
   POSE_CALIBRATION_PATH,
   WHEEL_BASE_METERS_DEFAULT,
+  WHEEL_BASE_METERS_MAX_PLAUSIBLE,
+  WHEEL_BASE_METERS_MIN_PLAUSIBLE,
 } from "../constants.js";
 import { readJsonFile, writeJsonFile } from "./jsonFileStore.js";
 
@@ -101,6 +105,23 @@ export class PoseCalibration {
     return this.parameters.wheelbaseMeters;
   }
 
+  /**
+   * True when the persisted calibration values are all within plausible
+   * physical ranges. Defaults are plausible by construction, so this returns
+   * true even for an uncalibrated mower running on defaults — the meaning is
+   * "the values won't break the controller", not "the values were measured".
+   */
+  isCalibrationPlausible(): boolean {
+    return (
+      this.parameters.wheelbaseMeters >= WHEEL_BASE_METERS_MIN_PLAUSIBLE &&
+      this.parameters.wheelbaseMeters <= WHEEL_BASE_METERS_MAX_PLAUSIBLE &&
+      this.parameters.leftEncoderMetersPerTick  >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE &&
+      this.parameters.leftEncoderMetersPerTick  <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE &&
+      this.parameters.rightEncoderMetersPerTick >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE &&
+      this.parameters.rightEncoderMetersPerTick <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE
+    );
+  }
+
   setEncoderCalibration(metersPerTick: number): void {
     // Shared setter intentionally overwrites per-wheel values.
     // If per-wheel asymmetric calibration matters, use setPerWheelCalibration instead.
@@ -136,15 +157,57 @@ export class PoseCalibration {
     }
 
     const legacy = raw as LegacyPoseCalibrationParameters;
-    const shared = this.readNumber(legacy.encoderMetersPerTick, ENCODER_METERS_PER_TICK_DEFAULT);
+    const sharedRaw = this.readNumber(legacy.encoderMetersPerTick, ENCODER_METERS_PER_TICK_DEFAULT);
+    const shared = this.clampPerTick(sharedRaw, ENCODER_METERS_PER_TICK_DEFAULT, "encoderMetersPerTick");
+    const left = this.clampPerTick(
+      this.readNumber(legacy.leftEncoderMetersPerTick, shared),
+      shared,
+      "leftEncoderMetersPerTick",
+    );
+    const right = this.clampPerTick(
+      this.readNumber(legacy.rightEncoderMetersPerTick, shared),
+      shared,
+      "rightEncoderMetersPerTick",
+    );
+    const wheelbase = this.clampWheelbase(
+      this.readNumber(legacy.wheelbaseMeters, WHEEL_BASE_METERS_DEFAULT),
+    );
     return {
       version: this.readNumber(legacy.version, 1),
       encoderMetersPerTick: shared,
-      leftEncoderMetersPerTick: this.readNumber(legacy.leftEncoderMetersPerTick, shared),
-      rightEncoderMetersPerTick: this.readNumber(legacy.rightEncoderMetersPerTick, shared),
-      wheelbaseMeters: this.readNumber(legacy.wheelbaseMeters, WHEEL_BASE_METERS_DEFAULT),
+      leftEncoderMetersPerTick: left,
+      rightEncoderMetersPerTick: right,
+      wheelbaseMeters: wheelbase,
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };
+  }
+
+  private clampPerTick(value: number, fallback: number, fieldName: string): number {
+    if (value >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE && value <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE) {
+      return value;
+    }
+    this.logger.warn("pose.calibration.implausible_value", {
+      field: fieldName,
+      value,
+      min: ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE,
+      max: ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE,
+      using: fallback,
+    });
+    return fallback;
+  }
+
+  private clampWheelbase(value: number): number {
+    if (value >= WHEEL_BASE_METERS_MIN_PLAUSIBLE && value <= WHEEL_BASE_METERS_MAX_PLAUSIBLE) {
+      return value;
+    }
+    this.logger.warn("pose.calibration.implausible_value", {
+      field: "wheelbaseMeters",
+      value,
+      min: WHEEL_BASE_METERS_MIN_PLAUSIBLE,
+      max: WHEEL_BASE_METERS_MAX_PLAUSIBLE,
+      using: WHEEL_BASE_METERS_DEFAULT,
+    });
+    return WHEEL_BASE_METERS_DEFAULT;
   }
 
   private createDefaultParameters(): PoseCalibrationParameters {

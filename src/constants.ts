@@ -434,15 +434,29 @@ export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
 export const DRIVE_CTE_NONLINEARITY_DEFAULT = 3.0;
 
 /**
- * Default wheel base used by the regulated pure pursuit controller (meters)
+ * Default wheel base used by the regulated pure pursuit controller (meters).
+ * Treated as an uncalibrated starting point — overwritten when the operator
+ * runs the dead-reckoning calibration tool.  Keep aligned with
+ * WHEEL_BASE_METERS_DEFAULT below.
  */
-export const DRIVE_WHEEL_BASE_METERS_DEFAULT = 0.35;
+export const DRIVE_WHEEL_BASE_METERS_DEFAULT = 0.55;
 
 /**
  * Default wheel track / wheelbase for dead-reckoning differential odometry (meters).
- * This is the centre-to-centre distance between the left and right wheels.
+ * Centre-to-centre distance between the left and right wheels.  This is the
+ * starting value used when no calibration file exists; the dead-reckoning
+ * calibration writes the measured value back into pose-calibration.json.
  */
-export const WHEEL_BASE_METERS_DEFAULT = 0.35;
+export const WHEEL_BASE_METERS_DEFAULT = 0.55;
+
+/**
+ * Plausible wheelbase range for a sub-1m garden robot.
+ * Persisted values outside this range are rejected on load and the defaults
+ * are used instead — this prevents a corrupted calibration run from poisoning
+ * the next session.
+ */
+export const WHEEL_BASE_METERS_MIN_PLAUSIBLE = 0.20;
+export const WHEEL_BASE_METERS_MAX_PLAUSIBLE = 1.50;
 
 /**
  * Fraction of maximum wheel speed used as the nominal target speed for regulated pure pursuit.
@@ -562,9 +576,21 @@ export const DRIVE_SEGMENT_STEP_METERS = 0.2;
 export const DRIVE_ARRIVAL_TOLERANCE_METERS = 0.01;
 
 /**
- * Default encoder meters per tick for dead-reckoning
+ * Default encoder meters per tick for dead-reckoning.
+ * Treated as an uncalibrated starting point — assume left and right wheels are
+ * the same diameter until a calibration run measures otherwise.  The
+ * dead-reckoning calibration writes per-wheel values back into
+ * pose-calibration.json.
  */
 export const ENCODER_METERS_PER_TICK_DEFAULT = 0.001;
+
+/**
+ * Plausible per-wheel meters-per-tick range.
+ * Persisted values outside this range are rejected on load and the default
+ * is used instead.
+ */
+export const ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE = 1e-5;
+export const ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE = 1e-2;
 
 /**
  * Target CTE for tuning (meters)

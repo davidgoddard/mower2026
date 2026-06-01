@@ -48,7 +48,6 @@ import {
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
   MAX_WHEEL_SPEED_MPS_DEFAULT,
-  DRIVE_WHEEL_BASE_METERS_DEFAULT,
   MOTOR_RAMP_DOWN_TIME_MS,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
@@ -893,8 +892,9 @@ export class DriveLineController {
     const targetLinearSpeedMps = this.calculateTargetLinearSpeedMps(remainingAlongTrackDistance, curvature);
     const signedLinearSpeedMps = targetLinearSpeedMps * this.driveDirectionSign;
     const angularSpeedRadPerSec = targetLinearSpeedMps * curvature;
-    const leftWheelSpeedMps = signedLinearSpeedMps - (angularSpeedRadPerSec * DRIVE_WHEEL_BASE_METERS_DEFAULT / 2);
-    const rightWheelSpeedMps = signedLinearSpeedMps + (angularSpeedRadPerSec * DRIVE_WHEEL_BASE_METERS_DEFAULT / 2);
+    const wheelBaseMeters = this.poseFusion.getWheelbaseMeters();
+    const leftWheelSpeedMps = signedLinearSpeedMps - (angularSpeedRadPerSec * wheelBaseMeters / 2);
+    const rightWheelSpeedMps = signedLinearSpeedMps + (angularSpeedRadPerSec * wheelBaseMeters / 2);
 
     const leftCommand = this.clampNormalizedSpeed(leftWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
     const rightCommand = this.clampNormalizedSpeed(rightWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);

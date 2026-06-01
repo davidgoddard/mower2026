@@ -1864,7 +1864,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       const pathFollowingParameters = pathFollowingConfig?.getParameters();
       pathFollower = new PurePursuitFollower({
         targetSpeed: MAX_WHEEL_SPEED_MPS_DEFAULT * 0.8,
-        wheelBase: 0.35,
+        wheelBase: poseFusion!.getWheelbaseMeters(),
         controlRateHz: 15,
         arrivalThreshold: 0.12,
         minLookaheadMeters: pathFollowingParameters?.purePursuitMinLookaheadMeters,

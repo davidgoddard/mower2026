@@ -27,7 +27,18 @@ export interface GnssPositionUpdateEvent {
   readonly headingAccuracyDeg: number | null;
   readonly fixType: string;
   readonly satellitesInUse: number | null;
+  /** Pi-side wallclock arrival time (ms since Unix epoch). */
   readonly timestampMillis: number;
+  /** Receiver-claimed sample age (ms). */
+  readonly sampleAgeMillis: number | null;
+  /** UTC fix time (ms since Unix epoch) from RECTIMEA when valid. */
+  readonly gpsTimeMillis?: number;
+  /** Measured antenna baseline length (m) from UNIHEADINGA. */
+  readonly headingBaselineMeters?: number;
+  /** Receiver heading-valid flag from UNIHEADINGA. */
+  readonly headingValid?: boolean;
+  /** Speed over ground (m/s) from PVTSLNA. */
+  readonly groundSpeedMetersPerSecond?: number;
 }
 
 /**

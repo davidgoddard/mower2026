@@ -796,6 +796,11 @@ export class SensorController extends EventEmitter {
         fixType: sample.fixType,
         satellitesInUse: sample.satellitesInUse,
         timestampMillis: sample.timestampMillis,
+        sampleAgeMillis: sample.sampleAgeMillis,
+        ...(sample.gpsTimeMillis !== undefined ? { gpsTimeMillis: sample.gpsTimeMillis } : {}),
+        ...(sample.headingBaselineMeters !== undefined ? { headingBaselineMeters: sample.headingBaselineMeters } : {}),
+        ...(sample.headingValid !== undefined ? { headingValid: sample.headingValid } : {}),
+        ...(sample.groundSpeedMetersPerSecond !== undefined ? { groundSpeedMetersPerSecond: sample.groundSpeedMetersPerSecond } : {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

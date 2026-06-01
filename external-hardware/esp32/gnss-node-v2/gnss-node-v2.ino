@@ -23,7 +23,26 @@ static const uint8_t MESSAGE_TYPE_GNSS_SAMPLE = 0x01;
 
 static const size_t FRAME_HEADER_SIZE = 9;
 static const size_t FRAME_CRC_SIZE = 2;
-static const size_t GNSS_PAYLOAD_SIZE = 36;
+// Payload layout (single, no version fallback):
+//   off 0 .. 7 : gpsTimeMillis  uint64 LE (Unix epoch ms; 0 when UTC invalid)
+//   off 8 .. 11: xMeters x 1000 int32 LE mm
+//   off 12..15 : yMeters x 1000 int32 LE mm
+//   off 16..19 : heading deg x 100 int32 LE; sentinel 0x7FFFFFFF
+//   off 20..21 : pitch deg x 100   int16 LE; sentinel 0x7FFF
+//   off 22..23 : ground speed mps x 1000 uint16 LE; sentinel 0xFFFF
+//   off 24..25 : position accuracy m x 1000 uint16 LE mm
+//   off 26..27 : heading accuracy deg x 100 uint16 LE; sentinel 0xFFFF
+//   off 28..29 : heading baseline length m x 1000 uint16 LE; sentinel 0xFFFF
+//   off 30..31 : sample age ms uint16 LE
+//   off 32     : fix type uint8 (0 none, 1 single, 2 float, 3 fixed)
+//   off 33     : satellites in use uint8
+//   off 34     : flag byte:
+//                  bit0 = utc valid
+//                  bit1 = heading valid (UNIHEADINGA solution status usable)
+//                  bit2 = baseline valid (UNIHEADINGA length present)
+//   off 35     : log config mask (PVTSLNA/RECTIMEA/UNIHEADINGA active bits)
+//   off 36..39 : reserved (zero-filled)
+static const size_t GNSS_PAYLOAD_SIZE = 40;
 static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + GNSS_PAYLOAD_SIZE + FRAME_CRC_SIZE;
 
 // ===== ESP32 pins =====
@@ -174,6 +193,10 @@ struct ParsedRectime {
   bool valid;
   bool utcValid;
   uint32_t localMillis;
+  // UTC fields from RECTIMEA / RECTIMEB (utc year/month/day/hour/min/ms).
+  // The receiver returns these as integers.  utcMs is the millisecond
+  // component of the second; we combine all of them into utcEpochMillis.
+  uint64_t utcEpochMillis;
 };
 
 struct ParsedUniheading {
@@ -184,11 +207,13 @@ struct ParsedUniheading {
   float pitchDegrees;
   float headingStdDevDegrees;
   bool headingStdDevValid;
+  float baselineLengthMeters;
+  bool baselineLengthValid;
 };
 
 ParsedPvtsln g_latestPvtsln = { false, 0, FIX_NONE, 0.0, 0.0, 99.0f, 0.0f, false, 0.0f, false, 0.0f, false, 0, 0.0f, false };
-ParsedRectime g_latestRectime = { false, false, 0 };
-ParsedUniheading g_latestUniheading = { false, false, 0, 0.0f, 0.0f, 0.0f, false };
+ParsedRectime g_latestRectime = { false, false, 0, 0 };
+ParsedUniheading g_latestUniheading = { false, false, 0, 0.0f, 0.0f, 0.0f, false, 0.0f, false };
 
 enum OriginSource : uint8_t {
   ORIGIN_NONE = 0,
@@ -233,6 +258,13 @@ void writeU32LE(uint8_t *bytes, uint32_t value) {
   bytes[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
   bytes[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
   bytes[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+}
+
+void writeU64LE(uint8_t *bytes, uint64_t value) {
+  for (uint8_t i = 0; i < 8; ++i) {
+    bytes[i] = static_cast<uint8_t>(value & 0xFF);
+    value >>= 8;
+  }
 }
 
 void writeI16LE(uint8_t *bytes, int16_t value) {
@@ -1081,18 +1113,74 @@ void parsePvtslna(const char *line) {
   }
 }
 
+// Convert UTC year/month/day/hour/min/sec/ms to milliseconds since the
+// Unix epoch (1970-01-01 00:00:00 UTC).  Uses the civil-from-days
+// algorithm by Howard Hinnant — leap years and the Gregorian calendar
+// are handled correctly without timezone conversions.
+// y is the four-digit year (e.g. 2026), m is 1..12, d is 1..31.
+uint64_t utcToEpochMillis(int year, int month, int day,
+                          int hour, int minute, int second, int millisecond) {
+  // Days from civil (Hinnant): days since 1970-01-01.
+  int y = year - (month <= 2 ? 1 : 0);
+  int era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = static_cast<unsigned>(y - era * 400);                // [0, 399]
+  unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1; // [0, 365]
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;               // [0, 146096]
+  long long daysSinceEpoch = static_cast<long long>(era) * 146097 + static_cast<long long>(doe) - 719468;
+
+  uint64_t totalSeconds = static_cast<uint64_t>(daysSinceEpoch) * 86400ULL
+                        + static_cast<uint64_t>(hour) * 3600ULL
+                        + static_cast<uint64_t>(minute) * 60ULL
+                        + static_cast<uint64_t>(second);
+  return totalSeconds * 1000ULL + static_cast<uint64_t>(millisecond);
+}
+
 void parseRectimea(const char *line) {
   g_totalRectimeaCount += 1;
   String payload = payloadAfterSemicolon(line);
   if (payload.length() == 0) {
     return;
   }
+  // RECTIMEA fields per UM982 manual section 7.3.47 (1-based per spec, here 0-based):
+  //   0  clock status
+  //   1  offset (s)
+  //   2  offset std (s)
+  //   3  utc offset (s)
+  //   4  utc year
+  //   5  utc month
+  //   6  utc day
+  //   7  utc hour
+  //   8  utc min
+  //   9  utc ms (millisecond of the minute as integer)
+  //   10 utc status
   String clockStatus = fieldAt(payload.c_str(), 0);
-  String utcStatus = fieldAt(payload.c_str(), 10);
+  String utcYear     = fieldAt(payload.c_str(), 4);
+  String utcMonth    = fieldAt(payload.c_str(), 5);
+  String utcDay      = fieldAt(payload.c_str(), 6);
+  String utcHour     = fieldAt(payload.c_str(), 7);
+  String utcMin      = fieldAt(payload.c_str(), 8);
+  String utcMs       = fieldAt(payload.c_str(), 9);
+  String utcStatus   = fieldAt(payload.c_str(), 10);
 
   g_latestRectime.valid = true;
   g_latestRectime.localMillis = millis();
-  g_latestRectime.utcValid = (clockStatus == "VALID") && (utcStatus == "VALID" || utcStatus == "WARNING");
+  const bool utcStatusUsable = (clockStatus == "VALID")
+                            && (utcStatus == "VALID" || utcStatus == "WARNING");
+  g_latestRectime.utcValid = utcStatusUsable;
+
+  if (utcStatusUsable && utcYear.length() > 0 && utcMonth.length() > 0 && utcDay.length() > 0) {
+    int year   = utcYear.toInt();
+    int month  = utcMonth.toInt();
+    int day    = utcDay.toInt();
+    int hour   = utcHour.toInt();
+    int minute = utcMin.toInt();
+    long msOfMinute = utcMs.toInt();
+    int second = static_cast<int>((msOfMinute / 1000) % 60);
+    int millisOfSec = static_cast<int>(msOfMinute % 1000);
+    if (year >= 2000 && year < 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      g_latestRectime.utcEpochMillis = utcToEpochMillis(year, month, day, hour, minute, second, millisOfSec);
+    }
+  }
 }
 
 void parseUniheadinga(const char *line) {
@@ -1102,10 +1190,19 @@ void parseUniheadinga(const char *line) {
     return;
   }
 
-  String solStat = fieldAt(payload.c_str(), 0);
-  String posType = fieldAt(payload.c_str(), 1);
-  String headingField = fieldAt(payload.c_str(), 3);
-  String pitchField = fieldAt(payload.c_str(), 4);
+  // UNIHEADINGA fields per UM982 manual section 7.3.48 (0-based):
+  //   0  sol stat
+  //   1  pos type
+  //   2  length (baseline length, m)
+  //   3  heading
+  //   4  pitch
+  //   5  reserved
+  //   6  hdgstddev
+  String solStat        = fieldAt(payload.c_str(), 0);
+  String posType        = fieldAt(payload.c_str(), 1);
+  String baselineField  = fieldAt(payload.c_str(), 2);
+  String headingField   = fieldAt(payload.c_str(), 3);
+  String pitchField     = fieldAt(payload.c_str(), 4);
   String headingStdField = fieldAt(payload.c_str(), 6);
 
   g_latestUniheading.valid = true;
@@ -1115,6 +1212,8 @@ void parseUniheadinga(const char *line) {
   g_latestUniheading.pitchDegrees = pitchField.toFloat();
   g_latestUniheading.headingStdDevDegrees = headingStdField.toFloat();
   g_latestUniheading.headingStdDevValid = headingStdField.length() > 0 && g_latestUniheading.headingStdDevDegrees > 0.0f;
+  g_latestUniheading.baselineLengthMeters = baselineField.toFloat();
+  g_latestUniheading.baselineLengthValid = baselineField.length() > 0 && g_latestUniheading.baselineLengthMeters > 0.0f;
 }
 
 void parseUniloglistHeader() {
@@ -1191,31 +1290,15 @@ void readUm982Lines() {
 
 // ===== GNSS payload =====
 void buildGnssPayload(uint8_t *payloadOut) {
-  uint32_t nowMillis = millis();
+  // Zero-fill so reserved bytes are deterministic.
+  memset(payloadOut, 0, GNSS_PAYLOAD_SIZE);
+
+  const uint32_t nowMillis = millis();
+
   uint16_t sampleAgeMillis = 0xFFFF;
-  uint16_t receiverLineAgeMillis = 0xFFFF;
-  uint16_t pvtslnaAgeMillis = 0xFFFF;
-  uint16_t uniheadingAgeMillis = 0xFFFF;
-  uint16_t rtcmAgeMillis = 0xFFFF;
   if (g_latestPvtsln.valid) {
     uint32_t age = nowMillis - g_latestPvtsln.localMillis;
     sampleAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
-  }
-  if (g_lastAnyReceiverLineMillis != 0) {
-    uint32_t age = nowMillis - g_lastAnyReceiverLineMillis;
-    receiverLineAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
-  }
-  if (g_latestPvtsln.valid) {
-    uint32_t age = nowMillis - g_latestPvtsln.localMillis;
-    pvtslnaAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
-  }
-  if (g_latestUniheading.valid) {
-    uint32_t age = nowMillis - g_latestUniheading.localMillis;
-    uniheadingAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
-  }
-  if (g_lastRtcmMillis != 0) {
-    uint32_t age = nowMillis - g_lastRtcmMillis;
-    rtcmAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
   }
 
   int32_t xMillimeters = 0;
@@ -1224,48 +1307,82 @@ void buildGnssPayload(uint8_t *payloadOut) {
     localXYFromLatLon(g_latestPvtsln.latitudeDegrees, g_latestPvtsln.longitudeDegrees, xMillimeters, yMillimeters);
   }
 
-  writeU32LE(&payloadOut[0], nowMillis);
-  writeI32LE(&payloadOut[4], xMillimeters);
-  writeI32LE(&payloadOut[8], yMillimeters);
+  // off 0..7: UTC fix time in Unix epoch ms.  When UTC is not yet valid the
+  // field is zero and the Pi will use its own decode-time wallclock.
+  uint64_t utcEpochMillis = 0;
+  if (g_latestRectime.valid && g_latestRectime.utcValid && g_latestRectime.utcEpochMillis != 0) {
+    // Project the receiver-clock UTC forward by the elapsed time since the
+    // RECTIMEA line was parsed so the timestamp is "now" not "last RECTIMEA".
+    uint32_t elapsed = nowMillis - g_latestRectime.localMillis;
+    utcEpochMillis = g_latestRectime.utcEpochMillis + static_cast<uint64_t>(elapsed);
+  }
+  writeU64LE(&payloadOut[0], utcEpochMillis);
 
+  // off 8..15: position
+  writeI32LE(&payloadOut[8],  xMillimeters);
+  writeI32LE(&payloadOut[12], yMillimeters);
+
+  // off 16..19: heading deg x 100 as int32 (sentinel 0x7FFFFFFF)
   if (g_latestPvtsln.headingValid) {
-    writeI16LE(&payloadOut[12], static_cast<int16_t>(g_latestPvtsln.headingDegrees * 100.0f));
+    writeI32LE(&payloadOut[16], static_cast<int32_t>(g_latestPvtsln.headingDegrees * 100.0f));
   } else {
-    writeI16LE(&payloadOut[12], 0x7FFF);
+    writeI32LE(&payloadOut[16], 0x7FFFFFFF);
   }
 
+  // off 20..21: pitch deg x 100 as int16 (sentinel 0x7FFF)
   if (g_latestPvtsln.pitchValid) {
-    writeI16LE(&payloadOut[14], static_cast<int16_t>(g_latestPvtsln.pitchDegrees * 100.0f));
+    writeI16LE(&payloadOut[20], static_cast<int16_t>(g_latestPvtsln.pitchDegrees * 100.0f));
   } else {
-    writeI16LE(&payloadOut[14], 0x7FFF);
+    writeI16LE(&payloadOut[20], 0x7FFF);
   }
 
+  // off 22..23: ground speed mm/s
   if (g_latestPvtsln.groundSpeedValid) {
-    writeU16LE(&payloadOut[16], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.groundSpeedMetersPerSecond) * 1000.0f));
+    writeU16LE(&payloadOut[22], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.groundSpeedMetersPerSecond) * 1000.0f));
   } else {
-    writeU16LE(&payloadOut[16], 0xFFFF);
+    writeU16LE(&payloadOut[22], 0xFFFF);
   }
 
-  writeU16LE(&payloadOut[18], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.positionAccuracyMeters) * 1000.0f));
+  // off 24..25: position accuracy mm
+  writeU16LE(&payloadOut[24], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.positionAccuracyMeters) * 1000.0f));
 
+  // off 26..27: heading accuracy centideg
   if (g_latestPvtsln.headingAccuracyValid) {
-    writeU16LE(&payloadOut[20], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.headingAccuracyDegrees) * 100.0f));
+    writeU16LE(&payloadOut[26], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.headingAccuracyDegrees) * 100.0f));
   } else {
-    writeU16LE(&payloadOut[20], 0xFFFF);
+    writeU16LE(&payloadOut[26], 0xFFFF);
   }
 
-  payloadOut[22] = static_cast<uint8_t>(g_latestPvtsln.fixType);
-  payloadOut[23] = g_latestPvtsln.satellitesInUse;
-  writeU16LE(&payloadOut[24], sampleAgeMillis);
-  writeU16LE(&payloadOut[26], receiverLineAgeMillis);
-  writeU16LE(&payloadOut[28], pvtslnaAgeMillis);
-  writeU16LE(&payloadOut[30], uniheadingAgeMillis);
-  writeU16LE(&payloadOut[32], rtcmAgeMillis);
-  payloadOut[34] =
+  // off 28..29: heading baseline length mm (from UNIHEADINGA when fresh)
+  if (g_latestUniheading.valid && g_latestUniheading.baselineLengthValid && (nowMillis - g_latestUniheading.localMillis) < 2000) {
+    writeU16LE(&payloadOut[28], static_cast<uint16_t>(max(0.0f, g_latestUniheading.baselineLengthMeters) * 1000.0f));
+  } else {
+    writeU16LE(&payloadOut[28], 0xFFFF);
+  }
+
+  // off 30..31: PVTSLNA sample age (ms since last receive)
+  writeU16LE(&payloadOut[30], sampleAgeMillis);
+
+  // off 32: fix type
+  payloadOut[32] = static_cast<uint8_t>(g_latestPvtsln.fixType);
+
+  // off 33: satellites in use
+  payloadOut[33] = g_latestPvtsln.satellitesInUse;
+
+  // off 34: flags
+  uint8_t flags = 0;
+  if (g_latestRectime.valid && g_latestRectime.utcValid) flags |= 0x01;
+  if (g_latestUniheading.valid && g_latestUniheading.headingValid) flags |= 0x02;
+  if (g_latestUniheading.valid && g_latestUniheading.baselineLengthValid) flags |= 0x04;
+  payloadOut[34] = flags;
+
+  // off 35: log config mask
+  payloadOut[35] =
     (g_unilogPvtslnaActive ? 0x01 : 0x00) |
     (g_unilogRectimeaActive ? 0x02 : 0x00) |
     (g_unilogUniheadingaActive ? 0x04 : 0x00);
-  payloadOut[35] = 0;
+
+  // off 36..39: reserved (zero-filled by memset)
 }
 
 void refreshTxFrame() {
