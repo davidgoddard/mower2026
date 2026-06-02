@@ -123,6 +123,43 @@ ${getAppDialogStyles()}
         margin-bottom: 1rem;
       }
 
+      .input-row {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) auto;
+        gap: 0.75rem;
+        align-items: end;
+        margin-bottom: 1rem;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .field label {
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-secondary);
+      }
+
+      .field input {
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+        padding: 0.75rem 0.9rem;
+        font-size: 1rem;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .field input:focus {
+        outline: 2px solid rgba(37, 99, 235, 0.18);
+        border-color: var(--primary-color);
+      }
+
       button {
         border: none;
         border-radius: 0.5rem;
@@ -425,12 +462,19 @@ ${getSensorWidgetScriptTag()}
 
             <div class="gnss-warn-banner" id="gnssWarnBanner"></div>
 
+            <div class="input-row">
+              <div class="field">
+                <label for="lineDistanceMeters">Straight distance</label>
+                <input id="lineDistanceMeters" type="number" min="0.5" max="20" step="0.5" value="5" inputmode="decimal" />
+              </div>
+            </div>
+
             <!-- Phase progress indicator -->
             <div class="phase-bar">
               <div class="phase-step" id="phaseWait">Waiting for fix</div>
               <div class="phase-step" id="phaseStraight">1 – Straight</div>
-              <div class="phase-step" id="phaseArcRight">2 – Arc right</div>
-              <div class="phase-step" id="phaseArcLeft">3 – Arc left</div>
+              <div class="phase-step" id="phaseArcRight">2 – Pivot CW</div>
+              <div class="phase-step" id="phaseArcLeft">3 – Pivot CCW</div>
               <div class="phase-step" id="phaseAnalyse">Analysis</div>
             </div>
 
@@ -494,17 +538,16 @@ ${getSensorWidgetScriptTag()}
           <section class="panel" id="canvasSection" style="display:none">
             <h2>Arc Encoder Tracking</h2>
             <p style="font-size:0.85rem;color:var(--text-secondary);margin:0 0 0.75rem">
-              Steady-state samples only (middle second of each arc drive).
-              Blue = encoder arc fraction, orange = IMU heading fraction.
-              Closer to the diagonal = better tracking.
+              Pivot diagnostics. These plots are retained for continuity but are
+              not used in the final wheelbase calculation.
             </p>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
               <div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Arc Right</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Pivot CW</div>
                 <div class="canvas-wrap"><canvas id="canvasArcRight" width="400" height="400"></canvas></div>
               </div>
               <div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Arc Left</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Pivot CCW</div>
                 <div class="canvas-wrap"><canvas id="canvasArcLeft" width="400" height="400"></canvas></div>
               </div>
             </div>
@@ -581,8 +624,8 @@ ${getAppDialogScript()}
       const PHASE_IDS = {
         'waiting-for-fix': 'phaseWait',
         'straight':        'phaseStraight',
-        'arc-right':       'phaseArcRight',
-        'arc-left':        'phaseArcLeft',
+        'pivot-cw':        'phaseArcRight',
+        'pivot-ccw':       'phaseArcLeft',
         'analysing':       'phaseAnalyse',
         'done':            'phaseAnalyse',
         'stopped':         null,
@@ -590,7 +633,7 @@ ${getAppDialogScript()}
         'idle':            null,
       };
 
-      const PHASE_ORDER = ['waiting-for-fix', 'straight', 'arc-right', 'arc-left', 'analysing'];
+      const PHASE_ORDER = ['waiting-for-fix', 'straight', 'pivot-cw', 'pivot-ccw', 'analysing'];
 
       function updatePhaseBar(phase) {
         const activeIdx = PHASE_ORDER.indexOf(phase);
@@ -703,8 +746,8 @@ ${getAppDialogScript()}
 
         container.innerHTML =
           renderPhaseResult('Straight', 'badge-straight', 'straight', result.straightPhase) +
-          renderPhaseResult('Arc Right', 'badge-arc-right', 'arc-right', result.arcRightPhase) +
-          renderPhaseResult('Arc Left',  'badge-arc-left',  'arc-left',  result.arcLeftPhase);
+          renderPhaseResult('Pivot CW', 'badge-arc-right', 'pivot-cw', result.arcRightPhase) +
+          renderPhaseResult('Pivot CCW',  'badge-arc-left',  'pivot-ccw',  result.arcLeftPhase);
       }
 
       // -----------------------------------------------------------------------
@@ -895,6 +938,8 @@ ${getAppDialogScript()}
           // Buttons
           document.getElementById('startBtn').disabled = running;
           document.getElementById('stopBtn').disabled = !running;
+          const lineDistanceInput = document.getElementById('lineDistanceMeters');
+          if (lineDistanceInput) lineDistanceInput.disabled = running;
 
           // Phase result cards
           if (result) {
@@ -922,17 +967,27 @@ ${getAppDialogScript()}
       // Button handlers
       // -----------------------------------------------------------------------
       document.getElementById('startBtn').addEventListener('click', async () => {
+        const lineDistanceInput = document.getElementById('lineDistanceMeters');
         document.getElementById('startBtn').disabled = true;
         document.getElementById('stopBtn').disabled = false;
+        lineDistanceInput.disabled = true;
         document.getElementById('phaseResults').innerHTML = '';
         document.getElementById('suggestionBanner').classList.remove('visible');
         document.getElementById('canvasSection').style.display = 'none';
         pendingSuggestedValue = null;
         try {
+          const lineDistanceMeters = Number(lineDistanceInput.value);
+          if (!Number.isFinite(lineDistanceMeters) || lineDistanceMeters <= 0) {
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            lineDistanceInput.disabled = false;
+            await appAlert('Please enter a valid straight distance in metres.');
+            return;
+          }
           const res = await fetch('/api/dead-reckoning/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ lineDistanceMeters }),
           });
           if (!res.ok) {
             const err = await res.json();
@@ -941,6 +996,7 @@ ${getAppDialogScript()}
           await update();
         } catch (err) {
           document.getElementById('startBtn').disabled = false;
+          lineDistanceInput.disabled = false;
           await appAlert('Network error: ' + err.message);
         }
       });

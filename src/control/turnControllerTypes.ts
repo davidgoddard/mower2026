@@ -20,6 +20,8 @@ export interface TurnRequest {
   readonly targetAngle: RelativeAngle;
   readonly direction: TurnDirection;
   readonly learningEnabled?: boolean;
+  /** Optional per-turn output scale [0..1] applied to maxWheelOutputPercent. */
+  readonly wheelOutputScale?: number;
 }
 
 export interface TurnResult {

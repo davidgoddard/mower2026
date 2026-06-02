@@ -33,6 +33,8 @@ export { PoseCalibration } from "./config/poseCalibration.js";
 export { GeometryCalibration } from "./config/geometryCalibration.js";
 export { PathFollowingConfig } from "./config/pathFollowingConfig.js";
 export { MotorNodeClient } from "./motors/motorNodeClient.js";
+export { decodeGnssDebugLine, gnssDebugPayloadLength } from "./gnss/gnssDebugCodec.js";
+export type { GnssDebugLine } from "./gnss/gnssDebugCodec.js";
 export {
   buildMotorDirectionMapping,
   clampNormalizedWheelTargets,

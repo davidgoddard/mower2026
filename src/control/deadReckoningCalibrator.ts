@@ -8,17 +8,12 @@
  *    divided by average ticks gives a first-pass encoderMetersPerTick.
  *    Per-wheel values are derived from the left/right tick ratio and the chord.
  *
- *  Phase 2 – Arc right (left wheel full, right wheel arcInnerSpeed)
- *    Drive a timed arc. IMU heading change + GNSS chord give arc geometry:
- *      arcRadius    = chord / (2 × sin(Δheading/2))
- *      arcLength    = arcRadius × |Δheading_rad|
- *      wheelbase    = (leftArcLen - rightArcLen) / |Δheading_rad|   (outer - inner)
- *      leftMPerTick  = leftArcLen  / leftTicks
- *      rightMPerTick = rightArcLen / rightTicks
- *    For steady-state samples: integrate DR position using IMU heading + encoder
- *    ticks and measure endpoint error vs GNSS anchor.
+ *  Phase 2 – Pivot right / CW
+ *    Drive a controlled in-place pivot. IMU heading change + encoder travel
+ *    give a wheelbase estimate from the signed wheel distance difference.
+ *    The pivot is only accepted when the DR endpoint error remains small.
  *
- *  Phase 3 – Arc left (right=full, left=arcInnerSpeed)
+ *  Phase 3 – Pivot left / CCW
  *    Mirror of phase 2.
  *
  * Results include suggested per-wheel m/tick, wheelbase, and DR endpoint error.
@@ -30,6 +25,8 @@ import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
+import { DriveLineController } from "./driveLineController.js";
+import { TurnController } from "./turnController.js";
 import {
   SENSOR_EVENTS,
   GnssPositionUpdateEvent,
@@ -37,16 +34,20 @@ import {
   MotorFeedbackUpdateEvent,
 } from "../sensing/sensorEvents.js";
 import { unwrapInternalHeading } from "../geometry/headingTypes.js";
+import { createRelativeAngle } from "../geometry/headingTypes.js";
+import { translatePositionByHeading, createBodyFrameOffset } from "../geometry/positionTypes.js";
 import { systemStop } from "./systemStop.js";
 
 const DEG_TO_RAD = Math.PI / 180;
+const MAX_PIVOT_DR_ENDPOINT_ERROR_METERS = 0.25;
+const MAX_PIVOT_TRACKING_RMS_ERROR_FRACTION = 0.15;
 
 export type CalibratorPhase =
   | "idle"
   | "waiting-for-fix"
   | "straight"
-  | "arc-right"
-  | "arc-left"
+  | "pivot-cw"
+  | "pivot-ccw"
   | "analysing"
   | "done"
   | "stopped"
@@ -95,6 +96,8 @@ export interface RunPhaseResult {
   readonly gnssHeadingChangeDeg: number;
   readonly leftTotalTicks: number;
   readonly rightTotalTicks: number;
+  readonly leftSignedTicks: number;
+  readonly rightSignedTicks: number;
   readonly arcSamples: ArcSample[];
   readonly steadyStateSamples: ArcSample[];
   /** Derived from straight phase only */
@@ -139,6 +142,8 @@ export interface DeadReckoningCalibratorOptions {
   poseFusion: PoseFusion;
   poseCalibration: PoseCalibration;
   motorCalibration?: MotorCalibration;
+  driveLineController?: DriveLineController;
+  turnController?: TurnController;
   logger: SessionLogger;
   driveDurationMs?: number;
   steadyStateStartMs?: number;
@@ -150,7 +155,15 @@ export interface DeadReckoningCalibratorOptions {
   maxAnchorAccuracyMeters?: number;
   fullSpeed?: number;
   arcInnerSpeed?: number;
+  lineDistanceMeters?: number;
+  spinsPerDirection?: number;
+  pivotTurnTimeoutMs?: number;
+  drPivotSpeedScale?: number;
   sleep?: (ms: number) => Promise<void>;
+}
+
+export interface DeadReckoningRunOptions {
+  readonly lineDistanceMeters?: number;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -169,6 +182,8 @@ export class DeadReckoningCalibrator {
   private readonly poseFusion: PoseFusion;
   private readonly poseCalibration: PoseCalibration;
   private readonly motorCalibration: MotorCalibration | null;
+  private readonly driveLineController: DriveLineController | null;
+  private readonly turnController: TurnController | null;
   private readonly driveDurationMs: number;
   private readonly steadyStateStartMs: number;
   private readonly steadyStateEndMs: number;
@@ -177,6 +192,10 @@ export class DeadReckoningCalibrator {
   private readonly maxAnchorAccuracyMeters: number;
   private readonly fullSpeed: number;
   private readonly arcInnerSpeed: number;
+  private readonly lineDistanceMeters: number;
+  private readonly spinsPerDirection: number;
+  private readonly pivotTurnTimeoutMs: number;
+  private readonly drPivotSpeedScale: number;
   private readonly sleep: (ms: number) => Promise<void>;
 
   private running = false;
@@ -191,6 +210,8 @@ export class DeadReckoningCalibrator {
   private arcSamples: ArcSample[] = [];
   private leftTicksAccum = 0;
   private rightTicksAccum = 0;
+  private leftTicksSignedAccum = 0;
+  private rightTicksSignedAccum = 0;
   private driveStartMs = 0;
   private motorOperationActive = false;
 
@@ -200,6 +221,8 @@ export class DeadReckoningCalibrator {
     this.poseFusion = options.poseFusion;
     this.poseCalibration = options.poseCalibration;
     this.motorCalibration = options.motorCalibration ?? null;
+    this.driveLineController = options.driveLineController ?? null;
+    this.turnController = options.turnController ?? null;
     this.driveDurationMs = options.driveDurationMs ?? 3000;
     this.steadyStateStartMs = options.steadyStateStartMs ?? 1000;
     this.steadyStateEndMs = options.steadyStateEndMs ?? 2000;
@@ -208,6 +231,10 @@ export class DeadReckoningCalibrator {
     this.maxAnchorAccuracyMeters = options.maxAnchorAccuracyMeters ?? 0.10;
     this.fullSpeed = options.fullSpeed ?? 1.0;
     this.arcInnerSpeed = options.arcInnerSpeed ?? 0.4;
+    this.lineDistanceMeters = options.lineDistanceMeters ?? 5.0;
+    this.spinsPerDirection = Math.max(1, options.spinsPerDirection ?? 1);
+    this.pivotTurnTimeoutMs = Math.max(5_000, options.pivotTurnTimeoutMs ?? 20_000);
+    this.drPivotSpeedScale = Math.max(0.1, Math.min(1, options.drPivotSpeedScale ?? 0.5));
     this.sleep = options.sleep ?? defaultSleep;
 
     this.onGnssUpdate = this.onGnssUpdate.bind(this);
@@ -232,9 +259,14 @@ export class DeadReckoningCalibrator {
     this.logger.info("dead_reckoning.stop_requested", {});
   }
 
-  async run(): Promise<DeadReckoningCalibrationResult> {
+  async run(options: DeadReckoningRunOptions = {}): Promise<DeadReckoningCalibrationResult> {
     if (this.running) {
       throw new Error("calibration_already_running");
+    }
+
+    const lineDistanceMeters = options.lineDistanceMeters ?? this.lineDistanceMeters;
+    if (!Number.isFinite(lineDistanceMeters) || lineDistanceMeters <= 0) {
+      throw new Error("invalid_line_distance_meters");
     }
 
     this.running = true;
@@ -277,11 +309,15 @@ export class DeadReckoningCalibrator {
         return this.buildResult(null, null, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
 
+      if (!this.driveLineController || !this.turnController) {
+        throw new Error("dead_reckoning_controllers_unavailable");
+      }
+
       // ------------------------------------------------------------------
-      // Phase 1 – straight line
+      // Phase 1 – 5m straight line using the line driver (no pivot pre-turn)
       // ------------------------------------------------------------------
-      this.setPhase("straight", "Phase 1: Driving straight forward…");
-      straightPhase = await this.runDrivePhase(this.fullSpeed, this.fullSpeed, preRunAnchor);
+      this.setPhase("straight", `Phase 1: Line-drive ${lineDistanceMeters.toFixed(1)} m…`);
+      straightPhase = await this.runLinePhase(preRunAnchor, lineDistanceMeters);
       if (this.stopRequested) {
         this.setPhase("stopped", "Stopped after straight phase.");
         return this.buildResult(straightPhase, null, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
@@ -297,15 +333,15 @@ export class DeadReckoningCalibrator {
       }
 
       // ------------------------------------------------------------------
-      // Phase 2 – arc right (left=full, right=inner)
+      // Phase 2 – pure in-place CW pivots, 180° each
       // ------------------------------------------------------------------
-      this.setPhase("arc-right", "Phase 2: Arc right (left=100%, right=40%)…");
-      arcRightPhase = await this.runDrivePhase(this.fullSpeed, this.arcInnerSpeed, preArcRightAnchor);
+      this.setPhase("pivot-cw", `Phase 2: ${this.spinsPerDirection} × 180° CW pivot…`);
+      arcRightPhase = await this.runPivotPhase("cw", preArcRightAnchor);
       if (this.stopRequested) {
-        this.setPhase("stopped", "Stopped after arc-right phase.");
+        this.setPhase("stopped", "Stopped after CW pivot phase.");
         return this.buildResult(straightPhase, arcRightPhase, null, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
-      arcRightPhase = this.analyseArcPhase(arcRightPhase, "right", warnings);
+      arcRightPhase = this.analysePivotPhase(arcRightPhase, "cw", straightPhase, warnings);
 
       this.setPhase("waiting-for-fix", "Settling between phases…");
       const preArcLeftAnchor = await this.waitForSettledPose();
@@ -315,15 +351,15 @@ export class DeadReckoningCalibrator {
       }
 
       // ------------------------------------------------------------------
-      // Phase 3 – arc left (right=full, left=inner)
+      // Phase 3 – pure in-place CCW pivots, 180° each
       // ------------------------------------------------------------------
-      this.setPhase("arc-left", "Phase 3: Arc left (right=100%, left=40%)…");
-      arcLeftPhase = await this.runDrivePhase(this.arcInnerSpeed, this.fullSpeed, preArcLeftAnchor);
+      this.setPhase("pivot-ccw", `Phase 3: ${this.spinsPerDirection} × 180° CCW pivot…`);
+      arcLeftPhase = await this.runPivotPhase("ccw", preArcLeftAnchor);
       if (this.stopRequested) {
-        this.setPhase("stopped", "Stopped after arc-left phase.");
+        this.setPhase("stopped", "Stopped after CCW pivot phase.");
         return this.buildResult(straightPhase, arcRightPhase, arcLeftPhase, prevShared, prevLeft, prevRight, prevWheelbase, warnings);
       }
-      arcLeftPhase = this.analyseArcPhase(arcLeftPhase, "left", warnings);
+      arcLeftPhase = this.analysePivotPhase(arcLeftPhase, "ccw", straightPhase, warnings);
 
       this.setPhase("analysing", "Analysing results…");
 
@@ -350,14 +386,19 @@ export class DeadReckoningCalibrator {
   }
 
   // ---------------------------------------------------------------------------
-  // Drive phase execution
+  // Line phase (uses line driver)
   // ---------------------------------------------------------------------------
 
-  private async runDrivePhase(leftPercent: number, rightPercent: number, preDriveAnchor: GnssAnchor): Promise<RunPhaseResult> {
+  private async runLinePhase(preDriveAnchor: GnssAnchor, lineDistanceMeters: number): Promise<RunPhaseResult> {
+    if (!this.driveLineController) {
+      throw new Error("drive_line_controller_unavailable");
+    }
     this.gnssAnchors = [];
     this.arcSamples = [];
     this.leftTicksAccum = 0;
     this.rightTicksAccum = 0;
+    this.leftTicksSignedAccum = 0;
+    this.rightTicksSignedAccum = 0;
 
     this.sensorController.on(SENSOR_EVENTS.GNSS_POSITION_UPDATE, this.onGnssUpdate);
     this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
@@ -365,14 +406,17 @@ export class DeadReckoningCalibrator {
 
     try {
       this.driveStartMs = Date.now();
-
-      await this.sensorController.setMotorWheelOutputs(leftPercent, rightPercent);
-      await this.sleep(this.driveDurationMs);
-
-      // Ramp to zero — let the motor node ramp-down naturally, do not cut power
-      await this.sensorController.setMotorWheelOutputs(0, 0);
-      const rampDownMs = this.motorCalibration?.getRampDownTime() ?? 1000;
-      await this.sleep(rampDownMs * 2);
+      const startPose = this.poseFusion.getCurrentPose();
+      const target = translatePositionByHeading(
+        startPose.position,
+        startPose.heading,
+        createBodyFrameOffset(lineDistanceMeters, 0),
+      );
+      await this.driveLineController.executeLineDrive({
+        targetPosition: target,
+        learningEnabled: false,
+        driveDirectionSign: 1,
+      });
 
       // Wait for pose to settle (GNSS rebasing IMU) before snapping end anchor
       const endAnchor = await this.waitForSettledPose() ?? this.buildCurrentAnchor();
@@ -393,6 +437,8 @@ export class DeadReckoningCalibrator {
         gnssHeadingChangeDeg,
         leftTotalTicks: this.leftTicksAccum,
         rightTotalTicks: this.rightTicksAccum,
+        leftSignedTicks: this.leftTicksSignedAccum,
+        rightSignedTicks: this.rightTicksSignedAccum,
         arcSamples: [...this.arcSamples],
         steadyStateSamples: steadySamples,
         derivedEncoderMetersPerTick: null,
@@ -400,6 +446,95 @@ export class DeadReckoningCalibrator {
         arcGeometry: null,
       };
     } finally {
+      this.sensorController.off(SENSOR_EVENTS.GNSS_POSITION_UPDATE, this.onGnssUpdate);
+      this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
+      this.sensorController.off(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onMotorFeedback);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pivot phase (uses turn controller)
+  // ---------------------------------------------------------------------------
+
+  private async runPivotPhase(direction: "cw" | "ccw", preDriveAnchor: GnssAnchor): Promise<RunPhaseResult> {
+    if (!this.turnController) {
+      throw new Error("turn_controller_unavailable");
+    }
+    this.gnssAnchors = [];
+    this.arcSamples = [];
+    this.leftTicksAccum = 0;
+    this.rightTicksAccum = 0;
+    this.leftTicksSignedAccum = 0;
+    this.rightTicksSignedAccum = 0;
+
+    this.sensorController.on(SENSOR_EVENTS.GNSS_POSITION_UPDATE, this.onGnssUpdate);
+    this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
+    this.sensorController.on(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onMotorFeedback);
+
+    try {
+      this.driveStartMs = Date.now();
+      for (let index = 0; index < this.spinsPerDirection; index += 1) {
+        this.phaseMessage = `Phase ${direction === "cw" ? "2" : "3"}: ${index + 1}/${this.spinsPerDirection} × 180° ${direction.toUpperCase()} pivot…`;
+        this.lastUpdated = new Date().toISOString();
+        const turnPromise = this.turnController.executeTurn({
+          targetAngle: createRelativeAngle(direction === "cw" ? -180 : 180),
+          direction,
+          learningEnabled: false,
+          wheelOutputScale: this.drPivotSpeedScale,
+        });
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error(`pivot_turn_timeout_${direction}_${index + 1}`)), this.pivotTurnTimeoutMs);
+        });
+
+        let result: Awaited<typeof turnPromise>;
+        try {
+          result = await Promise.race([turnPromise, timeoutPromise]);
+        } catch (error) {
+          if (timeoutHandle !== null) {
+            clearTimeout(timeoutHandle);
+          }
+          await this.turnController.stopCurrentTurn();
+          throw error;
+        }
+        if (timeoutHandle !== null) {
+          clearTimeout(timeoutHandle);
+        }
+        if (result.status !== "success") {
+          await this.turnController.stopCurrentTurn();
+          throw new Error(`pivot_turn_failed_${direction}_${index + 1}_${result.status}`);
+        }
+
+        if (this.stopRequested) break;
+      }
+
+      const endAnchor = await this.waitForSettledPose() ?? this.buildCurrentAnchor();
+      const dx = endAnchor.xMeters - preDriveAnchor.xMeters;
+      const dy = endAnchor.yMeters - preDriveAnchor.yMeters;
+      const gnssDistanceMeters = Math.hypot(dx, dy);
+      const gnssHeadingChangeDeg = normalizeAngle180(
+        (endAnchor.headingDeg ?? 0) - (preDriveAnchor.headingDeg ?? 0)
+      );
+
+      return {
+        startAnchor: preDriveAnchor,
+        endAnchor,
+        gnssDistanceMeters,
+        gnssHeadingChangeDeg,
+        leftTotalTicks: this.leftTicksAccum,
+        rightTotalTicks: this.rightTicksAccum,
+        leftSignedTicks: this.leftTicksSignedAccum,
+        rightSignedTicks: this.rightTicksSignedAccum,
+        arcSamples: [...this.arcSamples],
+        steadyStateSamples: [...this.arcSamples],
+        derivedEncoderMetersPerTick: null,
+        arcTrackingRmsErrorFraction: null,
+        arcGeometry: null,
+      };
+    } finally {
+      if (this.stopRequested) {
+        void this.turnController.stopCurrentTurn();
+      }
       this.sensorController.off(SENSOR_EVENTS.GNSS_POSITION_UPDATE, this.onGnssUpdate);
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onImuUpdate);
       this.sensorController.off(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onMotorFeedback);
@@ -433,115 +568,109 @@ export class DeadReckoningCalibrator {
   // Arc-phase analysis
   // ---------------------------------------------------------------------------
 
-  private analyseArcPhase(
+  private analysePivotPhase(
     phase: RunPhaseResult,
-    direction: "left" | "right",
+    direction: "cw" | "ccw",
+    straightPhase: RunPhaseResult | null,
     warnings: string[],
   ): RunPhaseResult {
-    const steady = phase.steadyStateSamples;
-    const { leftTotalTicks, rightTotalTicks, gnssDistanceMeters } = phase;
-
-    // ---- IMU heading change over the full phase ----
-    // Use the first and last arc samples (entire drive, not just steady)
     const allSamples = phase.arcSamples;
     if (allSamples.length < 2) {
-      warnings.push(`Arc-${direction}: too few IMU samples for geometry derivation.`);
+      warnings.push(`Pivot-${direction}: too few IMU samples for wheelbase derivation.`);
       return phase;
     }
     const imuHeadingChangeDeg = Math.abs(
       normalizeAngle180(allSamples[allSamples.length - 1].imuHeadingDeg - allSamples[0].imuHeadingDeg)
     );
-
-    const goodFix = (f: string) => f === "fixed" || f === "float" || f === "rtk-fixed" || f === "rtk-float";
-    if (!goodFix(phase.startAnchor.fixType) || !goodFix(phase.endAnchor.fixType)) {
-      warnings.push(`Arc-${direction}: GNSS fix not available at start or end anchor — geometry skipped. Ensure a good RTK fix before running calibration.`);
+    if (imuHeadingChangeDeg < 90) {
+      warnings.push(`Pivot-${direction}: heading change too small (${imuHeadingChangeDeg.toFixed(1)}°).`);
       return phase;
     }
 
-    if (imuHeadingChangeDeg < 5 || gnssDistanceMeters < 0.05 || leftTotalTicks < 1 || rightTotalTicks < 1) {
-      warnings.push(`Arc-${direction}: insufficient motion for geometry — phase skipped.`);
+    const leftTicks = phase.leftTotalTicks;
+    const rightTicks = phase.rightTotalTicks;
+    if (leftTicks < 1 || rightTicks < 1) {
+      warnings.push(`Pivot-${direction}: insufficient encoder ticks.`);
       return phase;
     }
 
-    const chordMeters = gnssDistanceMeters;
+    const leftMpt = straightPhase?.leftTotalTicks && straightPhase.leftTotalTicks > 0
+      ? straightPhase.gnssDistanceMeters / straightPhase.leftTotalTicks
+      : null;
+    const rightMpt = straightPhase?.rightTotalTicks && straightPhase.rightTotalTicks > 0
+      ? straightPhase.gnssDistanceMeters / straightPhase.rightTotalTicks
+      : null;
+    if (!leftMpt || !rightMpt) {
+      warnings.push(`Pivot-${direction}: no valid straight-line m/tick estimate.`);
+      return phase;
+    }
+
+    const leftDistanceSigned = phase.leftSignedTicks * leftMpt;
+    const rightDistanceSigned = phase.rightSignedTicks * rightMpt;
+    const leftDistance = Math.abs(leftDistanceSigned);
+    const rightDistance = Math.abs(rightDistanceSigned);
     const headingRad = imuHeadingChangeDeg * DEG_TO_RAD;
-
-    // Arc length of the centre path: chord = 2R sin(Δθ/2), so R = chord / (2 sin(Δθ/2))
-    // then centre arc length = R × Δθ
-    const arcRadiusMeters = chordMeters / (2 * Math.sin(headingRad / 2));
-    const centreArcLengthMeters = arcRadiusMeters * headingRad;
-
-    // For arc-right: left wheel is outer (larger radius), right is inner.
-    // The speed ratio outer/inner = fullSpeed / arcInnerSpeed.
-    // outerArc / innerArc = speedRatio (same time, different speeds ≈ different distances).
-    // We use measured ticks directly which is more accurate than the speed ratio.
-    const totalTicks = leftTotalTicks + rightTotalTicks;
-    const leftFraction  = leftTotalTicks  / totalTicks;
-    const rightFraction = rightTotalTicks / totalTicks;
-
-    let outerTicks: number, innerTicks: number;
-    let outerArcLen: number, innerArcLen: number;
-
-    if (direction === "right") {
-      // left=outer, right=inner
-      outerTicks = leftTotalTicks;
-      innerTicks = rightTotalTicks;
-    } else {
-      // right=outer, left=inner
-      outerTicks = rightTotalTicks;
-      innerTicks = leftTotalTicks;
-    }
-
-    // Total arc length ∝ total ticks; distribute proportionally
-    const outerFrac = outerTicks / totalTicks;
-    const innerFrac = innerTicks / totalTicks;
-    // Total arc = centre × 2 (outer + inner = 2 × centre for equal-radius arc is wrong;
-    // more precisely: outer = centreArc × (R+w/2)/R, inner = centreArc × (R-w/2)/R.
-    // But we don't know w yet, so bootstrap: totalArc ≈ outerArc + innerArc,
-    // and outerArc/innerArc ≈ outerTicks/innerTicks.
-    const outerArcLengthEstimate = 2 * outerFrac * centreArcLengthMeters;
-    const innerArcLengthEstimate = 2 * innerFrac * centreArcLengthMeters;
-
-    // Wheelbase = (outerArc - innerArc) / Δθ_rad
-    const wheelbaseMeters = Math.abs(outerArcLengthEstimate - innerArcLengthEstimate) / headingRad;
-
-    // Per-wheel m/tick
-    const outerMetersPerTick = outerArcLengthEstimate / outerTicks;
-    const innerMetersPerTick = innerArcLengthEstimate / innerTicks;
-
-    let leftMetersPerTick: number, rightMetersPerTick: number;
-    if (direction === "right") {
-      leftMetersPerTick  = outerMetersPerTick;
-      rightMetersPerTick = innerMetersPerTick;
-      outerArcLen = outerArcLengthEstimate;
-      innerArcLen = innerArcLengthEstimate;
-    } else {
-      rightMetersPerTick = outerMetersPerTick;
-      leftMetersPerTick  = innerMetersPerTick;
-      outerArcLen = outerArcLengthEstimate;
-      innerArcLen = innerArcLengthEstimate;
-    }
-
-    // ---- DR position integration over steady-state samples ----
-    const drError = this.computeDrPositionError(
-      phase, leftMetersPerTick, rightMetersPerTick,
+    const wheelbaseMeters = Math.abs(rightDistanceSigned - leftDistanceSigned) / headingRad;
+    const drError = this.computeDrPositionError(phase, leftMpt, rightMpt);
+    const arcTrackingRmsErrorFraction = this.computeArcTrackingRms(
+      phase.steadyStateSamples,
+      leftTicks,
+      rightTicks,
+      imuHeadingChangeDeg,
     );
 
-    // ---- Arc-tracking RMS (encoder fraction vs IMU fraction) ----
-    const rmsError = this.computeArcTrackingRms(steady, leftTotalTicks, rightTotalTicks, imuHeadingChangeDeg);
+    if (drError > MAX_PIVOT_DR_ENDPOINT_ERROR_METERS) {
+      warnings.push(
+        `Pivot-${direction}: DR endpoint error too large (${(drError * 100).toFixed(1)} cm); wheelbase rejected as likely slip.`,
+      );
+      this.logger.warn("dead_reckoning.pivot_geometry_rejected", {
+        direction,
+        imuHeadingChangeDeg,
+        leftDistanceMeters: leftDistance,
+        rightDistanceMeters: rightDistance,
+        wheelbaseMeters,
+        drEndpointErrorMeters: drError,
+        maxDrEndpointErrorMeters: MAX_PIVOT_DR_ENDPOINT_ERROR_METERS,
+      });
+      return {
+        ...phase,
+        arcTrackingRmsErrorFraction,
+        arcGeometry: null,
+      };
+    }
+
+    if (arcTrackingRmsErrorFraction !== null && arcTrackingRmsErrorFraction > MAX_PIVOT_TRACKING_RMS_ERROR_FRACTION) {
+      warnings.push(
+        `Pivot-${direction}: arc tracking error too large (${(arcTrackingRmsErrorFraction * 100).toFixed(1)}%); wheelbase rejected as unreliable.`,
+      );
+      this.logger.warn("dead_reckoning.pivot_geometry_rejected", {
+        direction,
+        imuHeadingChangeDeg,
+        leftDistanceMeters: leftDistance,
+        rightDistanceMeters: rightDistance,
+        wheelbaseMeters,
+        arcTrackingRmsErrorFraction,
+        maxArcTrackingRmsErrorFraction: MAX_PIVOT_TRACKING_RMS_ERROR_FRACTION,
+      });
+      return {
+        ...phase,
+        arcTrackingRmsErrorFraction,
+        arcGeometry: null,
+      };
+    }
 
     const arcGeometry: DerivedArcGeometry = {
       wheelbaseMeters,
-      outerArcLengthMeters: outerArcLen,
-      innerArcLengthMeters: innerArcLen,
-      leftMetersPerTick,
-      rightMetersPerTick,
+      outerArcLengthMeters: Math.max(leftDistance, rightDistance),
+      innerArcLengthMeters: Math.min(leftDistance, rightDistance),
+      leftMetersPerTick: leftMpt,
+      rightMetersPerTick: rightMpt,
       drEndpointErrorMeters: drError,
-      gnssChordMeters: chordMeters,
+      gnssChordMeters: phase.gnssDistanceMeters,
       imuHeadingChangeDeg,
     };
 
-    return { ...phase, arcTrackingRmsErrorFraction: rmsError, arcGeometry };
+    return { ...phase, arcTrackingRmsErrorFraction, arcGeometry };
   }
 
   // ---------------------------------------------------------------------------
@@ -710,19 +839,41 @@ export class DeadReckoningCalibrator {
   private onMotorFeedback(event: MotorFeedbackUpdateEvent): void {
     this.leftTicksAccum  += Math.abs(event.leftEncoderDelta);
     this.rightTicksAccum += Math.abs(event.rightEncoderDelta);
+    this.leftTicksSignedAccum += event.leftEncoderDelta;
+    this.rightTicksSignedAccum += event.rightEncoderDelta;
   }
 
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private buildCurrentAnchor(): GnssAnchor {
+  private buildCurrentAnchor(
+    diagnostics?: ReturnType<PoseFusion["getDiagnosticSnapshot"]>,
+  ): GnssAnchor {
     const goodAnchors = this.gnssAnchors.filter(
       (a) =>
         (a.fixType === "fixed" || a.fixType === "float" || a.fixType === "rtk-fixed" || a.fixType === "rtk-float") &&
         (a.positionAccuracyMeters === null || a.positionAccuracyMeters <= this.maxAnchorAccuracyMeters),
     );
     if (goodAnchors.length > 0) return goodAnchors[goodAnchors.length - 1];
+
+    const rawGnss = diagnostics?.gnss.raw ?? null;
+    if (
+      rawGnss !== null &&
+      rawGnss.positionAccuracyMeters !== null &&
+      rawGnss.positionAccuracyMeters <= this.maxAnchorAccuracyMeters &&
+      (rawGnss.fixType === "fixed" || rawGnss.fixType === "float" || rawGnss.fixType === "rtk-fixed" || rawGnss.fixType === "rtk-float")
+    ) {
+      return {
+        xMeters: rawGnss.x,
+        yMeters: rawGnss.y,
+        headingDeg: rawGnss.headingDeg,
+        positionAccuracyMeters: rawGnss.positionAccuracyMeters,
+        fixType: rawGnss.fixType,
+        timestampMillis: rawGnss.timestampMillis,
+      };
+    }
+
     // No good fix available — return a sentinel with fixType "none".
     // Callers that use the anchor for geometry must check fixType before trusting the coordinates.
     return {
@@ -741,11 +892,12 @@ export class DeadReckoningCalibrator {
    * for poseSteadyDwellMs. This guarantees the pose is settled and both
    * sensors agree before taking any calibration anchor.
    *
-   * Returns the current fused pose as a GNSS anchor, or null on timeout/stop.
+   * Returns the current settled GNSS anchor, or null on timeout/stop.
    */
   private async waitForSettledPose(): Promise<GnssAnchor | null> {
     const deadline = Date.now() + this.poseSettleTimeoutMs;
     let dwellStartMs: number | null = null;
+    let lastSettleBlocker: string | null = null;
 
     this.logger.info("dead_reckoning.waiting_for_settled_pose", {
       dwellMs: this.poseSteadyDwellMs,
@@ -756,6 +908,7 @@ export class DeadReckoningCalibrator {
       if (this.stopRequested) return null;
 
       const state = this.poseFusion.getPrimitiveState();
+      const diagnostics = this.poseFusion.getDiagnosticSnapshot();
       const isSettled =
         state.usingGnssHeading &&
         state.quality === "gnss" &&
@@ -766,16 +919,22 @@ export class DeadReckoningCalibrator {
         if (dwellStartMs === null) {
           dwellStartMs = Date.now();
         } else if (Date.now() - dwellStartMs >= this.poseSteadyDwellMs) {
-          // Sustained agreement — snapshot the current fused pose as the anchor
-          const pose = this.poseFusion.getCurrentPose();
-          const anchor: GnssAnchor = {
-            xMeters: state.xMeters!,
-            yMeters: state.yMeters!,
-            headingDeg: state.headingDeg,
-            positionAccuracyMeters: null,
-            fixType: "fixed",
-            timestampMillis: Date.now(),
-          };
+          // Sustained agreement — snapshot the latest raw GNSS anchor so the
+          // calibration uses the actual GNSS reading, not the fused pose.
+          const anchor = this.buildCurrentAnchor(diagnostics);
+          if (anchor.fixType === "none" || anchor.headingDeg === null) {
+            this.logger.info("dead_reckoning.pose_settled_anchor_rejected", {
+              reason: anchor.fixType === "none"
+                ? "no_good_gnss_anchor"
+                : "missing_heading",
+              dwellMs: Date.now() - dwellStartMs,
+              anchor,
+              diagnostics,
+            });
+            dwellStartMs = null;
+            await this.sleep(100);
+            continue;
+          }
           this.logger.info("dead_reckoning.pose_settled", {
             xMeters: anchor.xMeters,
             yMeters: anchor.yMeters,
@@ -785,6 +944,30 @@ export class DeadReckoningCalibrator {
           return anchor;
         }
       } else {
+        const blocker =
+          !state.usingGnssHeading
+            ? "usingGnssHeading=false"
+            : state.quality !== "gnss"
+              ? `quality=${state.quality}`
+              : state.xMeters === null || state.yMeters === null
+                ? "fused_position_missing"
+                : "unknown";
+
+        if (blocker !== lastSettleBlocker) {
+          this.logger.info("dead_reckoning.pose_not_settled", {
+            blocker,
+            usingGnssHeading: state.usingGnssHeading,
+            quality: state.quality,
+            xMeters: state.xMeters,
+            yMeters: state.yMeters,
+            headingDeg: state.headingDeg,
+            gnssPositionAgeMs: state.gnssPositionAgeMs,
+            gnss: diagnostics.gnss,
+            fused: diagnostics.fused,
+            encoder: diagnostics.encoder,
+          });
+          lastSettleBlocker = blocker;
+        }
         // Any interruption resets the dwell clock
         dwellStartMs = null;
       }
@@ -794,6 +977,8 @@ export class DeadReckoningCalibrator {
 
     this.logger.warn("dead_reckoning.pose_settle_timeout", {
       timeoutMs: this.poseSettleTimeoutMs,
+      poseFusion: this.poseFusion.getPrimitiveState(),
+      diagnostics: this.poseFusion.getDiagnosticSnapshot(),
     });
     return null;
   }

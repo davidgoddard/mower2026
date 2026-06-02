@@ -20,9 +20,12 @@ static const uint8_t PROTOCOL_START_OF_FRAME = 0x4D;
 static const uint8_t PROTOCOL_VERSION = 0x01;
 static const uint8_t NODE_ID_GNSS = 0x10;
 static const uint8_t MESSAGE_TYPE_GNSS_SAMPLE = 0x01;
+static const uint8_t MESSAGE_TYPE_GNSS_DEBUG_LINE = 0x02;
 
 static const size_t FRAME_HEADER_SIZE = 9;
 static const size_t FRAME_CRC_SIZE = 2;
+static const size_t GNSS_SAMPLE_PAYLOAD_SIZE = 40;
+static const size_t GNSS_DEBUG_PAYLOAD_SIZE = 116;
 // Payload layout (single, no version fallback):
 //   off 0 .. 7 : gpsTimeMillis  uint64 LE (Unix epoch ms; 0 when UTC invalid)
 //   off 8 .. 11: xMeters x 1000 int32 LE mm
@@ -42,8 +45,7 @@ static const size_t FRAME_CRC_SIZE = 2;
 //                  bit2 = baseline valid (UNIHEADINGA length present)
 //   off 35     : log config mask (PVTSLNA/RECTIMEA/UNIHEADINGA active bits)
 //   off 36..39 : reserved (zero-filled)
-static const size_t GNSS_PAYLOAD_SIZE = 40;
-static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + GNSS_PAYLOAD_SIZE + FRAME_CRC_SIZE;
+static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + GNSS_DEBUG_PAYLOAD_SIZE + FRAME_CRC_SIZE;
 
 // ===== ESP32 pins =====
 static const uint8_t I2C_SDA_PIN = 21;
@@ -140,6 +142,14 @@ static uint32_t g_lastDeviceReadyMillis = 0;
 static uint32_t g_totalDeviceReadyCount = 0;
 static uint8_t g_startupRawLinePrintCount = 0;
 static const uint8_t STARTUP_RAW_LINE_PRINT_LIMIT = 24;
+static bool g_lowSatelliteTraceLatched = false;
+static uint32_t g_lastLowSatelliteTraceMillis = 0;
+static char g_lastLowSatelliteRawText[GNSS_DEBUG_PAYLOAD_SIZE - 4 + 1] = {0};
+static uint8_t g_lastLowSatelliteRawTextLength = 0;
+static bool g_lastLowSatelliteRawTextTruncated = false;
+static uint8_t g_lastLowSatelliteFixType = 0;
+static uint8_t g_lastLowSatelliteSatellitesInUse = 0;
+static bool g_haveLowSatelliteTrace = false;
 static bool g_waitingForResetReady = false;
 static bool g_resetReadySeen = false;
 static bool g_waitingForCommandResponse = false;
@@ -227,6 +237,7 @@ double g_originLongitudeDegrees = 0.0;
 double g_originHeightMeters = 0.0;
 
 uint16_t g_lastRequestSequence = 0;
+uint8_t g_lastRequestMessageType = MESSAGE_TYPE_GNSS_SAMPLE;
 uint8_t g_txFrame[MAX_FRAME_SIZE];
 size_t g_txFrameLength = 0;
 
@@ -316,11 +327,11 @@ bool decodeFrame(const uint8_t *frame, size_t length, uint8_t &messageType, uint
   return true;
 }
 
-size_t encodeFrame(uint8_t flags, uint16_t sequence, const uint8_t *payload, uint16_t payloadLength, uint8_t *outFrame) {
+size_t encodeFrame(uint8_t messageType, uint8_t flags, uint16_t sequence, const uint8_t *payload, uint16_t payloadLength, uint8_t *outFrame) {
   outFrame[0] = PROTOCOL_START_OF_FRAME;
   outFrame[1] = PROTOCOL_VERSION;
   outFrame[2] = NODE_ID_GNSS;
-  outFrame[3] = MESSAGE_TYPE_GNSS_SAMPLE;
+  outFrame[3] = messageType;
   outFrame[4] = flags;
   writeU16LE(&outFrame[5], sequence);
   writeU16LE(&outFrame[7], payloadLength);
@@ -358,6 +369,32 @@ String payloadAfterSemicolon(const char *line) {
     return String(payloadStart);
   }
   return String(payloadStart).substring(0, asterisk - payloadStart);
+}
+
+bool tryParseInt32Strict(const String &value, int32_t &out) {
+  if (value.length() == 0) {
+    return false;
+  }
+  char *end = nullptr;
+  const long parsed = strtol(value.c_str(), &end, 10);
+  if (end == value.c_str() || (end != nullptr && *end != '\0')) {
+    return false;
+  }
+  out = static_cast<int32_t>(parsed);
+  return true;
+}
+
+bool tryParseFloatStrict(const String &value, float &out) {
+  if (value.length() == 0) {
+    return false;
+  }
+  char *end = nullptr;
+  const float parsed = strtof(value.c_str(), &end);
+  if (end == value.c_str() || (end != nullptr && *end != '\0')) {
+    return false;
+  }
+  out = parsed;
+  return true;
 }
 
 CompactFixType mapPositionType(const String &type) {
@@ -588,6 +625,29 @@ void printStartupRawLine(const char *line) {
   g_startupRawLinePrintCount += 1;
   Serial.print("[GNSS-RAW] ");
   Serial.println(line);
+}
+
+void traceLowSatellitePvtslna(const char *line, CompactFixType fixType, int32_t satellitesInUse) {
+  const bool lowSatellite = satellitesInUse < 8;
+  if (!lowSatellite) {
+    g_lowSatelliteTraceLatched = false;
+    return;
+  }
+
+  g_lowSatelliteTraceLatched = true;
+
+  String payload = payloadAfterSemicolon(line);
+  const size_t maxLength = sizeof(g_lastLowSatelliteRawText) - 1;
+  const size_t sourceLength = payload.length();
+  const size_t copyLength = sourceLength > maxLength ? maxLength : sourceLength;
+  memcpy(g_lastLowSatelliteRawText, payload.c_str(), copyLength);
+  g_lastLowSatelliteRawText[copyLength] = '\0';
+  g_lastLowSatelliteRawTextLength = static_cast<uint8_t>(copyLength);
+  g_lastLowSatelliteRawTextTruncated = sourceLength > maxLength;
+  g_lastLowSatelliteFixType = static_cast<uint8_t>(fixType);
+  g_lastLowSatelliteSatellitesInUse = static_cast<uint8_t>(satellitesInUse);
+  g_haveLowSatelliteTrace = true;
+  g_lastLowSatelliteTraceMillis = millis();
 }
 
 bool waitForReceiverReadyEvent(uint32_t timeoutMillis) {
@@ -1084,24 +1144,47 @@ void parsePvtslna(const char *line) {
   String headingField = fieldAt(payload.c_str(), 22);
   String pitchField = fieldAt(payload.c_str(), 23);
 
+  float latitudeDegrees = 0.0f;
+  float longitudeDegrees = 0.0f;
+  float latStd = 0.0f;
+  float lonStd = 0.0f;
+  int32_t satellitesInUse = 0;
+  float groundSpeedMetersPerSecond = 0.0f;
+  float headingDegrees = 0.0f;
+
+  const bool hasCoreNumbers =
+    tryParseFloatStrict(latField, latitudeDegrees) &&
+    tryParseFloatStrict(lonField, longitudeDegrees) &&
+    tryParseFloatStrict(latStdField, latStd) &&
+    tryParseFloatStrict(lonStdField, lonStd) &&
+    tryParseInt32Strict(solnSatsField, satellitesInUse);
+
+  if (!hasCoreNumbers || satellitesInUse < 0 || satellitesInUse > 80) {
+    return;
+  }
+
   g_latestPvtsln.valid = true;
   g_latestPvtsln.localMillis = millis();
   g_latestPvtsln.fixType = mapPositionType(bestposType);
   g_headingLedState = mapHeadingLedState(headingTypeField);
   g_positionLedState = mapPositionLedState(bestposType);
-  g_latestPvtsln.latitudeDegrees = latField.toDouble();
-  g_latestPvtsln.longitudeDegrees = lonField.toDouble();
-  g_latestPvtsln.positionAccuracyMeters = conservativeHorizontalAccuracy(latStdField.toFloat(), lonStdField.toFloat());
-  g_latestPvtsln.satellitesInUse = static_cast<uint8_t>(solnSatsField.toInt());
+  g_latestPvtsln.latitudeDegrees = static_cast<double>(latitudeDegrees);
+  g_latestPvtsln.longitudeDegrees = static_cast<double>(longitudeDegrees);
+  g_latestPvtsln.positionAccuracyMeters = conservativeHorizontalAccuracy(latStd, lonStd);
+  g_latestPvtsln.satellitesInUse = static_cast<uint8_t>(satellitesInUse);
 
-  g_latestPvtsln.groundSpeedMetersPerSecond = groundSpeedField.toFloat();
-  g_latestPvtsln.groundSpeedValid = groundSpeedField.length() > 0;
+  g_latestPvtsln.groundSpeedValid = tryParseFloatStrict(groundSpeedField, groundSpeedMetersPerSecond);
+  g_latestPvtsln.groundSpeedMetersPerSecond = g_latestPvtsln.groundSpeedValid ? groundSpeedMetersPerSecond : 0.0f;
 
   g_latestPvtsln.headingValid = isHeadingTypeUsable(headingTypeField);
-  g_latestPvtsln.headingDegrees = headingField.toFloat();
+  const bool headingParsed = tryParseFloatStrict(headingField, headingDegrees);
+  g_latestPvtsln.headingValid = g_latestPvtsln.headingValid && headingParsed;
+  g_latestPvtsln.headingDegrees = headingParsed ? headingDegrees : 0.0f;
 
-  g_latestPvtsln.pitchValid = pitchField.length() > 0;
-  g_latestPvtsln.pitchDegrees = pitchField.toFloat();
+  g_latestPvtsln.pitchValid = tryParseFloatStrict(pitchField, g_latestPvtsln.pitchDegrees);
+  if (!g_latestPvtsln.pitchValid) {
+    g_latestPvtsln.pitchDegrees = 0.0f;
+  }
 
   if (g_latestUniheading.valid && g_latestUniheading.headingStdDevValid && (millis() - g_latestUniheading.localMillis) < 1000) {
     g_latestPvtsln.headingAccuracyDegrees = g_latestUniheading.headingStdDevDegrees;
@@ -1111,6 +1194,8 @@ void parsePvtslna(const char *line) {
     g_latestPvtsln.headingAccuracyDegrees = estimated;
     g_latestPvtsln.headingAccuracyValid = estimated > 0.0f;
   }
+
+  traceLowSatellitePvtslna(line, g_latestPvtsln.fixType, satellitesInUse);
 }
 
 // Convert UTC year/month/day/hour/min/sec/ms to milliseconds since the
@@ -1291,7 +1376,7 @@ void readUm982Lines() {
 // ===== GNSS payload =====
 void buildGnssPayload(uint8_t *payloadOut) {
   // Zero-fill so reserved bytes are deterministic.
-  memset(payloadOut, 0, GNSS_PAYLOAD_SIZE);
+  memset(payloadOut, 0, GNSS_SAMPLE_PAYLOAD_SIZE);
 
   const uint32_t nowMillis = millis();
 
@@ -1385,18 +1470,47 @@ void buildGnssPayload(uint8_t *payloadOut) {
   // off 36..39: reserved (zero-filled by memset)
 }
 
+void buildGnssDebugPayload(uint8_t *payloadOut) {
+  memset(payloadOut, 0, GNSS_DEBUG_PAYLOAD_SIZE);
+
+  if (!g_haveLowSatelliteTrace) {
+    return;
+  }
+
+  const size_t textCapacity = GNSS_DEBUG_PAYLOAD_SIZE - 4;
+  const size_t textLength = static_cast<size_t>(g_lastLowSatelliteRawTextLength);
+  const size_t copyLength = textLength > textCapacity ? textCapacity : textLength;
+
+  uint8_t flags = 0x01;
+  if (g_lastLowSatelliteRawTextTruncated) {
+    flags |= 0x02;
+  }
+  payloadOut[0] = flags;
+  payloadOut[1] = g_lastLowSatelliteSatellitesInUse;
+  payloadOut[2] = g_lastLowSatelliteFixType;
+  payloadOut[3] = static_cast<uint8_t>(copyLength);
+  memcpy(&payloadOut[4], g_lastLowSatelliteRawText, copyLength);
+}
+
 void refreshTxFrame() {
-  uint8_t payload[GNSS_PAYLOAD_SIZE];
+  uint8_t flags = 0;
+  if (g_lastRequestMessageType == MESSAGE_TYPE_GNSS_DEBUG_LINE) {
+    uint8_t payload[GNSS_DEBUG_PAYLOAD_SIZE];
+    buildGnssDebugPayload(payload);
+    g_txFrameLength = encodeFrame(MESSAGE_TYPE_GNSS_DEBUG_LINE, flags, g_lastRequestSequence, payload, GNSS_DEBUG_PAYLOAD_SIZE, g_txFrame);
+    return;
+  }
+
+  uint8_t payload[GNSS_SAMPLE_PAYLOAD_SIZE];
   buildGnssPayload(payload);
 
-  uint8_t flags = 0;
   if (!g_latestPvtsln.valid || g_latestPvtsln.fixType == FIX_NONE) {
     flags |= 0x01;
   }
   if (!g_latestPvtsln.headingValid) {
     flags |= 0x02;
   }
-  g_txFrameLength = encodeFrame(flags, g_lastRequestSequence, payload, GNSS_PAYLOAD_SIZE, g_txFrame);
+  g_txFrameLength = encodeFrame(MESSAGE_TYPE_GNSS_SAMPLE, flags, g_lastRequestSequence, payload, GNSS_SAMPLE_PAYLOAD_SIZE, g_txFrame);
 }
 
 // ===== I2C =====
@@ -1422,7 +1536,8 @@ void onReceive(int numBytes) {
     return;
   }
 
-  if (messageType == MESSAGE_TYPE_GNSS_SAMPLE) {
+  if (messageType == MESSAGE_TYPE_GNSS_SAMPLE || messageType == MESSAGE_TYPE_GNSS_DEBUG_LINE) {
+    g_lastRequestMessageType = messageType;
     g_lastRequestSequence = sequence;
     refreshTxFrame();
   }

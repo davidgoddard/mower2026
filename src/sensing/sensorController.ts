@@ -52,6 +52,13 @@ const IMU_DIAGNOSTIC_WINDOW_MS = 5_000;
 const IMU_DIAGNOSTIC_MAX_SAMPLES = 1_000;
 const IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT = 20;
 const HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC = 1;
+const IMU_BIAS_RECALIBRATION_WINDOW_MS = 2_000;
+const IMU_BIAS_RECALIBRATION_MIN_SAMPLES = 20;
+const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
+const IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC = 1;
+const IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS = 2_000;
+const MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS = 0.01;
+const GNSS_LOW_SATELLITE_TRACE_THRESHOLD = 8;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
@@ -139,8 +146,10 @@ export class SensorController extends EventEmitter {
   private previousMotorFeedbackTimestampMillis: number | null = null;
   private motorCommandActiveSinceMillis: number | null = null;
   private motorZeroCommandSinceMillis: number | null = null;
+  private motorStoppedSinceMillis: number | null = null;
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
+  private gnssLowSatelliteTraceActive = false;
   private stallMotionAnchorPosition: Position | null = null;
   private stallMotionAnchorSinceMillis: number | null = null;
   private stallDetectionSamples = 0;
@@ -153,7 +162,9 @@ export class SensorController extends EventEmitter {
   private imuDiagnosticSampleCount = 0;
   private imuDiagnosticLatestTimestampMillis: number | null = null;
   private latestTiltCompensatedYawRateDegPerSec: number | null = null;
+  private imuYawRateBiasDegPerSec = 0;
   private lastImuMotionStopSummary: ImuDiagnosticSummary | null = null;
+  private imuBiasAutoRecalibratedForCurrentStop = false;
 
   // Type-safe event subscription methods
   declare on: <K extends keyof SensorControllerEvents>(
@@ -196,12 +207,15 @@ export class SensorController extends EventEmitter {
     this.previousMotorFeedbackTimestampMillis = null;
     this.motorCommandActiveSinceMillis = null;
     this.motorZeroCommandSinceMillis = null;
+    this.motorStoppedSinceMillis = null;
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
+    this.gnssLowSatelliteTraceActive = false;
     this.stallMotionAnchorPosition = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
     this.stallDetectionLatched = false;
+    this.imuBiasAutoRecalibratedForCurrentStop = false;
     this.primitivesStore.update({
       sensorController: {
         status: "starting",
@@ -487,6 +501,58 @@ export class SensorController extends EventEmitter {
     return this.lastImuMotionStopSummary;
   }
 
+  /**
+   * Re-estimate IMU yaw-rate bias from recent stationary samples.
+   * Returns true when a new bias was applied.
+   */
+  recalibrateImuYawBias(): boolean {
+    const summary = this.getRecentImuDiagnosticSummary(IMU_BIAS_RECALIBRATION_WINDOW_MS, IMU_BIAS_RECALIBRATION_MIN_SAMPLES);
+    if (!summary || summary.sampleCount < IMU_BIAS_RECALIBRATION_MIN_SAMPLES || summary.averageYawRateDegPerSec === null) {
+      this.logger.warn("sensor.imu.bias_recalibration_skipped", {
+        reason: "insufficient_samples",
+        minSamples: IMU_BIAS_RECALIBRATION_MIN_SAMPLES,
+        windowMs: IMU_BIAS_RECALIBRATION_WINDOW_MS,
+        sampleCount: summary?.sampleCount ?? 0,
+      });
+      return false;
+    }
+
+    const proposedBias = summary.averageYawRateDegPerSec;
+    if (Math.abs(proposedBias) > IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC) {
+      this.logger.warn("sensor.imu.bias_recalibration_skipped", {
+        reason: "proposed_bias_out_of_range",
+        proposedBiasDegPerSec: proposedBias,
+        maxAbsBiasDegPerSec: IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC,
+        sampleCount: summary.sampleCount,
+        windowMs: summary.windowMs,
+      });
+      return false;
+    }
+
+    const previousBias = this.imuYawRateBiasDegPerSec;
+    const biasStep = proposedBias - previousBias;
+    if (Math.abs(biasStep) > IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC) {
+      this.logger.warn("sensor.imu.bias_recalibration_skipped", {
+        reason: "bias_step_too_large",
+        previousBiasDegPerSec: previousBias,
+        proposedBiasDegPerSec: proposedBias,
+        maxStepDegPerSec: IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC,
+        sampleCount: summary.sampleCount,
+        windowMs: summary.windowMs,
+      });
+      return false;
+    }
+
+    this.imuYawRateBiasDegPerSec = proposedBias;
+    this.logger.info("sensor.imu.bias_recalibrated", {
+      previousBiasDegPerSec: previousBias,
+      newBiasDegPerSec: this.imuYawRateBiasDegPerSec,
+      sampleCount: summary.sampleCount,
+      windowMs: summary.windowMs,
+    });
+    return true;
+  }
+
   getRecentImuDiagnosticSummary(
     windowMs: number = IMU_DIAGNOSTIC_WINDOW_MS,
     recentSampleLimit: number = IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT,
@@ -607,6 +673,7 @@ export class SensorController extends EventEmitter {
     while (this.running) {
       const loopStartedMillis = this.nowMillis();
       await this.pollAllSensors();
+      this.maybeAutoRecalibrateImuYawBias();
       if (systemStop.isStopped()) {
         try {
           await this.sendGentleStopMotorsCommand();
@@ -636,6 +703,38 @@ export class SensorController extends EventEmitter {
         this.running = false;
       }
     }
+  }
+
+  private maybeAutoRecalibrateImuYawBias(): void {
+    const stoppedSinceMillis = this.motorStoppedSinceMillis;
+    const rebaseReadiness = this.getHeadingRebaseReadiness();
+    const stationary = stoppedSinceMillis !== null && rebaseReadiness.safe;
+
+    if (!stationary) {
+      // Re-arm once movement resumes, so a subsequent settle can calibrate again.
+      this.imuBiasAutoRecalibratedForCurrentStop = false;
+      return;
+    }
+
+    if (this.imuBiasAutoRecalibratedForCurrentStop) {
+      return;
+    }
+
+    const stationaryDurationMs = this.nowMillis() - stoppedSinceMillis;
+    if (stationaryDurationMs < IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS) {
+      return;
+    }
+
+    this.imuBiasAutoRecalibratedForCurrentStop = true;
+    const applied = this.recalibrateImuYawBias();
+    this.logger.info("sensor.imu.bias_recalibration_auto_attempt", {
+      applied,
+      stationaryDurationMs,
+      settleMs: IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS,
+      zeroCommandSinceMillis: this.motorZeroCommandSinceMillis,
+      stoppedSinceMillis,
+      yawRateDegPerSec: rebaseReadiness.yawRateDegPerSec,
+    });
   }
 
   private async pollAllSensors(): Promise<void> {
@@ -680,12 +779,13 @@ export class SensorController extends EventEmitter {
         pitchDeg,
         rollDeg,
       );
-      this.latestTiltCompensatedYawRateDegPerSec = tiltCompensatedYawRateDegPerSec;
+      const biasCorrectedYawRateDegPerSec = tiltCompensatedYawRateDegPerSec - this.imuYawRateBiasDegPerSec;
+      this.latestTiltCompensatedYawRateDegPerSec = biasCorrectedYawRateDegPerSec;
       let yawDeltaDeg = 0;
       if (sampleDeltaMs !== null) {
         const safeDeltaSeconds = sampleDeltaMs / MS_PER_SECOND;
         const yawScaleFactor = this.imuCalibration?.getYawScaleFactor() ?? 1;
-        const yawDelta = createRelativeAngle(tiltCompensatedYawRateDegPerSec * safeDeltaSeconds * yawScaleFactor);
+        const yawDelta = createRelativeAngle(biasCorrectedYawRateDegPerSec * safeDeltaSeconds * yawScaleFactor);
         yawDeltaDeg = unwrapRelativeAngle(yawDelta);
         this.imuHeading = addRelativeAngle(this.imuHeading, yawDelta);
       }
@@ -698,7 +798,7 @@ export class SensorController extends EventEmitter {
         pitchDeg,
         rollDeg,
         rawYawRateDegPerSec,
-        tiltCompensatedYawRateDegPerSec,
+        tiltCompensatedYawRateDegPerSec: biasCorrectedYawRateDegPerSec,
         yawDeltaDeg,
       });
       this.previousImuSampleMillis = sample.timestampMillis;
@@ -778,6 +878,21 @@ export class SensorController extends EventEmitter {
         },
       });
 
+      this.primitivesStore.appendGnssHistory({
+        sampledAt: new Date(sample.timestampMillis).toISOString(),
+        timestampMillis: sample.timestampMillis,
+        xMeters: adjustedXMeters,
+        yMeters: adjustedYMeters,
+        headingDeg: internalHeadingDeg,
+        positionAccuracyMeters: sample.positionAccuracyMeters,
+        headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
+        fixType: sample.fixType,
+        satellitesInUse: sample.satellitesInUse,
+        sampleAgeMillis: sample.sampleAgeMillis,
+        headingValid: sample.headingValid ?? null,
+        groundSpeedMetersPerSecond: sample.groundSpeedMetersPerSecond ?? null,
+      });
+
       this.latestGnssPosition = adjustedPosition;
       this.latestGnssAccuracyMeters = sample.positionAccuracyMeters;
 
@@ -801,7 +916,10 @@ export class SensorController extends EventEmitter {
         ...(sample.headingBaselineMeters !== undefined ? { headingBaselineMeters: sample.headingBaselineMeters } : {}),
         ...(sample.headingValid !== undefined ? { headingValid: sample.headingValid } : {}),
         ...(sample.groundSpeedMetersPerSecond !== undefined ? { groundSpeedMetersPerSecond: sample.groundSpeedMetersPerSecond } : {}),
+        rawSample: sample,
       });
+
+      await this.maybeLogGnssLowSatelliteTrace(sample);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.primitivesStore.snapshot().gnss;
@@ -814,6 +932,48 @@ export class SensorController extends EventEmitter {
       });
       this.logger.error("sensor.gnss.poll_failed", { error: message });
     }
+  }
+
+  private async maybeLogGnssLowSatelliteTrace(sample: import("../gnss/gnssProtocol.js").GnssSample): Promise<void> {
+    if (sample.satellitesInUse >= GNSS_LOW_SATELLITE_TRACE_THRESHOLD) {
+      if (this.gnssLowSatelliteTraceActive) {
+        this.gnssLowSatelliteTraceActive = false;
+        this.logger.info("sensor.gnss.low_satellite_recovered", {
+          satellitesInUse: sample.satellitesInUse,
+          fixType: sample.fixType,
+        });
+      }
+      return;
+    }
+
+    if (this.gnssLowSatelliteTraceActive) {
+      return;
+    }
+
+    this.gnssLowSatelliteTraceActive = true;
+
+    let debugLine: import("../gnss/gnssDebugCodec.js").GnssDebugLine | null = null;
+    if (typeof this.gateway.readGnssDebugLine === "function") {
+      try {
+        debugLine = await this.gateway.readGnssDebugLine();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("sensor.gnss.low_satellite_trace_read_failed", {
+          error: message,
+          satellitesInUse: sample.satellitesInUse,
+          fixType: sample.fixType,
+        });
+      }
+    }
+
+    this.logger.warn("sensor.gnss.low_satellite_raw_line", {
+      satellitesInUse: sample.satellitesInUse,
+      fixType: sample.fixType,
+      debugSatellitesInUse: debugLine?.satellitesInUse ?? null,
+      debugFixType: debugLine?.fixType ?? null,
+      truncated: debugLine?.truncated ?? null,
+      rawPayload: debugLine?.rawPayload ?? null,
+    });
   }
 
   private async pollMotors(): Promise<void> {
@@ -867,6 +1027,7 @@ export class SensorController extends EventEmitter {
         sample.rightMotorCurrentAmps ?? null,
         sample.faultFlags,
       );
+      this.updateMotorStoppedState(wheelSpeed, rightWheelSpeed);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.primitivesStore.snapshot().motors;
@@ -1088,6 +1249,27 @@ export class SensorController extends EventEmitter {
 
     const elapsedSeconds = elapsedMillis / 1000;
     return (encoderDelta * metersPerTick) / elapsedSeconds;
+  }
+
+  private updateMotorStoppedState(
+    leftWheelSpeedMetersPerSecond: number,
+    rightWheelSpeedMetersPerSecond: number,
+  ): void {
+    const command = this.lastMotorCommand;
+    const stopCommandIssued = command !== null && !this.isMotorCommandMotion(command);
+    const wheelsStationary =
+      Math.abs(leftWheelSpeedMetersPerSecond) <= MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS &&
+      Math.abs(rightWheelSpeedMetersPerSecond) <= MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS;
+
+    if (!stopCommandIssued || !wheelsStationary) {
+      this.motorStoppedSinceMillis = null;
+      this.imuBiasAutoRecalibratedForCurrentStop = false;
+      return;
+    }
+
+    if (this.motorStoppedSinceMillis === null) {
+      this.motorStoppedSinceMillis = this.nowMillis();
+    }
   }
 
   /**

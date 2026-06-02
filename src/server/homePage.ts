@@ -499,6 +499,29 @@ ${getSensorWidgetLayoutStyles()}
         margin-top: 0.5rem;
       }
 
+      .warning-banner {
+        display: none;
+        margin-bottom: 1.5rem;
+        padding: 0.9rem 1rem;
+        border-radius: 0.75rem;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        background: linear-gradient(180deg, rgba(255, 247, 237, 0.98), rgba(254, 243, 199, 0.82));
+        color: #92400e;
+        box-shadow: var(--shadow-sm);
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+
+      .warning-banner strong {
+        color: #78350f;
+      }
+
+      .warning-banner.bad {
+        border-color: rgba(239, 68, 68, 0.4);
+        background: linear-gradient(180deg, rgba(254, 242, 242, 0.98), rgba(254, 226, 226, 0.86));
+        color: #991b1b;
+      }
+
       .footer {
         background: var(--bg-primary);
         border-top: 1px solid var(--border-color);
@@ -725,25 +748,30 @@ ${getSensorWidgetScriptTag()}
           </div>
         </div>
       </div>
-      <!-- Heading Timeline -->
+      <div id="gnss-sat-warning" class="warning-banner" role="status" aria-live="polite"></div>
+      <!-- GNSS Satellite History -->
       <div class="timeline-section">
-        <div class="timeline-section-title">Heading History (last hour)</div>
-        <canvas id="headingCanvas" class="timeline-canvas" height="200"></canvas>
+        <div class="timeline-section-title">GNSS Satellites History (last hour)</div>
+        <canvas id="satelliteCountCanvas" class="timeline-canvas" height="200"></canvas>
         <div class="timeline-legend">
-          <span><span class="legend-swatch" style="background:#2563eb;"></span>IMU (fused)</span>
-          <span><span class="legend-swatch" style="background:#f59e0b;"></span>GNSS heading ± accuracy</span>
+          <span><span class="legend-swatch" style="background:#2563eb;"></span>Satellites in use</span>
+          <span><span class="legend-swatch" style="background:#f59e0b;"></span>8 min</span>
+          <span><span class="legend-swatch" style="background:#10b981;"></span>12 preferred</span>
         </div>
-        <div class="timeline-stats" id="headingStats">Waiting for heading data…</div>
+        <div class="timeline-stats" id="satelliteCountStats">Waiting for satellite data…</div>
       </div>
 
-      <!-- Position Accuracy Timeline -->
+      <!-- GNSS Fix History -->
       <div class="timeline-section">
-        <div class="timeline-section-title">Position Accuracy History (last hour)</div>
-        <canvas id="posAccCanvas" class="timeline-canvas" height="140"></canvas>
+        <div class="timeline-section-title">GNSS Fix State History (last hour)</div>
+        <canvas id="fixStateCanvas" class="timeline-canvas" height="140"></canvas>
         <div class="timeline-legend">
-          <span><span class="legend-swatch" style="background:#10b981;"></span>GNSS position accuracy (m)</span>
+          <span><span class="legend-swatch" style="background:#9ca3af;"></span>none</span>
+          <span><span class="legend-swatch" style="background:#f59e0b;"></span>single</span>
+          <span><span class="legend-swatch" style="background:#fbbf24;"></span>float</span>
+          <span><span class="legend-swatch" style="background:#10b981;"></span>fixed</span>
         </div>
-        <div class="timeline-stats" id="posAccStats">Waiting for accuracy data…</div>
+        <div class="timeline-stats" id="fixStateStats">Waiting for fix data…</div>
       </div>
     </div>
 
@@ -798,21 +826,18 @@ ${getSensorWidgetScriptTag()}
         return newPeak;
       }
 
-      // ── Timeline history ──────────────────────────────────────────────────
+      // ── GNSS history ─────────────────────────────────────────────────────
       const MAX_TIMELINE_POINTS = 3600;
+      const MIN_SATELLITES = 8;
+      const PREFERRED_SATELLITES = 12;
 
-      // Each entry: { imuDeg, gnssDeg, gnssAccDeg, posAccM } — all InternalHeading, all nullable
-      const timelineHistory = [];
+      // Each entry comes from the server-side GNSS ring buffer.
+      let satelliteHistory = [];
 
-      const headingCanvas = document.getElementById('headingCanvas');
-      const headingCtx = headingCanvas.getContext('2d');
-      const posAccCanvas = document.getElementById('posAccCanvas');
-      const posAccCtx = posAccCanvas.getContext('2d');
-
-      // InternalHeading (-180..180 Cartesian) → FieldHeading (0..360 N=0)
-      function internalToField(deg) {
-        return ((90 - deg) % 360 + 360) % 360;
-      }
+      const satelliteCountCanvas = document.getElementById('satelliteCountCanvas');
+      const satelliteCountCtx = satelliteCountCanvas.getContext('2d');
+      const fixStateCanvas = document.getElementById('fixStateCanvas');
+      const fixStateCtx = fixStateCanvas.getContext('2d');
 
       function syncCanvasWidth(canvas) {
         const w = canvas.clientWidth || canvas.parentElement.clientWidth || 900;
@@ -820,169 +845,273 @@ ${getSensorWidgetScriptTag()}
         return canvas.width;
       }
 
-      function addTimelinePoint(imuDeg, gnssDeg, gnssAccDeg, posAccM) {
-        timelineHistory.push({ imuDeg, gnssDeg, gnssAccDeg, posAccM });
-        if (timelineHistory.length > MAX_TIMELINE_POINTS) timelineHistory.shift();
+      function fixTypeToScore(fixType) {
+        switch ((fixType || 'none').toLowerCase()) {
+          case 'fixed':
+          case 'rtk-fixed':
+            return 3;
+          case 'float':
+          case 'rtk-float':
+            return 2;
+          case 'single':
+            return 1;
+          case 'none':
+          case 'unknown':
+          default:
+            return 0;
+        }
       }
 
-      function drawHeadingTimeline() {
-        const W = syncCanvasWidth(headingCanvas);
-        const H = headingCanvas.height;
-        const padL = 46, padR = 10, padT = 10, padB = 22;
-        const plotW = W - padL - padR;
-        const plotH = H - padT - padB;
-        const n = timelineHistory.length;
-
-        headingCtx.clearRect(0, 0, W, H);
-        headingCtx.fillStyle = '#ffffff';
-        headingCtx.fillRect(0, 0, W, H);
-
-        const yFor = (deg) => padT + plotH - (deg / 360) * plotH;
-        const xFor = (i) => padL + (i / Math.max(n - 1, 1)) * plotW;
-
-        // Grid lines every 45°
-        headingCtx.strokeStyle = 'rgba(0,0,0,0.07)';
-        headingCtx.lineWidth = 1;
-        headingCtx.fillStyle = '#111827';
-        headingCtx.font = '10px system-ui,sans-serif';
-        headingCtx.textAlign = 'right';
-        for (let ang = 0; ang <= 360; ang += 45) {
-          const y = yFor(ang);
-          headingCtx.beginPath();
-          headingCtx.moveTo(padL, y);
-          headingCtx.lineTo(padL + plotW, y);
-          headingCtx.stroke();
-          headingCtx.fillText(ang + '°', padL - 4, y + 3.5);
+      function fixTypeLabel(fixType) {
+        switch ((fixType || 'none').toLowerCase()) {
+          case 'fixed':
+          case 'rtk-fixed':
+            return 'fixed';
+          case 'float':
+          case 'rtk-float':
+            return 'float';
+          case 'single':
+            return 'single';
+          case 'none':
+          case 'unknown':
+          default:
+            return 'none';
         }
-
-        if (n === 0) return;
-
-        // GNSS accuracy band — one ImageData column per point
-        for (let i = 0; i < n; i++) {
-          const pt = timelineHistory[i];
-          if (pt.gnssDeg === null || pt.gnssAccDeg === null) continue;
-          const cx = Math.round(xFor(i));
-          const cyCentre = yFor(pt.gnssDeg) - padT; // relative to plot area
-          const halfBandPx = (pt.gnssAccDeg / 360) * plotH;
-          const col = new Uint8ClampedArray(plotH * 4);
-          for (let py = 0; py < plotH; py++) {
-            const dist = Math.abs(py - cyCentre);
-            const a = halfBandPx > 0 ? Math.max(0, 1 - dist / halfBandPx) * 100 : 0;
-            const idx = py * 4;
-            col[idx] = 245; col[idx + 1] = 158; col[idx + 2] = 11; col[idx + 3] = Math.round(a);
-          }
-          headingCtx.putImageData(new ImageData(col, 1, plotH), cx, padT);
-        }
-
-        // IMU line
-        headingCtx.strokeStyle = '#2563eb';
-        headingCtx.lineWidth = 1.5;
-        headingCtx.beginPath();
-        let started = false;
-        for (let i = 0; i < n; i++) {
-          const pt = timelineHistory[i];
-          if (pt.imuDeg === null) { started = false; continue; }
-          const x = xFor(i), y = yFor(internalToField(pt.imuDeg));
-          if (!started) { headingCtx.moveTo(x, y); started = true; } else headingCtx.lineTo(x, y);
-        }
-        headingCtx.stroke();
-
-        // GNSS heading line
-        headingCtx.strokeStyle = '#f59e0b';
-        headingCtx.lineWidth = 2;
-        headingCtx.beginPath();
-        started = false;
-        for (let i = 0; i < n; i++) {
-          const pt = timelineHistory[i];
-          if (pt.gnssDeg === null) { started = false; continue; }
-          const x = xFor(i), y = yFor(internalToField(pt.gnssDeg));
-          if (!started) { headingCtx.moveTo(x, y); started = true; } else headingCtx.lineTo(x, y);
-        }
-        headingCtx.stroke();
-
-        // Y-axis label
-        headingCtx.save();
-        headingCtx.fillStyle = '#111827';
-        headingCtx.font = '10px system-ui,sans-serif';
-        headingCtx.textAlign = 'center';
-        headingCtx.translate(8, padT + plotH / 2);
-        headingCtx.rotate(-Math.PI / 2);
-        headingCtx.fillText('Heading (°)', 0, 0);
-        headingCtx.restore();
-
-        const last = timelineHistory[n - 1];
-        document.getElementById('headingStats').textContent =
-          n + ' points' +
-          (last.imuDeg !== null ? ' | IMU: ' + internalToField(last.imuDeg).toFixed(1) + '°' : '') +
-          (last.gnssDeg !== null ? ' | GNSS: ' + internalToField(last.gnssDeg).toFixed(1) + '°' +
-            (last.gnssAccDeg !== null ? ' ±' + last.gnssAccDeg.toFixed(1) + '°' : '') : '');
       }
 
-      let posAccMaxM = 0.5;
+      function fixTypeColor(fixType) {
+        switch (fixTypeLabel(fixType)) {
+          case 'fixed':
+            return '#10b981';
+          case 'float':
+            return '#fbbf24';
+          case 'single':
+            return '#f59e0b';
+          case 'none':
+          default:
+            return '#9ca3af';
+        }
+      }
 
-      function drawPosAccTimeline() {
-        const W = syncCanvasWidth(posAccCanvas);
-        const H = posAccCanvas.height;
+      function drawSatelliteCountTimeline() {
+        const W = syncCanvasWidth(satelliteCountCanvas);
+        const H = satelliteCountCanvas.height;
         const padL = 52, padR = 10, padT = 10, padB = 22;
         const plotW = W - padL - padR;
         const plotH = H - padT - padB;
-        const n = timelineHistory.length;
+        const n = satelliteHistory.length;
 
-        posAccCtx.clearRect(0, 0, W, H);
-        posAccCtx.fillStyle = '#ffffff';
-        posAccCtx.fillRect(0, 0, W, H);
+        satelliteCountCtx.clearRect(0, 0, W, H);
+        satelliteCountCtx.fillStyle = '#ffffff';
+        satelliteCountCtx.fillRect(0, 0, W, H);
 
-        for (const pt of timelineHistory) {
-          if (pt.posAccM !== null && pt.posAccM > posAccMaxM) {
-            posAccMaxM = Math.ceil(pt.posAccM * 2) / 2;
-          }
+        let maxCount = PREFERRED_SATELLITES;
+        let minCount = null;
+        let sumCount = 0;
+        let countSamples = 0;
+        let lowCountSamples = 0;
+        let zeroCountSamples = 0;
+
+        for (const pt of satelliteHistory) {
+          if (pt.satellitesInUse === null || pt.satellitesInUse === undefined) continue;
+          maxCount = Math.max(maxCount, pt.satellitesInUse);
+          minCount = minCount === null ? pt.satellitesInUse : Math.min(minCount, pt.satellitesInUse);
+          sumCount += pt.satellitesInUse;
+          countSamples += 1;
+          if (pt.satellitesInUse < MIN_SATELLITES) lowCountSamples += 1;
+          if (pt.satellitesInUse === 0) zeroCountSamples += 1;
         }
 
-        const yFor = (m) => padT + plotH - (m / posAccMaxM) * plotH;
+        const yMax = Math.max(PREFERRED_SATELLITES, Math.ceil(maxCount / 4) * 4);
+        const yFor = (count) => padT + plotH - (count / yMax) * plotH;
         const xFor = (i) => padL + (i / Math.max(n - 1, 1)) * plotW;
 
-        const step = posAccMaxM <= 0.5 ? 0.1 : posAccMaxM <= 2 ? 0.5 : 1;
-        posAccCtx.strokeStyle = 'rgba(0,0,0,0.07)';
-        posAccCtx.lineWidth = 1;
-        posAccCtx.fillStyle = '#111827';
-        posAccCtx.font = '10px system-ui,sans-serif';
-        posAccCtx.textAlign = 'right';
-        for (let m = 0; m <= posAccMaxM + 0.001; m = Math.round((m + step) * 1000) / 1000) {
-          const y = yFor(m);
-          posAccCtx.beginPath();
-          posAccCtx.moveTo(padL, y);
-          posAccCtx.lineTo(padL + plotW, y);
-          posAccCtx.stroke();
-          posAccCtx.fillText(m.toFixed(2) + 'm', padL - 4, y + 3.5);
+        satelliteCountCtx.strokeStyle = 'rgba(0,0,0,0.07)';
+        satelliteCountCtx.lineWidth = 1;
+        satelliteCountCtx.fillStyle = '#111827';
+        satelliteCountCtx.font = '10px system-ui,sans-serif';
+        satelliteCountCtx.textAlign = 'right';
+
+        const gridStep = yMax <= 16 ? 2 : 4;
+        for (let count = 0; count <= yMax; count += gridStep) {
+          const y = yFor(count);
+          satelliteCountCtx.beginPath();
+          satelliteCountCtx.moveTo(padL, y);
+          satelliteCountCtx.lineTo(padL + plotW, y);
+          satelliteCountCtx.stroke();
+          satelliteCountCtx.fillText(String(count), padL - 4, y + 3.5);
+        }
+
+        const minLineY = yFor(MIN_SATELLITES);
+        satelliteCountCtx.strokeStyle = 'rgba(245,158,11,0.9)';
+        satelliteCountCtx.setLineDash([4, 4]);
+        satelliteCountCtx.beginPath();
+        satelliteCountCtx.moveTo(padL, minLineY);
+        satelliteCountCtx.lineTo(padL + plotW, minLineY);
+        satelliteCountCtx.stroke();
+        satelliteCountCtx.setLineDash([]);
+        satelliteCountCtx.fillStyle = '#b45309';
+        satelliteCountCtx.textAlign = 'left';
+        satelliteCountCtx.fillText(MIN_SATELLITES + ' min', padL + 4, minLineY - 4);
+
+        const preferredLineY = yFor(PREFERRED_SATELLITES);
+        satelliteCountCtx.strokeStyle = 'rgba(16,185,129,0.7)';
+        satelliteCountCtx.setLineDash([2, 4]);
+        satelliteCountCtx.beginPath();
+        satelliteCountCtx.moveTo(padL, preferredLineY);
+        satelliteCountCtx.lineTo(padL + plotW, preferredLineY);
+        satelliteCountCtx.stroke();
+        satelliteCountCtx.setLineDash([]);
+        satelliteCountCtx.fillStyle = '#047857';
+        satelliteCountCtx.fillText(PREFERRED_SATELLITES + ' preferred', padL + 4, preferredLineY - 4);
+
+        if (n === 0) return;
+
+        satelliteCountCtx.strokeStyle = '#2563eb';
+        satelliteCountCtx.lineWidth = 1.75;
+        satelliteCountCtx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const pt = satelliteHistory[i];
+          if (pt.satellitesInUse === null || pt.satellitesInUse === undefined) {
+            started = false;
+            continue;
+          }
+          const x = xFor(i);
+          const y = yFor(pt.satellitesInUse);
+          if (!started) {
+            satelliteCountCtx.moveTo(x, y);
+            started = true;
+          } else {
+            satelliteCountCtx.lineTo(x, y);
+          }
+        }
+        satelliteCountCtx.stroke();
+
+        for (let i = 0; i < n; i++) {
+          const pt = satelliteHistory[i];
+          if (pt.satellitesInUse === null || pt.satellitesInUse === undefined) continue;
+          const x = xFor(i);
+          const y = yFor(pt.satellitesInUse);
+          satelliteCountCtx.fillStyle = pt.satellitesInUse < MIN_SATELLITES ? '#f59e0b' : '#2563eb';
+          satelliteCountCtx.beginPath();
+          satelliteCountCtx.arc(x, y, pt.satellitesInUse < MIN_SATELLITES ? 2.8 : 2.2, 0, Math.PI * 2);
+          satelliteCountCtx.fill();
+        }
+
+        satelliteCountCtx.save();
+        satelliteCountCtx.fillStyle = '#111827';
+        satelliteCountCtx.font = '10px system-ui,sans-serif';
+        satelliteCountCtx.textAlign = 'center';
+        satelliteCountCtx.translate(8, padT + plotH / 2);
+        satelliteCountCtx.rotate(-Math.PI / 2);
+        satelliteCountCtx.fillText('Satellites in use', 0, 0);
+        satelliteCountCtx.restore();
+
+        const last = satelliteHistory[n - 1];
+        const avgCount = countSamples > 0 ? sumCount / countSamples : null;
+        const maxText = countSamples > 0 ? String(maxCount) : 'n/a';
+        document.getElementById('satelliteCountStats').textContent =
+          n + ' points' +
+          (last.satellitesInUse !== null && last.satellitesInUse !== undefined ? ' | current: ' + last.satellitesInUse : ' | current: n/a') +
+          (minCount !== null ? ' | min: ' + minCount : '') +
+          (avgCount !== null ? ' | avg: ' + avgCount.toFixed(1) : '') +
+          ' | max: ' + maxText +
+          ' | below 8: ' + lowCountSamples +
+          ' | zeros: ' + zeroCountSamples;
+      }
+
+      function drawFixStateTimeline() {
+        const W = syncCanvasWidth(fixStateCanvas);
+        const H = fixStateCanvas.height;
+        const padL = 52, padR = 10, padT = 10, padB = 22;
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
+        const n = satelliteHistory.length;
+
+        fixStateCtx.clearRect(0, 0, W, H);
+        fixStateCtx.fillStyle = '#ffffff';
+        fixStateCtx.fillRect(0, 0, W, H);
+
+        const yFor = (score) => padT + plotH - (score / 3) * plotH;
+        const xFor = (i) => padL + (i / Math.max(n - 1, 1)) * plotW;
+
+        const labels = ['none', 'single', 'float', 'fixed'];
+        const colors = ['#9ca3af', '#f59e0b', '#fbbf24', '#10b981'];
+
+        fixStateCtx.strokeStyle = 'rgba(0,0,0,0.07)';
+        fixStateCtx.lineWidth = 1;
+        fixStateCtx.fillStyle = '#111827';
+        fixStateCtx.font = '10px system-ui,sans-serif';
+        fixStateCtx.textAlign = 'right';
+        for (let score = 0; score <= 3; score += 1) {
+          const y = yFor(score);
+          fixStateCtx.beginPath();
+          fixStateCtx.moveTo(padL, y);
+          fixStateCtx.lineTo(padL + plotW, y);
+          fixStateCtx.stroke();
+          fixStateCtx.fillText(labels[score], padL - 4, y + 3.5);
+          fixStateCtx.fillStyle = colors[score];
+          fixStateCtx.fillRect(padL + 3, y - 1, 10, 2);
+          fixStateCtx.fillStyle = '#111827';
         }
 
         if (n === 0) return;
 
-        posAccCtx.strokeStyle = '#10b981';
-        posAccCtx.lineWidth = 1.5;
-        posAccCtx.beginPath();
+        fixStateCtx.strokeStyle = '#64748b';
+        fixStateCtx.lineWidth = 1.5;
+        fixStateCtx.beginPath();
         let started = false;
         for (let i = 0; i < n; i++) {
-          const pt = timelineHistory[i];
-          if (pt.posAccM === null) { started = false; continue; }
-          const x = xFor(i), y = yFor(pt.posAccM);
-          if (!started) { posAccCtx.moveTo(x, y); started = true; } else posAccCtx.lineTo(x, y);
+          const pt = satelliteHistory[i];
+          if (pt.fixType === null || pt.fixType === undefined) {
+            started = false;
+            continue;
+          }
+          const x = xFor(i);
+          const y = yFor(fixTypeToScore(pt.fixType));
+          if (!started) {
+            fixStateCtx.moveTo(x, y);
+            started = true;
+          } else {
+            fixStateCtx.lineTo(x, y);
+          }
         }
-        posAccCtx.stroke();
+        fixStateCtx.stroke();
 
-        posAccCtx.save();
-        posAccCtx.fillStyle = '#111827';
-        posAccCtx.font = '10px system-ui,sans-serif';
-        posAccCtx.textAlign = 'center';
-        posAccCtx.translate(8, padT + plotH / 2);
-        posAccCtx.rotate(-Math.PI / 2);
-        posAccCtx.fillText('Acc (m)', 0, 0);
-        posAccCtx.restore();
+        for (let i = 0; i < n; i++) {
+          const pt = satelliteHistory[i];
+          if (pt.fixType === null || pt.fixType === undefined) continue;
+          const x = xFor(i);
+          const y = yFor(fixTypeToScore(pt.fixType));
+          fixStateCtx.fillStyle = fixTypeColor(pt.fixType);
+          fixStateCtx.beginPath();
+          fixStateCtx.arc(x, y, 2.6, 0, Math.PI * 2);
+          fixStateCtx.fill();
+        }
 
-        const last = timelineHistory[n - 1];
-        document.getElementById('posAccStats').textContent =
-          n + ' points | current: ' + (last.posAccM !== null ? last.posAccM.toFixed(3) + ' m' : 'n/a') +
-          ' | scale: 0–' + posAccMaxM.toFixed(2) + ' m';
+        fixStateCtx.save();
+        fixStateCtx.fillStyle = '#111827';
+        fixStateCtx.font = '10px system-ui,sans-serif';
+        fixStateCtx.textAlign = 'center';
+        fixStateCtx.translate(8, padT + plotH / 2);
+        fixStateCtx.rotate(-Math.PI / 2);
+        fixStateCtx.fillText('Fix state', 0, 0);
+        fixStateCtx.restore();
+
+        const last = satelliteHistory[n - 1];
+        const fixCounts = { none: 0, single: 0, float: 0, fixed: 0 };
+        for (const pt of satelliteHistory) {
+          if (pt.fixType === null || pt.fixType === undefined) continue;
+          fixCounts[fixTypeLabel(pt.fixType)] += 1;
+        }
+        document.getElementById('fixStateStats').textContent =
+          n + ' points' +
+          (last.fixType ? ' | current: ' + last.fixType : ' | current: n/a') +
+          ' | fixed: ' + fixCounts.fixed +
+          ' | float: ' + fixCounts.float +
+          ' | single: ' + fixCounts.single +
+          ' | none: ' + fixCounts.none;
       }
 
       async function updateDashboard() {
@@ -1098,14 +1227,29 @@ ${getSensorWidgetScriptTag()}
             : '—';
 
           // Update timelines
-          addTimelinePoint(
-            imu.status !== 'error' ? imu.headingDeg : null,
-            gnss.status !== 'error' ? gnss.headingDeg : null,
-            gnss.status !== 'error' ? gnss.headingAccuracyDeg : null,
-            gnss.status !== 'error' ? gnss.positionAccuracyMeters : null
-          );
-          drawHeadingTimeline();
-          drawPosAccTimeline();
+          satelliteHistory = Array.isArray(primitives.primitives.gnssHistory)
+            ? primitives.primitives.gnssHistory.slice(-MAX_TIMELINE_POINTS)
+            : [];
+          drawSatelliteCountTimeline();
+          drawFixStateTimeline();
+
+          const gnssSatWarning = document.getElementById('gnss-sat-warning');
+          if (gnssSatWarning) {
+            const satellitesInUse = gnss.satellitesInUse;
+            if (satellitesInUse !== null && satellitesInUse !== undefined && satellitesInUse < MIN_SATELLITES) {
+              const fixText = gnss.fixType ? String(gnss.fixType) : 'unknown';
+              gnssSatWarning.className = 'warning-banner bad';
+              gnssSatWarning.style.display = 'block';
+              gnssSatWarning.innerHTML =
+                '<strong>GNSS satellite count is low.</strong> ' +
+                'Receiver reports ' + satellitesInUse + ' satellites with fix type ' + fixText +
+                '. Calibration and pose fusion may be unreliable below ' + MIN_SATELLITES + '.';
+            } else {
+              gnssSatWarning.style.display = 'none';
+              gnssSatWarning.textContent = '';
+              gnssSatWarning.className = 'warning-banner';
+            }
+          }
 
           // Update footer
           const serverStatusDot = document.getElementById('server-status');

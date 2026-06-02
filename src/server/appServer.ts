@@ -5,6 +5,7 @@ import { TurnController } from "../control/turnController.js";
 import { TurnLearningModel } from "../control/turnLearningModel.js";
 import { TurnValidationRunner } from "../control/turnValidationRunner.js";
 import { DriveController } from "../control/driveController.js";
+import { DriveLineController } from "../control/driveLineController.js";
 import type { DriveResult } from "../control/driveControllerTypes.js";
 import { DriveLearningModel } from "../control/driveLearningModel.js";
 import { SegmentTestRunner } from "../control/segmentTestRunner.js";
@@ -31,7 +32,16 @@ import { DeadReckoningCalibrator } from "../control/deadReckoningCalibrator.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { createPosition, unwrapMeters } from "../geometry/positionTypes.js";
-import { MAX_PORT_NUMBER, MAX_WHEEL_OUTPUT_PERCENT_DEFAULT, MAX_WHEEL_SPEED_MPS_DEFAULT, SENSOR_CONTROLLER_POLL_INTERVAL_MS } from "../constants.js";
+import {
+  MAX_PORT_NUMBER,
+  MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
+  MAX_WHEEL_SPEED_MPS_DEFAULT,
+  SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+  ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE,
+  ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE,
+  WHEEL_BASE_METERS_MIN_PLAUSIBLE,
+  WHEEL_BASE_METERS_MAX_PLAUSIBLE,
+} from "../constants.js";
 import { PathRecorder, PathStore, PurePursuitFollower, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath, MowingExecutor } from "../pathfollowing/index.js";
 import type { PathDriveAlgorithm, MowingStatus } from "../pathfollowing/index.js";
 
@@ -343,6 +353,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let turnValidationRunner: TurnValidationRunner | null = null;
   let poseFusion: PoseFusion | null = null;
   let driveLearningModel: DriveLearningModel | null = null;
+  let driveLineController: DriveLineController | null = null;
   let driveController: DriveController | null = null;
   let segmentTestRunner: SegmentTestRunner | null = null;
   let deadReckoningCalibrator: DeadReckoningCalibrator | null = null;
@@ -1516,9 +1527,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Start dead-reckoning calibration
         if (requestUrl.pathname === "/api/dead-reckoning/start" && deadReckoningCalibrator) {
+          const data = body.trim().length > 0 ? JSON.parse(body) : {};
+          const lineDistanceMeters = typeof data.lineDistanceMeters === "number" ? data.lineDistanceMeters : undefined;
           systemStop.clearStop("dead-reckoning-run");
           // Fire-and-forget — the status endpoint is polled separately
-          deadReckoningCalibrator.run().catch((err) => {
+          deadReckoningCalibrator.run({ lineDistanceMeters }).catch((err) => {
             logger.warn("dead_reckoning.run_error", { error: err instanceof Error ? err.message : String(err) });
           });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1548,8 +1561,20 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const wheelbase = typeof data.wheelbaseMeters     === "number" ? data.wheelbaseMeters     : null;
           const sharedMPT = typeof data.encoderMetersPerTick === "number" ? data.encoderMetersPerTick : null;
 
-          if (leftMPT !== null && rightMPT !== null && wheelbase !== null &&
-              leftMPT > 0 && rightMPT > 0 && wheelbase > 0) {
+          const leftMptPlausible = leftMPT !== null &&
+            leftMPT >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE &&
+            leftMPT <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE;
+          const rightMptPlausible = rightMPT !== null &&
+            rightMPT >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE &&
+            rightMPT <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE;
+          const wheelbasePlausible = wheelbase !== null &&
+            wheelbase >= WHEEL_BASE_METERS_MIN_PLAUSIBLE &&
+            wheelbase <= WHEEL_BASE_METERS_MAX_PLAUSIBLE;
+          const sharedMptPlausible = sharedMPT !== null &&
+            sharedMPT >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE &&
+            sharedMPT <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE;
+
+          if (leftMptPlausible && rightMptPlausible && wheelbasePlausible) {
             await poseFusion.setPerWheelCalibration(leftMPT, rightMPT, wheelbase);
             response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
             response.end(encodeJson({
@@ -1559,7 +1584,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
               wheelbaseMeters: wheelbase,
               encoderMetersPerTick: (leftMPT + rightMPT) / 2,
             }));
-          } else if (sharedMPT !== null && sharedMPT > 0) {
+          } else if (sharedMptPlausible) {
             await poseFusion.setEncoderCalibration(sharedMPT);
             response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
             response.end(encodeJson({ applied: true, encoderMetersPerTick: sharedMPT }));
@@ -1913,12 +1938,21 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     // Initialize drive controller
     driveLearningModel = new DriveLearningModel({ logger });
     await driveLearningModel.loadParameters();
+    driveLineController = new DriveLineController({
+      sensorController,
+      poseFusion,
+      logger,
+      learningModel: driveLearningModel,
+      motorCalibration: motorCalibration!,
+    });
+
     driveController = new DriveController({
       sensorController,
       poseFusion,
       turnController,
       logger,
       learningModel: driveLearningModel,
+      lineDriveController: driveLineController,
       motorCalibration: motorCalibration!,
     });
 
@@ -1934,6 +1968,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       poseFusion,
       poseCalibration: poseCalibration!,
       motorCalibration: motorCalibration ?? undefined,
+      driveLineController,
+      turnController,
       logger,
     });
 

@@ -1,5 +1,19 @@
 export interface PrimitiveSnapshot {
   sampledAt: string;
+  gnssHistory: Array<{
+    sampledAt: string;
+    timestampMillis: number;
+    xMeters: number;
+    yMeters: number;
+    headingDeg: number | null;
+    positionAccuracyMeters: number | null;
+    headingAccuracyDeg: number | null;
+    fixType: "unknown" | "none" | "single" | "float" | "fixed";
+    satellitesInUse: number | null;
+    sampleAgeMillis: number | null;
+    headingValid: boolean | null;
+    groundSpeedMetersPerSecond: number | null;
+  }>;
   sensorController: {
     status: "idle" | "starting" | "running" | "error" | "stopped";
     pollIntervalMs: number;
@@ -62,6 +76,7 @@ export interface PrimitiveSnapshot {
 
 export class PrimitivesStore {
   private snapshotValue: PrimitiveSnapshot;
+  private static readonly GNSS_HISTORY_WINDOW_MS = 60 * 60 * 1000;
 
   constructor() {
     this.snapshotValue = this.buildDefaultSnapshot();
@@ -70,6 +85,7 @@ export class PrimitivesStore {
   snapshot(): PrimitiveSnapshot {
     return {
       ...this.snapshotValue,
+      gnssHistory: this.snapshotValue.gnssHistory.map((entry) => ({ ...entry })),
       imu: { ...this.snapshotValue.imu },
       gnss: { ...this.snapshotValue.gnss },
       poseFusion: { ...this.snapshotValue.poseFusion },
@@ -77,10 +93,22 @@ export class PrimitivesStore {
     };
   }
 
+  appendGnssHistory(entry: PrimitiveSnapshot["gnssHistory"][number]): void {
+    const cutoffMillis = entry.timestampMillis - PrimitivesStore.GNSS_HISTORY_WINDOW_MS;
+    this.snapshotValue = {
+      ...this.snapshotValue,
+      gnssHistory: [...this.snapshotValue.gnssHistory, { ...entry }].filter((sample) => sample.timestampMillis >= cutoffMillis),
+      sampledAt: new Date(entry.timestampMillis).toISOString(),
+    };
+  }
+
   update(partial: Partial<PrimitiveSnapshot>): void {
     this.snapshotValue = {
       ...this.snapshotValue,
       ...partial,
+      gnssHistory: partial.gnssHistory !== undefined
+        ? partial.gnssHistory.map((entry) => ({ ...entry }))
+        : this.snapshotValue.gnssHistory,
       imu: {
         ...this.snapshotValue.imu,
         ...(partial.imu ?? {}),
@@ -104,6 +132,7 @@ export class PrimitivesStore {
   private buildDefaultSnapshot(): PrimitiveSnapshot {
     return {
       sampledAt: new Date().toISOString(),
+      gnssHistory: [],
       sensorController: {
         status: "idle",
         pollIntervalMs: 33,

@@ -137,15 +137,20 @@ export class TurnController {
         smallTurnBrakeFraction,
         smallAngleThreshold: this.learningModel.getSmallAngleThreshold(),
         turnIsSmallAngle: this.turnIsSmallAngle,
+        wheelOutputScale: request.wheelOutputScale ?? 1,
       });
 
       this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
       subscribed = true;
 
+      const wheelScale = request.wheelOutputScale === undefined
+        ? 1
+        : Math.max(0.1, Math.min(1, request.wheelOutputScale));
+      const scaledMaxWheelOutputPercent = this.maxWheelOutputPercent * wheelScale;
       this.status = "turning";
       const wheelOutputPercent = this.turnIsSmallAngle
-        ? this.maxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR
-        : this.maxWheelOutputPercent;
+        ? scaledMaxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR
+        : scaledMaxWheelOutputPercent;
       const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelOutputPercent);
       await this.sensorController.setMotorWheelOutputs(initialSpeeds.left, initialSpeeds.right);
     } catch (error) {

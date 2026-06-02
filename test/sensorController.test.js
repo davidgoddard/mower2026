@@ -108,6 +108,93 @@ test('SensorController polls IMU and stores latest integrated heading state', as
   });
 });
 
+test('SensorController logs the raw GNSS debug line when satellites drop below the trusted threshold', async () => {
+  const warnCalls = [];
+  const infoCalls = [];
+  const logger = {
+    child: () => logger,
+    debug: () => {},
+    info: (...args) => {
+      infoCalls.push(args);
+    },
+    warn: (...args) => {
+      warnCalls.push(args);
+    },
+    error: () => {},
+    transition: () => {},
+  };
+
+  let now = 0;
+  const primitivesStore = new PrimitivesStore();
+  const gateway = {
+    async initialise() {},
+    async readImu() {
+      now += 1000;
+      return {
+        timestampMillis: now,
+        angularVelocity: { zDegreesPerSecond: 0 },
+      };
+    },
+    async readGnss() {
+      return {
+        timestampMillis: now,
+        xMeters: 1,
+        yMeters: 2,
+        headingDegrees: 90,
+        positionAccuracyMeters: 0.02,
+        headingAccuracyDegrees: 0.5,
+        fixType: 'fixed',
+        satellitesInUse: 0,
+        sampleAgeMillis: 40,
+      };
+    },
+    async readGnssDebugLine() {
+      return {
+        satellitesInUse: 0,
+        fixType: 'fixed',
+        rawPayload: 'COM2,0,0,FINESTEERING,...,0,0',
+        truncated: false,
+      };
+    },
+    async readMotorFeedback() {
+      return {
+        timestampMillis: now,
+        leftEncoderDelta: 0,
+        rightEncoderDelta: 0,
+        leftPwmAppliedPercent: 0,
+        rightPwmAppliedPercent: 0,
+        watchdogHealthy: true,
+        faultFlags: 0,
+      };
+    },
+    async setMotorWheelOutputs() {},
+    async stopMotors() {},
+    async close() {},
+  };
+
+  const controller = new SensorController({
+    logger,
+    primitivesStore,
+    gateway,
+    pollIntervalMs: 0,
+    sleep: async () => {},
+    nowMillis: () => now,
+    maxLoopCount: 1,
+  });
+
+  await controller.start();
+  await delay(0);
+
+  const warning = warnCalls.find((call) => call[0] === 'sensor.gnss.low_satellite_raw_line');
+  assert.ok(warning);
+  assert.equal(warning[1].satellitesInUse, 0);
+  assert.equal(warning[1].fixType, 'fixed');
+  assert.equal(warning[1].rawPayload.includes('FINESTEERING'), true);
+  assert.equal(infoCalls.some((call) => call[0] === 'sensor.gnss.low_satellite_recovered'), false);
+
+  await controller.stop();
+});
+
 test('SensorController applies the persisted IMU yaw scale factor to heading integration', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
@@ -650,6 +737,81 @@ test('SensorController treats sub-10-percent wheel outputs as a zero command', a
     assert.equal(snapshot.motors.commandedRightWheelOutputPercent, 0);
     assert.equal(controller.getMotorZeroCommandSinceMillis(), 1234);
     assert.deepEqual(calls, [{ type: 'speed', left: 0, right: 0 }]);
+
+    await logger.close();
+  });
+});
+
+test('SensorController waits for motor feedback to show an actual stop before auto-recalibrating IMU bias', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    const gateway = {
+      async initialise() {},
+      async readImu() {
+        return { timestampMillis: 0, angularVelocity: { zDegreesPerSecond: 0 } };
+      },
+      async readGnss() {
+        return {
+          timestampMillis: 0,
+          xMeters: 0,
+          yMeters: 0,
+          positionAccuracyMeters: 0.01,
+          fixType: 'fixed',
+          satellitesInUse: 22,
+          sampleAgeMillis: 0,
+        };
+      },
+      async readMotorFeedback() {
+        return {
+          timestampMillis: 0,
+          leftEncoderDelta: 0,
+          rightEncoderDelta: 0,
+          leftPwmAppliedPercent: 0,
+          rightPwmAppliedPercent: 0,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelOutputs() {},
+      async stopMotors() {},
+      async close() {},
+    };
+
+    const primitivesStore = new PrimitivesStore();
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway,
+      pollIntervalMs: 100,
+      sleep: async () => {},
+      nowMillis: () => 3000,
+      maxLoopCount: 1,
+    });
+
+    let recalibrateCalls = 0;
+    controller.recalibrateImuYawBias = () => {
+      recalibrateCalls += 1;
+      return true;
+    };
+
+    controller['lastMotorCommand'] = { kind: 'stop' };
+    controller['motorZeroCommandSinceMillis'] = 0;
+    controller['motorStoppedSinceMillis'] = null;
+    controller['imuBiasAutoRecalibratedForCurrentStop'] = false;
+
+    controller['maybeAutoRecalibrateImuYawBias']();
+    assert.equal(recalibrateCalls, 0);
+
+    controller['motorStoppedSinceMillis'] = 0;
+    controller['maybeAutoRecalibrateImuYawBias']();
+    assert.equal(recalibrateCalls, 1);
 
     await logger.close();
   });

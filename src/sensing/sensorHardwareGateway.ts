@@ -8,11 +8,13 @@ import { MotorFeedbackSample } from "../motors/motorProtocol.js";
 import { Bmi160ImuSensor } from "../imu/bmi160ImuSensor.js";
 import { ImuSample } from "../imu/types.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
+import type { GnssDebugLine } from "../gnss/gnssDebugCodec.js";
 
 export interface SensorHardwareGateway {
   initialise(): Promise<void>;
   readImu(): Promise<ImuSample>;
   readGnss(): Promise<GnssSample>;
+  readGnssDebugLine?(): Promise<GnssDebugLine | null>;
   readMotorFeedback(): Promise<MotorFeedbackSample>;
   setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void>;
   stopMotors(): Promise<void>;
@@ -75,6 +77,14 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     }
 
     return this.gnssClient.refresh();
+  }
+
+  async readGnssDebugLine() {
+    if (!this.gnssClient) {
+      throw new Error("sensor gateway not initialised");
+    }
+
+    return this.gnssClient.refreshDebugLine();
   }
 
   async readMotorFeedback(): Promise<MotorFeedbackSample> {

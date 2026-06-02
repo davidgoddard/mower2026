@@ -27,7 +27,7 @@
  *     DEGRADED — partial failures (RTK_FLOAT, accuracy degraded, etc.)
  *     REJECTED — any hard failure
  *     Promote to TRUSTED only after N consecutive valid epochs (3 for
- *     position, 5 for heading).  Demote on M consecutive failures (2).
+ *     position, 5 for heading).  Demote on M consecutive failures (40).
  *
  * Heading validation is intentionally separate from position validation.
  * The spec marks heading as a stricter superset — heading can be REJECTED
@@ -99,7 +99,7 @@ const DEFAULTS = {
   maxImuHeadingDisagreementDeg: 5,
   positionPromotionEpochs: 3,
   headingPromotionEpochs: 5,
-  demotionEpochs: 2,
+  demotionEpochs: 40,
 };
 
 export class GnssValidator {

@@ -4,6 +4,7 @@ import { I2C_PRIORITY } from "../i2c/priorities.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 import { decodeGnssSample, gnssPayloadLength } from "./gnssCodec.js";
 import type { GnssSample } from "./gnssProtocol.js";
+import { decodeGnssDebugLine, gnssDebugPayloadLength, type GnssDebugLine } from "./gnssDebugCodec.js";
 import { GNSS_DEFAULT_MAX_ATTEMPTS, GNSS_RETRY_DELAY_MS } from "../constants.js";
 
 // Protocol sequence wrapping (implementation detail)
@@ -74,6 +75,48 @@ export class GnssNodeClient {
         }
 
         return decodeGnssSample(decoded.payload, { nowMillis: this.nowMillis() });
+      } catch (error) {
+        lastError = error;
+        if (attempt < this.maxAttempts) {
+          await this.sleep(this.retryDelayMs);
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  async refreshDebugLine(): Promise<GnssDebugLine | null> {
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      try {
+        const requestFrame = encodeFrame(
+          {
+            version: PROTOCOL_VERSION,
+            nodeId: NodeId.Gnss,
+            messageType: MessageType.GnssDebugLine,
+            flags: 0,
+            sequence: this.sequence,
+          },
+          new Uint8Array(0),
+        );
+        this.sequence = (this.sequence + 1) & PROTOCOL_SEQUENCE_MASK;
+
+        const responseFrame = await this.controller.queueRead({
+          key: "gnss.debug-line",
+          priority: I2C_PRIORITY.gnssRead,
+          address: this.address,
+          requestPayload: requestFrame,
+          responseLength: frameLengthForPayload(gnssDebugPayloadLength()),
+        });
+
+        const decoded = decodeFrame(responseFrame);
+        if (decoded.header.nodeId !== NodeId.Gnss || decoded.header.messageType !== MessageType.GnssDebugLine) {
+          throw new Error("Unexpected GNSS debug response frame");
+        }
+
+        return decodeGnssDebugLine(decoded.payload);
       } catch (error) {
         lastError = error;
         if (attempt < this.maxAttempts) {

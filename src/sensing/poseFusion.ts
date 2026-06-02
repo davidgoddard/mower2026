@@ -86,6 +86,7 @@ const DR_POSITION_SYNC_THRESHOLD_METERS = 0.5;
 // receiver-claimed sample age (which the validator handles via
 // sampleAgeMillis when present).
 const GNSS_STALE_TIMEOUT_MS = 2_000;
+const STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG = 30;
 
 const DEG_TO_RAD = Math.PI / 180;
 
@@ -596,10 +597,39 @@ export class PoseFusion extends EventEmitter {
       }
     }
 
-    if (validation.heading === "TRUSTED" && event.heading !== null) {
+    const canBootstrapHeadingFromGnss =
+      !this.hasGnssHeadingBaseline &&
+      validation.position === "TRUSTED" &&
+      event.heading !== null;
+
+    const headingDisagreementDeg = event.heading === null
+      ? null
+      : Math.abs(unwrapRelativeAngle(headingDifference(this.currentHeading, event.heading)));
+    const rebaseReadiness = this.sensorController.getHeadingRebaseReadiness();
+    const canStationaryOverrideRebase =
+      event.heading !== null &&
+      validation.position === "TRUSTED" &&
+      rebaseReadiness.safe &&
+      headingDisagreementDeg !== null &&
+      headingDisagreementDeg <= STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG;
+
+    if (canBootstrapHeadingFromGnss) {
+      // Bootstrap: on first trusted GNSS epoch, seed IMU heading from GNSS so
+      // later IMU-agreement checks don't deadlock due to initial offset.
+      this.applyGnssHeadingRebase(event.heading, event.timestampMillis);
+      this.isUsingGnssHeading = true;
+    } else if (validation.heading === "TRUSTED" && event.heading !== null) {
       // Heading is trusted — rebase the IMU.  The validator already verified
       // |GNSS - IMU| ≤ disagreement threshold so this is a small step.
       this.applyGnssHeadingRebase(event.heading, event.timestampMillis);
+      this.isUsingGnssHeading = true;
+    } else if (canStationaryOverrideRebase) {
+      this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
+        disagreementDeg: headingDisagreementDeg,
+        maxOverrideDisagreementDeg: STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG,
+        yawRateDegPerSec: rebaseReadiness.yawRateDegPerSec,
+      });
+      this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
       this.isUsingGnssHeading = true;
     } else {
       this.isUsingGnssHeading = false;
@@ -625,6 +655,20 @@ export class PoseFusion extends EventEmitter {
         headingState: validation.heading,
         positionRejections: validation.positionRejections,
         headingRejections: validation.headingRejections,
+        gnssEvent: this.lastGnssEvent === null
+          ? null
+          : {
+            xMeters: this.lastGnssEvent.xMeters,
+            yMeters: this.lastGnssEvent.yMeters,
+            fixType: this.lastGnssEvent.fixType,
+            satellitesInUse: this.lastGnssEvent.satellitesInUse,
+            positionAccuracyMeters: this.lastGnssEvent.positionAccuracyMeters,
+            headingAccuracyDeg: this.lastGnssEvent.headingAccuracyDeg,
+            headingDeg: this.lastGnssEvent.heading === null ? null : unwrapInternalHeading(this.lastGnssEvent.heading),
+            sampleAgeMillis: this.lastGnssEvent.sampleAgeMillis,
+            timestampMillis: this.lastGnssEvent.timestampMillis,
+          },
+        gnssRawSample: this.lastGnssEvent?.rawSample ?? null,
       });
       this.lastGnssRejectionLogAtMs.set(reason, nowMs);
     }

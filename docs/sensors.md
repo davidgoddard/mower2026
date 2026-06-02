@@ -215,14 +215,22 @@ GNSS sample request:
 - `messageType = 0x01`
 - empty payload
 
+GNSS low-satellite debug request:
+
+- `nodeId = 0x10`
+- `messageType = 0x02`
+- empty payload
+
+When the receiver reports fewer than the trusted satellite threshold, the ESP32
+retains the latest raw `PVTSLNA` text payload after the semicolon and exposes
+it through this debug frame so the Pi can write it into the normal session log.
+That keeps the forensic text available over SSH without needing a USB serial
+console on the machine.
+
 ### GNSS payload variants
 
-The runtime currently supports two GNSS payload layouts from node firmware:
-
-- `36` bytes
-- `38` bytes
-
-Both decode to the same application `GnssSample` shape.
+The runtime currently supports the compact `40` byte GNSS sample layout from
+node firmware.
 
 ### `GnssSample` fields and meaning
 

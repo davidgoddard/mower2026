@@ -927,42 +927,9 @@ export class DriveLineController {
    * be diagnosed from the log alone — see redesign notes in CLAUDE.md.
    */
   private emitHeartbeatIfDue(pose: Pose, cte: Meters): void {
-    const now = this.nowMillis();
-    if (now - this.lastHeartbeatMs < DriveLineController.HEARTBEAT_INTERVAL_MS) {
-      return;
-    }
-    this.lastHeartbeatMs = now;
-
-    const diag = this.poseFusion.getDiagnosticSnapshot();
-    this.logger.info("drive.line.heartbeat", {
-      tSinceStartMs: now - this.driveStartTime,
-      cteMeters: unwrapMeters(cte),
-      fused: {
-        x: diag.fused.x,
-        y: diag.fused.y,
-        headingDeg: diag.fused.headingDeg,
-        quality: diag.fused.quality,
-        usingGnssHeading: diag.fused.usingGnssHeading,
-      },
-      encoder: {
-        onlyX: diag.encoder.onlyX,
-        onlyY: diag.encoder.onlyY,
-        onlyHeadingDeg: diag.encoder.onlyHeadingDeg,
-        drConfidence: diag.encoder.drConfidence,
-        encoderSynced: diag.encoder.encoderSynced,
-        wheelSlipSuspected: diag.encoder.wheelSlipSuspected,
-        lastLeftDelta: diag.encoder.lastLeftDelta,
-        lastRightDelta: diag.encoder.lastRightDelta,
-      },
-      gnss: {
-        gnssToFusedSeparationMeters: diag.gnss.gnssToFusedSeparationMeters,
-        lastAcceptedAgoMs: diag.gnss.lastAcceptedAgoMs,
-        lastRejectionReason: diag.gnss.lastRejectionReason,
-        lastRejectionAgoMs: diag.gnss.lastRejectionAgoMs,
-        lastBlendFactor: diag.gnss.lastBlendFactor,
-        raw: diag.gnss.raw,
-      },
-    });
+    // Heartbeat logging intentionally disabled for normal operation.
+    void pose;
+    void cte;
   }
 
   private projectAlongTrackDistance(position: Position): number {

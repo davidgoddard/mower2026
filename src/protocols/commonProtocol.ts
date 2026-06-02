@@ -15,6 +15,7 @@ export enum NodeId {
 
 export enum MessageType {
   GnssSample = 0x01,
+  GnssDebugLine = 0x02,
   MotorWheelSpeedCommand = 0x21,
   MotorFeedbackSample = 0x22,
 }

@@ -71,6 +71,9 @@ This document maps problem domains to candidate files removing the need for Code
   - the first good GNSS heading primes the IMU immediately, then IMU remains the live heading reference with GNSS only nudging the IMU when the fix is good, the heading is stable, and the GNSS heading is already close to the current IMU heading
   - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, heading stability, and the current IMU/GNSS heading alignment gate all pass for the part of pose being updated
   - `getCurrentPose()` returns the latest fused pose without settling
+- `src/sensing/gnssValidator.ts`: GNSS sample acceptance / trust state machine
+  - position and heading are validated separately, with heading requiring position to pass first
+  - heading trust now demotes only after a much longer failure window so brief slow-mower glitches do not flicker it off
 
 ## Motor Control
 - `src/motors/motorProtocol.ts`: normalized motor command frame contract and raw motor feedback telemetry types.
@@ -294,9 +297,10 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/imu/bmi160Registers.ts`: BMI160 register/command constants.
 - `src/imu/types.ts`: IMU sample and sensor contracts.
 - `src/gnss/gnssProtocol.ts`: GNSS sample contract used by runtime.
-- `src/gnss/gnssCodec.ts`: GNSS payload decoding (supports both 36-byte and 38-byte payload layouts).
-- `src/gnss/gnssNodeClient.ts`: GNSS request/response polling client over I2C framed protocol.
-- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover GNSS firmware; relays verified RTCM to the UM982, decodes RTCM 1006 base-position messages for the local origin when no fixed base is configured, converts rover lat/lon to local X/Y, and serves framed GNSS samples over I2C.
+- `src/gnss/gnssCodec.ts`: GNSS sample payload decoding for the compact 40-byte GNSS frame.
+- `src/gnss/gnssDebugCodec.ts`: low-satellite raw-text debug payload decoding for the diagnostic I2C frame.
+- `src/gnss/gnssNodeClient.ts`: GNSS request/response polling client over I2C framed protocol, plus low-satellite raw-text debug fetches.
+- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover GNSS firmware; relays verified RTCM to the UM982, decodes RTCM 1006 base-position messages for the local origin when no fixed base is configured, converts rover lat/lon to local X/Y, serves framed GNSS samples over I2C, and retains the latest low-satellite raw `PVTSLNA` payload for Pi-side logging.
 - `src/motors/motorProtocol.ts`: motor command/feedback contracts.
 - `src/motors/motorCodec.ts`: wheel-speed command encoding and motor-feedback payload decoding.
 - `src/motors/motorMapping.ts`: app-facing forward-positive wheel convention mapping to/from raw motor node direction signs.
@@ -329,7 +333,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `GnssPositionUpdateEvent`: position, heading, fix quality from GNSS
   - `MotorFeedbackUpdateEvent`: wheel speeds, encoder deltas, PWM, current, watchdog/fault state
   - `ObstructionDetectedEvent`: obstruction type, motor currents, wheel speeds
-- `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers.
+- `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers, including the optional low-satellite GNSS debug-line fetch used for Pi-side raw-text logging.
 - `src/i2c/types.ts`: I2C transport and queued request types.
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
 - `src/i2c/i2cBusController.ts`: single-bus queued priority controller with key-based request replacement.
@@ -372,7 +376,7 @@ This document maps problem domains to candidate files removing the need for Code
   - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
-- `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab.
+- `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab and live GNSS satellite/fix history charts on the dashboard, rendered from the buffered GNSS history stream, plus a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
 - `src/server/deadReckoningPage.ts`: dead-reckoning calibration page — three-phase calibration procedure UI (straight line, arc right, arc left); live IMU/GNSS sidebar widgets; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
 - `src/server/sensorWidgets.js`: **WEB COMPONENT DEFINITIONS** — pure static JS served at `GET /sensor-widgets.js` (cached 1 hour).
@@ -387,7 +391,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `getSensorWidgetScriptTag()`: returns `<script src="/sensor-widgets.js" defer></script>` for page `<head>`
   - `getSensorWidgetLayoutStyles()`: returns minimal layout CSS (flex/grid placement of the custom elements); contains no typography or colour rules so it cannot override component shadow CSS
   - used by: deadReckoningPage, driveTuningPage, homePage, segmentTestingPage, turnTuningPage
-- `src/server/primitivesStore.ts`: in-memory primitives state holder.
+- `src/server/primitivesStore.ts`: in-memory primitives state holder plus rolling GNSS history buffer for dashboard diagnostics.
   - primitives payload shape contains `imu`, `gnss`, `poseFusion`, and `motors` sections.
   - `poseFusion.usingGnssHeading` is the app-level flag consumed by the live widgets to show whether GNSS is currently rebasing the IMU heading.
   - all four sections (`imu`, `gnss`, `poseFusion`, `motors`) are guaranteed non-null objects — initialised with defaults at construction and deep-merged on update.
@@ -400,12 +404,14 @@ This document maps problem domains to candidate files removing the need for Code
 ## Dead-Reckoning Calibration
 - `src/control/deadReckoningCalibrator.ts`: three-phase dead-reckoning calibration procedure
   - Phase 1 (straight line): drives ~3 s forward; divides GNSS chord by average encoder ticks to derive a first-pass `encoderMetersPerTick`; per-wheel values derived from left/right tick ratio and chord
-  - Phase 2 (arc right): drives a timed arc (left=full, right=arcInnerSpeed); computes arc geometry from IMU heading change + GNSS chord (`arcRadius`, `arcLength`, `wheelbase`, per-wheel m/tick); integrates DR position to measure endpoint error vs GNSS anchor
-  - Phase 3 (arc left): mirror of phase 2
+  - Phase 2 (pivot CW): performs a controlled in-place 180° pivot, derives wheelbase from signed wheel travel and IMU heading change, and rejects the phase when DR endpoint error indicates excessive slip
+  - Phase 3 (pivot CCW): mirror of phase 2
   - outputs suggested per-wheel m/tick, wheelbase, and DR endpoint error for operator review before applying
+  - settle diagnostics: logs `dead_reckoning.pose_not_settled` with the live blocker reason plus pose-fusion diagnostics whenever the 2-second settle dwell is interrupted, logs `dead_reckoning.pose_settled_anchor_rejected` when the pose is settled but the raw GNSS anchor is unusable, and logs the final fused/gnss snapshot on timeout
   - integrates with `systemStop` for safe abort during any phase
   - API: `run()`, `requestStop()`, `getState()`
 - `src/server/deadReckoningPage.ts`: dead-reckoning calibration web UI (see Operation And Server Entry above)
+  - exposes a user-entered straight-line distance for phase 1 and posts it with the calibration start request
 
 ## Project Build And Test Tooling
 - `package.json`:

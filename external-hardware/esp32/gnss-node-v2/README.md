@@ -88,11 +88,13 @@ Only then is it forwarded to the UM982 and allowed to pulse the LED. Random ESP-
 
 If no fresh `PVTSLNA` fix has been parsed for more than about `2 s`, the heading and position LEDs are forced off.
 
-## Serial diagnostics
+## Diagnostics
 
-The sketch now emits a compact debug line about once per second on the USB serial console at `115200`.
+The sketch still emits a compact boot/debug summary on the USB serial console
+for bench work, but low-satellite raw text is now fetched by the Pi and written
+into the normal session log instead of relying on a local serial monitor.
 
-Example:
+Example summary:
 
 ```text
 [GNSS] lines=128 pvtslna=42 rectimea=4 uniheadinga=21 unknown=11 logConfig=ok(111) fix=single sats=17 headingValid=yes receiverAgeMs=12 pvtslnaAgeMs=95 uniheadingAgeMs=180 rtcmAgeMs=640 uniloglistAgeMs=220
@@ -145,6 +147,10 @@ Useful failure patterns:
   - UM982 is talking, but not producing the expected `PVTSLNA` log
 - `pvtslna` increasing but `fix=none sats=0`
   - parser is running, but the receiver solution itself is not usable
+- when `sats` drops below 8, the Pi requests the latest raw `PVTSLNA`
+  payload text after the semicolon over I2C and logs it into the mower
+  session file so parsing can be checked against the receiver's own text
+  output via SSH
 - `rtcmAgeMs=none`
   - rover has not recently received verified RTCM correction messages
 - `rtcmAgeMs` fresh but `origin=dynamic`

@@ -3,6 +3,7 @@
  */
 
 import { InternalHeading } from "../geometry/headingTypes.js";
+import type { GnssSample } from "../gnss/gnssProtocol.js";
 
 /**
  * IMU heading update event
@@ -39,6 +40,8 @@ export interface GnssPositionUpdateEvent {
   readonly headingValid?: boolean;
   /** Speed over ground (m/s) from PVTSLNA. */
   readonly groundSpeedMetersPerSecond?: number;
+  /** Full decoded GNSS sample from ESP/receiver path for diagnostics. */
+  readonly rawSample?: GnssSample;
 }
 
 /**
