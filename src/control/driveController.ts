@@ -13,6 +13,8 @@ import { DriveLineController } from "./driveLineController.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
 import {
   InternalHeading,
+  addRelativeAngle,
+  createRelativeAngle,
   headingDifference,
   unwrapRelativeAngle,
   unwrapInternalHeading,
@@ -160,17 +162,26 @@ export class DriveController {
           startHeading: unwrapInternalHeading(this.driveStartHeading),
         });
 
-        // 2. Calculate angle to target
+        // 2. Calculate angle to target. For reverse drives the mower's body should
+        //    point 180° away from the target so its rear travels toward it along the
+        //    line — useful when retracing recent targets after a grass jam without
+        //    pivoting through the obstruction.
+        const driveDirectionSign: 1 | -1 = request.driveDirectionSign ?? 1;
         const angleToTarget = angleTo(this.driveStartPosition, request.targetPosition);
-        const headingError = headingDifference(this.driveStartHeading, angleToTarget);
+        const desiredHeading: InternalHeading = driveDirectionSign === 1
+          ? angleToTarget
+          : addRelativeAngle(angleToTarget, createRelativeAngle(180));
+        const headingError = headingDifference(this.driveStartHeading, desiredHeading);
         const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingError));
 
-        // 3. Turn to face target — always when alwaysTurnToFaceTarget is set (e.g. short
-        //    boundary segments), otherwise only when error exceeds the threshold.
+        // 3. Turn to face the desired heading — always when alwaysTurnToFaceTarget
+        //    is set (e.g. short boundary segments), otherwise only when error
+        //    exceeds the threshold.
         if (request.alwaysTurnToFaceTarget || headingErrorDeg > DRIVE_INITIAL_TURN_THRESHOLD_DEG) {
           this.status = "turning";
           this.logger.info("drive.turning", {
             headingError: unwrapRelativeAngle(headingError),
+            driveDirectionSign,
           });
 
           await this.turnController.executeTurn({
@@ -185,7 +196,7 @@ export class DriveController {
         const lineResult = await this.lineDriveController.executeLineDrive({
           targetPosition: request.targetPosition,
           learningEnabled: request.learningEnabled,
-          driveDirectionSign: 1,
+          driveDirectionSign,
           maxCrossTrackErrorMeters: request.maxCrossTrackErrorMeters,
         });
 
@@ -239,6 +250,56 @@ export class DriveController {
       void stopCurrentTurn.call(this.turnController);
     }
     void this.lineDriveController.stopCurrentDrive();
+  }
+
+  /**
+   * Drive a single segment to a target position. Used by the obstruction-recovery
+   * path to retrace recently completed targets in reverse.
+   */
+  async driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<void> {
+    systemStop.clearStop("drive-segment-recovery");
+    await this.executeDrive({
+      targetPosition: createPosition(target.xMeters, target.yMeters),
+      driveDirectionSign,
+      alwaysTurnToFaceTarget: true,
+      learningEnabled: false,
+    });
+  }
+
+  /**
+   * Drive forward to an arbitrary target. Used by line-context retry recovery
+   * to retry the original target after reversing out of a grass jam.
+   */
+  async driveToTarget(target: { xMeters: number; yMeters: number }): Promise<void> {
+    systemStop.clearStop("drive-retry-forward");
+    await this.executeDrive({
+      targetPosition: createPosition(target.xMeters, target.yMeters),
+      driveDirectionSign: 1,
+      learningEnabled: false,
+    });
+  }
+
+  /**
+   * Drive in reverse for a fixed duration. Used by line-context retry recovery
+   * (and as the path-context fallback when no recent targets are available) to
+   * back the mower out of a grass jam before retrying.
+   */
+  async reverseForDuration(durationMs: number): Promise<void> {
+    systemStop.clearStop("drive-retry-reverse");
+    const reverseSpeed = -this.fullSpeedCommand;
+    this.sensorController.beginMotionSession();
+    try {
+      await this.sensorController.setMotorWheelOutputs(reverseSpeed, reverseSpeed);
+      const completed = await this.sleepWithStopChecks(durationMs);
+      await this.sensorController.stopMotors();
+      if (!completed) {
+        return;
+      }
+      const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
+      await this.sleepWithStopChecks(2 * rampDownTime + this.settleTimeMs);
+    } finally {
+      this.sensorController.endMotionSession();
+    }
   }
 
   /**

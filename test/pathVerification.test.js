@@ -19,6 +19,22 @@ import {
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPose } from "../dist/geometry/positionTypes.js";
 
+const TEST_PARAMETERS = {
+  version: 3,
+  closedLoopToleranceMeters: 0.05,
+  closedLoopDetectionToleranceMeters: 0.35,
+  verificationApproachStandoffMeters: 0.1,
+  verificationTurnOnlyDistanceMeters: 0.3,
+  mowingStandoffMeters: 0.15,
+  segmentedDriveSimplificationToleranceMeters: 0.05,
+  segmentedDriveMaxVertexTurnDeg: 10,
+  segmentedDriveMaxSegmentLengthMeters: 0.5,
+  segmentedDriveMinSegmentLengthMeters: 0.05,
+  segmentedDriveMaxCteMeters: 0.05,
+  pathRetryReverseDistanceMeters: 0.5,
+  updatedAt: "2026-06-04T00:00:00.000Z",
+};
+
 test("buildVerificationPathPoints rotates the path from the tangential join point and closes the loop", () => {
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -41,21 +57,24 @@ test("buildVerificationPathPoints rotates the path from the tangential join poin
   );
 });
 
-test("buildVerificationPathPoints drops a duplicated closed-loop endpoint and expands the loop outward", () => {
+test("buildVerificationPathPoints preserves a closed-loop perimeter without inflating it", () => {
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
     { xMeters: 1, yMeters: 1, capturedAt: 3 },
-    { xMeters: 0, yMeters: 0, capturedAt: 4 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
   ];
-  const pose = createPose(1.1, 0.2, createInternalHeading(0), "gnss");
+  const pose = createPose(0.1, -0.2, createInternalHeading(0), "gnss");
 
   const verificationPoints = buildVerificationPathPoints(points, pose);
-  assert.equal(verificationPoints.length, 7);
-  assert.equal(verificationPoints.at(0)?.xMeters, verificationPoints.at(-1)?.xMeters);
-  assert.equal(verificationPoints.at(0)?.yMeters, verificationPoints.at(-1)?.yMeters);
-  assert.equal(verificationPoints.some((point) => point.xMeters > 1.05), true);
-  assert.equal(verificationPoints.some((point) => point.yMeters > 1.05), true);
+
+  // Recorded geometry only, no outward inflation. Length = 4 unique vertices + duplicate join.
+  assert.equal(verificationPoints.length, 5);
+  assert.equal(verificationPoints[0].xMeters, verificationPoints.at(-1).xMeters);
+  assert.equal(verificationPoints[0].yMeters, verificationPoints.at(-1).yMeters);
+  assert.equal(verificationPoints.every((point) => point.xMeters >= 0 && point.xMeters <= 1), true);
+  assert.equal(verificationPoints.every((point) => point.yMeters >= 0 && point.yMeters <= 1), true);
 });
 
 
@@ -95,7 +114,7 @@ test("buildDrivePathPoints can rotate the path in reverse from the nearest point
   );
 });
 
-test("buildDrivePathPoints offsets closed obstacle loops outward", () => {
+test("buildDrivePathPoints follows recorded closed obstacle loops without outward inflation", () => {
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
@@ -107,38 +126,12 @@ test("buildDrivePathPoints offsets closed obstacle loops outward", () => {
 
   const drivePoints = buildDrivePathPointsForDirection(points, pose, "forward");
 
-  assert.equal(drivePoints.length, 8);
-  assert.equal(drivePoints.some((point) => point.yMeters < -0.05), true);
-  assert.equal(drivePoints.some((point) => point.xMeters > 1.05), true);
-  assert.equal(drivePoints.some((point) => point.yMeters > 1.05), true);
-  assert.equal(drivePoints.some((point) => point.xMeters < -0.05), true);
+  assert.equal(drivePoints.length, 5);
+  assert.equal(drivePoints.every((point) => point.xMeters >= 0 && point.xMeters <= 1), true);
+  assert.equal(drivePoints.every((point) => point.yMeters >= 0 && point.yMeters <= 1), true);
 });
 
-test("buildDrivePathPoints uses supplied obstacle outward offset", () => {
-  const points = [
-    { xMeters: 0, yMeters: 0, capturedAt: 1 },
-    { xMeters: 1, yMeters: 0, capturedAt: 2 },
-    { xMeters: 1, yMeters: 1, capturedAt: 3 },
-    { xMeters: 0, yMeters: 1, capturedAt: 4 },
-    { xMeters: 0, yMeters: 0, capturedAt: 5 },
-  ];
-  const pose = createPose(0.1, -0.2, createInternalHeading(0), "gnss");
-
-  const drivePoints = buildDrivePathPointsForDirection(points, pose, "forward", {
-    version: 1,
-    closedLoopToleranceMeters: 0.05,
-    closedLoopDetectionToleranceMeters: 0.35,
-    verificationApproachStandoffMeters: 0.1,
-    verificationTurnOnlyDistanceMeters: 0.3,
-    obstacleOutwardOffsetMeters: 0.2,
-    updatedAt: "test",
-  });
-
-  assert.equal(drivePoints.some((point) => point.yMeters < -0.15), true);
-  assert.equal(drivePoints.every((point) => point.yMeters >= -0.25), true);
-});
-
-test("buildPerimeterDrivePathPoints follows mowing perimeters exactly without obstacle offset", () => {
+test("buildPerimeterDrivePathPoints follows mowing perimeters exactly", () => {
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
@@ -267,7 +260,7 @@ test("buildVerificationPathPointsFromPlan preserves the chosen direction", () =>
   );
 });
 
-test("buildSegmentedBoundaryTargets smooths wiggle and bounds segment length", () => {
+test("buildSegmentedBoundaryTargets fuses gentle wiggles within tolerance into a single chord", () => {
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 0.2, yMeters: 0.01, capturedAt: 2 },
@@ -275,26 +268,31 @@ test("buildSegmentedBoundaryTargets smooths wiggle and bounds segment length", (
     { xMeters: 1, yMeters: 0, capturedAt: 4 },
   ];
 
-  const targets = buildSegmentedBoundaryTargets(points, {
-    version: 1,
-    closedLoopToleranceMeters: 0.05,
-    closedLoopDetectionToleranceMeters: 0.35,
-    verificationApproachStandoffMeters: 0.1,
-    verificationTurnOnlyDistanceMeters: 0.3,
-    obstacleOutwardOffsetMeters: 0.5,
-    purePursuitMinLookaheadMeters: 0.5,
-    purePursuitBaseLookaheadMeters: 1,
-    purePursuitMaxLookaheadMeters: 2,
-    mowingStandoffMeters: 0.15,
-    segmentedDriveSimplificationToleranceMeters: 0.025,
-    segmentedDriveMaxSegmentLengthMeters: 0.5,
-    segmentedDriveMinSegmentLengthMeters: 0.05,
-    segmentedDriveMaxCteMeters: 0.05,
-    updatedAt: "2026-05-26T00:00:00.000Z",
-  });
+  const targets = buildSegmentedBoundaryTargets(points, TEST_PARAMETERS);
 
   assert.deepEqual(targets.map((point) => point.yMeters), [0, 0, 0]);
   assert.deepEqual(targets.map((point) => point.xMeters), [0, 0.5, 1]);
+});
+
+test("buildSegmentedBoundaryTargets keeps a vertex whose turn exceeds the configured limit", () => {
+  // 90-degree corner: simplifier must keep the corner vertex even though chord
+  // tolerance alone would also keep it; this test asserts the turn-angle gate works.
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
+  ];
+
+  const targets = buildSegmentedBoundaryTargets(points, TEST_PARAMETERS);
+
+  assert.deepEqual(
+    targets.map((point) => [point.xMeters, point.yMeters]),
+    [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ],
+  );
 });
 
 test("buildSegmentedBoundaryExecutionTargets resumes from the nearest target and skips the current pose", () => {
@@ -307,21 +305,10 @@ test("buildSegmentedBoundaryExecutionTargets resumes from the nearest target and
   ];
   const pose = createPose(1.01, 0.01, createInternalHeading(0), "gnss");
   const parameters = {
-    version: 1,
-    closedLoopToleranceMeters: 0.05,
-    closedLoopDetectionToleranceMeters: 0.35,
-    verificationApproachStandoffMeters: 0.1,
-    verificationTurnOnlyDistanceMeters: 0.3,
-    obstacleOutwardOffsetMeters: 0.5,
-    purePursuitMinLookaheadMeters: 0.5,
-    purePursuitBaseLookaheadMeters: 1,
-    purePursuitMaxLookaheadMeters: 2,
-    mowingStandoffMeters: 0.15,
+    ...TEST_PARAMETERS,
     segmentedDriveSimplificationToleranceMeters: 0,
+    segmentedDriveMaxVertexTurnDeg: 0,
     segmentedDriveMaxSegmentLengthMeters: 2,
-    segmentedDriveMinSegmentLengthMeters: 0.05,
-    segmentedDriveMaxCteMeters: 0.05,
-    updatedAt: "2026-05-26T00:00:00.000Z",
   };
 
   const targets = buildSegmentedBoundaryExecutionTargets(points, parameters, pose);

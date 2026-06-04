@@ -4,17 +4,13 @@
 
 import { readFile, writeFile, readdir, unlink, access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { IPathStore, PathDriveAlgorithm, PathPoint, StoredPath } from "./pathFollowerApi.js";
+import { IPathStore, PathPoint, StoredPath } from "./pathFollowerApi.js";
 import { LoggerScope } from "../logging/types.js";
 
 export interface PathStoreOptions {
   storageDirectory: string;
   logger: LoggerScope;
   filenameSuffix?: string;
-}
-
-export interface SavePathOptions {
-  driveAlgorithm?: PathDriveAlgorithm;
 }
 
 export class PathStore implements IPathStore {
@@ -33,7 +29,7 @@ export class PathStore implements IPathStore {
     await mkdir(this.storageDirectory, { recursive: true });
   }
 
-  async savePath(name: string, points: PathPoint[], options: SavePathOptions = {}): Promise<void> {
+  async savePath(name: string, points: PathPoint[]): Promise<void> {
     const path: StoredPath = {
       name,
       points,
@@ -41,7 +37,6 @@ export class PathStore implements IPathStore {
       metadata: {
         totalDistance: this.calculateTotalDistance(points),
         pointCount: points.length,
-        driveAlgorithm: this.normalizeDriveAlgorithm(options.driveAlgorithm),
       },
     };
 
@@ -146,30 +141,6 @@ export class PathStore implements IPathStore {
     }
   }
 
-  async updatePathDriveAlgorithm(name: string, driveAlgorithm: PathDriveAlgorithm): Promise<StoredPath> {
-    const existing = await this.loadPath(name);
-    const updated: StoredPath = {
-      ...existing,
-      metadata: {
-        ...existing.metadata,
-        totalDistance: this.calculateTotalDistance(existing.points),
-        pointCount: existing.points.length,
-        driveAlgorithm: this.normalizeDriveAlgorithm(driveAlgorithm),
-      },
-    };
-
-    await this.ensureStorageDirectory();
-    const filepath = join(this.storageDirectory, this.getFilename(name));
-    await writeFile(filepath, JSON.stringify(updated, null, 2), "utf-8");
-    this.pathCache.set(name, updated);
-    this.logger.info("path_store.algorithm_updated", {
-      name,
-      driveAlgorithm: updated.metadata.driveAlgorithm,
-      filepath,
-    });
-    return updated;
-  }
-
   async pathExists(name: string): Promise<boolean> {
     // Check cache
     if (this.pathCache.has(name)) {
@@ -210,13 +181,8 @@ export class PathStore implements IPathStore {
           ? metadata.totalDistance
           : this.calculateTotalDistance(points),
         pointCount: typeof metadata.pointCount === "number" ? metadata.pointCount : points.length,
-        driveAlgorithm: this.normalizeDriveAlgorithm(metadata.driveAlgorithm),
       },
     };
-  }
-
-  private normalizeDriveAlgorithm(value: unknown): PathDriveAlgorithm {
-    return value === "segmented_drive" ? "segmented_drive" : "pure_pursuit";
   }
 
   private calculateTotalDistance(points: PathPoint[]): number {

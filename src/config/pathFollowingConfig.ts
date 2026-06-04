@@ -9,33 +9,35 @@ export interface PathFollowingParameters {
   closedLoopDetectionToleranceMeters: number;
   verificationApproachStandoffMeters: number;
   verificationTurnOnlyDistanceMeters: number;
-  obstacleOutwardOffsetMeters: number;
-  purePursuitMinLookaheadMeters: number;
-  purePursuitBaseLookaheadMeters: number;
-  purePursuitMaxLookaheadMeters: number;
   mowingStandoffMeters: number;
   segmentedDriveSimplificationToleranceMeters: number;
+  segmentedDriveMaxVertexTurnDeg: number;
   segmentedDriveMaxSegmentLengthMeters: number;
   segmentedDriveMinSegmentLengthMeters: number;
   segmentedDriveMaxCteMeters: number;
+  /**
+   * On a high-current obstruction during a perimeter follow, the recovery routine
+   * retraces the most recently completed targets in reverse until the cumulative
+   * reverse travel reaches this distance, giving the mower clear ground to charge
+   * back at the grass jam at full speed.
+   */
+  pathRetryReverseDistanceMeters: number;
   updatedAt: string;
 }
 
 export const DEFAULT_PATH_FOLLOWING_PARAMETERS: PathFollowingParameters = {
-  version: 1,
+  version: 3,
   closedLoopToleranceMeters: 0.05,
   closedLoopDetectionToleranceMeters: 0.35,
   verificationApproachStandoffMeters: 0.10,
   verificationTurnOnlyDistanceMeters: 0.30,
-  obstacleOutwardOffsetMeters: 0.5,
-  purePursuitMinLookaheadMeters: 0.5,
-  purePursuitBaseLookaheadMeters: 1.0,
-  purePursuitMaxLookaheadMeters: 2.0,
   mowingStandoffMeters: 0.15,
-  segmentedDriveSimplificationToleranceMeters: 0.025,
+  segmentedDriveSimplificationToleranceMeters: 0.05,
+  segmentedDriveMaxVertexTurnDeg: 10,
   segmentedDriveMaxSegmentLengthMeters: 0.5,
   segmentedDriveMinSegmentLengthMeters: 0.05,
   segmentedDriveMaxCteMeters: 0.05,
+  pathRetryReverseDistanceMeters: 0.5,
   updatedAt: new Date().toISOString(),
 };
 
@@ -50,15 +52,13 @@ interface LegacyPathFollowingParameters {
   closedLoopDetectionToleranceMeters?: unknown;
   verificationApproachStandoffMeters?: unknown;
   verificationTurnOnlyDistanceMeters?: unknown;
-  obstacleOutwardOffsetMeters?: unknown;
-  purePursuitMinLookaheadMeters?: unknown;
-  purePursuitBaseLookaheadMeters?: unknown;
-  purePursuitMaxLookaheadMeters?: unknown;
   mowingStandoffMeters?: unknown;
   segmentedDriveSimplificationToleranceMeters?: unknown;
+  segmentedDriveMaxVertexTurnDeg?: unknown;
   segmentedDriveMaxSegmentLengthMeters?: unknown;
   segmentedDriveMinSegmentLengthMeters?: unknown;
   segmentedDriveMaxCteMeters?: unknown;
+  pathRetryReverseDistanceMeters?: unknown;
   updatedAt?: unknown;
 }
 
@@ -83,11 +83,8 @@ export class PathFollowingConfig {
         closedLoopDetectionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
         verificationApproachStandoffMeters: this.parameters.verificationApproachStandoffMeters,
         verificationTurnOnlyDistanceMeters: this.parameters.verificationTurnOnlyDistanceMeters,
-        obstacleOutwardOffsetMeters: this.parameters.obstacleOutwardOffsetMeters,
-        purePursuitMinLookaheadMeters: this.parameters.purePursuitMinLookaheadMeters,
-        purePursuitBaseLookaheadMeters: this.parameters.purePursuitBaseLookaheadMeters,
-        purePursuitMaxLookaheadMeters: this.parameters.purePursuitMaxLookaheadMeters,
         segmentedDriveSimplificationToleranceMeters: this.parameters.segmentedDriveSimplificationToleranceMeters,
+        segmentedDriveMaxVertexTurnDeg: this.parameters.segmentedDriveMaxVertexTurnDeg,
         segmentedDriveMaxSegmentLengthMeters: this.parameters.segmentedDriveMaxSegmentLengthMeters,
       });
     } catch (error) {
@@ -133,11 +130,8 @@ export class PathFollowingConfig {
       closedLoopDetectionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
       verificationApproachStandoffMeters: this.parameters.verificationApproachStandoffMeters,
       verificationTurnOnlyDistanceMeters: this.parameters.verificationTurnOnlyDistanceMeters,
-      obstacleOutwardOffsetMeters: this.parameters.obstacleOutwardOffsetMeters,
-      purePursuitMinLookaheadMeters: this.parameters.purePursuitMinLookaheadMeters,
-      purePursuitBaseLookaheadMeters: this.parameters.purePursuitBaseLookaheadMeters,
-      purePursuitMaxLookaheadMeters: this.parameters.purePursuitMaxLookaheadMeters,
       segmentedDriveSimplificationToleranceMeters: this.parameters.segmentedDriveSimplificationToleranceMeters,
+      segmentedDriveMaxVertexTurnDeg: this.parameters.segmentedDriveMaxVertexTurnDeg,
       segmentedDriveMaxSegmentLengthMeters: this.parameters.segmentedDriveMaxSegmentLengthMeters,
     });
   }
@@ -149,7 +143,7 @@ export class PathFollowingConfig {
 
     const legacy = raw as LegacyPathFollowingParameters;
     return {
-      version: this.readNumber(legacy.version, 1),
+      version: this.readNumber(legacy.version, DEFAULT_PATH_FOLLOWING_PARAMETERS.version),
       closedLoopToleranceMeters: this.readPositiveNumber(
         legacy.closedLoopToleranceMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.closedLoopToleranceMeters,
@@ -166,22 +160,6 @@ export class PathFollowingConfig {
         legacy.verificationTurnOnlyDistanceMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.verificationTurnOnlyDistanceMeters,
       ),
-      obstacleOutwardOffsetMeters: this.readPositiveNumber(
-        legacy.obstacleOutwardOffsetMeters,
-        DEFAULT_PATH_FOLLOWING_PARAMETERS.obstacleOutwardOffsetMeters,
-      ),
-      purePursuitMinLookaheadMeters: this.readPositiveNumber(
-        legacy.purePursuitMinLookaheadMeters,
-        DEFAULT_PATH_FOLLOWING_PARAMETERS.purePursuitMinLookaheadMeters,
-      ),
-      purePursuitBaseLookaheadMeters: this.readPositiveNumber(
-        legacy.purePursuitBaseLookaheadMeters,
-        DEFAULT_PATH_FOLLOWING_PARAMETERS.purePursuitBaseLookaheadMeters,
-      ),
-      purePursuitMaxLookaheadMeters: this.readPositiveNumber(
-        legacy.purePursuitMaxLookaheadMeters,
-        DEFAULT_PATH_FOLLOWING_PARAMETERS.purePursuitMaxLookaheadMeters,
-      ),
       mowingStandoffMeters: this.readPositiveNumber(
         legacy.mowingStandoffMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.mowingStandoffMeters,
@@ -189,6 +167,10 @@ export class PathFollowingConfig {
       segmentedDriveSimplificationToleranceMeters: this.readPositiveNumber(
         legacy.segmentedDriveSimplificationToleranceMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveSimplificationToleranceMeters,
+      ),
+      segmentedDriveMaxVertexTurnDeg: this.readPositiveNumber(
+        legacy.segmentedDriveMaxVertexTurnDeg,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveMaxVertexTurnDeg,
       ),
       segmentedDriveMaxSegmentLengthMeters: this.readPositiveNumber(
         legacy.segmentedDriveMaxSegmentLengthMeters,
@@ -201,6 +183,10 @@ export class PathFollowingConfig {
       segmentedDriveMaxCteMeters: this.readPositiveNumber(
         legacy.segmentedDriveMaxCteMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveMaxCteMeters,
+      ),
+      pathRetryReverseDistanceMeters: this.readPositiveNumber(
+        legacy.pathRetryReverseDistanceMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.pathRetryReverseDistanceMeters,
       ),
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };

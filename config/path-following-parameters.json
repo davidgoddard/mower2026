@@ -1,16 +1,15 @@
 {
-  "version": 1,
+  "version": 3,
   "closedLoopToleranceMeters": 0.05,
   "closedLoopDetectionToleranceMeters": 0.35,
   "verificationApproachStandoffMeters": 0.1,
   "verificationTurnOnlyDistanceMeters": 0.3,
-  "obstacleOutwardOffsetMeters": 0.5,
-  "purePursuitMinLookaheadMeters": 0.5,
-  "purePursuitBaseLookaheadMeters": 1,
-  "purePursuitMaxLookaheadMeters": 2,
-  "segmentedDriveSimplificationToleranceMeters": 0.025,
+  "mowingStandoffMeters": 0.15,
+  "segmentedDriveSimplificationToleranceMeters": 0.05,
+  "segmentedDriveMaxVertexTurnDeg": 10,
   "segmentedDriveMaxSegmentLengthMeters": 0.5,
   "segmentedDriveMinSegmentLengthMeters": 0.05,
   "segmentedDriveMaxCteMeters": 0.05,
-  "updatedAt": "2026-05-24T00:00:00.000Z"
+  "pathRetryReverseDistanceMeters": 0.5,
+  "updatedAt": "2026-06-04T00:00:00.000Z"
 }

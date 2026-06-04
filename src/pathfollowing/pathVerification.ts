@@ -120,9 +120,7 @@ export function buildDrivePathPointsForDirection(
     ? rotatePathForward(normalized, nearestIndex)
     : rotatePathReverse(normalized, nearestIndex);
 
-  return normalizedPath.isClosedLoop
-    ? buildOutwardConservativeLoop(rotated, parameters)
-    : rotated;
+  return normalizedPath.isClosedLoop ? rotated.concat([rotated[0]]) : rotated;
 }
 
 export function buildVerificationPathPoints(
@@ -144,12 +142,7 @@ export function buildVerificationPathPointsFromPlan(
   plan: VerificationApproachPlan,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
-  const rotated = buildDrivePathPointsForDirection(points, pose, plan.pathDirection, parameters);
-  if (rotated.length === 0) {
-    return [];
-  }
-
-  return rotated.concat([rotated[0]]);
+  return buildDrivePathPointsForDirection(points, pose, plan.pathDirection, parameters);
 }
 
 export function buildPerimeterDrivePathPoints(
@@ -239,89 +232,6 @@ function rotatePathReverse(points: PathPoint[], startIndex: number): PathPoint[]
   const reversed = points.slice().reverse();
   const reverseStartIndex = points.length - 1 - startIndex;
   return reversed.slice(reverseStartIndex).concat(reversed.slice(0, reverseStartIndex));
-}
-
-function calculateSignedArea(points: PathPoint[]): number {
-  let area = 0;
-  for (let index = 0; index < points.length; index += 1) {
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    area += (current.xMeters * next.yMeters) - (next.xMeters * current.yMeters);
-  }
-  return area / 2;
-}
-
-function calculateSegmentOutwardNormal(
-  from: PathPoint,
-  to: PathPoint,
-  signedArea: number,
-): { x: number; y: number } {
-  const dx = to.xMeters - from.xMeters;
-  const dy = to.yMeters - from.yMeters;
-  const length = Math.hypot(dx, dy);
-  if (length <= 1e-9) {
-    return { x: 0, y: 0 };
-  }
-
-  const leftNormal = { x: -dy / length, y: dx / length };
-  const rightNormal = { x: dy / length, y: -dx / length };
-  return signedArea >= 0 ? rightNormal : leftNormal;
-}
-
-function offsetPoint(
-  point: PathPoint,
-  normal: { x: number; y: number },
-  parameters: PathVerificationParameters,
-): PathPoint {
-  return {
-    xMeters: point.xMeters + (normal.x * parameters.obstacleOutwardOffsetMeters),
-    yMeters: point.yMeters + (normal.y * parameters.obstacleOutwardOffsetMeters),
-    capturedAt: point.capturedAt,
-  };
-}
-
-function buildOutwardConservativeLoop(
-  points: PathPoint[],
-  parameters: PathVerificationParameters,
-): PathPoint[] {
-  if (points.length < 3) {
-    return points.slice();
-  }
-
-  const signedArea = calculateSignedArea(points);
-  if (Math.abs(signedArea) <= 1e-9) {
-    return points.slice();
-  }
-
-  const conservative: PathPoint[] = [];
-
-  for (let index = 0; index < points.length; index += 1) {
-    const previous = points[(index - 1 + points.length) % points.length];
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    const previousNormal = calculateSegmentOutwardNormal(previous, current, signedArea);
-    const nextNormal = calculateSegmentOutwardNormal(current, next, signedArea);
-    const vertexNormalLength = Math.hypot(
-      previousNormal.x + nextNormal.x,
-      previousNormal.y + nextNormal.y,
-    );
-    const vertexNormal = vertexNormalLength <= 1e-9
-      ? nextNormal
-      : {
-          x: (previousNormal.x + nextNormal.x) / vertexNormalLength,
-          y: (previousNormal.y + nextNormal.y) / vertexNormalLength,
-        };
-    const segmentMidpoint = {
-      xMeters: (current.xMeters + next.xMeters) / 2,
-      yMeters: (current.yMeters + next.yMeters) / 2,
-      capturedAt: current.capturedAt,
-    };
-
-    conservative.push(offsetPoint(current, vertexNormal, parameters));
-    conservative.push(offsetPoint(segmentMidpoint, nextNormal, parameters));
-  }
-
-  return conservative;
 }
 
 function getHeadingAlignmentCost(pose: Pose, tangentHeading: InternalHeading): number {

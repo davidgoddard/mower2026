@@ -1,6 +1,7 @@
-import { PathPoint, IPathFollower } from "./pathFollowerApi.js";
+import { PathPoint } from "./pathFollowerApi.js";
 import type { MowingInitialEntryPlan, MowingPlan } from "./mowingPlanner.js";
 import { buildPerimeterPathPointsFromPlan, buildPerimeterJoinPlan } from "./pathVerification.js";
+import { executeSegmentedBoundaryPath, RecentTargetSink } from "./segmentedBoundaryExecutor.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
@@ -37,10 +38,16 @@ export interface MowingExecutorOptions {
   readonly obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
   readonly driveController: DriveController;
   readonly turnController: TurnController;
-  readonly pathFollower: IPathFollower;
   readonly poseFusion: PoseFusion;
   readonly logger: LoggerScope;
   readonly parameters?: PathFollowingParameters;
+  /**
+   * Optional sink for recording boundary targets the segmented executor has
+   * just completed. Wired through to perimeter traces and inter-strip
+   * connectors so the retry manager can reverse-retrace recent targets when
+   * a high-current obstruction interrupts a mowing run.
+   */
+  readonly recentTargetSink?: RecentTargetSink;
 }
 
 const TURN_ALIGNMENT_THRESHOLD_DEG = 2;
@@ -53,11 +60,11 @@ export class MowingExecutor {
   private readonly obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
   private readonly driveController: DriveController;
   private readonly turnController: TurnController;
-  private readonly pathFollower: IPathFollower;
   private readonly poseFusion: PoseFusion;
   private readonly logger: LoggerScope;
   private readonly parameters: PathFollowingParameters;
   private readonly standoff: number;
+  private readonly recentTargetSink: RecentTargetSink | undefined;
 
   private phase: MowingPhase = "idle";
   private currentStripIndex: number = 0;
@@ -71,11 +78,11 @@ export class MowingExecutor {
     this.obstaclePointsArray = options.obstaclePointsArray;
     this.driveController = options.driveController;
     this.turnController = options.turnController;
-    this.pathFollower = options.pathFollower;
     this.poseFusion = options.poseFusion;
     this.logger = options.logger;
     this.parameters = options.parameters ?? DEFAULT_PATH_FOLLOWING_PARAMETERS;
     this.standoff = this.parameters.mowingStandoffMeters;
+    this.recentTargetSink = options.recentTargetSink;
   }
 
   getStatus(): MowingStatus {
@@ -194,7 +201,16 @@ export class MowingExecutor {
           const connector = this.plan.connectors[index];
           if (connector && connector.length >= 2) {
             this.phase = "following_connector";
-            const connectorResult = await this.pathFollower.followPathPoints(connector);
+            const connectorResult = await executeSegmentedBoundaryPath(
+              [...connector],
+              this.driveController,
+              {
+                parameters: this.parameters,
+                learningEnabled: true,
+                startPose: this.poseFusion.getCurrentPose(),
+                recentTargetSink: this.recentTargetSink,
+              },
+            );
             if (!connectorResult.completed) {
               if (connectorResult.reason === "user_stopped") {
                 this.phase = "stopped";
@@ -318,7 +334,16 @@ export class MowingExecutor {
       return true;
     }
 
-    const followResult = await this.pathFollower.followPathPoints(loopPoints);
+    const followResult = await executeSegmentedBoundaryPath(
+      loopPoints,
+      this.driveController,
+      {
+        parameters: this.parameters,
+        learningEnabled: true,
+        startPose: this.poseFusion.getCurrentPose(),
+        recentTargetSink: this.recentTargetSink,
+      },
+    );
     if (!followResult.completed && followResult.reason === "user_stopped") {
       this.phase = "stopped";
       return false;

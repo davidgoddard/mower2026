@@ -5,3 +5,4 @@
 export * from "./retryTypes.js";
 export * from "./checkpointStore.js";
 export * from "./retryManager.js";
+export * from "./operationContextTracker.js";

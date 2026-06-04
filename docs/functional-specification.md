@@ -509,41 +509,51 @@ Mowing strip previews shall treat recorded obstacle perimeters as exclusion zone
 
 From the same page as for tracing the obstacle's perimeter, there will be a button to 'Drive'.
 
-When verifying a traced obstacle perimeter, the mower shall first approach the nearest point on the path but stop about 10cm short of the perimeter so it can turn to face the obstacle path without fouling it.
 There will also be a button to 'Verify'.
 
-The drive button will immediately line-follow the stored path from the mower's current position.
-The verify button will first execute a segment-style approach to about 10cm short of the nearest point, then continue around the stored path until it returns to that join point.
+The drive button shall immediately follow the stored path from the mower's current position.
+The verify button shall first execute a segment-style approach to about 10cm short of the nearest recorded point, then continue around the stored path until it returns to that join point. The 10cm standoff exists so the mower has body clearance to turn on the spot at arrival without fouling the recorded edge; it is not an inflation of the path itself.
 
-Stored obstacle perimeters and mowing area perimeters shall persist the drive algorithm used when retracing them. The operator shall be able to choose between pure-pursuit retrace and segmented-drive retrace on the Drive & Paths page for each saved path independently.
+All perimeter follows — obstacle perimeters, mowing area perimeters, mowing first-encounter boundary traces, and inter-strip connectors — shall use the segmented drive executor. There shall be no separate pure-pursuit follower and no per-path drive-algorithm choice.
 
-Pure-pursuit retrace shall keep the existing smooth continuous path follower behavior. Segmented-drive retrace shall simplify small manually driven wiggles that are within a configurable tolerance, split the simplified boundary into bounded straight segment targets, and execute those targets using the calibrated segment drive and turn controllers. At execution time, segmented-drive retrace shall re-anchor the target list to the nearest target to the mower's current pose and skip targets already reached, so it resumes from where the mower meets the boundary rather than returning to the saved path's first point. Segmented-drive retrace shall abort if the measured segment cross-track error exceeds the configured path-following limit.
+The segmented drive executor shall simplify the manually driven recording before execution using both a chord tolerance and a per-vertex turn-angle gate:
+- A run of consecutive recorded points may be replaced by a single straight segment if every original point in the run lies within the configured simplification tolerance of that chord, and no original interior vertex of the run requires a heading change above the configured maximum vertex turn angle.
+- The first vertex that fails either test ends the chord at the last good vertex; that failing vertex becomes a turn-on-the-spot pivot before the next chord begins.
+- Long simplified chords shall still be subdivided into bounded segment targets so the segment drive controller has frequent re-anchor opportunities.
 
-For closed obstacle perimeters, the recorded path points shall be treated as the inner safety boundary. The runtime shall bias the followed path outward from the closed loop and insert conservative outward points between recorded samples, so smoothing and interpolation do not cut inside the traced obstacle perimeter.
+The recorded perimeter points are the boundary to follow as faithfully as the simplifier allows. No outward inflation is applied to either obstacle or area perimeters; the original manually driven trace is presumed to already respect the safe edge of the obstacle or area.
 
-For mowing area perimeters, the recorded points are the boundary to follow and shall not receive the obstacle outward offset. Driving a mowing area perimeter assumes the mower is already on or close to the perimeter: the runtime shall choose the nearest recorded perimeter point and continue in the direction that best matches the mower's current heading. Verifying a mowing area perimeter shall segment-drive to the nearest perimeter point, stop there, turn to align with the chosen path direction, and then switch to the path follower.
+Driving a mowing area perimeter assumes the mower is already on or close to the perimeter: the runtime shall choose the nearest recorded perimeter point and continue in the direction that best matches the mower's current heading. Verifying a mowing area perimeter shall segment-drive to the nearest perimeter point, stop there, turn to align with the chosen path direction, and then continue around the perimeter using the same segmented executor.
+
+At execution time the segmented executor shall re-anchor the target list to the nearest target to the mower's current pose and skip targets already reached, so it resumes from where the mower meets the boundary rather than returning to the saved path's first point. The executor shall abort the run if the measured segment cross-track error exceeds the configured path-following limit.
 
 Generated strip previews define geometry only. They do not start mowing motion until an execution workflow is added.
 
-The closed-loop tolerance, closed-loop detection tolerance, verification approach standoff, verification turn-only distance, obstacle outward offset, pure-pursuit lookahead distances, segmented-drive simplification tolerance, segmented-drive maximum segment length, segmented-drive minimum segment length, and segmented-drive maximum CTE shall be loaded from persisted path-following configuration rather than being hard-coded in the path helpers.
+The closed-loop tolerance, closed-loop detection tolerance, verification approach standoff, verification turn-only distance, segmented-drive simplification tolerance, segmented-drive maximum vertex turn angle, segmented-drive maximum segment length, segmented-drive minimum segment length, segmented-drive maximum CTE, and path-retry reverse distance shall be loaded from persisted path-following configuration rather than being hard-coded in the path helpers.
 
-The drive will perform a smooth line-follower algorithm but only resort to 'turn-on-the-spot' when the direction to the next point requires a turn greater than can be achieved using an arc - arc is preferred. Motion commands shall not intentionally drive with only one active motor. Any moving wheel command shall be at least 30% of full output; if the requested arc would require one stationary wheel or a lower active output, the controller shall either widen the arc to that minimum active command or flip into a turn-on-the-spot command using opposing wheels.
+A "Stop" button shall be prominent on the screen and immediately terminate a drive.
 
-A "Stop" button will be prominant on the screen and immediately terminate a drive.
-
-Driving should initially be performed at full speed as this ensures the blades are moving quickly and it overcomes the friction - a slow drive could get stuck.
+Driving should initially be performed at full speed as this ensures the blades are moving quickly and it overcomes the friction — a slow drive could get stuck.
 
 ## Obstructions - retry
 
-The mower has two current meters; one for each motor.  When either the current goes over a threshold (to be defined but start with 2 amps) or the position is effectively stationary whilst the motor feedback indicates movement (wheel slip) or the position is stationary for 1 second and the motors have been engaged, then enter a retry loop.
+The mower has two current meters; one for each motor. The system shall classify obstruction events into three types:
 
-The retry loop involves driving in reverse to the last known point if it was driving a line and reversing for 2 seconds and then driving forward to continue and hence re-try. This is presumed to get over long or thick grass that causes a jam.  If the retry is failed 3 times then abort the entire session and power off the motors.
+- **high_current** — either motor draws above the configured current threshold (initial value 2 A). This is treated as the mower hitting thick grass or a clump that the blades may yet cut through with another run-up.
+- **wheel_slip** — wheels are turning per encoder feedback but the fused position is effectively stationary.
+- **stall** — the position is stationary for the stall window while motors are engaged, and the encoders also show no meaningful progress.
 
-The retry loop involves retracing the path backwards for the last 5 waypoints if it was path following to ensure it does not collide with the obstacle.
+Only `high_current` events trigger a retry. `wheel_slip` and `stall` events shall stop the active operation and abort the session — the mower is assumed to be physically stuck.
 
-If turning on the spot, then simply turn the other way for 2 seconds and then retry going forward.  Note that this will require the angles to be managed so that the original target heading is reached even if a back-up and retry occurs.
+The high-current retry strategy depends on the active operation:
 
-Logging should indicate that the retry has occured and which condition was detected and the context in which it occured such as line following or turning.
+- **Line driving**: reverse for the configured duration (initial 2 s, roughly half a metre at full speed), settle, then drive forward to the original target again.
+- **Path following / boundary tracing**: stop the segmented executor cleanly, then retrace the most recently completed targets backward — re-issuing each as a reverse-direction segment drive — until the cumulative reverse distance reaches the configured retreat distance (initial value 0.5 m). The mower travels rear-first along the line it just came in on rather than pivoting through the obstruction. Once clear, restart the same boundary follow; the segmented executor's nearest-target re-anchor logic resumes forward travel from wherever the mower is.
+- **Turn on the spot**: turn the opposite direction for the configured escape duration, then resume the original turn from the new heading. Angles must be managed so that the original target heading is still reached even after the back-up.
+
+If the same operation accumulates more than the configured maximum number of high-current retries (initial value 3) without making progress, the session shall be aborted and the motors powered off.
+
+Logging shall indicate that the retry has occurred, which obstruction type was detected, and the context (line driving, path following, or turning).
 
 ## Mowing Strip Planning
 

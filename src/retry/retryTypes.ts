@@ -39,8 +39,8 @@ export interface LineMetadata {
 
 export interface PathMetadata {
   type: "path";
+  /** Recorded boundary points the segmented executor was following at the time of the obstruction. */
   waypoints: PathPoint[];
-  currentWaypointIndex: number;
 }
 
 export interface TurnMetadata {

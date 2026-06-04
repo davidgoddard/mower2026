@@ -766,28 +766,6 @@ ${getAppDialogScript()}
         .replace(/>/g, '&gt;');
     }
 
-    const DRIVE_ALGORITHM_LABELS = {
-      pure_pursuit: 'Pure pursuit',
-      segmented_drive: 'Segmented drive',
-    };
-
-    function pathDriveAlgorithm(path) {
-      return path.metadata?.driveAlgorithm === 'segmented_drive' ? 'segmented_drive' : 'pure_pursuit';
-    }
-
-    function renderDriveAlgorithmSelect(path, changeHandlerName) {
-      const selectedAlgorithm = pathDriveAlgorithm(path);
-      return \`
-        <label class="path-algorithm">
-          <span>Drive mode</span>
-          <select onchange="\${changeHandlerName}(\${htmlAttribute(jsString(path.name))}, this.value)">
-            <option value="pure_pursuit"\${selectedAlgorithm === 'pure_pursuit' ? ' selected' : ''}>Pure pursuit</option>
-            <option value="segmented_drive"\${selectedAlgorithm === 'segmented_drive' ? ' selected' : ''}>Segmented drive</option>
-          </select>
-        </label>
-      \`;
-    }
-
     function normalizeAxisHeading(headingDeg) {
       const normalized = ((Number(headingDeg) % 180) + 180) % 180;
       return Number.isFinite(normalized) ? normalized : 0;
@@ -1437,7 +1415,6 @@ ${getAppDialogScript()}
         const pointTotal = path.points?.length ?? path.pointCount ?? 0;
         const totalDistance = path.metadata?.totalDistance ?? 0;
         const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
-        const driveAlgorithm = pathDriveAlgorithm(path);
 
         return \`
           <div class="path-item">
@@ -1445,11 +1422,10 @@ ${getAppDialogScript()}
               <div class="path-name">\${path.name}</div>
               <div class="path-meta">
                 \${pointTotal} points • \${totalDistance.toFixed(1)}m total distance
-                • \${DRIVE_ALGORITHM_LABELS[driveAlgorithm]} • Created \${createdAt}
+                • Created \${createdAt}
               </div>
             </div>
             <div class="path-actions">
-              \${renderDriveAlgorithmSelect(path, 'setPathAlgorithm')}
               <button class="button button-primary button-small" type="button" onclick="drivePath(\${htmlAttribute(jsString(path.name))})">
                 <span>▶️</span> Drive
               </button>
@@ -1480,7 +1456,6 @@ ${getAppDialogScript()}
         const pointTotal = path.points?.length ?? path.pointCount ?? 0;
         const totalDistance = path.metadata?.totalDistance ?? 0;
         const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
-        const driveAlgorithm = pathDriveAlgorithm(path);
 
         return \`
           <div class="path-item">
@@ -1488,11 +1463,10 @@ ${getAppDialogScript()}
               <div class="path-name">\${path.name}</div>
               <div class="path-meta">
                 \${pointTotal} points • \${totalDistance.toFixed(1)}m perimeter
-                • \${DRIVE_ALGORITHM_LABELS[driveAlgorithm]} • Created \${createdAt}
+                • Created \${createdAt}
               </div>
             </div>
             <div class="path-actions">
-              \${renderDriveAlgorithmSelect(path, 'setAreaPerimeterAlgorithm')}
               <button class="button button-primary button-small" type="button" onclick="driveAreaPerimeter(\${htmlAttribute(jsString(path.name))})">
                 <span>▶️</span> Drive
               </button>
@@ -1941,37 +1915,6 @@ ${getAppDialogScript()}
       } catch (error) {
         alert('Failed to stop path operation: ' + error.message);
       }
-    };
-
-    async function updatePathAlgorithm(endpoint, pathName, driveAlgorithm, reloadFn) {
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pathName, driveAlgorithm }),
-        });
-
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.error || 'Failed to update drive mode');
-        }
-
-        await reloadFn();
-      } catch (error) {
-        alert('Failed to update drive mode: ' + error.message);
-        await reloadFn();
-      }
-    }
-
-    window.setPathAlgorithm = async function(pathName, driveAlgorithm) {
-      await updatePathAlgorithm('/api/path/algorithm', pathName, driveAlgorithm, loadStoredPaths);
-    };
-
-    window.setAreaPerimeterAlgorithm = async function(pathName, driveAlgorithm) {
-      await updatePathAlgorithm('/api/area-perimeter/algorithm', pathName, driveAlgorithm, async () => {
-        await loadStoredAreaPerimeters();
-        await requestMowingPlanPreview();
-      });
     };
 
     window.deletePath = async function(pathName) {

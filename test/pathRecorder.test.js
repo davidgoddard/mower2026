@@ -29,7 +29,6 @@ function createRecorder(options = {}) {
         metadata: {
           totalDistance: 0,
           pointCount: saved?.points.length ?? 0,
-          driveAlgorithm: 'pure_pursuit',
         },
       };
     },

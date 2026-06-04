@@ -18,6 +18,21 @@ export interface SegmentedBoundaryExecutionOptions {
   readonly learningEnabled?: boolean;
   readonly parameters?: PathFollowingParameters;
   readonly startPose?: Pose;
+  /**
+   * Optional sink for recording each target the executor has just completed.
+   * The retry manager uses this trail to retrace recent targets backward when
+   * recovering from a grass-jam high-current obstruction.
+   */
+  readonly recentTargetSink?: RecentTargetSink;
+}
+
+/**
+ * Sink that receives each target the segmented executor has just successfully
+ * driven to. The implementation can decide retention (e.g. cap by distance).
+ */
+export interface RecentTargetSink {
+  /** Called once per completed target, in execution order. */
+  recordCompletedTarget(target: PathPoint): void;
 }
 
 interface Point2 {
@@ -33,6 +48,7 @@ export function buildSegmentedBoundaryTargets(
   const simplified = simplifyPolyline(
     filtered,
     parameters.segmentedDriveSimplificationToleranceMeters,
+    parameters.segmentedDriveMaxVertexTurnDeg,
     parameters.closedLoopToleranceMeters,
   );
   return resampleLongSegments(simplified, parameters.segmentedDriveMaxSegmentLengthMeters);
@@ -122,6 +138,7 @@ export async function executeSegmentedBoundaryPath(
     }
 
     completedSegments += 1;
+    options.recentTargetSink?.recordCompletedTarget(target);
     if (Math.abs(unwrapMeters(driveResult.maxCteMeters)) > parameters.segmentedDriveMaxCteMeters) {
       systemStop.requestStop("segmented-boundary", "segmented_boundary_cte_exceeded");
       return {
@@ -168,42 +185,99 @@ function removeTinySegments(points: PathPoint[], minDistanceMeters: number): Pat
   return filtered;
 }
 
-function simplifyPolyline(points: PathPoint[], toleranceMeters: number, closedLoopToleranceMeters: number): PathPoint[] {
-  if (points.length <= 2 || toleranceMeters <= 0) {
-    return points.slice();
-  }
-
-  const isClosed = distance(points[0], points[points.length - 1]) <= closedLoopToleranceMeters;
-  const working = isClosed ? points.slice(0, -1) : points;
-  const simplified = simplifyOpenPolyline(working, toleranceMeters);
-  return isClosed ? simplified.concat([simplified[0]]) : simplified;
-}
-
-function simplifyOpenPolyline(points: PathPoint[], toleranceMeters: number): PathPoint[] {
+function simplifyPolyline(
+  points: PathPoint[],
+  toleranceMeters: number,
+  maxVertexTurnDeg: number,
+  closedLoopToleranceMeters: number,
+): PathPoint[] {
   if (points.length <= 2) {
     return points.slice();
   }
 
-  let maxDistance = 0;
-  let splitIndex = -1;
-  const start = points[0];
-  const end = points[points.length - 1];
+  const isClosed = distance(points[0], points[points.length - 1]) <= closedLoopToleranceMeters;
+  const working = isClosed ? points.slice(0, -1) : points.slice();
+  const simplified = simplifyByGreedyChord(working, toleranceMeters, maxVertexTurnDeg);
+  return isClosed ? simplified.concat([simplified[0]]) : simplified;
+}
 
-  for (let index = 1; index < points.length - 1; index += 1) {
-    const candidateDistance = pointToSegmentDistance(points[index], start, end);
-    if (candidateDistance > maxDistance) {
-      maxDistance = candidateDistance;
-      splitIndex = index;
+/**
+ * Walk the recorded points and fuse consecutive ones into a single chord while
+ *   1) every interior recorded point stays within `toleranceMeters` of the chord, and
+ *   2) no interior recorded point requires a heading change above `maxVertexTurnDeg`.
+ * The first vertex that fails either gate becomes a kept pivot, then the next chord starts there.
+ */
+function simplifyByGreedyChord(
+  points: PathPoint[],
+  toleranceMeters: number,
+  maxVertexTurnDeg: number,
+): PathPoint[] {
+  if (points.length <= 2) {
+    return points.slice();
+  }
+
+  const tolerance = Math.max(0, toleranceMeters);
+  const turnRadians = Math.max(0, maxVertexTurnDeg) * (Math.PI / 180);
+  const cosLimit = Math.cos(turnRadians);
+  const kept: PathPoint[] = [points[0]];
+  let anchorIndex = 0;
+
+  while (anchorIndex < points.length - 1) {
+    let candidateEnd = anchorIndex + 1;
+
+    for (let probe = anchorIndex + 2; probe < points.length; probe += 1) {
+      if (
+        chordViolation(points, anchorIndex, probe, tolerance, cosLimit)
+      ) {
+        break;
+      }
+      candidateEnd = probe;
+    }
+
+    kept.push(points[candidateEnd]);
+    anchorIndex = candidateEnd;
+  }
+
+  return kept;
+}
+
+function chordViolation(
+  points: PathPoint[],
+  anchorIndex: number,
+  probeIndex: number,
+  toleranceMeters: number,
+  cosLimit: number,
+): boolean {
+  const start = points[anchorIndex];
+  const end = points[probeIndex];
+
+  for (let index = anchorIndex + 1; index < probeIndex; index += 1) {
+    if (toleranceMeters > 0 && pointToSegmentDistance(points[index], start, end) > toleranceMeters) {
+      return true;
+    }
+    if (cosLimit < 1 && vertexTurnExceeds(points, index, cosLimit)) {
+      return true;
     }
   }
 
-  if (maxDistance <= toleranceMeters || splitIndex < 0) {
-    return [start, end];
-  }
+  return false;
+}
 
-  const first = simplifyOpenPolyline(points.slice(0, splitIndex + 1), toleranceMeters);
-  const second = simplifyOpenPolyline(points.slice(splitIndex), toleranceMeters);
-  return first.slice(0, -1).concat(second);
+function vertexTurnExceeds(points: PathPoint[], vertexIndex: number, cosLimit: number): boolean {
+  const previous = points[vertexIndex - 1];
+  const current = points[vertexIndex];
+  const next = points[vertexIndex + 1];
+  const inDx = current.xMeters - previous.xMeters;
+  const inDy = current.yMeters - previous.yMeters;
+  const outDx = next.xMeters - current.xMeters;
+  const outDy = next.yMeters - current.yMeters;
+  const inLength = Math.hypot(inDx, inDy);
+  const outLength = Math.hypot(outDx, outDy);
+  if (inLength <= 1e-9 || outLength <= 1e-9) {
+    return false;
+  }
+  const cosTheta = ((inDx * outDx) + (inDy * outDy)) / (inLength * outLength);
+  return cosTheta < cosLimit;
 }
 
 function resampleLongSegments(points: PathPoint[], maxSegmentLengthMeters: number): PathPoint[] {

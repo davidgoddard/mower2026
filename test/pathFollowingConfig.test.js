@@ -14,7 +14,7 @@ async function withTempDir(run) {
   }
 }
 
-test("PathFollowingConfig persists and reloads obstacle path safety parameters", async () => {
+test("PathFollowingConfig persists and reloads segmented-drive perimeter follow parameters", async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
       app: "core-app",
@@ -36,10 +36,14 @@ test("PathFollowingConfig persists and reloads obstacle path safety parameters",
     assert.equal(defaults.closedLoopDetectionToleranceMeters, 0.35);
     assert.equal(defaults.verificationApproachStandoffMeters, 0.1);
     assert.equal(defaults.verificationTurnOnlyDistanceMeters, 0.3);
-    assert.equal(defaults.obstacleOutwardOffsetMeters, 0.5);
-    assert.equal(defaults.purePursuitMinLookaheadMeters, 0.5);
-    assert.equal(defaults.purePursuitBaseLookaheadMeters, 1);
-    assert.equal(defaults.purePursuitMaxLookaheadMeters, 2);
+    assert.equal(defaults.segmentedDriveSimplificationToleranceMeters, 0.05);
+    assert.equal(defaults.segmentedDriveMaxVertexTurnDeg, 10);
+    assert.equal(defaults.segmentedDriveMaxSegmentLengthMeters, 0.5);
+    assert.equal(defaults.segmentedDriveMinSegmentLengthMeters, 0.05);
+    assert.equal(defaults.segmentedDriveMaxCteMeters, 0.05);
+    assert.equal(defaults.pathRetryReverseDistanceMeters, 0.5);
+    assert.equal(defaults.obstacleOutwardOffsetMeters, undefined);
+    assert.equal(defaults.purePursuitMinLookaheadMeters, undefined);
 
     const reloaded = new PathFollowingConfig({
       logger,
@@ -53,20 +57,16 @@ test("PathFollowingConfig persists and reloads obstacle path safety parameters",
         closedLoopDetectionToleranceMeters: reloaded.getParameters().closedLoopDetectionToleranceMeters,
         verificationApproachStandoffMeters: reloaded.getParameters().verificationApproachStandoffMeters,
         verificationTurnOnlyDistanceMeters: reloaded.getParameters().verificationTurnOnlyDistanceMeters,
-        obstacleOutwardOffsetMeters: reloaded.getParameters().obstacleOutwardOffsetMeters,
-        purePursuitMinLookaheadMeters: reloaded.getParameters().purePursuitMinLookaheadMeters,
-        purePursuitBaseLookaheadMeters: reloaded.getParameters().purePursuitBaseLookaheadMeters,
-        purePursuitMaxLookaheadMeters: reloaded.getParameters().purePursuitMaxLookaheadMeters,
+        segmentedDriveSimplificationToleranceMeters: reloaded.getParameters().segmentedDriveSimplificationToleranceMeters,
+        segmentedDriveMaxVertexTurnDeg: reloaded.getParameters().segmentedDriveMaxVertexTurnDeg,
       },
       {
         closedLoopToleranceMeters: 0.05,
         closedLoopDetectionToleranceMeters: 0.35,
         verificationApproachStandoffMeters: 0.1,
         verificationTurnOnlyDistanceMeters: 0.3,
-        obstacleOutwardOffsetMeters: 0.5,
-        purePursuitMinLookaheadMeters: 0.5,
-        purePursuitBaseLookaheadMeters: 1,
-        purePursuitMaxLookaheadMeters: 2,
+        segmentedDriveSimplificationToleranceMeters: 0.05,
+        segmentedDriveMaxVertexTurnDeg: 10,
       },
     );
 

@@ -162,9 +162,9 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('appDialogBackdrop'), true);
   assert.equal(manualPage.includes('onclick="verifyPath('), true);
   assert.equal(manualPage.includes('value="\\${htmlAttribute(path.name)}"'), true);
-  assert.equal(manualPage.includes('Segmented drive'), true);
-  assert.equal(manualPage.includes('/api/path/algorithm'), true);
-  assert.equal(manualPage.includes('/api/area-perimeter/algorithm'), true);
+  assert.equal(manualPage.includes('Segmented drive'), false);
+  assert.equal(manualPage.includes('/api/path/algorithm'), false);
+  assert.equal(manualPage.includes('/api/area-perimeter/algorithm'), false);
   assert.equal(manualPage.includes('/api/path/verify'), true);
   assert.equal(manualPage.includes('/api/area-perimeter/verify'), true);
   assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);

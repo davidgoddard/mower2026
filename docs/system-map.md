@@ -19,12 +19,12 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/config/imuCalibration.ts`: IMU yaw scale calibration and persistence.
 - `src/config/poseCalibration.ts`: encoder calibration persistence.
 - `src/config/geometryCalibration.ts`: body-frame GNSS-to-vehicle reference offset persistence.
-- `src/config/pathFollowingConfig.ts`: path tracing/following safety parameters for closed-loop detection, approach standoff, turn-only threshold, obstacle outward offset, and pure-pursuit lookahead distances.
+- `src/config/pathFollowingConfig.ts`: path tracing/following safety parameters for closed-loop detection, approach standoff, turn-only threshold, segmented-drive simplification (chord tolerance, max vertex turn angle, max/min segment length, max CTE), and path-retry reverse distance.
 - `config/motor-calibration.json`: persisted motor calibration values.
 - `config/imu-yaw-calibration.json`: persisted IMU yaw scale factor.
 - `config/pose-calibration.json`: persisted pose calibration values.
 - `config/geometry-calibration.json`: persisted GNSS position offset values for the vehicle control point.
-- `config/path-following-parameters.json`: persisted obstacle path following and pure-pursuit lookahead parameters.
+- `config/path-following-parameters.json`: persisted segmented-drive perimeter follow parameters.
 - `config/drive-learning-params.json`: persisted drive learning values, including forward/reverse CTE gains.
 - `config/turn-learning-parameters.json`: persisted turn learning values.
 
@@ -62,7 +62,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
 - `src/control/turnController.ts`: turn stop checks and stop handling.
 - `src/control/driveController.ts`: drive stop checks and stop handling.
-- `src/pathfollowing/purePursuitFollower.ts`: path-following stop checks and stop handling.
+- `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
 
 ## Pose Fusion
@@ -164,14 +164,15 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Retry System (Obstruction Recovery)
 - `src/retry/retryManager.ts`: **EVENT-DRIVEN RECOVERY SYSTEM** - handles obstruction detection and context-aware recovery
-  - subscribes to `obstructionDetected` events from sensor controller
-  - session tracking: max 3 retry attempts per session before abort
+  - subscribes to `obstructionDetected` events from sensor controller via the appServer wiring
+  - retry only fires for `high_current` events; `wheel_slip` and `stall` events stop and abort the session immediately
+  - session tracking: max 3 high-current retry attempts per session before abort
+  - implements `RecentTargetSink` so the segmented executor can record completed targets while a path follow runs; the path-context recovery walks that trail backward
   - context-aware recovery strategies:
-    - **Line driving**: reverse 2 seconds, retry forward to target
-    - **Path following**: retrace backwards 5 waypoints, resume forward
-    - **Turn on spot**: escape turn opposite direction 2 seconds, retry original heading
+    - **Line driving**: reverse 2 seconds (~half a metre at full speed), retry forward to original target
+    - **Path following / boundary tracing**: stop the segmented executor, retrace the most recently completed targets in reverse (rear-first via `DriveController.driveSegment(target, -1)`) until cumulative reverse travel reaches the configured retreat distance, then call `pathRestart(waypoints)` which re-runs the same boundary follow (the executor re-anchors to the nearest target on resume)
+    - **Turn on spot**: escape turn opposite direction 2 seconds, retry original heading from the new pose
   - emergency abort: powers off motors after max retries exceeded
-  - comprehensive logging at each recovery step with algorithm-specific prefixes
 - `src/retry/checkpointStore.ts`: checkpoint storage for recovery points
   - maintains circular buffer of last 10 checkpoints
   - context-specific checkpoint retrieval (line, path, turn)
@@ -180,47 +181,40 @@ This document maps problem domains to candidate files removing the need for Code
   - `ObstructionType`: high_current, wheel_slip, stall
   - `OperationContext`: line, path, turn
   - `Checkpoint`: recovery point with pose and context metadata
-- Obstruction detection conditions:
-  - Motor current > 2A threshold (configurable)
-  - Wheel slip: encoder movement but position stationary
-  - Stall: position stationary for 1 second with motors engaged
+- `src/retry/operationContextTracker.ts`: in-process holder for the active `OperationContext`. Perimeter routes and the mowing run set "path" while running; the obstruction-event handler reads this to decide whether to dispatch to recovery and which flow to use. Returns `null` when nothing is active so unrelated obstruction events are ignored.
+- Obstruction detection conditions (sensorController):
+  - Motor current > 2A threshold (configurable) — triggers retry (high_current detection not yet implemented in firmware/sensor pipeline)
+  - Wheel slip: encoder movement but position stationary — abort (not yet implemented)
+  - Stall: position stationary for 1 second with motors engaged — abort (live)
+- `src/server/appServer.ts` wiring:
+  - constructs `OperationContextTracker`, `CheckpointStore`, and `RetryManager` after the drive/turn controllers
+  - injects a `turn(angleDeg)` adapter that calls `turnController.executeTurn({ targetAngle, direction })`
+  - injects `pathRestart(waypoints)` that re-runs `executeSegmentedBoundaryPath` with the same recent-target sink
+  - subscribes `sensorController.on("obstructionDetected", ...)` and routes the event to `retryManager.handleObstruction(...)` only when the operation-context tracker reports an active context
+  - `runSegmentedPerimeterFollow` helper wraps each perimeter-follow route (path drive/verify, area-perimeter drive/verify) with operation-context set/clear + retry session start/end + path checkpoint registration
+  - mowing run wires `recentTargetSink: retryManager` into `MowingExecutor` and brackets the background execution with the same retry-session lifecycle
 
 ## Path Following
-- `src/pathfollowing/pathFollowerApi.ts`: **PATH FOLLOWING API** - abstract interface supporting multiple algorithms
-  - `IPathFollower`: interface for path following implementations (Pure Pursuit, Arc Interpolation, etc.)
+- `src/pathfollowing/pathFollowerApi.ts`: **PATH FOLLOWING API** - shared types for recorded paths and path storage
+  - `PathPoint`, `StoredPath`: shared geometry types
   - `IPathRecorder`: interface for recording paths during manual driving
   - `IPathStore`: interface for persistent path storage
-  - `PathDriveAlgorithm`: persisted per-path drive mode, currently `pure_pursuit` or `segmented_drive`
-  - API methods: `followPath()`, `followPathPoints()`, `resumeFromWaypoint()`, `retraceToWaypoint()`, `stop()`
-  - State: current path, waypoint index, distance to target, cross-track error
-- `src/pathfollowing/purePursuitFollower.ts`: **PURE PURSUIT ALGORITHM IMPLEMENTATION**
-  - adaptive lookahead distance loaded from path-following config and adjusted by speed/path curvature
-  - smooth arc following using differential wheel speeds
-  - automatic in-place turns for tight radius (<0.5m); one-wheel stationary pivots are not emitted
-  - moving wheel commands are kept at or above the 30% minimum active motor output, with tighter arcs converted to turn-on-the-spot commands
-  - waypoint progress is monotonic during a run so closed-loop verification stops at the duplicated join point instead of snapping back to the first copy and starting another lap
-  - 20Hz control loop (configurable)
-  - curvature calculation: κ = 2 * sin(α) / L (classic Pure Pursuit formula)
-  - integrates with retry system via checkpoint creation
-  - algorithm-specific logging with `pure_pursuit.*` prefixes
+- `src/pathfollowing/segmentedBoundaryExecutor.ts`: **PERIMETER FOLLOW IMPLEMENTATION** — the only follower used at runtime
+  - simplifies manually recorded wiggles using a chord tolerance plus a per-vertex turn-angle gate, so any kept vertex is one the mower will pivot through on the spot
+  - subdivides long simplified spans into bounded segment-drive targets
+  - re-anchors target execution to the nearest target at runtime and skips targets already under the current pose
+  - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
 - `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
   - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
   - in-memory caching for loaded paths
-  - path metadata: total distance, point count, creation timestamp, and selected drive algorithm
-  - legacy path metadata without a drive algorithm is normalized to `pure_pursuit` on load
+  - path metadata: total distance, point count, creation timestamp
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
   - records fused GNSS and dead-reckoning poses, ignores unknown-quality poses, and skips implausible segment jumps while keeping skip counts in the stop summary
-- `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification starts at the nearest point and loops back to the join point
-  - obstacle path verification chooses the nearest recorded point first, then chooses forward/reverse by tangent alignment at that point
-  - verification approach stages to the outer edge of the join point from the mower's current position, then uses an on-the-spot turn if the arrival heading needs to be corrected
-  - closed obstacle loops are expanded outward with inserted outward midpoints so recorded waypoints are treated as the inner safety limit rather than a smoothed centreline to cut through
-  - mowing area perimeter helpers join the nearest recorded point directly, preserve the exact perimeter geometry without obstacle offsetting, and choose the follow direction from the mower's current heading
+- `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification/drive starts at the nearest recorded point and (for closed perimeters) loops back to the join point
+  - chooses forward or reverse traversal by tangent alignment at the nearest point
+  - verification approach stages 10cm short of the join point so the mower has body clearance to pivot before joining the perimeter
+  - both obstacle perimeters and mowing area perimeters preserve the recorded geometry verbatim — no outward inflation
   - path safety distances are supplied from `PathFollowingConfig` rather than hard-coded in this helper
-- `src/pathfollowing/segmentedBoundaryExecutor.ts`: high-precision boundary retrace mode
-  - simplifies manually recorded near-linear or gentle-arc wiggles within the configured tolerance
-  - resamples long simplified spans into bounded segment-drive targets
-  - re-anchors target execution to the nearest target at runtime and skips targets already under the current pose
-  - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
 - `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
   - normalizes the requested mowing axis to 0-180 degrees because opposite directions produce the same strip layout
   - clips parallel strips to the selected mowing area perimeter using the requested strip spacing, defaulting to 30cm spacing for the 40cm blade
@@ -239,20 +233,18 @@ This document maps problem domains to candidate files removing the need for Code
   - path recording controls for named obstacle paths
   - mowing area perimeter recording controls and stored perimeter management
   - mowing strip preview controls for selecting an area, setting strip width, and setting the strip angle with either a slider or a canvas drag gesture
-  - drive and verify actions for stored paths
+  - drive and verify actions for stored paths (single segmented drive mode — no per-path algorithm choice)
   - canvas map auto-scales across live position history, obstacle paths, and mowing area perimeters, with a minimum view range and stationary jitter coalescing so centimetre-scale GNSS drift does not dominate the display
   - canvas map overlays generated mowing strips and obstacle-aware connectors for the selected area
   - stored path and area-perimeter detail loads are skipped individually if invalid so one bad/missing file does not suppress all overlays
   - prominent stop button for path following aborts
 - `src/server/pathTracingPage.ts`: legacy wrapper that serves the combined Drive & Paths page
 - Path tracing server behavior:
-  - drive immediately line-follows the stored path from the current position
+  - drive immediately follows the stored path from the current position via the segmented executor
   - verify first executes a segment-style approach to about 10cm short of the nearest point on the stored path
-  - verify then follows the rotated loop back to the join point
-  - stored obstacle paths and mowing area perimeters choose between pure pursuit and segmented drive using their persisted `driveAlgorithm`
-  - the Drive & Paths page exposes the per-path drive mode and saves changes through algorithm update endpoints
+  - verify then follows the rotated loop back to the join point via the segmented executor
   - drive and verify route handlers always claim their API paths; when runtime controllers are not initialized they return a 503 JSON error with a `missing` dependency list rather than falling through to `not_found`
-  - mowing area perimeter drive starts path following from the nearest perimeter point in the direction closest to the mower's current heading
+  - mowing area perimeter drive starts perimeter following from the nearest perimeter point in the direction closest to the mower's current heading
   - mowing area perimeter verify segment-drives to the nearest perimeter point, turns to align with the chosen path direction, then follows the perimeter
   - mowing plan preview clips parallel strip lines to the selected mowing area perimeter, excludes stored obstacle perimeters, and returns the strips/connectors without starting motion
   - startup does not seed review fixture paths; mowing previews use only operator-recorded area perimeters and obstacle paths
@@ -264,7 +256,6 @@ This document maps problem domains to candidate files removing the need for Code
   - `GET /api/path/record/status` - current recording point count
   - `POST /api/path/drive` - drive a stored path from the current position
   - `POST /api/path/verify` - join a stored path at the nearest point and loop back to that join point
-  - `POST /api/path/algorithm` - update a stored obstacle path drive algorithm
   - `POST /api/path/stop` - stop active path following
   - `POST /api/path/delete` - delete a stored path
   - `GET /api/area-perimeters` - list stored mowing area perimeters
@@ -275,7 +266,6 @@ This document maps problem domains to candidate files removing the need for Code
   - `GET /api/area-perimeter/record/status` - current mowing area perimeter recording point count
   - `POST /api/area-perimeter/drive` - follow a stored mowing area perimeter from the nearest point and current-facing direction
   - `POST /api/area-perimeter/verify` - drive to the nearest mowing area perimeter point, align, and follow it
-  - `POST /api/area-perimeter/algorithm` - update a stored mowing area perimeter drive algorithm
   - `POST /api/area-perimeter/delete` - delete a stored mowing area perimeter
   - `POST /api/mowing-plan/preview` - generate a strip preview for a selected mowing area perimeter, heading, and strip spacing
   - subscribes to `poseUpdate` events from pose fusion

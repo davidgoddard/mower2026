@@ -9,6 +9,14 @@ export interface DriveRequest {
   readonly learningEnabled?: boolean; // Default true
   readonly maxCrossTrackErrorMeters?: number;
   readonly alwaysTurnToFaceTarget?: boolean; // When true, always pivot to face the target regardless of heading error magnitude
+  /**
+   * Direction of travel along the segment.
+   *  +1 (default) = forward; the mower turns to face the target then drives toward it.
+   *  -1           = reverse; the mower turns so its rear points along the line then drives backward to the target.
+   * Used by the obstruction-recovery path to retrace the recently driven targets without
+   * spinning the mower around mid-jam.
+   */
+  readonly driveDirectionSign?: 1 | -1;
 }
 
 export interface DriveResult {
