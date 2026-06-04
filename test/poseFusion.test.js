@@ -363,8 +363,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   let rebaseReadiness = {
     safe: true,
     motorCommandActive: false,
-    yawRateDegPerSec: 0,
-    maxYawRateDegPerSec: 1,
+    leftWheelSpeedMetersPerSecond: 0,
+    rightWheelSpeedMetersPerSecond: 0,
+    wheelsStationary: true,
+    maxWheelSpeedMetersPerSecond: 0.01,
   };
   sensorController.setHeading = mock.fn();
   sensorController.getHeadingRebaseReadiness = mock.fn(() => rebaseReadiness);
@@ -399,8 +401,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   rebaseReadiness = {
     safe: false,
     motorCommandActive: true,
-    yawRateDegPerSec: 20,
-    maxYawRateDegPerSec: 1,
+    leftWheelSpeedMetersPerSecond: 0.4,
+    rightWheelSpeedMetersPerSecond: 0.4,
+    wheelsStationary: false,
+    maxWheelSpeedMetersPerSecond: 0.01,
   };
   sensorController.getCurrentTimeMillis = mock.fn(() => 2000);
 
@@ -428,8 +432,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   rebaseReadiness = {
     safe: true,
     motorCommandActive: false,
-    yawRateDegPerSec: 0,
-    maxYawRateDegPerSec: 1,
+    leftWheelSpeedMetersPerSecond: 0,
+    rightWheelSpeedMetersPerSecond: 0,
+    wheelsStationary: true,
+    maxWheelSpeedMetersPerSecond: 0.01,
   };
   sensorController.getCurrentTimeMillis = mock.fn(() => 2300);
 
@@ -673,6 +679,84 @@ test("PoseFusion drConfidence recovers after slip resolves", async () => {
   }
   const confidenceAfterRecovery = fusion.getPrimitiveState().drConfidence;
   assert.ok(confidenceAfterRecovery > confidenceAfterSlip, "confidence should have recovered");
+
+  await fusion.stop();
+});
+
+test("PoseFusion re-anchors encoder-only X/Y on every TRUSTED GNSS position even when heading is not rebased", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({
+    safe: false,
+    motorCommandActive: true,
+    leftWheelSpeedMetersPerSecond: 0.4,
+    rightWheelSpeedMetersPerSecond: 0.4,
+    wheelsStationary: false,
+    maxWheelSpeedMetersPerSecond: 0.01,
+  });
+  sensorController.getMotorZeroCommandSinceMillis = () => null;
+  sensorController.getCurrentTimeMillis = () => 99999;
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+  await fusion.start();
+
+  // Feed enough valid position samples (no heading present) to promote position
+  // to TRUSTED while leaving heading REJECTED. The validator default is 3
+  // consecutive valid epochs for position promotion.
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(0), pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    sensorController.emit("gnssPositionUpdate", {
+      xMeters: 10, yMeters: 20,
+      heading: null,
+      positionAccuracyMeters: 0.02,
+      headingAccuracyDeg: null,
+      fixType: "fixed", satellitesInUse: 20, timestampMillis: 200 + i * 50,
+    });
+  }
+
+  // Drift the encoder-only track via wheel ticks while GNSS is silent
+  sensorController.emit("motorFeedbackUpdate", {
+    leftEncoderDelta: 500, rightEncoderDelta: 500,
+    leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
+    leftWheelSpeedMetersPerSecond: 0.4, rightWheelSpeedMetersPerSecond: 0.4,
+    leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
+    watchdogHealthy: true, faultFlags: 0, timestampMillis: 400,
+  });
+
+  const encXBeforeAnchor = fusion.getPrimitiveState().encoderOnlyXMeters;
+  assert.ok(
+    Math.abs((encXBeforeAnchor ?? 0) - 10) > 0.05,
+    `encoder-only X should have drifted from anchor before re-anchor; got ${encXBeforeAnchor}`,
+  );
+
+  // Setheading should NOT have been called because heading was always null
+  assert.equal(sensorController.setHeading.mock.calls.length, 0);
+
+  // Send another TRUSTED position with still no heading — encoder-only track
+  // should snap back to (10, 20) without invoking a heading rebase.
+  sensorController.emit("gnssPositionUpdate", {
+    xMeters: 10, yMeters: 20,
+    heading: null,
+    positionAccuracyMeters: 0.02,
+    headingAccuracyDeg: null,
+    fixType: "fixed", satellitesInUse: 20, timestampMillis: 500,
+  });
+
+  const stateAfter = fusion.getPrimitiveState();
+  assert.ok(
+    Math.abs((stateAfter.encoderOnlyXMeters ?? 0) - 10) < 0.001,
+    `encoderOnlyX should be re-anchored to fused X=10 but got ${stateAfter.encoderOnlyXMeters}`,
+  );
+  assert.ok(
+    Math.abs((stateAfter.encoderOnlyYMeters ?? 0) - 20) < 0.001,
+    `encoderOnlyY should be re-anchored to fused Y=20 but got ${stateAfter.encoderOnlyYMeters}`,
+  );
+  assert.equal(
+    sensorController.setHeading.mock.calls.length,
+    0,
+    "no heading rebase should fire when GNSS heading is absent",
+  );
 
   await fusion.stop();
 });

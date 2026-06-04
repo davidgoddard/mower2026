@@ -51,7 +51,11 @@ const DEG_TO_RAD = Math.PI / 180;
 const IMU_DIAGNOSTIC_WINDOW_MS = 5_000;
 const IMU_DIAGNOSTIC_MAX_SAMPLES = 1_000;
 const IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT = 20;
-const HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC = 1;
+// Wheel-speed magnitude (m/s) below which both wheels are considered
+// stationary for heading-rebase / stop-detection purposes. Picked above
+// encoder + sensor noise; the slow mower will never mistake genuine motion
+// for noise at 1 cm/s.
+const WHEELS_STATIONARY_SPEED_THRESHOLD_MPS = 0.01;
 const IMU_BIAS_RECALIBRATION_WINDOW_MS = 2_000;
 const IMU_BIAS_RECALIBRATION_MIN_SAMPLES = 20;
 const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
@@ -59,7 +63,6 @@ const IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC = 1;
 const IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS = 2_000;
 const IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS = 30 * 60 * 1000;
 const MOTOR_REPLAY_INTERVAL_MS = 10;
-const MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS = 0.01;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
@@ -123,8 +126,10 @@ export interface ImuDiagnosticSummary {
 export interface HeadingRebaseReadiness {
   readonly safe: boolean;
   readonly motorCommandActive: boolean;
-  readonly yawRateDegPerSec: number | null;
-  readonly maxYawRateDegPerSec: number;
+  readonly leftWheelSpeedMetersPerSecond: number | null;
+  readonly rightWheelSpeedMetersPerSecond: number | null;
+  readonly wheelsStationary: boolean;
+  readonly maxWheelSpeedMetersPerSecond: number;
 }
 
 export class SensorController extends EventEmitter {
@@ -164,7 +169,6 @@ export class SensorController extends EventEmitter {
   private imuDiagnosticNextIndex = 0;
   private imuDiagnosticSampleCount = 0;
   private imuDiagnosticLatestTimestampMillis: number | null = null;
-  private latestTiltCompensatedYawRateDegPerSec: number | null = null;
   private imuYawRateBiasDegPerSec = 0;
   private lastImuMotionStopSummary: ImuDiagnosticSummary | null = null;
   private imuBiasAutoRecalibratedForCurrentStop = false;
@@ -473,16 +477,26 @@ export class SensorController extends EventEmitter {
 
   getHeadingRebaseReadiness(): HeadingRebaseReadiness {
     const motorCommandActive = this.isMotorCommandMotion(this.lastMotorCommand);
-    const yawRateDegPerSec = this.latestTiltCompensatedYawRateDegPerSec;
-    const yawRateActive =
-      yawRateDegPerSec !== null &&
-      Math.abs(yawRateDegPerSec) > HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC;
+    const motors = this.primitivesStore.snapshot().motors;
+    const leftWheelSpeedMetersPerSecond = motors.leftWheelSpeedMetersPerSecond;
+    const rightWheelSpeedMetersPerSecond = motors.rightWheelSpeedMetersPerSecond;
+    // Treat unknown wheel speed (no feedback yet) as stationary so the
+    // bootstrap rebase can fire before the first motor-feedback sample.
+    const leftStationary =
+      leftWheelSpeedMetersPerSecond === null ||
+      Math.abs(leftWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS;
+    const rightStationary =
+      rightWheelSpeedMetersPerSecond === null ||
+      Math.abs(rightWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS;
+    const wheelsStationary = leftStationary && rightStationary;
 
     return {
-      safe: !motorCommandActive && !yawRateActive,
+      safe: !motorCommandActive && wheelsStationary,
       motorCommandActive,
-      yawRateDegPerSec,
-      maxYawRateDegPerSec: HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC,
+      leftWheelSpeedMetersPerSecond,
+      rightWheelSpeedMetersPerSecond,
+      wheelsStationary,
+      maxWheelSpeedMetersPerSecond: WHEELS_STATIONARY_SPEED_THRESHOLD_MPS,
     };
   }
 
@@ -787,7 +801,8 @@ export class SensorController extends EventEmitter {
       idleThresholdMs: IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS,
       zeroCommandSinceMillis: this.motorZeroCommandSinceMillis,
       stoppedSinceMillis,
-      yawRateDegPerSec: rebaseReadiness.yawRateDegPerSec,
+      leftWheelSpeedMetersPerSecond: rebaseReadiness.leftWheelSpeedMetersPerSecond,
+      rightWheelSpeedMetersPerSecond: rebaseReadiness.rightWheelSpeedMetersPerSecond,
     });
   }
 
@@ -834,7 +849,6 @@ export class SensorController extends EventEmitter {
         rollDeg,
       );
       const biasCorrectedYawRateDegPerSec = tiltCompensatedYawRateDegPerSec - this.imuYawRateBiasDegPerSec;
-      this.latestTiltCompensatedYawRateDegPerSec = biasCorrectedYawRateDegPerSec;
       let yawDeltaDeg = 0;
       if (sampleDeltaMs !== null) {
         const safeDeltaSeconds = sampleDeltaMs / MS_PER_SECOND;
@@ -1268,8 +1282,8 @@ export class SensorController extends EventEmitter {
     const command = this.lastMotorCommand;
     const stopCommandIssued = command !== null && !this.isMotorCommandMotion(command);
     const wheelsStationary =
-      Math.abs(leftWheelSpeedMetersPerSecond) <= MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS &&
-      Math.abs(rightWheelSpeedMetersPerSecond) <= MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS;
+      Math.abs(leftWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS &&
+      Math.abs(rightWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS;
 
     if (!stopCommandIssued || !wheelsStationary) {
       this.motorStoppedSinceMillis = null;

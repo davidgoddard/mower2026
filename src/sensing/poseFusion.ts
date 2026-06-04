@@ -18,12 +18,14 @@
  *   continuously and is the live heading source consumers see.  GNSS does
  *   not write the IMU heading directly except on rebase events.
  *
- *   Encoders integrate position between TRUSTED GNSS epochs only.  When
- *   GNSS is TRUSTED the encoder integration is shadowed by the snap; when
- *   GNSS is REJECTED the encoder track keeps the position estimate alive
- *   using IMU heading and the per-wheel distance values from
- *   poseCalibration.  No DR-vs-GNSS agreement gate exists — the validator
- *   is the only authority on whether GNSS is good enough.
+ *   Encoders integrate position between TRUSTED GNSS epochs.  When GNSS is
+ *   TRUSTED the fused position snaps to GNSS and the encoder-only track is
+ *   re-anchored to that snap, so the dead-reckoning origin is always fresh
+ *   for an eventual GNSS dropout.  When GNSS is REJECTED the encoder track
+ *   keeps the position estimate alive using IMU heading and the per-wheel
+ *   distance values from poseCalibration.  No DR-vs-GNSS agreement gate
+ *   exists — the validator is the only authority on whether GNSS is good
+ *   enough.
  *
  *   Quality reporting:
  *     "gnss"            — last GNSS sample was TRUSTED within GNSS_STALE_TIMEOUT_MS
@@ -579,11 +581,17 @@ export class PoseFusion extends EventEmitter {
       this.lastGnssAcceptedAtMs = nowMs;
       this.lastGnssRejectionReason = null;
       this.gnssQualityLostTimeMs = null;
-      // Seed the encoder-only track from this anchor on first sample so the
-      // diagnostic widget shows a position immediately.
-      if (this.encoderOnlyX === null) {
-        this.encoderOnlyX = event.xMeters;
-        this.encoderOnlyY = event.yMeters;
+      // Re-anchor the encoder-only track to the freshly-snapped fused
+      // position on every TRUSTED-position update so that, when GNSS later
+      // drops out and the system switches to dead-reckoning, the encoder
+      // track is already starting from a known-good origin rather than from
+      // wherever it had drifted to. Heading re-anchor still happens inside
+      // applyGnssHeadingRebase whenever the heading itself is being
+      // rebased; in between, encoder heading continues to integrate from
+      // wheel differentials.
+      this.encoderOnlyX = event.xMeters;
+      this.encoderOnlyY = event.yMeters;
+      if (this.encoderOnlyHeadingDeg === null) {
         this.encoderOnlyHeadingDeg = unwrapInternalHeading(this.currentHeading);
       }
     } else {
@@ -627,7 +635,8 @@ export class PoseFusion extends EventEmitter {
       this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
         disagreementDeg: headingDisagreementDeg,
         maxOverrideDisagreementDeg: STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG,
-        yawRateDegPerSec: rebaseReadiness.yawRateDegPerSec,
+        leftWheelSpeedMetersPerSecond: rebaseReadiness.leftWheelSpeedMetersPerSecond,
+        rightWheelSpeedMetersPerSecond: rebaseReadiness.rightWheelSpeedMetersPerSecond,
       });
       this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
       this.isUsingGnssHeading = true;

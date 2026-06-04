@@ -30,7 +30,7 @@ Transform a manual push mower into an autonomous system capable of:
 
 ### Navigation & Control
 - ✅ **RTK-GPS positioning** with dual-antenna UM982 receiver (30cm baseline)
-- ✅ **Pose fusion** combining GNSS, wheel odometry, and IMU (6-axis BMI160) with automatic quality tracking
+- ✅ **[Pose fusion](./docs/pose-fusion.md)** combining GNSS, wheel odometry, and IMU (6-axis BMI160) with automatic quality tracking
 - ✅ **Self-learning turn controller** with direction-specific parameter adaptation
 - ✅ **Self-learning drive controller** for straight-line precision with CTE correction
 - ✅ **Pure Pursuit path following** with adaptive lookahead and automatic pivot turns
