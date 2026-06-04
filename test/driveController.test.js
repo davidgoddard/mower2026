@@ -1016,7 +1016,6 @@ describe("DriveLineController", () => {
     const drivePromise = controller.executeLineDrive({
       targetPosition: createPosition(1, 0),
       learningEnabled: true,
-      disableTimeout: true,
       maxCrossTrackErrorMeters: 0.1,
     });
 
@@ -1103,7 +1102,6 @@ describe("DriveLineController", () => {
       targetPosition: createPosition(-1.05, 0),
       driveDirectionSign: -1,
       learningEnabled: true,
-      disableTimeout: true,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1146,7 +1144,6 @@ describe("DriveLineController", () => {
       targetPosition: createPosition(-1.05, 0),
       driveDirectionSign: -1,
       learningEnabled: true,
-      disableTimeout: true,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1191,7 +1188,6 @@ describe("DriveLineController", () => {
       targetPosition: createPosition(-1.05, 0),
       driveDirectionSign: -1,
       learningEnabled: true,
-      disableTimeout: true,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1263,7 +1259,6 @@ describe("DriveLineController", () => {
     const drivePromise = controller.executeLineDrive({
       targetPosition: createPosition(5, 0),
       learningEnabled: true,
-      disableTimeout: true,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1325,7 +1320,6 @@ describe("DriveLineController", () => {
     const drivePromise = controller.executeLineDrive({
       targetPosition: createPosition(5, 0),
       learningEnabled: false,
-      disableTimeout: true,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1397,7 +1391,6 @@ describe("DriveLineController", () => {
     const drivePromise = controller.executeLineDrive({
       targetPosition: createPosition(5, 0),
       learningEnabled: false,
-      disableTimeout: true,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1569,7 +1562,6 @@ describe("DriveLineController", () => {
     const resultPromise = controller.executeLineDrive({
       targetPosition: createPosition(0.05, 0),
       learningEnabled: true,
-      disableTimeout: true,
     });
 
     setTimeout(() => {

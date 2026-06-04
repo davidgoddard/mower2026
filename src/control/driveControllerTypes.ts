@@ -7,8 +7,6 @@ import { Position, Meters } from "../geometry/positionTypes.js";
 export interface DriveRequest {
   readonly targetPosition: Position;
   readonly learningEnabled?: boolean; // Default true
-  readonly timeoutMinimumMs?: number;
-  readonly disableTimeout?: boolean;
   readonly maxCrossTrackErrorMeters?: number;
   readonly alwaysTurnToFaceTarget?: boolean; // When true, always pivot to face the target regardless of heading error magnitude
 }
@@ -23,7 +21,7 @@ export interface DriveResult {
   readonly avgCteMeters: Meters; // Average absolute CTE
   readonly durationMs: number;
   readonly brakeDistanceUsed: Meters;
-  readonly status: "success" | "error" | "stopped" | "timeout";
+  readonly status: "success" | "error" | "stopped";
   readonly errorMessage?: string;
   readonly timestamp: string;
 }

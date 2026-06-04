@@ -44,7 +44,6 @@ import {
 } from "./driveControllerTypes.js";
 import {
   DRIVE_SETTLE_TIME_MS,
-  DRIVE_TIMEOUT_MULTIPLIER,
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
   MAX_WHEEL_SPEED_MPS_DEFAULT,
@@ -74,8 +73,6 @@ import { defaultSleep } from "./sleep.js";
 
 export interface DriveLineRequest extends DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
-  readonly timeoutMinimumMs?: number;
-  readonly disableTimeout?: boolean;
   readonly maxCrossTrackErrorMeters?: number;
 }
 
@@ -123,8 +120,6 @@ export class DriveLineController {
   private cteSamples: Meters[] = [];
   private totalEncoderTicks = 0;
   private driveDirectionSign: 1 | -1 = 1;
-  private driveTimeoutMinimumMs = 0;
-  private driveTimeoutDisabled = false;
   // Drive heartbeat — the per-drive diagnostic record.  Captures every
   // contributor to fused pose at ~5 Hz so the next failure can be diagnosed
   // from the log alone.
@@ -179,8 +174,6 @@ export class DriveLineController {
       systemStop.clearStop("drive-line-execute");
       this.currentDrive = request;
       this.driveDirectionSign = request.driveDirectionSign ?? 1;
-      this.driveTimeoutMinimumMs = request.timeoutMinimumMs ?? 0;
-      this.driveTimeoutDisabled = request.disableTimeout ?? false;
       this.driveStartTime = this.nowMillis();
       this.cteSamples = [];
       this.totalEncoderTicks = 0;
@@ -478,7 +471,6 @@ export class DriveLineController {
             targetPosition,
             learningEnabled: true,
             driveDirectionSign: directionSign,
-            disableTimeout: true,
             maxCrossTrackErrorMeters: distanceMeters,
           });
           results.push(result);
@@ -759,40 +751,6 @@ export class DriveLineController {
       return;
     }
 
-    if (!this.driveTimeoutDisabled && this.nowMillis() - this.driveStartTime > this.calculateTimeout()) {
-      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      try {
-        await this.sensorController.stopMotors();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn("drive.line.stop_failed", { error: message });
-      }
-      systemStop.requestStop("drive", "drive_timeout");
-      this.status = "idle";
-      const finalPosition = pose.position;
-      const errorX = calculateXError(finalPosition, this.driveLineStart, this.driveLineEnd);
-      const errorY = crossTrackError(finalPosition, this.driveLineStart, this.driveLineEnd);
-      this.logger.error("drive.line.timeout", {
-        durationMs: this.nowMillis() - this.driveStartTime,
-      });
-      this.driveResolve?.({
-        startPosition: this.driveStartPosition,
-        targetPosition: this.driveTargetPosition,
-        finalPosition,
-        errorX,
-        errorY,
-        maxCteMeters: this.calculateMaxCte(),
-        avgCteMeters: this.calculateAvgCte(),
-        durationMs: this.nowMillis() - this.driveStartTime,
-        brakeDistanceUsed: brakeDistance,
-        status: "timeout",
-        errorMessage: "Drive execution timeout",
-        timestamp: new Date().toISOString(),
-      });
-      this.currentDrive = null;
-      this.driveResolve = null;
-      return;
-    }
   }
 
   private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number {
@@ -1228,17 +1186,6 @@ export class DriveLineController {
       timestamp: new Date().toISOString(),
     });
     this.driveResolve = null;
-  }
-
-  private calculateTimeout(): number {
-    if (this.driveStartPosition === null || this.driveTargetPosition === null) {
-      return 60000;
-    }
-
-    const distance = unwrapMeters(distanceBetween(this.driveStartPosition, this.driveTargetPosition));
-    const nominalSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
-    const estimatedDurationMs = (distance / Math.max(nominalSpeedMps, 1e-6)) * 1000;
-    return Math.max(estimatedDurationMs * DRIVE_TIMEOUT_MULTIPLIER, this.driveTimeoutMinimumMs);
   }
 
   private calculateMaxCte(): Meters {

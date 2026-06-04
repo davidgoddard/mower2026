@@ -1,7 +1,7 @@
 import { decodeFrame, encodeFrame, frameLengthForPayload } from "../bus/frameCodec.js";
 import { I2cBusController } from "../i2c/i2cBusController.js";
 import { I2C_PRIORITY } from "../i2c/priorities.js";
-import { MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS } from "../constants.js";
+import { MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS, MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS } from "../constants.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 import { decodeMotorFeedbackSample, encodeWheelSpeedCommand, motorFeedbackSampleLength } from "./motorCodec.js";
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
@@ -49,7 +49,7 @@ export class MotorNodeClient {
     this.address = options.address;
     this.motorCalibration = options.motorCalibration ?? null;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
-    this.commandTimeoutMillis = options.commandTimeoutMillis ?? 300;
+    this.commandTimeoutMillis = options.commandTimeoutMillis ?? MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS;
     this.maxReadAttempts = options.maxReadAttempts ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 20;
     this.sleep = options.sleep ?? defaultSleep;

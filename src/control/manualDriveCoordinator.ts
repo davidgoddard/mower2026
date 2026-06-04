@@ -7,6 +7,7 @@ import { systemStop } from "./systemStop.js";
 import {
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
   MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS,
+  MANUAL_DRIVE_CONTROLLER_DISCONNECT_GRACE_MS,
   MANUAL_DRIVE_LOOP_INTERVAL_MS,
   MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT,
 } from "../constants.js";
@@ -17,6 +18,7 @@ interface ManualDriveCoordinatorOptions {
   hidController: HidGameController;
   controlIntervalMs?: number;
   commandRefreshIntervalMs?: number;
+  controllerDisconnectGraceMs?: number;
   outputQuantizationPercent?: number;
   maxWheelOutputPercent?: number;
   nowMillis?: () => number;
@@ -48,6 +50,7 @@ export class ManualDriveCoordinator {
   private readonly hidController: HidGameController;
   private readonly controlIntervalMs: number;
   private readonly commandRefreshIntervalMs: number;
+  private readonly controllerDisconnectGraceMs: number;
   private readonly outputQuantizationPercent: number;
   private readonly maxWheelOutputPercent: number;
   private readonly nowMillis: () => number;
@@ -61,6 +64,8 @@ export class ManualDriveCoordinator {
   private lastCommandedLeftWheelOutputPercent: number | null = null;
   private lastCommandedRightWheelOutputPercent: number | null = null;
   private lastCommandSentMillis: number | null = null;
+  private controllerLostSinceMillis: number | null = null;
+  private gentleHaltSentForCurrentLoss = false;
 
   constructor(options: ManualDriveCoordinatorOptions) {
     this.logger = options.logger.child({ context: "control", source: "ManualDriveCoordinator" });
@@ -68,6 +73,7 @@ export class ManualDriveCoordinator {
     this.hidController = options.hidController;
     this.controlIntervalMs = options.controlIntervalMs ?? MANUAL_DRIVE_LOOP_INTERVAL_MS;
     this.commandRefreshIntervalMs = options.commandRefreshIntervalMs ?? MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS;
+    this.controllerDisconnectGraceMs = options.controllerDisconnectGraceMs ?? MANUAL_DRIVE_CONTROLLER_DISCONNECT_GRACE_MS;
     this.outputQuantizationPercent = options.outputQuantizationPercent ?? MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT;
     this.maxWheelOutputPercent = options.maxWheelOutputPercent ?? DRIVE_FULL_SPEED_COMMAND_DEFAULT;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
@@ -105,9 +111,22 @@ export class ManualDriveCoordinator {
   private registerControllerEvents(): void {
     this.hidController.on("update", (snapshot: HidGameControllerSnapshot) => {
       this.snapshot = snapshot;
-      if (!snapshot.connected && this.manualDriveEnabled) {
-        this.logger.warn("control.manual_drive.disarmed_controller_disconnected");
-        void this.disableManualDrive();
+      if (!snapshot.connected) {
+        if (this.manualDriveEnabled && this.controllerLostSinceMillis === null) {
+          this.controllerLostSinceMillis = this.nowMillis();
+          this.gentleHaltSentForCurrentLoss = false;
+          this.logger.warn("control.manual_drive.controller_disconnected", {
+            graceMs: this.controllerDisconnectGraceMs,
+          });
+        }
+      } else {
+        if (this.controllerLostSinceMillis !== null) {
+          this.logger.info("control.manual_drive.controller_reconnected", {
+            disconnectedForMs: this.nowMillis() - this.controllerLostSinceMillis,
+          });
+        }
+        this.controllerLostSinceMillis = null;
+        this.gentleHaltSentForCurrentLoss = false;
       }
     });
 
@@ -141,11 +160,37 @@ export class ManualDriveCoordinator {
           continue;
         }
 
-        if (!this.manualDriveEnabled || !this.snapshot.connected) {
+        if (!this.manualDriveEnabled) {
           if (this.drivingActive) {
             this.drivingActive = false;
             await this.sensorController.stopMotors();
           }
+          await this.sleep(this.controlIntervalMs);
+          continue;
+        }
+
+        if (!this.snapshot.connected) {
+          // Flaky HID links drop briefly. Bring the mower to a gentle halt
+          // immediately but keep manual drive armed for the grace window so
+          // a quick reconnect can resume without re-arming. If the window
+          // expires, fall through to the normal disarm path.
+          if (!this.gentleHaltSentForCurrentLoss) {
+            this.gentleHaltSentForCurrentLoss = true;
+            this.drivingActive = false;
+            this.lastCommandedLeftWheelOutputPercent = null;
+            this.lastCommandedRightWheelOutputPercent = null;
+            this.lastCommandSentMillis = null;
+            await this.sensorController.stopMotors();
+          }
+
+          const lostSince = this.controllerLostSinceMillis;
+          if (lostSince !== null && this.nowMillis() - lostSince >= this.controllerDisconnectGraceMs) {
+            this.logger.warn("control.manual_drive.disarmed_controller_disconnect_grace_expired", {
+              graceMs: this.controllerDisconnectGraceMs,
+            });
+            await this.disableManualDrive();
+          }
+
           await this.sleep(this.controlIntervalMs);
           continue;
         }
@@ -232,12 +277,17 @@ export class ManualDriveCoordinator {
   }
 
   private async disableManualDrive(): Promise<void> {
+    const wasArmed = this.manualDriveEnabled;
     this.manualDriveEnabled = false;
     this.drivingActive = false;
     this.lastCommandedLeftWheelOutputPercent = null;
     this.lastCommandedRightWheelOutputPercent = null;
     this.lastCommandSentMillis = null;
-    this.sensorController.endMotionSession();
+    this.controllerLostSinceMillis = null;
+    this.gentleHaltSentForCurrentLoss = false;
+    if (wasArmed) {
+      this.sensorController.endMotionSession();
+    }
     try {
       await this.sensorController.stopMotors();
     } catch (error) {

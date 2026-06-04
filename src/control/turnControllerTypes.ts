@@ -31,7 +31,7 @@ export interface TurnResult {
   readonly durationMs: number;
   readonly brakeDistanceUsed: RelativeAngle;
   readonly motorEngaged: boolean;
-  readonly status: "success" | "timeout" | "error" | "stopped";
+  readonly status: "success" | "error" | "stopped";
   readonly errorMessage?: string;
   readonly timestamp: string;
 }

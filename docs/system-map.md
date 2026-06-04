@@ -66,6 +66,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
 
 ## Pose Fusion
+- `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.
 - `src/sensing/poseFusion.ts`: fused pose estimate
   - maintains the latest IMU/GNSS/encoder-derived pose estimate
   - GNSS heading accuracy and fix quality drive IMU heading priming/rebasing; GNSS position accuracy is used separately for trusting x/y pose updates
@@ -219,7 +220,6 @@ This document maps problem domains to candidate files removing the need for Code
   - simplifies manually recorded near-linear or gentle-arc wiggles within the configured tolerance
   - resamples long simplified spans into bounded segment-drive targets
   - re-anchors target execution to the nearest target at runtime and skips targets already under the current pose
-  - applies a minimum timeout to short segment drives so ramp-up and pose updates have time to complete
   - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
 - `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
   - normalizes the requested mowing axis to 0-180 degrees because opposite directions produce the same strip layout

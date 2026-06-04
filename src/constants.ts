@@ -37,6 +37,25 @@ export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
 export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
 
 /**
+ * ESP motor-node command-watchdog timeout, in milliseconds, sent in every
+ * wheel-speed frame. The ESP firmware hard-disables drive when no fresh
+ * command has been received within this window, so the value is the upper
+ * bound on how long a transient I2C contention can last without the ESP
+ * forcing motors off. The mower is slow-moving so 1 s gives plenty of
+ * margin for a stuck bus while still catching a genuinely dead Pi.
+ */
+export const MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS = 1000;
+
+/**
+ * Manual drive controller-disconnect grace period in milliseconds.
+ * If the HID controller drops while manual drive is armed, the coordinator
+ * brings the mower to a gentle halt but keeps manual drive armed for this
+ * window so a flaky link can reconnect without forcing the operator to
+ * re-arm. Past this window the coordinator disarms via the normal stop path.
+ */
+export const MANUAL_DRIVE_CONTROLLER_DISCONNECT_GRACE_MS = 2000;
+
+/**
  * Default IMU calibration sample count (design decision for accuracy vs time)
  */
 export const IMU_DEFAULT_CALIBRATION_SAMPLES = 240;
@@ -340,12 +359,6 @@ export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.45;
 export const TURN_LEARNING_RATE = 0.3;
 
 /**
- * Turn timeout safety multiplier
- * Timeout = (angle / expected_rotation_rate) * multiplier
- */
-export const TURN_TIMEOUT_MULTIPLIER = 3.0;
-
-/**
  * Maximum number of turn results to keep in history
  */
 export const TURN_HISTORY_MAX_SIZE = 100;
@@ -398,12 +411,6 @@ export const DRIVE_SETTLE_TIME_MS = 200;
  * Initial turn threshold - if heading error exceeds this, turn before driving (degrees)
  */
 export const DRIVE_INITIAL_TURN_THRESHOLD_DEG = 5;
-
-/**
- * Drive timeout safety multiplier
- * Timeout = (distance / expected_speed) * multiplier
- */
-export const DRIVE_TIMEOUT_MULTIPLIER = 3.0;
 
 /**
  * Maximum number of drive results to keep in history

@@ -279,7 +279,7 @@ Manual-drive commands must never bypass the motor node control path.
 
 Manual-drive output commands shall be coalesced so tiny analogue stick jitter does not create unnecessary I2C writes, but a held non-zero manual command shall still be refreshed before the motor node watchdog timeout so steady operator input remains alive.
 
-If controller connectivity is lost while manual drive is armed, manual drive shall disarm and issue a motor stop command.
+If controller connectivity is lost while manual drive is armed, manual drive shall issue a gentle stop (zero wheel command, drive enabled) but shall keep manual drive armed for a short reconnect grace window so a flaky HID link can recover without the operator re-arming. If the grace window expires without reconnection, manual drive shall disarm via the normal stop path. A controller disconnect shall never trigger a hard motor disable.
 
 #### IMU interface
 
@@ -431,6 +431,8 @@ The logical sequence of steps is:
 
 The drive controller shall not add a separate post-turn heading settle wait before starting the straight-line portion; the current IMU-derived pose is used immediately and GNSS only nudges the heading when it is already close enough.
 
+The drive controller shall not impose a duration-based timeout on a drive. Drives are bounded by measured error: arrival tolerance, the optional cross-track-error limit, and the global stall detector. Ground speed is not guaranteed and a drive that is making honest progress shall be allowed to continue.
+
 Using events for all sensor value inputs.
 
 Ideally the heading is known at all times.  The mower shall run from the IMU heading continuously.  At startup, the first good GNSS heading shall rebase the IMU immediately if the mower is not already commanded to move and yaw motion is settled.  After that, GNSS headings shall only nudge the IMU when the fix is "fixed", the heading accuracy is good, the heading is stable, the mower is stopped, yaw motion has settled, and the new GNSS heading is already very close to the current IMU heading.  If the mower has been commanded to zero speed for a sustained period, a good GNSS heading may be allowed to rebase the IMU again even if it is no longer close, so that the system can recover from drift while stationary.  When the GNSS gives a silly value or loses fix quality a form of dead-reckoning is achieved by keeping the IMU heading and using the last known good position estimate.  Likewise for position, use GNSS when the fix is good but if fix is lost, then use a dead-reckoning using the motor feedback.  This will require a calibrated motor feedback tick to distance value.
@@ -515,7 +517,7 @@ The verify button will first execute a segment-style approach to about 10cm shor
 
 Stored obstacle perimeters and mowing area perimeters shall persist the drive algorithm used when retracing them. The operator shall be able to choose between pure-pursuit retrace and segmented-drive retrace on the Drive & Paths page for each saved path independently.
 
-Pure-pursuit retrace shall keep the existing smooth continuous path follower behavior. Segmented-drive retrace shall simplify small manually driven wiggles that are within a configurable tolerance, split the simplified boundary into bounded straight segment targets, and execute those targets using the calibrated segment drive and turn controllers. At execution time, segmented-drive retrace shall re-anchor the target list to the nearest target to the mower's current pose and skip targets already reached, so it resumes from where the mower meets the boundary rather than returning to the saved path's first point. Short segmented drives shall use a minimum timeout that allows motor ramp-up and pose feedback to occur. Segmented-drive retrace shall abort if the measured segment cross-track error exceeds the configured path-following limit.
+Pure-pursuit retrace shall keep the existing smooth continuous path follower behavior. Segmented-drive retrace shall simplify small manually driven wiggles that are within a configurable tolerance, split the simplified boundary into bounded straight segment targets, and execute those targets using the calibrated segment drive and turn controllers. At execution time, segmented-drive retrace shall re-anchor the target list to the nearest target to the mower's current pose and skip targets already reached, so it resumes from where the mower meets the boundary rather than returning to the saved path's first point. Segmented-drive retrace shall abort if the measured segment cross-track error exceeds the configured path-following limit.
 
 For closed obstacle perimeters, the recorded path points shall be treated as the inner safety boundary. The runtime shall bias the followed path outward from the closed loop and insert conservative outward points between recorded samples, so smoothing and interpolation do not cut inside the traced obstacle perimeter.
 

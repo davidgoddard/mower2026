@@ -5,8 +5,6 @@ import { Pose, createPosition, unwrapMeters } from "../geometry/positionTypes.js
 import { systemStop } from "../control/systemStop.js";
 import { PathFollowResult, PathPoint } from "./pathFollowerApi.js";
 
-const SEGMENTED_DRIVE_TIMEOUT_MINIMUM_MS = 2_000;
-
 export interface SegmentedBoundaryResult extends PathFollowResult {
   readonly algorithm: "segmented_drive";
   readonly rawPointCount: number;
@@ -104,7 +102,6 @@ export async function executeSegmentedBoundaryPath(
     const driveResult = await driveController.executeDrive({
       targetPosition: createPosition(target.xMeters, target.yMeters),
       learningEnabled: options.learningEnabled ?? true,
-      timeoutMinimumMs: SEGMENTED_DRIVE_TIMEOUT_MINIMUM_MS,
       maxCrossTrackErrorMeters: parameters.segmentedDriveMaxCteMeters,
       alwaysTurnToFaceTarget: true,
     });
