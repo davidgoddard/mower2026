@@ -57,8 +57,9 @@ const IMU_BIAS_RECALIBRATION_MIN_SAMPLES = 20;
 const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
 const IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC = 1;
 const IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS = 2_000;
+const IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS = 30 * 60 * 1000;
+const MOTOR_REPLAY_INTERVAL_MS = 10;
 const MOTOR_STOP_RECALIBRATION_SPEED_THRESHOLD_MPS = 0.01;
-const GNSS_LOW_SATELLITE_TRACE_THRESHOLD = 8;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
@@ -140,16 +141,18 @@ export class SensorController extends EventEmitter {
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
+  private motorReplayIntervalHandle: NodeJS.Timeout | null = null;
+  private motorReplayTickInFlight = false;
   private lastMotorCommand: MotorCommand | null = null;
   private stopRequestLogged = false;
-  private motorOperationDepth = 0;
   private previousMotorFeedbackTimestampMillis: number | null = null;
   private motorCommandActiveSinceMillis: number | null = null;
   private motorZeroCommandSinceMillis: number | null = null;
   private motorStoppedSinceMillis: number | null = null;
+  private motionSessionDepth = 0;
+  private motionSessionIdleSinceMillis: number | null = null;
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
-  private gnssLowSatelliteTraceActive = false;
   private stallMotionAnchorPosition: Position | null = null;
   private stallMotionAnchorSinceMillis: number | null = null;
   private stallDetectionSamples = 0;
@@ -208,9 +211,10 @@ export class SensorController extends EventEmitter {
     this.motorCommandActiveSinceMillis = null;
     this.motorZeroCommandSinceMillis = null;
     this.motorStoppedSinceMillis = null;
+    this.motionSessionDepth = 0;
+    this.motionSessionIdleSinceMillis = this.nowMillis();
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
-    this.gnssLowSatelliteTraceActive = false;
     this.stallMotionAnchorPosition = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
@@ -271,6 +275,7 @@ export class SensorController extends EventEmitter {
     });
 
     this.loopPromise = this.runLoop();
+    this.startMotorReplayTimer();
   }
 
   async stop(): Promise<void> {
@@ -279,6 +284,7 @@ export class SensorController extends EventEmitter {
     }
 
     this.running = false;
+    this.stopMotorReplayTimer();
     if (this.loopPromise) {
       await this.loopPromise;
       this.loopPromise = null;
@@ -321,10 +327,6 @@ export class SensorController extends EventEmitter {
   }
 
   async setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void> {
-    if (this.motorOperationDepth === 0) {
-      throw new Error("motor operation not active");
-    }
-
     const deadbandedLeftWheelOutputPercent = this.applyMotorOutputDeadband(leftWheelOutputPercent);
     const deadbandedRightWheelOutputPercent = this.applyMotorOutputDeadband(rightWheelOutputPercent);
     const {
@@ -398,7 +400,7 @@ export class SensorController extends EventEmitter {
       this.motorZeroCommandSinceMillis = null;
       this.lastImuMotionStopSummary = null;
     }
-    await this.gateway.setMotorWheelOutputs(normalizedLeftWheelOutputPercent, normalizedRightWheelOutputPercent);
+    // The dedicated replay timer owns the actual motor-speed write path.
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
@@ -445,27 +447,6 @@ export class SensorController extends EventEmitter {
     return Math.sign(value) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT;
   }
 
-  beginMotorOperation(): void {
-    this.motorOperationDepth += 1;
-  }
-
-  async endMotorOperation(): Promise<void> {
-    if (this.motorOperationDepth === 0) {
-      this.logger.warn("motors.operation_end_without_start", {});
-      return;
-    }
-
-    this.motorOperationDepth -= 1;
-    if (this.motorOperationDepth === 0) {
-      try {
-        await this.sendDisableMotorsCommand();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn("motors.operation_stop_failed", { error: message });
-      }
-    }
-  }
-
   async stopMotors(): Promise<void> {
     if (!this.stopRequestLogged) {
       this.logger.warn("motors.stop_requested", {
@@ -476,6 +457,14 @@ export class SensorController extends EventEmitter {
     }
 
     await this.sendGentleStopMotorsCommand();
+  }
+
+  async haltMotors(): Promise<void> {
+    this.logger.warn("motors.halt_requested", {
+      currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
+      currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
+    });
+    await this.sendDisableMotorsCommand();
   }
 
   getMotorZeroCommandSinceMillis(): number | null {
@@ -495,6 +484,20 @@ export class SensorController extends EventEmitter {
       yawRateDegPerSec,
       maxYawRateDegPerSec: HEADING_REBASE_MAX_YAW_RATE_DEG_PER_SEC,
     };
+  }
+
+  beginMotionSession(): void {
+    if (this.motionSessionDepth === 0) {
+      this.motionSessionIdleSinceMillis = null;
+    }
+    this.motionSessionDepth += 1;
+  }
+
+  endMotionSession(): void {
+    this.motionSessionDepth = Math.max(0, this.motionSessionDepth - 1);
+    if (this.motionSessionDepth === 0) {
+      this.motionSessionIdleSinceMillis = this.nowMillis();
+    }
   }
 
   getLastImuMotionStopSummary(): ImuDiagnosticSummary | null {
@@ -670,13 +673,62 @@ export class SensorController extends EventEmitter {
     let nextTickMillis = this.nowMillis();
     let loopCount = 0;
 
-    while (this.running) {
-      const loopStartedMillis = this.nowMillis();
-      await this.pollAllSensors();
-      this.maybeAutoRecalibrateImuYawBias();
+    try {
+      while (this.running) {
+        const loopStartedMillis = this.nowMillis();
+        await this.pollAllSensors();
+        this.maybeAutoRecalibrateImuYawBias();
+        const loopDurationMs = this.nowMillis() - loopStartedMillis;
+
+        this.primitivesStore.update({
+          sensorController: {
+            status: "running",
+            pollIntervalMs: this.pollIntervalMs,
+            lastLoopDurationMs: loopDurationMs,
+          },
+        });
+
+        nextTickMillis += this.pollIntervalMs;
+        const waitMillis = Math.max(0, nextTickMillis - this.nowMillis());
+        await this.sleep(waitMillis);
+
+        loopCount += 1;
+        if (this.maxLoopCount !== null && loopCount >= this.maxLoopCount) {
+          this.running = false;
+        }
+      }
+    } finally {
+      this.stopMotorReplayTimer();
+    }
+  }
+
+  private startMotorReplayTimer(): void {
+    if (this.motorReplayIntervalHandle !== null) {
+      return;
+    }
+
+    this.motorReplayIntervalHandle = setInterval(() => {
+      void this.runMotorReplayTick();
+    }, MOTOR_REPLAY_INTERVAL_MS);
+  }
+
+  private stopMotorReplayTimer(): void {
+    if (this.motorReplayIntervalHandle !== null) {
+      clearInterval(this.motorReplayIntervalHandle);
+      this.motorReplayIntervalHandle = null;
+    }
+  }
+
+  private async runMotorReplayTick(): Promise<void> {
+    if (!this.running || this.motorReplayTickInFlight) {
+      return;
+    }
+
+    this.motorReplayTickInFlight = true;
+    try {
       if (systemStop.isStopped()) {
         try {
-          await this.sendGentleStopMotorsCommand();
+          await this.haltMotors();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.warn("sensor.motors.stop_during_global_stop_failed", { error: message });
@@ -684,28 +736,28 @@ export class SensorController extends EventEmitter {
       } else {
         await this.replayLastMotorCommand();
       }
-      const loopDurationMs = this.nowMillis() - loopStartedMillis;
-
-      this.primitivesStore.update({
-        sensorController: {
-          status: "running",
-          pollIntervalMs: this.pollIntervalMs,
-          lastLoopDurationMs: loopDurationMs,
-        },
-      });
-
-      nextTickMillis += this.pollIntervalMs;
-      const waitMillis = Math.max(0, nextTickMillis - this.nowMillis());
-      await this.sleep(waitMillis);
-
-      loopCount += 1;
-      if (this.maxLoopCount !== null && loopCount >= this.maxLoopCount) {
-        this.running = false;
-      }
+    } finally {
+      this.motorReplayTickInFlight = false;
     }
   }
 
   private maybeAutoRecalibrateImuYawBias(): void {
+    if (this.motionSessionDepth > 0) {
+      this.imuBiasAutoRecalibratedForCurrentStop = false;
+      return;
+    }
+
+    const idleSinceMillis = this.motionSessionIdleSinceMillis;
+    if (idleSinceMillis === null) {
+      this.imuBiasAutoRecalibratedForCurrentStop = false;
+      return;
+    }
+
+    const idleDurationMs = this.nowMillis() - idleSinceMillis;
+    if (idleDurationMs < IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS) {
+      return;
+    }
+
     const stoppedSinceMillis = this.motorStoppedSinceMillis;
     const rebaseReadiness = this.getHeadingRebaseReadiness();
     const stationary = stoppedSinceMillis !== null && rebaseReadiness.safe;
@@ -730,7 +782,9 @@ export class SensorController extends EventEmitter {
     this.logger.info("sensor.imu.bias_recalibration_auto_attempt", {
       applied,
       stationaryDurationMs,
+      idleDurationMs,
       settleMs: IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS,
+      idleThresholdMs: IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS,
       zeroCommandSinceMillis: this.motorZeroCommandSinceMillis,
       stoppedSinceMillis,
       yawRateDegPerSec: rebaseReadiness.yawRateDegPerSec,
@@ -918,8 +972,6 @@ export class SensorController extends EventEmitter {
         ...(sample.groundSpeedMetersPerSecond !== undefined ? { groundSpeedMetersPerSecond: sample.groundSpeedMetersPerSecond } : {}),
         rawSample: sample,
       });
-
-      await this.maybeLogGnssLowSatelliteTrace(sample);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.primitivesStore.snapshot().gnss;
@@ -932,48 +984,6 @@ export class SensorController extends EventEmitter {
       });
       this.logger.error("sensor.gnss.poll_failed", { error: message });
     }
-  }
-
-  private async maybeLogGnssLowSatelliteTrace(sample: import("../gnss/gnssProtocol.js").GnssSample): Promise<void> {
-    if (sample.satellitesInUse >= GNSS_LOW_SATELLITE_TRACE_THRESHOLD) {
-      if (this.gnssLowSatelliteTraceActive) {
-        this.gnssLowSatelliteTraceActive = false;
-        this.logger.info("sensor.gnss.low_satellite_recovered", {
-          satellitesInUse: sample.satellitesInUse,
-          fixType: sample.fixType,
-        });
-      }
-      return;
-    }
-
-    if (this.gnssLowSatelliteTraceActive) {
-      return;
-    }
-
-    this.gnssLowSatelliteTraceActive = true;
-
-    let debugLine: import("../gnss/gnssDebugCodec.js").GnssDebugLine | null = null;
-    if (typeof this.gateway.readGnssDebugLine === "function") {
-      try {
-        debugLine = await this.gateway.readGnssDebugLine();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn("sensor.gnss.low_satellite_trace_read_failed", {
-          error: message,
-          satellitesInUse: sample.satellitesInUse,
-          fixType: sample.fixType,
-        });
-      }
-    }
-
-    this.logger.warn("sensor.gnss.low_satellite_raw_line", {
-      satellitesInUse: sample.satellitesInUse,
-      fixType: sample.fixType,
-      debugSatellitesInUse: debugLine?.satellitesInUse ?? null,
-      debugFixType: debugLine?.fixType ?? null,
-      truncated: debugLine?.truncated ?? null,
-      rawPayload: debugLine?.rawPayload ?? null,
-    });
   }
 
   private async pollMotors(): Promise<void> {

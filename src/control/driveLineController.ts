@@ -122,7 +122,6 @@ export class DriveLineController {
   private driveResolve: ((result: DriveResult) => void) | null = null;
   private cteSamples: Meters[] = [];
   private totalEncoderTicks = 0;
-  private motorOperationActive = false;
   private driveDirectionSign: 1 | -1 = 1;
   private driveTimeoutMinimumMs = 0;
   private driveTimeoutDisabled = false;
@@ -174,11 +173,10 @@ export class DriveLineController {
 
   private async startDriveAsync(request: DriveLineRequest): Promise<void> {
     let subscribed = false;
+    this.sensorController.beginMotionSession();
     try {
       this.stopRequested = false;
       systemStop.clearStop("drive-line-execute");
-      this.beginMotorOperation();
-
       this.currentDrive = request;
       this.driveDirectionSign = request.driveDirectionSign ?? 1;
       this.driveTimeoutMinimumMs = request.timeoutMinimumMs ?? 0;
@@ -253,12 +251,12 @@ export class DriveLineController {
       } catch (stopError) {
         const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
         this.logger.warn("drive.line.stop_failed", { error: stopMessage });
-      } finally {
-        await this.endMotorOperation();
       }
       this.status = "idle";
       this.currentDrive = null;
       throw error;
+    } finally {
+      this.sensorController.endMotionSession();
     }
   }
 
@@ -324,53 +322,54 @@ export class DriveLineController {
         distanceMeters: startDistanceMeters,
       },
     );
+    this.sensorController.beginMotionSession();
+    try {
+      for (const distanceMeters of distancePlan) {
+        const directionSigns = includeReverseLegs ? ([1, -1] as const) : ([1] as const);
+        let pairAttempt = 0;
+        const MAX_PAIR_ATTEMPTS = 10;
 
-    for (const distanceMeters of distancePlan) {
-      const directionSigns = includeReverseLegs ? ([1, -1] as const) : ([1] as const);
-      let pairAttempt = 0;
-      const MAX_PAIR_ATTEMPTS = 10;
+        while (pairAttempt < MAX_PAIR_ATTEMPTS) {
+          if (systemStop.isStopped()) {
+            this.logger.warn("drive.line.short_training.stopped", {
+              completed: results.length,
+              reason: "system_stop",
+              distanceMeters,
+            });
+            reportProgress("stopped", `Short-distance training stopped after ${results.length} drive${results.length === 1 ? "" : "s"}.`, {
+              distanceMeters,
+              completedDrives: results.length,
+            });
+            return results;
+          }
+          if (this.stopRequested) {
+            this.logger.warn("drive.line.short_training.stopped", {
+              completed: results.length,
+              distanceMeters,
+            });
+            this.stopRequested = false;
+            reportProgress("stopped", `Short-distance training stopped after ${results.length} drive${results.length === 1 ? "" : "s"}.`, {
+              distanceMeters,
+              completedDrives: results.length,
+            });
+            return results;
+          }
 
-      while (pairAttempt < MAX_PAIR_ATTEMPTS) {
-        if (systemStop.isStopped()) {
-          this.logger.warn("drive.line.short_training.stopped", {
-            completed: results.length,
-            reason: "system_stop",
-            distanceMeters,
-          });
-          reportProgress("stopped", `Short-distance training stopped after ${results.length} drive${results.length === 1 ? "" : "s"}.`, {
-            distanceMeters,
-            completedDrives: results.length,
-          });
-          return results;
-        }
-        if (this.stopRequested) {
-          this.logger.warn("drive.line.short_training.stopped", {
-            completed: results.length,
-            distanceMeters,
-          });
-          this.stopRequested = false;
-          reportProgress("stopped", `Short-distance training stopped after ${results.length} drive${results.length === 1 ? "" : "s"}.`, {
-            distanceMeters,
-            completedDrives: results.length,
-          });
-          return results;
-        }
-
-        pairAttempt += 1;
-        this.logger.info("drive.line.short_training.pair_attempt", {
-          distanceMeters,
-          pairAttempt,
-          includeReverseLegs,
-        });
-        reportProgress(
-          "pair_attempt",
-          `Distance ${Math.round(distanceMeters * 100)} cm, pair attempt ${pairAttempt}.`,
-          {
+          pairAttempt += 1;
+          this.logger.info("drive.line.short_training.pair_attempt", {
             distanceMeters,
             pairAttempt,
-            completedDrives: results.length,
-          },
-        );
+            includeReverseLegs,
+          });
+          reportProgress(
+            "pair_attempt",
+            `Distance ${Math.round(distanceMeters * 100)} cm, pair attempt ${pairAttempt}.`,
+            {
+              distanceMeters,
+              pairAttempt,
+              completedDrives: results.length,
+            },
+          );
 
         let pairSucceeded = true;
         let legAttempt = 0;
@@ -582,18 +581,21 @@ export class DriveLineController {
           return results;
         }
       }
-    }
+      }
 
-    this.logger.info("drive.line.short_training.completed", { totalDrives: results.length });
-    reportProgress(
-      "completed",
-      `Straight-line training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
-      {
-        distanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
-        completedDrives: results.length,
-      },
-    );
-    return results;
+      this.logger.info("drive.line.short_training.completed", { totalDrives: results.length });
+      reportProgress(
+        "completed",
+        `Straight-line training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
+        {
+          distanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+          completedDrives: results.length,
+        },
+      );
+      return results;
+    } finally {
+      this.sensorController.endMotionSession();
+    }
   }
 
   async stopCurrentDrive(): Promise<void> {
@@ -667,8 +669,6 @@ export class DriveLineController {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("drive.line.stop_failed", { error: message });
-      } finally {
-        await this.endMotorOperation();
       }
       this.status = "stopped";
       const stoppedDrive = this.currentDrive;
@@ -695,11 +695,7 @@ export class DriveLineController {
 
     if (systemStop.isStopped()) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      try {
-        await this.sensorController.stopMotors();
-      } finally {
-        await this.endMotorOperation();
-      }
+      await this.sensorController.stopMotors();
       this.status = "stopped";
       this.currentDrive = null;
       this.logger.warn("drive.line.stopped", { durationMs: this.nowMillis() - this.driveStartTime, reason: "system_stop" });
@@ -770,8 +766,6 @@ export class DriveLineController {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("drive.line.stop_failed", { error: message });
-      } finally {
-        await this.endMotorOperation();
       }
       systemStop.requestStop("drive", "drive_timeout");
       this.status = "idle";
@@ -1159,8 +1153,6 @@ export class DriveLineController {
 
       this.status = "idle";
       this.currentDrive = null;
-      await this.endMotorOperation();
-
       const result: DriveResult = {
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
@@ -1182,8 +1174,6 @@ export class DriveLineController {
       this.status = "idle";
       this.currentDrive = null;
       systemStop.requestStop("drive", "drive_completion_error");
-      await this.endMotorOperation();
-
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("drive.line.completion_error", { error: errorMessage });
 
@@ -1217,11 +1207,7 @@ export class DriveLineController {
     this.currentDrive = null;
     this.stopRequested = false;
     systemStop.requestStop("drive", errorMessage);
-    try {
-      await this.sensorController.stopMotors();
-    } finally {
-      await this.endMotorOperation();
-    }
+    await this.sensorController.stopMotors();
     this.logger.warn("drive.line.stopped", {
       durationMs: this.nowMillis() - this.driveStartTime,
       reason: errorMessage,
@@ -1311,15 +1297,4 @@ export class DriveLineController {
     );
   }
 
-  private beginMotorOperation(): void {
-    if (this.motorOperationActive) return;
-    this.motorOperationActive = true;
-    this.sensorController.beginMotorOperation();
-  }
-
-  private async endMotorOperation(): Promise<void> {
-    if (!this.motorOperationActive) return;
-    this.motorOperationActive = false;
-    await this.sensorController.endMotorOperation();
-  }
 }

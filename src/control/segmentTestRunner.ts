@@ -112,7 +112,6 @@ export class SegmentTestRunner {
   private lastUpdated: string | null = null;
   private stopRequested = false;
   private history: SegmentTestResult[] = [];
-  private motorOperationActive = false;
 
   constructor(options: SegmentTestRunnerOptions) {
     this.logger = options.logger.child({ context: "control", source: "SegmentTestRunner" });
@@ -135,6 +134,7 @@ export class SegmentTestRunner {
     this.history = [];
     this.stopRequested = false;
     this.running = true;
+    this.sensorController.beginMotionSession();
     this.phase = "collecting-waypoints";
     this.collectedWaypoints = 0;
     this.totalWaypoints = waypointCount;
@@ -150,9 +150,6 @@ export class SegmentTestRunner {
       testRunCount,
       collectDriveMs: this.collectDriveMs,
     });
-
-    this.sensorController.beginMotorOperation();
-    this.motorOperationActive = true;
 
     try {
       const initialPose = this.poseProvider();
@@ -209,8 +206,6 @@ export class SegmentTestRunner {
           headingDeg: unwrapInternalHeading(pose.heading),
         });
       }
-
-      await this.endCollectionMotorOperation();
 
       if (waypoints.length < 2) {
         this.phase = "completed";
@@ -280,13 +275,11 @@ export class SegmentTestRunner {
       this.logger.info("segment_test.completed", { totalRuns: results.length });
       return results;
     } finally {
-      if (this.motorOperationActive) {
-        await this.endCollectionMotorOperation();
-      }
       this.history = [...results];
       this.running = false;
       this.completedRuns = results.length;
       this.lastUpdated = new Date().toISOString();
+      this.sensorController.endMotionSession();
     }
   }
 
@@ -473,20 +466,6 @@ export class SegmentTestRunner {
 
   private shouldStop(): boolean {
     return systemStop.isStopped() || this.stopRequested;
-  }
-
-  private async endCollectionMotorOperation(): Promise<void> {
-    if (!this.motorOperationActive) {
-      return;
-    }
-
-    this.motorOperationActive = false;
-    try {
-      await this.sensorController.endMotorOperation();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn("segment_test.motor_operation_end_failed", { error: message });
-    }
   }
 
   private logStopped(completedRuns: number, reason: "stop_requested" | "system_stop" | "pose_unavailable" | "waypoint_collection"): void {

@@ -58,6 +58,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/systemStop.ts`: global stop latch for user actions, timeouts, and runtime safety faults.
 - `src/server/appServer.ts`: stop API entry points and operation reset wiring.
 - `src/sensing/sensorController.ts`: sensor loop stop checks and stop-command keepalive while stopped.
+  - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
 - `src/control/turnController.ts`: turn stop checks and stop handling.
 - `src/control/driveController.ts`: drive stop checks and stop handling.
@@ -326,7 +327,7 @@ This document maps problem domains to candidate files removing the need for Code
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
-  - motor API: `setMotorWheelOutputs(...)` and `stopMotors()` command passthrough to hardware boundary; operation end disables motors after any in-operation zero-speed stop has been requested
+  - motor API: `setMotorWheelOutputs(...)` updates the latest desired wheel pair, `stopMotors()` issues an explicit graceful stop, and `haltMotors()` issues a hard disable; a dedicated fast motor replay timer is the sole motor-speed writer and keeps the latest command refreshed independently of the sensor poll cadence so long reads cannot starve motor output
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU

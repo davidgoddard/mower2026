@@ -43,8 +43,6 @@ function createSensorController() {
   return {
     commands,
     controller: {
-      beginMotorOperation() {},
-      async endMotorOperation() {},
       async stopMotors() {
         commands.push(['stop']);
       },
@@ -127,4 +125,36 @@ test('manual drive coalesces tiny held-stick output jitter', async () => {
   const wheelCommands = commands.filter((command) => command.length === 2);
   assert.equal(wheelCommands.length, 1);
   assert.deepEqual(wheelCommands[0], [0.6, 0.6]);
+});
+
+test('manual drive sends a normal zero command when the stick centres', async () => {
+  systemStop.clearStop('manual-drive-test');
+  let now = 0;
+  const hidController = new FakeHidController();
+  const { commands, controller: sensorController } = createSensorController();
+  const coordinator = new ManualDriveCoordinator({
+    logger: createLogger(),
+    sensorController,
+    hidController,
+    controlIntervalMs: 100,
+    commandRefreshIntervalMs: 10_000,
+    nowMillis: () => now,
+    sleep: async (delayMs) => {
+      now += delayMs;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+  });
+
+  coordinator.start();
+  hidController.emit('update', createSnapshot({ speed: 0.6 }));
+  hidController.emit('right-top');
+
+  await waitFor(() => commands.length >= 1);
+
+  hidController.emit('update', createSnapshot({ speed: 0 }));
+  await waitFor(() => commands.some((command) => command.length === 2 && command[0] === 0 && command[1] === 0));
+  await coordinator.stop();
+
+  const wheelCommands = commands.filter((command) => command.length === 2);
+  assert.equal(wheelCommands.some((command) => command[0] === 0 && command[1] === 0), true);
 });

@@ -24,8 +24,6 @@ export interface PurePursuitDependencies {
   motorController: {
     setWheelSpeeds(left: number, right: number): Promise<void>;
     stop(): Promise<void>;
-    beginOperation?: () => void | Promise<void>;
-    endOperation?: () => void | Promise<void>;
   };
   getCurrentPose(): Pose;
   getCurrentSpeed(): number;
@@ -54,7 +52,6 @@ export class PurePursuitFollower implements IPathFollower {
   private stopRequested: boolean = false;
   private currentPath: StoredPath | null = null;
   private currentWaypointIndex: number = 0;
-  private motorOperationActive: boolean = false;
   private hasBeenAwayFromFinalPoint: boolean = false;
   private recentTrail: PathPoint[] = [];
   private passedWaypointIndexes: Set<number> = new Set();
@@ -122,12 +119,7 @@ export class PurePursuitFollower implements IPathFollower {
     });
 
     systemStop.clearStop("path-following-start");
-    await this.beginMotorOperation();
-    try {
-      return await this.executePathFollowing(waypoints);
-    } finally {
-      await this.endMotorOperation();
-    }
+    return await this.executePathFollowing(waypoints);
   }
 
   async resumeFromWaypoint(waypointIndex: number): Promise<PathFollowResult> {
@@ -328,24 +320,6 @@ export class PurePursuitFollower implements IPathFollower {
     } finally {
       this.isFollowing = false;
     }
-  }
-
-  private async beginMotorOperation(): Promise<void> {
-    if (this.motorOperationActive) {
-      return;
-    }
-
-    this.motorOperationActive = true;
-    await this.deps.motorController.beginOperation?.();
-  }
-
-  private async endMotorOperation(): Promise<void> {
-    if (!this.motorOperationActive) {
-      return;
-    }
-
-    this.motorOperationActive = false;
-    await this.deps.motorController.endOperation?.();
   }
 
   private async sleepWithStopChecks(delayMs: number): Promise<boolean> {

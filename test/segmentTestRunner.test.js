@@ -19,8 +19,8 @@ function createMockLogger() {
 test("SegmentTestRunner collects waypoints, drives home first, then tests random non-nearest waypoints", async () => {
   const logger = createMockLogger();
   const sensorController = {
-    beginMotorOperation: mock.fn(() => {}),
-    endMotorOperation: mock.fn(async () => {}),
+    beginMotionSession: mock.fn(() => {}),
+    endMotionSession: mock.fn(async () => {}),
     setMotorWheelOutputs: mock.fn(async () => {}),
     stopMotors: mock.fn(async () => {}),
   };
@@ -72,8 +72,8 @@ test("SegmentTestRunner collects waypoints, drives home first, then tests random
 
   assert.equal(results.length, 2);
   assert.equal(runner.getHistory().length, 2);
-  assert.equal(sensorController.beginMotorOperation.mock.calls.length, 1);
-  assert.equal(sensorController.endMotorOperation.mock.calls.length, 1);
+  assert.equal(sensorController.beginMotionSession.mock.calls.length, 1);
+  assert.equal(sensorController.endMotionSession.mock.calls.length, 1);
   assert.equal(sensorController.setMotorWheelOutputs.mock.calls.length, 6);
   assert.equal(sensorController.stopMotors.mock.calls.length, 6);
   assert.equal(driveController.executeDrive.mock.calls.length, 2);
@@ -115,8 +115,8 @@ test("SegmentTestRunner collects waypoints, drives home first, then tests random
 test("SegmentTestRunner waits for the collection settle period before sampling the next waypoint", async () => {
   const logger = createMockLogger();
   const sensorController = {
-    beginMotorOperation: mock.fn(() => {}),
-    endMotorOperation: mock.fn(async () => {}),
+    beginMotionSession: mock.fn(() => {}),
+    endMotionSession: mock.fn(async () => {}),
     setMotorWheelOutputs: mock.fn(async () => {}),
     stopMotors: mock.fn(async () => {}),
   };

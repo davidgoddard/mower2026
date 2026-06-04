@@ -128,6 +128,7 @@ export class DriveController {
    * Execute a segment drive maneuver.
    */
   async executeDrive(request: DriveRequest): Promise<DriveResult> {
+    this.sensorController.beginMotionSession();
     return new Promise<DriveResult>(async (resolve) => {
       const preserveLearningState = this.status === "learning";
       try {
@@ -223,6 +224,9 @@ export class DriveController {
           timestamp: new Date().toISOString(),
         });
       }
+      finally {
+        this.sensorController.endMotionSession();
+      }
     });
   }
 
@@ -263,8 +267,10 @@ export class DriveController {
       phase: "collecting_waypoints"
     });
 
-    // Phase 1: Collect waypoints by driving forward
-    const waypoints: Position[] = [];
+    this.sensorController.beginMotionSession();
+    try {
+      // Phase 1: Collect waypoints by driving forward
+      const waypoints: Position[] = [];
 
     for (let i = 0; i < waypointCount; i++) {
       if (systemStop.isStopped()) {
@@ -378,12 +384,15 @@ export class DriveController {
       }
     }
 
-    this.logger.info("drive.test_pattern.completed", {
-      totalWaypoints: waypoints.length,
-      testDrives: results.length
-    });
+      this.logger.info("drive.test_pattern.completed", {
+        totalWaypoints: waypoints.length,
+        testDrives: results.length
+      });
 
-    return results;
+      return results;
+    } finally {
+      this.sensorController.endMotionSession();
+    }
   }
 
   /**
@@ -418,42 +427,47 @@ export class DriveController {
       includeReverseLegs,
     });
 
-    this.status = "learning";
-    const results = await this.lineDriveController.runShortDistanceTraining({
-      targetXErrorMeters,
-      includeReverseLegs,
-      startDistanceMeters,
-      maxDistanceMeters,
-      progressReporter,
-    });
-
-    for (const result of results) {
-      this.shortTrainingResults.push(result);
-      if (result.status === "success") {
-        this.addToHistory(result);
-      }
-    }
-
-    this.stopRequested = false;
-    this.status = "idle";
-    if (!this.shortTrainingProgress) {
-      this.shortTrainingProgress = {
-        mode: "short-distance",
-        phase: "completed",
-        distanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
-        pairAttempt: 0,
-        legAttempt: 0,
-        directionSign: null,
+    this.sensorController.beginMotionSession();
+    try {
+      this.status = "learning";
+      const results = await this.lineDriveController.runShortDistanceTraining({
         targetXErrorMeters,
-        completedDrives: results.length,
-        totalPlannedDrives: Math.round(DRIVE_SHORT_BUCKET_MAX_METERS / DRIVE_SHORT_BUCKET_STEP_METERS) * (includeReverseLegs ? 2 : 1),
-        message: `Short-distance training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
-        timestamp: new Date().toISOString(),
-        resultStatus: "success",
-      };
+        includeReverseLegs,
+        startDistanceMeters,
+        maxDistanceMeters,
+        progressReporter,
+      });
+
+      for (const result of results) {
+        this.shortTrainingResults.push(result);
+        if (result.status === "success") {
+          this.addToHistory(result);
+        }
+      }
+
+      this.stopRequested = false;
+      this.status = "idle";
+      if (!this.shortTrainingProgress) {
+        this.shortTrainingProgress = {
+          mode: "short-distance",
+          phase: "completed",
+          distanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+          pairAttempt: 0,
+          legAttempt: 0,
+          directionSign: null,
+          targetXErrorMeters,
+          completedDrives: results.length,
+          totalPlannedDrives: Math.round(DRIVE_SHORT_BUCKET_MAX_METERS / DRIVE_SHORT_BUCKET_STEP_METERS) * (includeReverseLegs ? 2 : 1),
+          message: `Short-distance training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
+          timestamp: new Date().toISOString(),
+          resultStatus: "success",
+        };
+      }
+      this.logger.info("drive.short_training.completed", { totalDrives: results.length });
+      return results;
+    } finally {
+      this.sensorController.endMotionSession();
     }
-    this.logger.info("drive.short_training.completed", { totalDrives: results.length });
-    return results;
   }
 
   /**
@@ -487,7 +501,9 @@ export class DriveController {
       externalProgressReporter?.(progress);
     };
 
-    this.status = "learning";
+    this.sensorController.beginMotionSession();
+    try {
+      this.status = "learning";
 
     const reportProgress = (
       phase: SegmentTrainingProgress["phase"],
@@ -753,9 +769,12 @@ export class DriveController {
         completedSegments: results.length,
       },
     );
-    this.status = "idle";
-    this.stopRequested = false;
-    return results;
+      this.status = "idle";
+      this.stopRequested = false;
+      return results;
+    } finally {
+      this.sensorController.endMotionSession();
+    }
   }
 
   /**

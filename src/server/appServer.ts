@@ -1915,12 +1915,6 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           async stop(): Promise<void> {
             await sensorController.stopMotors();
           },
-          beginOperation(): void {
-            sensorController.beginMotorOperation();
-          },
-          async endOperation(): Promise<void> {
-            await sensorController.endMotorOperation();
-          },
         },
         getCurrentPose: () => poseFusion!.getCurrentPose(),
         getCurrentSpeed: () => {

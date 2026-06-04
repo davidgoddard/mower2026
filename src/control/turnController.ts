@@ -66,7 +66,6 @@ export class TurnController {
   private turnBrakeDistance: RelativeAngle | null = null;
   private turnResolve: ((result: TurnResult) => void) | null = null;
   private turnIsSmallAngle: boolean = false;
-  private motorOperationActive = false;
   private headingUpdateInFlight = false;
 
   constructor(options: TurnControllerOptions) {
@@ -108,6 +107,7 @@ export class TurnController {
 
   private async startTurnAsync(request: TurnRequest): Promise<void> {
     let subscribed = false;
+    this.sensorController.beginMotionSession();
     try {
       systemStop.clearStop("turn-execute");
       this.currentTurn = request;
@@ -120,8 +120,6 @@ export class TurnController {
         direction: request.direction,
         startHeading: unwrapInternalHeading(this.turnStartHeading),
       });
-
-      this.beginMotorOperation();
 
       const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
       this.turnBrakeDistance = this.learningModel.getBrakeAngle(absAngle, request.direction);
@@ -155,13 +153,14 @@ export class TurnController {
       await this.sensorController.setMotorWheelOutputs(initialSpeeds.left, initialSpeeds.right);
     } catch (error) {
       systemStop.requestStop("turn", "turn_error");
-      await this.endMotorOperation();
       if (subscribed) {
         this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
       }
       this.status = "idle";
       this.currentTurn = null;
       throw error;
+    } finally {
+      this.sensorController.endMotionSession();
     }
   }
 
@@ -201,8 +200,6 @@ export class TurnController {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("turn.stop_failed", { error: message });
-      } finally {
-        await this.endMotorOperation();
       }
       this.status = "stopped";
       const stoppedTurn = this.currentTurn;
@@ -342,8 +339,6 @@ export class TurnController {
       // 11. Return to idle and resolve promise
       this.status = "idle";
       this.currentTurn = null;
-      await this.endMotorOperation();
-
       const result: TurnResult = {
         requestedAngle: request.targetAngle,
         achievedAngle,
@@ -365,8 +360,6 @@ export class TurnController {
       this.status = "idle";
       this.currentTurn = null;
       systemStop.requestStop("turn", "turn_completion_error");
-      await this.endMotorOperation();
-
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("turn.completion_error", { error: errorMessage });
 
@@ -631,7 +624,6 @@ export class TurnController {
     const stoppedTurn = this.currentTurn ?? request;
     this.currentTurn = null;
     this.stopRequested = false;
-    await this.endMotorOperation();
     this.logger.warn("turn.stopped", {
       durationMs: this.nowMillis() - this.turnStartTime,
       reason: errorMessage,
@@ -670,15 +662,4 @@ export class TurnController {
     return angles;
   }
 
-  private beginMotorOperation(): void {
-    if (this.motorOperationActive) return;
-    this.motorOperationActive = true;
-    this.sensorController.beginMotorOperation();
-  }
-
-  private async endMotorOperation(): Promise<void> {
-    if (!this.motorOperationActive) return;
-    this.motorOperationActive = false;
-    await this.sensorController.endMotorOperation();
-  }
 }

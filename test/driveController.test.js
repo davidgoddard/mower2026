@@ -752,8 +752,8 @@ describe("DriveLineController", () => {
     return {
       setMotorWheelOutputs: mock.fn(async () => {}),
       stopMotors: mock.fn(async () => {}),
-      beginMotorOperation: mock.fn(() => {}),
-      endMotorOperation: mock.fn(async () => {}),
+      beginMotionSession: mock.fn(() => {}),
+      endMotionSession: mock.fn(async () => {}),
       on: mock.fn(() => {}),
       off: mock.fn(() => {}),
     };

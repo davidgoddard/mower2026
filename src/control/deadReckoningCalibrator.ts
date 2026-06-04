@@ -213,7 +213,6 @@ export class DeadReckoningCalibrator {
   private leftTicksSignedAccum = 0;
   private rightTicksSignedAccum = 0;
   private driveStartMs = 0;
-  private motorOperationActive = false;
 
   constructor(options: DeadReckoningCalibratorOptions) {
     this.logger = options.logger.child({ context: "control", source: "DeadReckoningCalibrator" });
@@ -270,6 +269,7 @@ export class DeadReckoningCalibrator {
     }
 
     this.running = true;
+    this.sensorController.beginMotionSession();
     this.stopRequested = false;
     this.result = null;
     this.gnssWarning = null;
@@ -284,11 +284,6 @@ export class DeadReckoningCalibrator {
     let straightPhase: RunPhaseResult | null = null;
     let arcRightPhase: RunPhaseResult | null = null;
     let arcLeftPhase: RunPhaseResult | null = null;
-
-    // Open a single motor operation that spans the entire calibration run.
-    // Motors are never disabled mid-run — zero-speed commands ramp down naturally.
-    this.sensorController.beginMotorOperation();
-    this.motorOperationActive = true;
 
     try {
       // ------------------------------------------------------------------
@@ -378,10 +373,7 @@ export class DeadReckoningCalibrator {
     } finally {
       this.running = false;
       this.lastUpdated = new Date().toISOString();
-      if (this.motorOperationActive) {
-        await this.sensorController.endMotorOperation();
-        this.motorOperationActive = false;
-      }
+      this.sensorController.endMotionSession();
     }
   }
 

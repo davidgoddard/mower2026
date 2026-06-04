@@ -111,15 +111,20 @@ The `poseFusion.usingGnssHeading` flag is the app-level indicator the live widge
 
 The controller exposes motor command methods:
 
-- `setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent)` for controller-level motion requests
-- `stopMotors()`
+- `setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent)` to update the latest controller-level motion request
+- `stopMotors()` for a normal ramp-down stop
+- `haltMotors()` for an immediate hard disable
 
-`stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands.
-The stationary pose-fusion timer is armed by either an explicit zero-output command or the hard motor-disable stop path, so a mower that has been stopped by the controller can still qualify for a GNSS heading rebase after the timeout.
+`stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands, while `haltMotors()` maps to the emergency disable path.
+The latest requested wheel pair is replayed by the sensor controller’s dedicated fast motor loop, so callers only update desired motion and do not write directly to the motor node.
+The stationary pose-fusion timer is armed by an explicit zero-output command or a user/abort stop path, so a mower that has been stopped by the controller can still qualify for a GNSS heading rebase after the timeout.
 Motor output commands at or below 10% magnitude are treated as zero before transmission, which gives the controller a little tolerance around the joystick center and helps stationary detection settle cleanly.
 Non-zero motor output commands are raised to at least 30% magnitude before transmission. A one-wheel motion command is converted into a minimum active arc command so the hardware is not asked to move with only one active motor.
 The stationary timer uses the controller clock rather than the GNSS sample timestamp, so a stale GNSS receiver time cannot suppress the stop timeout.
 The motor node command payload sent over I2C uses normalized percentages, where `1.0` is full output and `0.0` is stop.
+The controller keeps a dedicated motor replay timer running independently of the sensor poll loop so long read delays do not starve the motors.
+
+IMU yaw-bias auto-recalibration is an idle-only maintenance action. It is suppressed while any motion session is active and only re-arms after the mower has been idle for about 30 minutes, so active tuning and test runs do not get their heading baseline nudged mid-session.
 
 ### Obstruction detection
 
