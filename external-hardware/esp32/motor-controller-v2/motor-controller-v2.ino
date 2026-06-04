@@ -6,6 +6,17 @@
 // It accepts explicit left/right wheel percentage targets over I2C and returns
 // a coherent feedback snapshot with FG pulse deltas, applied PWM, and
 // watchdog/fault state.
+//
+// Encoder signing: each tachometer line is single-channel (no quadrature), so
+// pulse direction is inferred from a cached "last commanded direction" sign
+// per wheel (g_leftDirSign / g_rightDirSign). applyMotorHardware updates the
+// cache in lockstep with the DIR-pin write, so the cache is the canonical
+// record of the last commanded direction and the encoder ISR signs each
+// pulse from it directly. The cache is only flipped after the firmware has
+// ramped PWM magnitude through zero, so coast pulses during brake-to-stop
+// and during direction reversals are signed by the direction the wheel was
+// actually rolling at the moment of the pulse — not by whether the motor
+// is currently powered.
 
 // ===== I2C / protocol =====
 static const uint8_t I2C_SLAVE_ADDRESS = 0x66;
@@ -125,6 +136,13 @@ volatile int32_t g_leftPulseAccumulator = 0;
 volatile int32_t g_rightPulseAccumulator = 0;
 volatile uint32_t g_lastLeftPulseMicros = 0;
 volatile uint32_t g_lastRightPulseMicros = 0;
+// Last sign written to the DIR pin for each wheel. The encoder ISRs sign
+// each pulse by this value so coast pulses during brake-to-stop are
+// attributed to the direction the wheel was last driven, not zeroed.
+// applyMotorHardware updates these together with the digitalWrite that
+// drives the DIR pin, so there is exactly one source of truth.
+volatile int8_t g_leftDirSign = 1;
+volatile int8_t g_rightDirSign = 1;
 static const uint32_t ENCODER_DEBOUNCE_MICROS = 800;
 
 MotorState g_leftMotor = { "left", LEFT_CHANNEL, LEFT_PWM_PIN, LEFT_DIR_PIN, false, 0, 0, 1, false, 0.0f, 0.0f, 0.0f, 0 };
@@ -220,10 +238,20 @@ uint16_t encodeCurrentTenths(float amps) {
 }
 
 // ===== Encoder ISR =====
+//
+// Single-line tachometer: each pulse reports physical wheel rotation, but the
+// pulse alone has no direction. We sign each pulse by g_leftDirSign /
+// g_rightDirSign, which applyMotorHardware updates atomically with the
+// DIR-pin write — so the cache is the canonical record of the last
+// commanded direction. Crucially this is correct during the brake/coast
+// window (DIR is unchanged, so coast pulses inherit the last commanded
+// direction) and during a direction reversal (the firmware ramps PWM
+// magnitude to zero before flipping DIR, so deceleration pulses keep the
+// OLD sign and post-flip pulses pick up the NEW sign).
 void IRAM_ATTR onLeftPulse() {
   uint32_t now = micros();
   if (now - g_lastLeftPulseMicros > ENCODER_DEBOUNCE_MICROS) {
-    g_leftPulseAccumulator += 1;
+    g_leftPulseAccumulator += g_leftDirSign;
     g_lastLeftPulseMicros = now;
   }
 }
@@ -231,7 +259,7 @@ void IRAM_ATTR onLeftPulse() {
 void IRAM_ATTR onRightPulse() {
   uint32_t now = micros();
   if (now - g_lastRightPulseMicros > ENCODER_DEBOUNCE_MICROS) {
-    g_rightPulseAccumulator += 1;
+    g_rightPulseAccumulator += g_rightDirSign;
     g_lastRightPulseMicros = now;
   }
 }
@@ -313,8 +341,19 @@ void encodeMotorFeedbackPayload(const FeedbackSnapshot &feedback, uint8_t *paylo
 
 // ===== Low-level motor output =====
 void applyMotorHardware(MotorState &motor) {
-  int directionBit = motor.currentDirectionSign >= 0 ? 0 : 1;
+  int8_t dirSign = motor.currentDirectionSign >= 0 ? 1 : -1;
+  int directionBit = dirSign >= 0 ? 0 : 1;
   digitalWrite(motor.dirPin, directionBit ^ (motor.inverted ? 1 : 0));
+
+  // Mirror the sign that just drove the DIR pin into the volatile cache the
+  // encoder ISR reads. Doing it here (the only place that writes the DIR
+  // pin) keeps the cache and the pin in lockstep — the ISR can rely on the
+  // cache being a faithful record of the last commanded direction.
+  if (motor.dirPin == LEFT_DIR_PIN) {
+    g_leftDirSign = dirSign;
+  } else if (motor.dirPin == RIGHT_DIR_PIN) {
+    g_rightDirSign = dirSign;
+  }
 
   int duty = (abs(motor.appliedPwmPercent) * PWM_MAX_DUTY) / 100;
   ledc_set_duty(PWM_MODE, motor.pwmChannel, duty);
@@ -324,7 +363,11 @@ void applyMotorHardware(MotorState &motor) {
 void forceMotorStop(MotorState &motor) {
   motor.requestedPwmPercent = 0;
   motor.appliedPwmPercent = 0;
-  motor.currentDirectionSign = 0;
+  // Leave currentDirectionSign at its last non-zero value. The DIR pin is
+  // driven from this field, and the encoder ISR signs coast pulses by the
+  // pin level. Zeroing the sign here would flip the DIR pin to a default
+  // ("forward") while the wheel is still coasting in the prior direction,
+  // mis-signing every coast pulse during the brake-to-stop window.
   motor.targetPercent = 0.0f;
   motor.rampedTargetPercent = 0.0f;
   applyMotorHardware(motor);
@@ -414,9 +457,11 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
     motor.currentDirectionSign = 1;
   } else if (motor.appliedPwmPercent < 0) {
     motor.currentDirectionSign = -1;
-  } else if (targetMagnitude == 0) {
-    motor.currentDirectionSign = 0;
   }
+  // When the applied PWM falls to zero we deliberately keep the last
+  // non-zero direction sign. The DIR pin stays reflecting the direction
+  // the wheel was last driven, so the encoder ISR signs coast pulses
+  // correctly while the wheel rolls to a stop.
   applyMotorHardware(motor);
 }
 
@@ -500,19 +545,19 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   }
   lastSnapshotMillis = nowMillis;
 
-  int32_t leftPulses = 0;
-  int32_t rightPulses = 0;
+  // The encoder ISRs already sign each pulse by the live DIR-pin level, so
+  // the accumulator is the signed pulse delta over this feedback window —
+  // including coast pulses during brake-to-stop and ramp-down, which used
+  // to be discarded by an unwanted "is the motor driven right now?" gate.
+  int32_t signedLeftPulses = 0;
+  int32_t signedRightPulses = 0;
   noInterrupts();
-  leftPulses = g_leftPulseAccumulator;
-  rightPulses = g_rightPulseAccumulator;
+  signedLeftPulses = g_leftPulseAccumulator;
+  signedRightPulses = g_rightPulseAccumulator;
   g_leftPulseAccumulator = 0;
   g_rightPulseAccumulator = 0;
   interrupts();
 
-  bool leftDriven = abs(g_leftMotor.appliedPwmPercent) > 0 && g_leftMotor.currentDirectionSign != 0;
-  bool rightDriven = abs(g_rightMotor.appliedPwmPercent) > 0 && g_rightMotor.currentDirectionSign != 0;
-  int32_t signedLeftPulses = leftDriven ? (leftPulses * g_leftMotor.currentDirectionSign) : 0;
-  int32_t signedRightPulses = rightDriven ? (rightPulses * g_rightMotor.currentDirectionSign) : 0;
   float elapsedSeconds = static_cast<float>(elapsedMs) / 1000.0f;
 
   g_leftMotor.measuredWheelOutputPercent = pulsesToOutputPercent(signedLeftPulses, elapsedSeconds);

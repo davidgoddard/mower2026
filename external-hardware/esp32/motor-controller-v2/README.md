@@ -80,7 +80,7 @@ That means:
 
 - the ESP input needs a pull-up
 - an external pull-up to `3.3 V` is preferred over relying only on the ESP32 internal pull-up
-- direction is currently inferred from commanded motor direction, not measured from the feedback line itself
+- direction is inferred from a cached "last commanded direction" sign per wheel (`g_leftDirSign` / `g_rightDirSign`). The cache is updated in lockstep with the DIR-pin write inside `applyMotorHardware`, so the encoder ISR can sign each pulse from the cache without an extra `digitalRead`. This is correct during ramp-down and during the brake-to-stop coast (the cached sign is unchanged so coast pulses inherit the prior direction) and during direction reversals (the firmware ramps PWM through zero before flipping the cached sign, so deceleration pulses keep the OLD sign and post-flip pulses pick up the NEW sign).
 
 If the mower reports motion while motor power is off, inspect FG wiring and the pull-up arrangement first.
 
