@@ -477,6 +477,9 @@ ${getAppDialogScript()}
       const maxDriveResultRows = 500;
       const driveResultKeys = new Set();
       const driveResultRows = [];
+      let driveStateSnapshot = { status: "idle" };
+      let startHandshakePending = false;
+      let stopRequestPending = false;
 
       function driveResultKey(item) {
         const start = item.startPosition ?? {};
@@ -516,6 +519,25 @@ ${getAppDialogScript()}
         }
       }
 
+      function isDriveTrainingActive(driveState) {
+        const status = driveState?.status ?? "idle";
+        const phase = driveState?.shortTrainingProgress?.phase ?? driveState?.segmentTrainingProgress?.phase ?? null;
+        return status !== "idle" || (phase !== null && phase !== "completed" && phase !== "stopped");
+      }
+
+      function syncDriveButtons() {
+        const startButton = document.getElementById("startDriveTuning");
+        const stopButton = document.getElementById("stopDriveTuning");
+        const trainingActive = isDriveTrainingActive(driveStateSnapshot);
+
+        if (trainingActive) {
+          startHandshakePending = false;
+        }
+
+        startButton.disabled = startHandshakePending || trainingActive;
+        stopButton.disabled = stopRequestPending || !trainingActive;
+      }
+
       async function fetchStatus() {
         const [statusResponse, primitivesResponse] = await Promise.all([
           fetch("/api/drive/status?ts=" + Date.now(), {
@@ -537,9 +559,11 @@ ${getAppDialogScript()}
           updateSidebar(payload.primitives);
 
           const driveState = data.state ?? {};
+          driveStateSnapshot = driveState;
           const liveResults = Array.isArray(driveState.shortTrainingResults) ? driveState.shortTrainingResults : [];
           appendDriveRows(history);
           appendDriveRows(liveResults);
+          syncDriveButtons();
           document.getElementById("driveStatus").textContent = driveState.status ?? "idle";
           document.getElementById("driveRunCount").textContent = String(driveResultRows.length);
           document.getElementById("driveSummary").textContent = driveState.shortTrainingProgress?.message
@@ -575,6 +599,7 @@ ${getAppDialogScript()}
           }).join("");
         } catch (error) {
           console.error("Failed to update drive tuning page:", error);
+          syncDriveButtons();
         }
       }
 
@@ -591,7 +616,6 @@ ${getAppDialogScript()}
       }
 
       document.getElementById("startDriveTuning").addEventListener("click", async () => {
-        const button = document.getElementById("startDriveTuning");
         const startDistanceCm = Number(document.getElementById("startDistanceCm").value);
         const requestedDistanceMeters = Number.isFinite(startDistanceCm) ? Math.max(0.5, startDistanceCm / 100) : 0.5;
         const startAtMeters = requestedDistanceMeters;
@@ -601,7 +625,8 @@ ${getAppDialogScript()}
         document.getElementById("driveSummary").textContent = startAtCm === endAtCm
           ? "Starting short-distance training at " + startAtCm + " cm..."
           : "Starting short-distance training from " + startAtCm + " cm to " + endAtCm + " cm...";
-        button.disabled = true;
+        startHandshakePending = true;
+        syncDriveButtons();
         try {
           await postAction("train-short", {
             startDistanceMeters: startAtMeters,
@@ -613,16 +638,22 @@ ${getAppDialogScript()}
         } catch (error) {
           alert("Failed to start drive tuning: " + (error instanceof Error ? error.message : String(error)));
         } finally {
-          button.disabled = false;
+          startHandshakePending = false;
+          syncDriveButtons();
         }
       });
 
       document.getElementById("stopDriveTuning").addEventListener("click", async () => {
+        stopRequestPending = true;
+        syncDriveButtons();
         try {
           await postAction("stop");
           await update();
         } catch (error) {
           alert("Failed to stop drive tuning: " + (error instanceof Error ? error.message : String(error)));
+        } finally {
+          stopRequestPending = false;
+          syncDriveButtons();
         }
       });
 

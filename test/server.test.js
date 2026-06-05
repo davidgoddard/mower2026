@@ -99,6 +99,9 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(turnPage.includes('Are you sure you want to reset turn learning parameters to defaults?'), true);
   assert.equal(turnPage.includes('id="validationResultsTableBody"'), true);
   assert.equal(turnPage.includes('id="validationStatus"'), true);
+  assert.equal(turnPage.includes('const turnActionButtons = ['), true);
+  assert.equal(turnPage.includes('function syncTurnButtons()'), true);
+  assert.equal(turnPage.includes("stopButton.disabled = stopRequestPending || !runActive;"), true);
 
   const drivePage = getDriveTuningPageHtml();
   assert.equal(drivePage.includes('class="page-layout"'), true);
@@ -114,6 +117,10 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(drivePage.includes('maxDistanceMeters: endAtMeters'), true);
   assert.equal(drivePage.includes('const maxDriveResultRows = 500;'), true);
   assert.equal(drivePage.includes('const driveResultRows = [];'), true);
+  assert.equal(drivePage.includes('let startHandshakePending = false;'), true);
+  assert.equal(drivePage.includes('function syncDriveButtons()'), true);
+  assert.equal(drivePage.includes('startButton.disabled = startHandshakePending || trainingActive;'), true);
+  assert.equal(drivePage.includes('stopButton.disabled = stopRequestPending || !trainingActive;'), true);
   assert.equal(drivePage.includes('appendDriveRows(history);'), true);
   assert.equal(drivePage.includes('appendDriveRows(liveResults);'), true);
   assert.equal(drivePage.includes('driveResultRows.slice(-maxDriveResultRows).reverse()'), true);
@@ -132,6 +139,10 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(segmentPage.includes('primitives: primitivesPayload.primitives ?? primitivesPayload'), true);
   assert.equal(segmentPage.includes('id="startSegmentTest"'), true);
   assert.equal(segmentPage.includes('id="stopSegmentTest"'), true);
+  assert.equal(segmentPage.includes('let segmentStateSnapshot = { phase: "idle", running: false };'), true);
+  assert.equal(segmentPage.includes('function syncSegmentButtons()'), true);
+  assert.equal(segmentPage.includes('startButton.disabled = startHandshakePending || runActive;'), true);
+  assert.equal(segmentPage.includes('stopButton.disabled = stopRequestPending || !runActive;'), true);
   assert.equal(segmentPage.includes('id="segmentResultsTableBody"'), true);
   assert.equal(segmentPage.includes('Segment Results'), true);
   assert.equal(segmentPage.includes('Run Segment Test'), true);

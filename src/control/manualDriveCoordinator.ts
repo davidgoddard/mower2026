@@ -66,6 +66,8 @@ export class ManualDriveCoordinator {
   private lastCommandSentMillis: number | null = null;
   private controllerLostSinceMillis: number | null = null;
   private gentleHaltSentForCurrentLoss = false;
+  private snapshotStaleSinceMillis: number | null = null;
+  private gentleStopSentForCurrentStaleSnapshot = false;
 
   constructor(options: ManualDriveCoordinatorOptions) {
     this.logger = options.logger.child({ context: "control", source: "ManualDriveCoordinator" });
@@ -110,7 +112,10 @@ export class ManualDriveCoordinator {
 
   private registerControllerEvents(): void {
     this.hidController.on("update", (snapshot: HidGameControllerSnapshot) => {
-      this.snapshot = snapshot;
+      this.snapshot = {
+        ...snapshot,
+        lastUpdateMillis: snapshot.lastUpdateMillis > 0 ? snapshot.lastUpdateMillis : this.nowMillis(),
+      };
       if (!snapshot.connected) {
         if (this.manualDriveEnabled && this.controllerLostSinceMillis === null) {
           this.controllerLostSinceMillis = this.nowMillis();
@@ -125,8 +130,15 @@ export class ManualDriveCoordinator {
             disconnectedForMs: this.nowMillis() - this.controllerLostSinceMillis,
           });
         }
+        if (this.snapshotStaleSinceMillis !== null) {
+          this.logger.info("control.manual_drive.snapshot_stream_recovered", {
+            staleForMs: this.nowMillis() - this.snapshotStaleSinceMillis,
+          });
+        }
         this.controllerLostSinceMillis = null;
         this.gentleHaltSentForCurrentLoss = false;
+        this.snapshotStaleSinceMillis = null;
+        this.gentleStopSentForCurrentStaleSnapshot = false;
       }
     });
 
@@ -187,6 +199,43 @@ export class ManualDriveCoordinator {
           if (lostSince !== null && this.nowMillis() - lostSince >= this.controllerDisconnectGraceMs) {
             this.logger.warn("control.manual_drive.disarmed_controller_disconnect_grace_expired", {
               graceMs: this.controllerDisconnectGraceMs,
+            });
+            await this.disableManualDrive();
+          }
+
+          await this.sleep(this.controlIntervalMs);
+          continue;
+        }
+
+        const snapshotAgeMillis = this.nowMillis() - this.snapshot.lastUpdateMillis;
+        const snapshotStaleAfterMillis = Math.max(
+          this.commandRefreshIntervalMs * 2,
+          this.controlIntervalMs * 2,
+        );
+
+        if (snapshotAgeMillis >= snapshotStaleAfterMillis) {
+          if (this.snapshotStaleSinceMillis === null) {
+            this.snapshotStaleSinceMillis = this.nowMillis();
+            this.gentleStopSentForCurrentStaleSnapshot = false;
+            this.logger.warn("control.manual_drive.snapshot_stream_stale", {
+              snapshotAgeMs: snapshotAgeMillis,
+              staleAfterMs: snapshotStaleAfterMillis,
+            });
+          }
+
+          if (!this.gentleStopSentForCurrentStaleSnapshot) {
+            this.gentleStopSentForCurrentStaleSnapshot = true;
+            this.drivingActive = false;
+            this.lastCommandedLeftWheelOutputPercent = null;
+            this.lastCommandedRightWheelOutputPercent = null;
+            this.lastCommandSentMillis = null;
+            await this.sensorController.stopMotors();
+          }
+
+          if (this.nowMillis() - this.snapshotStaleSinceMillis >= this.controllerDisconnectGraceMs) {
+            this.logger.warn("control.manual_drive.disarmed_snapshot_stream_stale", {
+              graceMs: this.controllerDisconnectGraceMs,
+              snapshotAgeMs: snapshotAgeMillis,
             });
             await this.disableManualDrive();
           }
@@ -285,6 +334,8 @@ export class ManualDriveCoordinator {
     this.lastCommandSentMillis = null;
     this.controllerLostSinceMillis = null;
     this.gentleHaltSentForCurrentLoss = false;
+    this.snapshotStaleSinceMillis = null;
+    this.gentleStopSentForCurrentStaleSnapshot = false;
     if (wasArmed) {
       this.sensorController.endMotionSession();
     }

@@ -736,13 +736,44 @@ ${getAppDialogScript()}
         };
       }
 
+      let segmentStateSnapshot = { phase: "idle", running: false };
+      let startHandshakePending = false;
+      let stopRequestPending = false;
+
+      function isSegmentRunActive(state) {
+        if (state?.running) {
+          return true;
+        }
+        const phase = state?.phase ?? "idle";
+        return phase !== "idle" && phase !== "completed" && phase !== "stopped";
+      }
+
+      function syncSegmentButtons() {
+        const startButton = document.getElementById("startSegmentTest");
+        const stopButton = document.getElementById("stopSegmentTest");
+        const runActive = isSegmentRunActive(segmentStateSnapshot);
+
+        if (runActive) {
+          startHandshakePending = false;
+        }
+
+        if (startButton) {
+          startButton.disabled = startHandshakePending || runActive;
+        }
+        if (stopButton) {
+          stopButton.disabled = stopRequestPending || !runActive;
+        }
+      }
+
       async function update() {
         try {
           const payload = await fetchStatus();
           updateSidebar(payload.primitives);
 
           const state = payload.status?.state ?? {};
+          segmentStateSnapshot = state;
           const history = Array.isArray(payload.status?.history) ? payload.status.history : [];
+          syncSegmentButtons();
 
           const resultCount = document.getElementById("segment-result-count");
           if (resultCount) {
@@ -810,6 +841,7 @@ ${getAppDialogScript()}
           }).join("");
         } catch (error) {
           console.error("Failed to update segment testing page:", error);
+          syncSegmentButtons();
         }
       }
 
@@ -826,8 +858,8 @@ ${getAppDialogScript()}
       }
 
       document.getElementById("startSegmentTest").addEventListener("click", async () => {
-        const button = document.getElementById("startSegmentTest");
-        button.disabled = true;
+        startHandshakePending = true;
+        syncSegmentButtons();
         try {
           await postAction("start", {
             waypointCount: 7,
@@ -838,16 +870,22 @@ ${getAppDialogScript()}
         } catch (error) {
           alert("Failed to start segment testing: " + (error instanceof Error ? error.message : String(error)));
         } finally {
-          button.disabled = false;
+          startHandshakePending = false;
+          syncSegmentButtons();
         }
       });
 
       document.getElementById("stopSegmentTest").addEventListener("click", async () => {
+        stopRequestPending = true;
+        syncSegmentButtons();
         try {
           await postAction("stop");
           await update();
         } catch (error) {
           alert("Failed to stop segment testing: " + (error instanceof Error ? error.message : String(error)));
+        } finally {
+          stopRequestPending = false;
+          syncSegmentButtons();
         }
       });
 

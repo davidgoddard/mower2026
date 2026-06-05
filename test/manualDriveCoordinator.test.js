@@ -43,6 +43,8 @@ function createSensorController() {
   return {
     commands,
     controller: {
+      beginMotionSession() {},
+      endMotionSession() {},
       async stopMotors() {
         commands.push(['stop']);
       },
@@ -77,6 +79,7 @@ test('manual drive refreshes a held moving command before the motor watchdog can
     nowMillis: () => now,
     sleep: async (delayMs) => {
       now += delayMs;
+      hidController.emit('update', createSnapshot({ lastUpdateMillis: now }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     },
   });
@@ -203,6 +206,46 @@ test('manual drive disarms after the controller disconnect grace window expires'
 
   const stopCount = commands.filter((command) => command[0] === 'stop').length;
   assert.equal(stopCount >= 2, true);
+});
+
+test('manual drive requests a normal stop when HID updates go stale and resumes on recovery', async () => {
+  systemStop.clearStop('manual-drive-test');
+  let now = 0;
+  const hidController = new FakeHidController();
+  const { commands, controller: sensorController } = createSensorController();
+  const coordinator = new ManualDriveCoordinator({
+    logger: createLogger(),
+    sensorController,
+    hidController,
+    controlIntervalMs: 50,
+    commandRefreshIntervalMs: 100,
+    controllerDisconnectGraceMs: 500,
+    nowMillis: () => now,
+    sleep: async (delayMs) => {
+      now += delayMs;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+  });
+
+  coordinator.start();
+  hidController.emit('update', createSnapshot({ speed: 0.6, lastUpdateMillis: now }));
+  hidController.emit('right-top');
+
+  await waitFor(() => commands.some((command) => command.length === 2 && command[0] !== 0));
+  const beforeStale = commands.length;
+
+  await waitFor(() => commands.slice(beforeStale).some((command) => command[0] === 'stop'), 500);
+
+  hidController.emit('update', createSnapshot({ speed: 0.6, lastUpdateMillis: now }));
+
+  await waitFor(() => {
+    const wheelCommandsAfterRecovery = commands
+      .slice(beforeStale)
+      .filter((command) => command.length === 2);
+    return wheelCommandsAfterRecovery.some((command) => command[0] !== 0 || command[1] !== 0);
+  }, 500);
+
+  await coordinator.stop();
 });
 
 test('manual drive sends a normal zero command when the stick centres', async () => {

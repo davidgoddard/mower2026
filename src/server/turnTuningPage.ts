@@ -1006,6 +1006,44 @@ ${getAppDialogScript()}
         : 'Idle';
     }
 
+    const turnActionButtons = [
+      { id: 'runSingleTurn', idleLabel: 'Run Single Turn', pendingLabel: '<span class="spinner"></span> Running...' },
+      { id: 'runLargeAngleTraining', idleLabel: 'Train Large Angles', pendingLabel: '<span class="spinner"></span> Training Large Angles...' },
+      { id: 'runSmallAngleTraining', idleLabel: 'Train Small Angles', pendingLabel: '<span class="spinner"></span> Training Small Angles...' },
+      { id: 'runRealPoseValidation', idleLabel: 'Validate Real Pose', pendingLabel: '<span class="spinner"></span> Validating Real Pose...' },
+    ];
+    let turnStateSnapshot = { status: 'idle' };
+    let realPoseValidationSnapshot = null;
+    let pendingTurnActionId = null;
+    let stopRequestPending = false;
+
+    function isTurnRunActive(turnState, validationState) {
+      if ((turnState?.status ?? 'idle') !== 'idle') {
+        return true;
+      }
+      return Boolean(validationState?.running);
+    }
+
+    function syncTurnButtons() {
+      const runActive = isTurnRunActive(turnStateSnapshot, realPoseValidationSnapshot);
+      if (runActive) {
+        pendingTurnActionId = null;
+      }
+
+      for (const config of turnActionButtons) {
+        const button = document.getElementById(config.id);
+        if (!button) continue;
+        const isPending = pendingTurnActionId === config.id;
+        button.disabled = runActive || isPending;
+        button.innerHTML = isPending ? config.pendingLabel : config.idleLabel;
+      }
+
+      const stopButton = document.getElementById('stopCurrentRun');
+      if (stopButton) {
+        stopButton.disabled = stopRequestPending || !runActive;
+      }
+    }
+
     // Update UI with status data
     async function updateStatus() {
       try {
@@ -1016,6 +1054,9 @@ ${getAppDialogScript()}
         const data = await turnResponse.json();
         const primitives = await primitivesResponse.json();
         updateSensorWidgets(primitives);
+        turnStateSnapshot = data.state ?? { status: 'idle' };
+        realPoseValidationSnapshot = data.realPoseValidation ?? null;
+        syncTurnButtons();
 
         // Update controller status badge
         const statusBadge = document.getElementById('controllerStatus');
@@ -1109,15 +1150,15 @@ ${getAppDialogScript()}
         }
       } catch (error) {
         console.error('Failed to update status:', error);
+        syncTurnButtons();
       }
     }
 
     // Run single turn
     document.getElementById('runSingleTurn').addEventListener('click', async () => {
       const angle = parseFloat(document.getElementById('testAngle').value);
-      const button = document.getElementById('runSingleTurn');
-      button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Running...';
+      pendingTurnActionId = 'runSingleTurn';
+      syncTurnButtons();
 
       try {
         await fetch('/api/turn/execute', {
@@ -1129,16 +1170,15 @@ ${getAppDialogScript()}
       } catch (error) {
         alert('Failed to execute turn: ' + error.message);
       } finally {
-        button.disabled = false;
-        button.innerHTML = 'Run Single Turn';
+        pendingTurnActionId = null;
+        syncTurnButtons();
       }
     });
 
     // Run large-angle training sequence
     document.getElementById('runLargeAngleTraining').addEventListener('click', async () => {
-      const button = document.getElementById('runLargeAngleTraining');
-      button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Training Large Angles...';
+      pendingTurnActionId = 'runLargeAngleTraining';
+      syncTurnButtons();
 
       try {
         await fetch('/api/turn/train-large', {
@@ -1150,16 +1190,15 @@ ${getAppDialogScript()}
       } catch (error) {
         alert('Failed to train large angles: ' + error.message);
       } finally {
-        button.disabled = false;
-        button.innerHTML = 'Train Large Angles';
+        pendingTurnActionId = null;
+        syncTurnButtons();
       }
     });
 
     // Run small-angle training sequence
     document.getElementById('runSmallAngleTraining').addEventListener('click', async () => {
-      const button = document.getElementById('runSmallAngleTraining');
-      button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Training Small Angles...';
+      pendingTurnActionId = 'runSmallAngleTraining';
+      syncTurnButtons();
 
       try {
         await fetch('/api/turn/train-small', {
@@ -1171,16 +1210,15 @@ ${getAppDialogScript()}
       } catch (error) {
         alert('Failed to train small angles: ' + error.message);
       } finally {
-        button.disabled = false;
-        button.innerHTML = 'Train Small Angles';
+        pendingTurnActionId = null;
+        syncTurnButtons();
       }
     });
 
     // Run real-pose validation sequence
     document.getElementById('runRealPoseValidation').addEventListener('click', async () => {
-      const button = document.getElementById('runRealPoseValidation');
-      button.disabled = true;
-      button.innerHTML = '<span class="spinner"></span> Validating Real Pose...';
+      pendingTurnActionId = 'runRealPoseValidation';
+      syncTurnButtons();
 
       try {
         await updateStatus();
@@ -1193,21 +1231,22 @@ ${getAppDialogScript()}
       } catch (error) {
         alert('Failed to validate real pose: ' + error.message);
       } finally {
-        button.disabled = false;
-        button.innerHTML = 'Validate Real Pose';
+        pendingTurnActionId = null;
+        syncTurnButtons();
       }
     });
 
     document.getElementById('stopCurrentRun').addEventListener('click', async () => {
-      const button = document.getElementById('stopCurrentRun');
-      button.disabled = true;
+      stopRequestPending = true;
+      syncTurnButtons();
       try {
         await fetch('/api/turn/stop', { method: 'POST' });
         await updateStatus();
       } catch (error) {
         alert('Failed to stop current run: ' + error.message);
       } finally {
-        button.disabled = false;
+        stopRequestPending = false;
+        syncTurnButtons();
       }
     });
 
