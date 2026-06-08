@@ -24,6 +24,9 @@ function findLogCall(logger, message) {
 test("PoseFusion rebases the IMU from the first good GNSS heading fix", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({
     sensorController,
     logger: createMockLogger(),
@@ -59,6 +62,9 @@ test("PoseFusion rebases the IMU from the first good GNSS heading fix", async ()
 test("PoseFusion ignores poor GNSS fixes when deciding whether to reset heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({
     sensorController,
     logger: createMockLogger(),
@@ -86,6 +92,9 @@ test("PoseFusion ignores poor GNSS fixes when deciding whether to reset heading"
 test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({
     sensorController,
     logger: createMockLogger(),
@@ -132,6 +141,9 @@ test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", as
 test("PoseFusion keeps GNSS position even when heading accuracy is too poor to rebase heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({
     sensorController,
     logger: createMockLogger(),
@@ -160,6 +172,9 @@ test("PoseFusion keeps GNSS position even when heading accuracy is too poor to r
 test("PoseFusion still syncs heading from GNSS when position accuracy is poor", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({
     sensorController,
     logger: createMockLogger(),
@@ -191,6 +206,9 @@ test("PoseFusion still syncs heading from GNSS when position accuracy is poor", 
 test("PoseFusion keeps the IMU heading when later GNSS is too far away and rebases only when close", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const logger = createMockLogger();
   const fusion = new PoseFusion({
     sensorController,
@@ -259,6 +277,9 @@ test("PoseFusion keeps the IMU heading when later GNSS is too far away and rebas
 test("PoseFusion rebases from GNSS after a long zero-speed stop even when heading gap is large", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   sensorController.getMotorZeroCommandSinceMillis = mock.fn(() => 1000);
   sensorController.getCurrentTimeMillis = mock.fn(() => 1000);
   sensorController.getRecentImuDiagnosticSummary = mock.fn(() => ({
@@ -369,6 +390,9 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
     maxWheelSpeedMetersPerSecond: 0.01,
   };
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   sensorController.getHeadingRebaseReadiness = mock.fn(() => rebaseReadiness);
   sensorController.getCurrentTimeMillis = mock.fn(() => 1000);
   const fusion = new PoseFusion({
@@ -460,6 +484,9 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
 test("PoseFusion rebases from GNSS after a consistent mirrored offset", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   sensorController.getMotorZeroCommandSinceMillis = mock.fn(() => null);
   const logger = createMockLogger();
   const fusion = new PoseFusion({
@@ -536,6 +563,9 @@ test("PoseFusion rebases from GNSS after a consistent mirrored offset", async ()
 test("PoseFusion initialises encoder-only track from first IMU heading on first encoder sample", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
   await fusion.start();
 
@@ -565,6 +595,9 @@ test("PoseFusion initialises encoder-only track from first IMU heading on first 
 test("PoseFusion drConfidence starts at 1 and remains at 1 when encoders agree with IMU", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
   await fusion.start();
 
@@ -598,6 +631,9 @@ test("PoseFusion drConfidence starts at 1 and remains at 1 when encoders agree w
 test("PoseFusion drConfidence decays when encoder-implied turn disagrees with IMU", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
   await fusion.start();
 
@@ -636,6 +672,9 @@ test("PoseFusion drConfidence decays when encoder-implied turn disagrees with IM
 test("PoseFusion drConfidence recovers after slip resolves", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
   await fusion.start();
 
@@ -686,6 +725,9 @@ test("PoseFusion drConfidence recovers after slip resolves", async () => {
 test("PoseFusion re-anchors encoder-only X/Y on every TRUSTED GNSS position even when heading is not rebased", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   sensorController.getHeadingRebaseReadiness = () => ({
     safe: false,
     motorCommandActive: true,
@@ -764,6 +806,9 @@ test("PoseFusion re-anchors encoder-only X/Y on every TRUSTED GNSS position even
 test("PoseFusion re-anchors encoder-only track and boosts confidence when GNSS rebases IMU heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
+  if (!sensorController.getHeadingRebaseReadiness) {
+    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  }
   sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
   sensorController.getMotorZeroCommandSinceMillis = () => 0;
   sensorController.getCurrentTimeMillis = () => 99999;

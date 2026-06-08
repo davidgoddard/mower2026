@@ -23,6 +23,7 @@ test("SegmentTestRunner collects waypoints, drives home first, then tests random
     endMotionSession: mock.fn(async () => {}),
     setMotorWheelOutputs: mock.fn(async () => {}),
     stopMotors: mock.fn(async () => {}),
+    requestNeutralMotorOutputs: mock.fn(async () => {}),
   };
 
   const driveController = {
@@ -119,6 +120,7 @@ test("SegmentTestRunner waits for the collection settle period before sampling t
     endMotionSession: mock.fn(async () => {}),
     setMotorWheelOutputs: mock.fn(async () => {}),
     stopMotors: mock.fn(async () => {}),
+    requestNeutralMotorOutputs: mock.fn(async () => {}),
   };
 
   const driveController = {

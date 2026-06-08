@@ -36,6 +36,12 @@ describe("DriveController", () => {
         wheelSpeedLeft = 0;
         wheelSpeedRight = 0;
       }),
+      requestNeutralMotorOutputs: mock.fn(async () => {
+        wheelSpeedLeft = 0;
+        wheelSpeedRight = 0;
+      }),
+      beginMotionSession: mock.fn(),
+      endMotionSession: mock.fn(),
       _testGetWheelSpeeds: () => ({ left: wheelSpeedLeft, right: wheelSpeedRight }),
     };
   }
@@ -58,6 +64,14 @@ describe("DriveController", () => {
       setEncoderCalibration: (val) => {
         encoderCalibration = val;
       },
+      getWheelbaseMeters: () => 0.55,
+      getDiagnosticSnapshot: () => ({
+        calibration: {
+          leftMetersPerTick: 0.001,
+          rightMetersPerTick: 0.001,
+          wheelbaseMeters: 0.55,
+        },
+      }),
       on: (event, listener) => emitter.on(event, listener),
       off: (event, listener) => emitter.off(event, listener),
       _testEmitPoseUpdate: (pose) => {
@@ -770,6 +784,14 @@ describe("DriveLineController", () => {
       }),
       getEncoderCalibration: () => 0.001,
       setEncoderCalibration: mock.fn(async () => {}),
+      getWheelbaseMeters: () => 0.55,
+      getDiagnosticSnapshot: () => ({
+        calibration: {
+          leftMetersPerTick: 0.001,
+          rightMetersPerTick: 0.001,
+          wheelbaseMeters: 0.55,
+        },
+      }),
       on: mock.fn(() => {}),
       off: mock.fn(() => {}),
     };
@@ -787,6 +809,14 @@ describe("DriveLineController", () => {
       getCurrentPose: () => currentPose,
       getEncoderCalibration: () => 0.001,
       setEncoderCalibration: mock.fn(async () => {}),
+      getWheelbaseMeters: () => 0.55,
+      getDiagnosticSnapshot: () => ({
+        calibration: {
+          leftMetersPerTick: 0.001,
+          rightMetersPerTick: 0.001,
+          wheelbaseMeters: 0.55,
+        },
+      }),
       setPose: (pose) => {
         currentPose = pose;
       },
@@ -799,6 +829,14 @@ describe("DriveLineController", () => {
       getCurrentPose: mock.fn(() => poses[Math.min(index++, poses.length - 1)]),
       getEncoderCalibration: () => 0.001,
       setEncoderCalibration: mock.fn(async () => {}),
+      getWheelbaseMeters: () => 0.55,
+      getDiagnosticSnapshot: () => ({
+        calibration: {
+          leftMetersPerTick: 0.001,
+          rightMetersPerTick: 0.001,
+          wheelbaseMeters: 0.55,
+        },
+      }),
       on: mock.fn(() => {}),
       off: mock.fn(() => {}),
     };

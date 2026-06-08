@@ -217,15 +217,16 @@ test("buildVerificationApproachPlan stages to the outer edge with a tangential j
     { xMeters: 1, yMeters: 1, capturedAt: 3 },
     { xMeters: 0, yMeters: 1, capturedAt: 4 },
   ];
+  // Pose (0.15, 0.05) is ~0.158m from the join point — well within the
+  // default verificationTurnOnlyDistanceMeters (0.30m), so the plan is a
+  // turn-only join rather than a tangent drive.
   const nearPose = createPose(0.15, 0.05, createInternalHeading(90), "gnss");
   const nearPlan = buildVerificationApproachPlan(loopPoints, nearPose);
   assert.ok(nearPlan);
-  assert.equal(nearPlan.turnOnly, false);
+  assert.equal(nearPlan.turnOnly, true);
   assert.equal(nearPlan.pathDirection, "forward");
   assert.equal(nearPlan.joinPoint.xMeters, 0);
   assert.equal(nearPlan.joinPoint.yMeters, 0);
-  assert.equal(nearPlan.approachTarget.xMeters, -0.1);
-  assert.equal(nearPlan.approachTarget.yMeters, 0);
 });
 
 test("buildVerificationApproachPlan chooses nearest point before heading alignment", () => {

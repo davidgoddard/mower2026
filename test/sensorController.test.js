@@ -10,6 +10,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitFor(predicate, { timeoutMs = 1000, intervalMs = 5 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await delay(intervalMs);
+  }
+  throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+}
+
 async function withTempDir(run) {
   const dir = await mkdtemp(join(tmpdir(), 'mower-sensors-'));
   try {
@@ -731,8 +740,11 @@ test('SensorController adjusts GNSS position to the calibrated vehicle reference
     await delay(0);
 
     const snapshot = primitivesStore.snapshot();
+    // Body-frame offset (forward=1, right=0.5) at IMU heading 0 (along +X):
+    // forward axis is (+1, 0) → +1 in world X
+    // right axis is (0, -1) at heading 0 → -0.5 in world Y
     assert.equal(snapshot.gnss.xMeters, 13.34);
-    assert.equal(snapshot.gnss.yMeters, 57.28);
+    assert.equal(snapshot.gnss.yMeters, 56.28);
 
     await controller.stop();
     await logger.close();
@@ -889,10 +901,11 @@ test('SensorController requires an active motor operation for speed commands and
     assert.equal(controller.getMotorZeroCommandSinceMillis(), 0);
     assert.equal(controller.getHeadingRebaseReadiness().safe, true);
 
+    // stopMotors() now issues a normalised zero-output speed command rather
+    // than asserting motor disable. Hard disable is reserved for haltMotors.
     assert.deepEqual(calls, [
       { type: 'speed', left: 0.5, right: -0.5 },
       { type: 'speed', left: 0, right: 0 },
-      { type: 'stop' },
     ]);
 
     await logger.close();
@@ -1012,13 +1025,17 @@ test('SensorController waits for motor feedback to show an actual stop before au
     };
 
     const primitivesStore = new PrimitivesStore();
+    // Auto-recalibration requires 30 minutes of motion-session idleness plus
+    // a 2 second motor-stopped settle. Pick a now() well past both so the
+    // gate is open and the test only validates the motor-stopped check.
+    const NOW_MS = 30 * 60 * 1000 + 5_000;
     const controller = new SensorController({
       logger,
       primitivesStore,
       gateway,
       pollIntervalMs: 100,
       sleep: async () => {},
-      nowMillis: () => 3000,
+      nowMillis: () => NOW_MS,
       maxLoopCount: 1,
     });
 
@@ -1032,6 +1049,9 @@ test('SensorController waits for motor feedback to show an actual stop before au
     controller['motorZeroCommandSinceMillis'] = 0;
     controller['motorStoppedSinceMillis'] = null;
     controller['imuBiasAutoRecalibratedForCurrentStop'] = false;
+    // Open the idle-duration gate by anchoring the motion-session idle time
+    // to 0 so idleDurationMs = NOW_MS comfortably exceeds the 30-minute threshold.
+    controller['motionSessionIdleSinceMillis'] = 0;
 
     controller['maybeAutoRecalibrateImuYawBias']();
     assert.equal(recalibrateCalls, 0);
@@ -1246,13 +1266,16 @@ test('SensorController detects a stall after a startup grace period and requests
         pollIntervalMs: 0,
         sleep: async () => {},
         nowMillis: () => now,
-        maxLoopCount: 20,
+        // Generous loop count: stall needs the GNSS observation window
+        // (4000ms mocked) to elapse before consecutive-sample accumulation
+        // even begins. Each cycle advances mock time by ~300ms.
+        maxLoopCount: 60,
       });
 
       await controller.start();
       await controller.setMotorWheelOutputs(0.8, 0.8);
 
-      await delay(20);
+      await delay(50);
 
       assert.equal(systemStop.isStopped(), true);
       assert.equal(calls.some((call) => call.type === 'speed' && call.left === 0 && call.right === 0), true);
@@ -1332,13 +1355,13 @@ test('SensorController detects a stall when a commanded wheel stops moving after
         pollIntervalMs: 0,
         sleep: async () => {},
         nowMillis: () => now,
-        maxLoopCount: 20,
+        maxLoopCount: 60,
       });
 
       await controller.start();
       await controller.setMotorWheelOutputs(0.8, 0);
 
-      await delay(20);
+      await delay(50);
 
       assert.equal(systemStop.isStopped(), true);
       assert.equal(calls.some((call) => call.type === 'speed' && call.left === 0 && call.right === 0), true);

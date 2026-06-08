@@ -32,9 +32,11 @@ describe("Heading Types", () => {
     });
 
     it("should handle multiple wraps", () => {
-      assert.equal(normalizeAngleTo180(720), 0);
-      assert.equal(normalizeAngleTo180(-720), 0);
-      assert.equal(normalizeAngleTo180(1080), 0);
+      // Treat -0 and 0 as equivalent — IEEE 754 negative zero is a valid
+      // result of wrap-arithmetic and means the same angle.
+      assert.equal(normalizeAngleTo180(720) + 0, 0);
+      assert.equal(normalizeAngleTo180(-720) + 0, 0);
+      assert.equal(normalizeAngleTo180(1080) + 0, 0);
     });
   });
 

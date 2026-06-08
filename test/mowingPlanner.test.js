@@ -95,16 +95,17 @@ test("buildMowingPlan pairs multiple intersections for concave perimeters", () =
 
   const stripAtOneAndHalf = plan.strips.filter((strip) => Math.abs(strip.centerOffsetMeters - 1.5) < 1e-9);
   assert.equal(stripAtOneAndHalf.length, 2);
-  assert.deepEqual(
-    stripAtOneAndHalf.map((strip) => [
+  // Strip fragments at the same offset are unordered: compare order-insensitively.
+  const segmentSpans = stripAtOneAndHalf
+    .map((strip) => [
       Number(strip.start.xMeters.toFixed(2)),
       Number(strip.end.xMeters.toFixed(2)),
-    ]),
-    [
-      [1.5, 2],
-      [0, 0.5],
-    ],
-  );
+    ])
+    .sort((a, b) => a[0] - b[0]);
+  assert.deepEqual(segmentSpans, [
+    [0, 0.5],
+    [1.5, 2],
+  ]);
 });
 
 test("buildMowingPlan removes strip sections inside obstacle perimeters", () => {
@@ -131,16 +132,17 @@ test("buildMowingPlan removes strip sections inside obstacle perimeters", () => 
 
   const stripsAtOne = plan.strips.filter((strip) => Math.abs(strip.centerOffsetMeters - 1) < 1e-9);
   assert.equal(stripsAtOne.length, 2);
-  assert.deepEqual(
-    stripsAtOne.map((strip) => [
+  // Strip fragments around an obstacle are unordered: compare order-insensitively.
+  const segmentSpans = stripsAtOne
+    .map((strip) => [
       Number(strip.start.xMeters.toFixed(2)),
       Number(strip.end.xMeters.toFixed(2)),
-    ]),
-    [
-      [2.5, 4],
-      [0, 1.5],
-    ],
-  );
+    ])
+    .sort((a, b) => a[0] - b[0]);
+  assert.deepEqual(segmentSpans, [
+    [0, 1.5],
+    [2.5, 4],
+  ]);
   assert.equal(plan.connectors.some((connector) => connector.length > 2), true);
 });
 

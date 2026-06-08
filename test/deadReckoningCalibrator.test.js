@@ -6,7 +6,7 @@ import { DeadReckoningCalibrator } from "../dist/control/deadReckoningCalibrator
 
 function createMockLogger() {
   const logger = {
-    child: mock.fn(),
+    child: null,
     info: mock.fn(),
     warn: mock.fn(),
     error: mock.fn(),
@@ -14,7 +14,7 @@ function createMockLogger() {
     flush: () => {},
     close: () => {},
   };
-  logger.child.mockImplementation(() => logger);
+  logger.child = mock.fn(() => logger);
   return logger;
 }
 
