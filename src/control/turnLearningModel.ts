@@ -113,6 +113,17 @@ export class TurnLearningModel {
    *
    * Large turns learn the remaining brake distance.
    * Small turns learn the brake fraction used to decide when to halt.
+   *
+   * NOTE on the sign convention: small-turn and large-turn updates use
+   * opposite error-sign conventions on purpose. For small turns the
+   * adjusted parameter is a brake-fraction (0..1) where smaller fractions
+   * mean "brake earlier", so an overshoot (achieved > requested) reduces
+   * the fraction via a positive `requestedAbs - achievedAbs` error driving
+   * `currentFraction + adjustment` down. For large turns the adjusted
+   * parameter is a brake-distance in degrees where bigger distances mean
+   * "brake earlier", so an overshoot (achieved > requested) increases the
+   * distance via a positive `achievedAbs - requestedAbs` error. Each
+   * branch is internally self-consistent: do not unify the signs.
    */
   async updateFromTurn(result: TurnLearningInput): Promise<void> {
     const requestedAbs = Math.abs(unwrapRelativeAngle(result.requestedAngle));

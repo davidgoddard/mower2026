@@ -13,6 +13,9 @@ import {
   DRIVE_SHORT_BUCKET_COARSE_START_METERS,
   DRIVE_SHORT_BUCKET_MAX_METERS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
+  DRIVE_SHORT_MIN_LEARNING_RATE,
+  DRIVE_SHORT_MAX_LEARNING_RATE,
+  DRIVE_SHORT_MAX_FRACTION_STEP,
   DRIVE_TARGET_CTE_METERS,
   DRIVE_LEARNING_PARAMETERS_PATH,
 } from "../constants.js";
@@ -64,9 +67,6 @@ export interface DriveLearningModelOptions {
 }
 
 export class DriveLearningModel {
-  private static readonly SHORT_DRIVE_MIN_LEARNING_RATE = 0.03;
-  private static readonly SHORT_DRIVE_MAX_LEARNING_RATE = 0.12;
-  private static readonly SHORT_DRIVE_MAX_FRACTION_STEP = 0.08;
   private static readonly MAX_CTE_GAIN = 1.5;
 
   private readonly logger: LoggerScope;
@@ -177,13 +177,13 @@ export class DriveLearningModel {
       const learningRate = this.getAdaptiveLearningRate(
         Math.abs(errorXValue),
         Math.max(bucketDistanceMeters * 0.25, 0.04),
-        DriveLearningModel.SHORT_DRIVE_MIN_LEARNING_RATE,
-        DriveLearningModel.SHORT_DRIVE_MAX_LEARNING_RATE,
+        DRIVE_SHORT_MIN_LEARNING_RATE,
+        DRIVE_SHORT_MAX_LEARNING_RATE,
       );
       const adjustment = this.clamp(
         normalizedError * learningRate,
-        -DriveLearningModel.SHORT_DRIVE_MAX_FRACTION_STEP,
-        DriveLearningModel.SHORT_DRIVE_MAX_FRACTION_STEP,
+        -DRIVE_SHORT_MAX_FRACTION_STEP,
+        DRIVE_SHORT_MAX_FRACTION_STEP,
       );
       const clampedFraction = Math.max(0.05, Math.min(0.95, currentFraction + adjustment));
       const cteGainBefore = this.getCteGainForDirection(direction);

@@ -19,7 +19,7 @@ import { MotorCalibration } from "../config/motorCalibration.js";
 import { ImuCalibration } from "../config/imuCalibration.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
 import { GeometryCalibration } from "../config/geometryCalibration.js";
-import { PathFollowingConfig } from "../config/pathFollowingConfig.js";
+import { PathFollowingConfig, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -119,7 +119,10 @@ function getMissingRouteDependencyNames(dependencies: ReadonlyArray<readonly [st
     .map(([name]) => name);
 }
 
-const PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG = 2;
+function getTurnAlignmentThresholdDeg(config: PathFollowingConfig | null): number {
+  return config?.getParameters().turnAlignmentThresholdDeg
+    ?? DEFAULT_PATH_FOLLOWING_PARAMETERS.turnAlignmentThresholdDeg;
+}
 
 export function routeServerRequest(
   method: string,
@@ -289,24 +292,6 @@ export function routeServerRequest(
         state: segmentTestRunner.getState(),
         history: segmentTestRunner.getHistory(),
       }),
-      logNotFound: false,
-    };
-  }
-
-  if (method === "GET" && pathname === "/api/paths") {
-    return {
-      statusCode: 200,
-      contentType: "application/json; charset=utf-8",
-      body: encodeJson({ paths: [] }), // Will be populated async
-      logNotFound: false,
-    };
-  }
-
-  if (method === "GET" && pathname === "/api/area-perimeters") {
-    return {
-      statusCode: 200,
-      contentType: "application/json; charset=utf-8",
-      body: encodeJson({ paths: [] }), // Will be populated async
       logNotFound: false,
     };
   }
@@ -953,7 +938,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
             const poseAfterDrive = poseFusion.getCurrentPose();
             const turnAngle = headingDifference(poseAfterDrive.heading, approachPlan.tangentHeading);
-            if (Math.abs(unwrapRelativeAngle(turnAngle)) > PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG) {
+            if (Math.abs(unwrapRelativeAngle(turnAngle)) > getTurnAlignmentThresholdDeg(pathFollowingConfig)) {
               const turnResult = await turnController.executeTurn({
                 targetAngle: turnAngle,
                 direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
@@ -1157,7 +1142,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
             const poseAfterDrive = poseFusion.getCurrentPose();
             const turnAngle = headingDifference(poseAfterDrive.heading, approachPlan.tangentHeading);
-            if (Math.abs(unwrapRelativeAngle(turnAngle)) > PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG) {
+            if (Math.abs(unwrapRelativeAngle(turnAngle)) > getTurnAlignmentThresholdDeg(pathFollowingConfig)) {
               const turnResult = await turnController.executeTurn({
                 targetAngle: turnAngle,
                 direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
@@ -1279,7 +1264,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
           const poseBeforeFollow = poseFusion.getCurrentPose();
           const turnAngle = headingDifference(poseBeforeFollow.heading, joinPlan.tangentHeading);
-          if (Math.abs(unwrapRelativeAngle(turnAngle)) > PATH_JOIN_TURN_ALIGNMENT_THRESHOLD_DEG) {
+          if (Math.abs(unwrapRelativeAngle(turnAngle)) > getTurnAlignmentThresholdDeg(pathFollowingConfig)) {
             const turnResult = await turnController.executeTurn({
               targetAngle: turnAngle,
               direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",

@@ -327,16 +327,19 @@ export const TURN_POLLING_INTERVAL_MS = 33;
 export const TURN_SETTLE_TIME_MS = 200;
 
 /**
- * Motor ramp-down time from hardware spec (milliseconds)
- * Time for motors to decelerate from full speed to zero
+ * Motor ramp-down time from hardware spec (milliseconds).
+ * Time for motors to decelerate from full speed to zero. Must match the
+ * ESP32 motor controller firmware default (`DEFAULT_RAMP_DOWN_MS` in
+ * external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino).
  */
-export const MOTOR_RAMP_DOWN_TIME_MS = 1000;
+export const MOTOR_RAMP_DOWN_TIME_MS = 700;
 
 /**
- * Motor ramp-up time from hardware spec (milliseconds)
- * Time for motors to accelerate from zero to full speed
+ * Motor ramp-up time from hardware spec (milliseconds).
+ * Time for motors to accelerate from zero to full speed. Must match the
+ * ESP32 motor controller firmware default (`DEFAULT_RAMP_UP_MS`).
  */
-export const MOTOR_RAMP_UP_TIME_MS = 1000;
+export const MOTOR_RAMP_UP_TIME_MS = 460;
 
 /**
  * Small angle threshold - below this, use special handling (degrees)
@@ -357,9 +360,61 @@ export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.45;
 export const TURN_LEARNING_RATE = 0.3;
 
 /**
+ * Adaptive learning-rate floor for short-drive brake-fraction updates.
+ * Used when the X error is small relative to the bucket distance.
+ */
+export const DRIVE_SHORT_MIN_LEARNING_RATE = 0.03;
+
+/**
+ * Adaptive learning-rate ceiling for short-drive brake-fraction updates.
+ * Used when the X error is large relative to the bucket distance so a
+ * 10cm miss adapts faster than a 4cm miss.
+ */
+export const DRIVE_SHORT_MAX_LEARNING_RATE = 0.12;
+
+/**
+ * Per-update clamp on the absolute change to a short-drive brake fraction.
+ * Prevents a single very poor run from re-tuning the bucket too aggressively.
+ */
+export const DRIVE_SHORT_MAX_FRACTION_STEP = 0.08;
+
+/**
  * Maximum number of turn results to keep in history
  */
 export const TURN_HISTORY_MAX_SIZE = 100;
+
+/**
+ * Turn watchdog timeout (milliseconds). If no IMU heading update is received
+ * while a turn is in the active "turning" phase for longer than this window,
+ * the controller treats the sensor stream as dead, raises systemStop and
+ * resolves the turn promise with an error. Generously sized so a healthy turn
+ * (worst-case 180° at low GNSS-rebase wheel speed) cannot trip it.
+ */
+export const TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS = 30_000;
+
+/**
+ * GNSS validator — physical jump (teleport) guard.
+ * The mower cannot exceed this ground speed in any direction. If a GNSS
+ * sample lands further from the previous accepted sample than is credible
+ * for the elapsed time, the sample is rejected even if it otherwise looks
+ * valid. Tuned for the Flymo H400 platform top wheel speed (~0.5 m/s) with
+ * generous slack: ground speed ceiling × safety factor × dt.
+ */
+export const GNSS_MAX_VEHICLE_GROUND_SPEED_METERS_PER_SECOND = 1.0;
+
+/** Multiplicative slack on the jump ceiling so honest GNSS noise is never penalised. */
+export const GNSS_JUMP_SAFETY_FACTOR = 4.0;
+
+/** Floor for the jump ceiling regardless of dt; always allow at least this much. */
+export const GNSS_JUMP_FLOOR_METERS = 0.30;
+
+/**
+ * After this elapsed time without a previous accepted sample, the jump check
+ * is treated as a re-prime and skipped — the validator already required N
+ * consecutive good epochs to re-promote, which is its own teleport defence
+ * once GNSS coverage returns from a long outage.
+ */
+export const GNSS_JUMP_GATE_WIDEN_AFTER_SECONDS = 5.0;
 
 /**
  * Turn learning parameters file path (relative to project root)

@@ -193,6 +193,43 @@ describe("TurnController", () => {
     assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
   });
 
+  it("watchdog fires when no IMU heading update arrives during the active turn", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    // Augment the mock with the motion-session and neutral-output surface that
+    // the watchdog cleanup path may invoke if no real implementation exists.
+    mockSensor.beginMotionSession = mock.fn();
+    mockSensor.endMotionSession = mock.fn();
+    mockSensor.requestNeutralMotorOutputs = mock.fn(async () => {});
+
+    const mockLearning = createMockLearningModel();
+
+    let elapsed = 0;
+    const controller = new TurnController({
+      sensorController: mockSensor,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      nowMillis: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+      // Tiny watchdog window so the test does not need to wait long
+      headingUpdateWatchdogTimeoutMs: 25,
+    });
+
+    const turnPromise = controller.executeTurn({
+      targetAngle: createRelativeAngle(180),
+      direction: "ccw",
+      learningEnabled: true,
+    });
+
+    // Deliberately do NOT emit any heading updates. The watchdog should fire.
+    const result = await turnPromise;
+
+    assert.equal(result.status, "error");
+    assert.match(result.errorMessage ?? "", /watching|watchdog|IMU heading update/i);
+  });
+
   it("tracks turn history", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();

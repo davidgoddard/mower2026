@@ -22,6 +22,13 @@ export interface PathFollowingParameters {
    * back at the grass jam at full speed.
    */
   pathRetryReverseDistanceMeters: number;
+  /**
+   * Heading-alignment threshold (degrees) used by the mowing executor when
+   * deciding whether to pivot before joining a recorded boundary. If the
+   * remaining heading change to face the boundary tangent is below this
+   * threshold the executor proceeds without pivoting.
+   */
+  turnAlignmentThresholdDeg: number;
   updatedAt: string;
 }
 
@@ -38,6 +45,7 @@ export const DEFAULT_PATH_FOLLOWING_PARAMETERS: PathFollowingParameters = {
   segmentedDriveMinSegmentLengthMeters: 0.05,
   segmentedDriveMaxCteMeters: 0.05,
   pathRetryReverseDistanceMeters: 0.5,
+  turnAlignmentThresholdDeg: 2,
   updatedAt: new Date().toISOString(),
 };
 
@@ -59,6 +67,7 @@ interface LegacyPathFollowingParameters {
   segmentedDriveMinSegmentLengthMeters?: unknown;
   segmentedDriveMaxCteMeters?: unknown;
   pathRetryReverseDistanceMeters?: unknown;
+  turnAlignmentThresholdDeg?: unknown;
   updatedAt?: unknown;
 }
 
@@ -187,6 +196,10 @@ export class PathFollowingConfig {
       pathRetryReverseDistanceMeters: this.readPositiveNumber(
         legacy.pathRetryReverseDistanceMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.pathRetryReverseDistanceMeters,
+      ),
+      turnAlignmentThresholdDeg: this.readPositiveNumber(
+        legacy.turnAlignmentThresholdDeg,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.turnAlignmentThresholdDeg,
       ),
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };

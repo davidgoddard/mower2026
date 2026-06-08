@@ -50,7 +50,6 @@ export interface MowingExecutorOptions {
   readonly recentTargetSink?: RecentTargetSink;
 }
 
-const TURN_ALIGNMENT_THRESHOLD_DEG = 2;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
 export class MowingExecutor {
@@ -310,7 +309,7 @@ export class MowingExecutor {
     }
 
     const turnAngle = headingDifference(currentPose.heading, joinPlan.tangentHeading);
-    if (Math.abs(unwrapRelativeAngle(turnAngle)) > TURN_ALIGNMENT_THRESHOLD_DEG) {
+    if (Math.abs(unwrapRelativeAngle(turnAngle)) > this.parameters.turnAlignmentThresholdDeg) {
       const turnResult = await this.turnController.executeTurn({
         targetAngle: turnAngle,
         direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
@@ -357,7 +356,7 @@ export class MowingExecutor {
     const currentPose = this.poseFusion.getCurrentPose();
     const targetHeading = createInternalHeading(targetHeadingDeg);
     const turnAngle = headingDifference(currentPose.heading, targetHeading);
-    if (Math.abs(unwrapRelativeAngle(turnAngle)) <= TURN_ALIGNMENT_THRESHOLD_DEG) {
+    if (Math.abs(unwrapRelativeAngle(turnAngle)) <= this.parameters.turnAlignmentThresholdDeg) {
       return;
     }
     await this.turnController.executeTurn({

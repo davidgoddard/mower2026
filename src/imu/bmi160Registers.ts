@@ -1,5 +1,7 @@
+import { I2C_ADDRESS_BMI160_DEFAULT } from "../constants.js";
+
 export const BMI160 = {
-  defaultAddress: 0x69,
+  defaultAddress: I2C_ADDRESS_BMI160_DEFAULT,
   expectedChipId: 0xd1,
   registers: {
     chipId: 0x00,

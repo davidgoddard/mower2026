@@ -982,7 +982,7 @@ export class SensorController extends EventEmitter {
       const sample = await this.gateway.readMotorFeedback();
       const leftMetersPerTick  = this.poseCalibration?.getLeftEncoderMetersPerTick()  ?? ENCODER_METERS_PER_TICK_DEFAULT;
       const rightMetersPerTick = this.poseCalibration?.getRightEncoderMetersPerTick() ?? ENCODER_METERS_PER_TICK_DEFAULT;
-      const wheelSpeed      = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.leftEncoderDelta,  leftMetersPerTick);
+      const leftWheelSpeed  = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.leftEncoderDelta,  leftMetersPerTick);
       const rightWheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.rightEncoderDelta, rightMetersPerTick);
       this.previousMotorFeedbackTimestampMillis = sample.timestampMillis;
       const current = this.primitivesStore.snapshot().motors;
@@ -991,7 +991,7 @@ export class SensorController extends EventEmitter {
           ...current,
           status: "running",
           error: null,
-          leftWheelSpeedMetersPerSecond: wheelSpeed,
+          leftWheelSpeedMetersPerSecond: leftWheelSpeed,
           rightWheelSpeedMetersPerSecond: rightWheelSpeed,
           leftRpm: null,
           rightRpm: null,
@@ -1008,7 +1008,7 @@ export class SensorController extends EventEmitter {
 
       // Emit motor feedback update event
       this.emit(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, {
-        leftWheelSpeedMetersPerSecond: wheelSpeed,
+        leftWheelSpeedMetersPerSecond: leftWheelSpeed,
         rightWheelSpeedMetersPerSecond: rightWheelSpeed,
         leftEncoderDelta: sample.leftEncoderDelta,
         rightEncoderDelta: sample.rightEncoderDelta,
@@ -1028,7 +1028,7 @@ export class SensorController extends EventEmitter {
         sample.rightMotorCurrentAmps ?? null,
         sample.faultFlags,
       );
-      this.updateMotorStoppedState(wheelSpeed, rightWheelSpeed);
+      this.updateMotorStoppedState(leftWheelSpeed, rightWheelSpeed);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.primitivesStore.snapshot().motors;

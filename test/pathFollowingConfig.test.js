@@ -42,6 +42,7 @@ test("PathFollowingConfig persists and reloads segmented-drive perimeter follow 
     assert.equal(defaults.segmentedDriveMinSegmentLengthMeters, 0.05);
     assert.equal(defaults.segmentedDriveMaxCteMeters, 0.05);
     assert.equal(defaults.pathRetryReverseDistanceMeters, 0.5);
+    assert.equal(defaults.turnAlignmentThresholdDeg, 2);
     assert.equal(defaults.obstacleOutwardOffsetMeters, undefined);
     assert.equal(defaults.purePursuitMinLookaheadMeters, undefined);
 

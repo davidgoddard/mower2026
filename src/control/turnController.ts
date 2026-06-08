@@ -27,6 +27,7 @@ import {
   TURN_HISTORY_MAX_SIZE,
   MOTOR_RAMP_DOWN_TIME_MS,
   TURN_SMALL_CRAWL_SPEED_FACTOR,
+  TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS,
 } from "../constants.js";
 import { SENSOR_EVENTS, ImuHeadingUpdateEvent } from "../sensing/sensorEvents.js";
 import { systemStop } from "./systemStop.js";
@@ -41,6 +42,12 @@ export interface TurnControllerOptions {
   settleTimeMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
+  /**
+   * Maximum time without an IMU heading update during the active turning
+   * phase before the watchdog fires. Defaults to
+   * `TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS`.
+   */
+  headingUpdateWatchdogTimeoutMs?: number;
 }
 
 export class TurnController {
@@ -52,6 +59,8 @@ export class TurnController {
   private readonly settleTimeMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly headingUpdateWatchdogTimeoutMs: number;
+  private headingUpdateWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   private status: TurnStatus = "idle";
   private currentTurn: TurnRequest | null = null;
@@ -77,9 +86,56 @@ export class TurnController {
     this.settleTimeMs = options.settleTimeMs ?? TURN_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
+    this.headingUpdateWatchdogTimeoutMs =
+      options.headingUpdateWatchdogTimeoutMs ?? TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS;
 
     // Bind event handler to maintain 'this' context
     this.onHeadingUpdate = this.onHeadingUpdate.bind(this);
+  }
+
+  private armHeadingUpdateWatchdog(request: TurnRequest): void {
+    this.clearHeadingUpdateWatchdog();
+    this.headingUpdateWatchdogTimer = setTimeout(() => {
+      this.headingUpdateWatchdogTimer = null;
+      this.onHeadingUpdateWatchdogExpired(request);
+    }, this.headingUpdateWatchdogTimeoutMs);
+  }
+
+  private clearHeadingUpdateWatchdog(): void {
+    if (this.headingUpdateWatchdogTimer !== null) {
+      clearTimeout(this.headingUpdateWatchdogTimer);
+      this.headingUpdateWatchdogTimer = null;
+    }
+  }
+
+  private onHeadingUpdateWatchdogExpired(request: TurnRequest): void {
+    if (this.status !== "turning") {
+      return;
+    }
+    this.logger.error("turn.heading_update_watchdog_expired", {
+      requestedAngle: unwrapRelativeAngle(request.targetAngle),
+      timeoutMs: this.headingUpdateWatchdogTimeoutMs,
+      durationMs: this.nowMillis() - this.turnStartTime,
+    });
+    this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+    this.status = "idle";
+    const stalledTurn = this.currentTurn ?? request;
+    this.currentTurn = null;
+    systemStop.requestStop("turn", "turn_heading_update_watchdog_expired");
+    void this.sensorController.requestNeutralMotorOutputs().catch(() => {});
+    const r = this.turnResolve;
+    this.turnResolve = null;
+    r?.({
+      requestedAngle: stalledTurn.targetAngle,
+      achievedAngle: createRelativeAngle(0),
+      errorAngle: stalledTurn.targetAngle,
+      durationMs: this.nowMillis() - this.turnStartTime,
+      brakeDistanceUsed: this.turnBrakeDistance ?? createRelativeAngle(0),
+      motorEngaged: false,
+      status: "error",
+      errorMessage: "Turn timed out waiting for IMU heading update",
+      timestamp: new Date().toISOString(),
+    });
   }
 
   executeTurn(request: TurnRequest): Promise<TurnResult> {
@@ -146,6 +202,7 @@ export class TurnController {
         : Math.max(0.1, Math.min(1, request.wheelOutputScale));
       const scaledMaxWheelOutputPercent = this.maxWheelOutputPercent * wheelScale;
       this.status = "turning";
+      this.armHeadingUpdateWatchdog(request);
       const wheelOutputPercent = this.turnIsSmallAngle
         ? scaledMaxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR
         : scaledMaxWheelOutputPercent;
@@ -156,6 +213,7 @@ export class TurnController {
       if (subscribed) {
         this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
       }
+      this.clearHeadingUpdateWatchdog();
       this.status = "idle";
       this.currentTurn = null;
       throw error;
@@ -192,9 +250,14 @@ export class TurnController {
       return;
     }
 
+    // Re-arm the watchdog: a heading update has arrived, so the IMU stream
+    // is alive. Petting the timer keeps the turn from timing out.
+    this.armHeadingUpdateWatchdog(this.currentTurn);
+
     // Check for emergency stop
     if (this.stopRequested) {
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+      this.clearHeadingUpdateWatchdog();
       try {
         await this.sensorController.requestNeutralMotorOutputs();
       } catch (error) {
@@ -245,6 +308,7 @@ export class TurnController {
     if (shouldBrake) {
       this.status = "braking";
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+      this.clearHeadingUpdateWatchdog();
       await this.completeTurn(this.currentTurn);
     }
   }
@@ -620,6 +684,7 @@ export class TurnController {
    */
   private async finishStoppedTurn(request: TurnRequest, errorMessage: string): Promise<void> {
     this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+    this.clearHeadingUpdateWatchdog();
     this.status = "stopped";
     const stoppedTurn = this.currentTurn ?? request;
     this.currentTurn = null;
