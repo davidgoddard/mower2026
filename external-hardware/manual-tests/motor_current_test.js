@@ -10,7 +10,8 @@ const NODE_ID_MOTOR = 0x20;
 const MESSAGE_TYPE_WHEEL_SPEED_COMMAND = 0x21;
 const MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
 
-const FEEDBACK_FRAME_SIZE = 9 + 26 + 2;
+const FEEDBACK_PAYLOAD_SIZE = 22;
+const FEEDBACK_FRAME_SIZE = 9 + FEEDBACK_PAYLOAD_SIZE + 2;
 const SAMPLE_INTERVAL_MS = 100;
 const MAX_FRAME_ATTEMPTS = 4;
 const RETRY_DELAY_MS = 60;
@@ -61,7 +62,7 @@ function decodeFrame(frame) {
     throw new Error(`bad message type: ${frame[3]}`);
   }
   const payloadLength = frame.readUInt16LE(7);
-  if (payloadLength !== 26) {
+  if (payloadLength !== FEEDBACK_PAYLOAD_SIZE) {
     throw new Error(`bad payload length: ${payloadLength}`);
   }
   const crc = frame.readUInt16LE(9 + payloadLength);
@@ -93,20 +94,17 @@ function encodeWheelSpeedCommand({
 }
 
 function decodeMotorFeedbackPayload(payload) {
-  const leftCurrentRaw = payload.readUInt16LE(18);
-  const rightCurrentRaw = payload.readUInt16LE(20);
+  const rightCurrentRaw = payload.readUInt16LE(16);
   return {
     timestampMillis: payload.readUInt32LE(0),
-    leftWheelActualMetersPerSecond: payload.readInt16LE(4) / 1000,
-    rightWheelActualMetersPerSecond: payload.readInt16LE(6) / 1000,
-    leftEncoderDelta: payload.readInt32LE(8),
-    rightEncoderDelta: payload.readInt32LE(12),
-    leftPwmAppliedPercent: payload.readInt8(16),
-    rightPwmAppliedPercent: payload.readInt8(17),
-    leftMotorCurrentAmps: leftCurrentRaw === 0xffff ? null : leftCurrentRaw / 10,
+    leftEncoderDelta: payload.readInt32LE(4),
+    rightEncoderDelta: payload.readInt32LE(8),
+    leftPwmAppliedPercent: payload.readInt8(12),
+    rightPwmAppliedPercent: payload.readInt8(13),
+    leftMotorCurrentAmps: payload.readUInt16LE(14) === 0xffff ? null : payload.readUInt16LE(14) / 10,
     rightMotorCurrentAmps: rightCurrentRaw === 0xffff ? null : rightCurrentRaw / 10,
-    watchdogHealthy: payload[22] === 1,
-    faultFlags: payload.readUInt16LE(23),
+    watchdogHealthy: payload[18] === 1,
+    faultFlags: payload.readUInt16LE(19),
   };
 }
 

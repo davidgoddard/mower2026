@@ -116,14 +116,12 @@ The controller exposes motor command methods:
 - `haltMotors()` for an immediate hard disable
 
 `stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands, while `haltMotors()` maps to the emergency disable path.
-The latest requested wheel pair is replayed by the sensor controller’s dedicated fast motor loop, so callers only update desired motion and do not write directly to the motor node.
+The latest requested wheel pair is sent through the normal I2C queue only when it changes. The ESP32 motor node latches the most recent accepted command until some newer command replaces it.
 The stationary pose-fusion timer is armed by an explicit zero-output command or a user/abort stop path, so a mower that has been stopped by the controller can still qualify for a GNSS heading rebase after the timeout.
 Motor output commands at or below 10% magnitude are treated as zero before transmission, which gives the controller a little tolerance around the joystick center and helps stationary detection settle cleanly.
 Non-zero motor output commands are raised to at least 30% magnitude before transmission. A one-wheel motion command is converted into a minimum active arc command so the hardware is not asked to move with only one active motor.
 The stationary timer uses the controller clock rather than the GNSS sample timestamp, so a stale GNSS receiver time cannot suppress the stop timeout.
 The motor node command payload sent over I2C uses normalized percentages, where `1.0` is full output and `0.0` is stop.
-The controller keeps a dedicated motor replay timer running independently of the sensor poll loop so long read delays do not starve the motors.
-
 IMU yaw-bias auto-recalibration is an idle-only maintenance action. It is suppressed while any motion session is active and only re-arms after the mower has been idle for about 30 minutes, so active tuning and test runs do not get their heading baseline nudged mid-session.
 
 ### Obstruction detection
@@ -352,12 +350,11 @@ The mapping follows the previous working model:
 
 Manual demand shaping then converts speed + turn demand into wheel targets (straight/arc/spin modes) and sends those targets through the normal motor command path.
 Manual wheel outputs are quantized into small 2% steps before comparison so tiny held-stick jitter is coalesced instead of creating unnecessary I2C writes.
-A held non-zero manual command is still refreshed every 150ms, which keeps the motor node watchdog alive while remaining below the default 300ms command timeout.
 
 Path and perimeter recording consumes fused poses, but it only writes GNSS-quality poses and skips implausible jumps between consecutive recorded points. This prevents degraded GNSS or dead-reckoning drift from being persisted as long spikes in saved boundaries.
 
 ### Motion path
 
-Manual-drive commands are not applied directly to PWM. They flow through the same wheel-speed command primitive used by the rest of the app, so the motor node's ramp and watchdog behavior still apply.
+Manual-drive commands are not applied directly to PWM. They flow through the same wheel-speed command primitive used by the rest of the app, so the motor node's ramping and latched-command behavior still apply.
 
 If controller connection drops while manual drive is armed, the runtime disarms manual mode and issues a stop command.

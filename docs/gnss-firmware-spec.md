@@ -258,6 +258,49 @@ On normal boot, the sketch only sends `UNILOGLIST` and parses the response to ve
 - `logConfig=ok(111)` when all three logs are present
 - `logConfig=partial(...)` when only some are present
 - `logConfig=none(000)` when none are present
+
+## Base-station ESP-NOW RTCM transport
+
+The paired base-station sketch is:
+
+- `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`
+
+Its job is intentionally narrow:
+
+1. read RTCM3 frames from the UM980 UART
+2. verify the RTCM frame length and CRC before transmission
+3. fragment each RTCM frame into ESP-NOW packets
+4. transmit those fragments to the rover GNSS ESP32 as fast as the ESP-NOW queue allows
+
+Current transport header:
+
+- 2-byte magic
+- 1-byte version
+- 1-byte message type
+- 1-byte flags
+- 2-byte message ID
+- 1-byte fragment index
+- 1-byte fragment count
+- 1-byte fragment payload length
+- 2-byte total RTCM frame length
+- 3-byte RTCM CRC tag
+
+The rover sketch reassembles fragments by message ID and fragment index, rejects incomplete or inconsistent assemblies, and only forwards a fully reconstructed RTCM frame to the UM982 after verifying the RTCM CRC again.
+
+### Reliability guidance
+
+- Prefer unicast ESP-NOW peers over broadcast. Broadcast remains available only as a fallback bench mode.
+- Keep the base and rover on a fixed ESP-NOW Wi-Fi channel.
+- Disable Wi-Fi power save on both ESP32s.
+- Drain the receiver UART aggressively so RTCM bursts do not back up behind the serial ISR.
+
+### Current defaults
+
+- Base UM980 UART: `115200`
+- Rover UM982 UART: `460800`
+- ESP-NOW channel: `1`
+
+The base-side UART rate follows the user's current UM980 base configuration. The rover-side UART rate remains `460800` because that is the existing runtime requirement for `PVTSLNA` on the mower receiver.
 - `logConfig=unknown` before any `UNILOGLIST` response has been parsed
 
 The mower's current UM982 breakout module wiring uses the lower header row labeled:
@@ -287,7 +330,25 @@ CONFIG BASEOBSFILTER DISABLE
 CONFIG COM1 115200
 CONFIG COM2 115200
 CONFIG COM3 115200
+RTCM1006 COM2 10
+RTCM1033 COM2 0.5
+RTCM1077 COM2 0.5
+RTCM1087 COM2 0.5
+RTCM1097 COM2 0.5
+RTCM1127 COM2 0.5
 ```
+
+RTCM output interpretation for the base station:
+
+- `RTCM1006 COM2 10` sends the antenna reference position every `10` seconds
+- `RTCM1033 COM2 0.5` sends receiver/antenna descriptor data at `2 Hz`
+- `RTCM1077 COM2 0.5` sends GPS MSM7 observations at `2 Hz`
+- `RTCM1087 COM2 0.5` sends GLONASS MSM7 observations at `2 Hz`
+- `RTCM1097 COM2 0.5` sends Galileo MSM7 observations at `2 Hz`
+- `RTCM1127 COM2 0.5` sends BeiDou MSM7 observations at `2 Hz`
+
+These are the RTCM messages the ESP32 base sketch expects the UM980 to emit on
+`COM2` for relay to the rover over ESP-NOW.
 
 This is useful for documenting the correction source, but it does not by itself explain a rover node showing:
 

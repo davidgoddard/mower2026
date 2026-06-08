@@ -17,7 +17,8 @@ const NODE_ID_MOTOR = 0x20;
 const MESSAGE_TYPE_WHEEL_SPEED_COMMAND = 0x21;
 const MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
 
-const FEEDBACK_FRAME_SIZE = 9 + 26 + 2;
+const FEEDBACK_PAYLOAD_SIZE = 22;
+const FEEDBACK_FRAME_SIZE = 9 + FEEDBACK_PAYLOAD_SIZE + 2;
 const SAMPLE_INTERVAL_MS = 200;
 const STEADY_STATE_IGNORE_SAMPLES = 2;
 const MAX_FRAME_ATTEMPTS = 4;
@@ -62,7 +63,7 @@ function decodeFrame(frame) {
     throw new Error(`bad message type: ${frame[3]}`);
   }
   const payloadLength = frame.readUInt16LE(7);
-  if (payloadLength !== 26) {
+  if (payloadLength !== FEEDBACK_PAYLOAD_SIZE) {
     throw new Error(`bad payload length: ${payloadLength}`);
   }
   const crc = frame.readUInt16LE(9 + payloadLength);
@@ -113,14 +114,14 @@ function encodeWheelSpeedCommand({
 function decodeMotorFeedbackPayload(payload) {
   return {
     timestampMillis: payload.readUInt32LE(0),
-    leftWheelActualMetersPerSecond: payload.readInt16LE(4) / 1000,
-    rightWheelActualMetersPerSecond: payload.readInt16LE(6) / 1000,
-    leftEncoderDelta: payload.readInt32LE(8),
-    rightEncoderDelta: payload.readInt32LE(12),
-    leftPwmAppliedPercent: payload.readInt8(16),
-    rightPwmAppliedPercent: payload.readInt8(17),
-    watchdogHealthy: payload[22] === 1,
-    faultFlags: payload.readUInt16LE(23),
+    leftEncoderDelta: payload.readInt32LE(4),
+    rightEncoderDelta: payload.readInt32LE(8),
+    leftPwmAppliedPercent: payload.readInt8(12),
+    rightPwmAppliedPercent: payload.readInt8(13),
+    leftMotorCurrentAmps: payload.readUInt16LE(14) === 0xffff ? null : payload.readUInt16LE(14) / 10,
+    rightMotorCurrentAmps: payload.readUInt16LE(16) === 0xffff ? null : payload.readUInt16LE(16) / 10,
+    watchdogHealthy: payload[18] === 1,
+    faultFlags: payload.readUInt16LE(19),
   };
 }
 
@@ -130,10 +131,6 @@ function sleep(ms) {
 
 function toRawWheelTarget(physicalMetersPerSecond, forwardSign) {
   return physicalMetersPerSecond * forwardSign;
-}
-
-function toPhysicalWheelSpeed(rawMetersPerSecond, forwardSign) {
-  return rawMetersPerSecond * forwardSign;
 }
 
 function average(values) {
@@ -157,12 +154,12 @@ function summariseStep(label, leftTargetPhysical, rightTargetPhysical, samples) 
     };
   }
 
-  const leftActualAverage = average(steadySamples.map((sample) => sample.leftWheelActualPhysicalMetersPerSecond));
-  const rightActualAverage = average(steadySamples.map((sample) => sample.rightWheelActualPhysicalMetersPerSecond));
+  const leftDeltaAverage = average(steadySamples.map((sample) => sample.leftEncoderDelta));
+  const rightDeltaAverage = average(steadySamples.map((sample) => sample.rightEncoderDelta));
   const leftPwmAverage = average(steadySamples.map((sample) => sample.leftPwmAppliedPercent));
   const rightPwmAverage = average(steadySamples.map((sample) => sample.rightPwmAppliedPercent));
-  const leftAbsActual = Math.abs(leftActualAverage);
-  const rightAbsActual = Math.abs(rightActualAverage);
+  const leftAbsDelta = Math.abs(leftDeltaAverage);
+  const rightAbsDelta = Math.abs(rightDeltaAverage);
 
   return {
     label,
@@ -170,20 +167,18 @@ function summariseStep(label, leftTargetPhysical, rightTargetPhysical, samples) 
     rightTargetPhysical,
     sampleCount: samples.length,
     steadySampleCount: steadySamples.length,
-    leftActualPhysicalAverage: Number(leftActualAverage.toFixed(3)),
-    rightActualPhysicalAverage: Number(rightActualAverage.toFixed(3)),
-    leftError: Number((leftActualAverage - leftTargetPhysical).toFixed(3)),
-    rightError: Number((rightActualAverage - rightTargetPhysical).toFixed(3)),
+    leftEncoderDeltaAverage: Number(leftDeltaAverage.toFixed(3)),
+    rightEncoderDeltaAverage: Number(rightDeltaAverage.toFixed(3)),
     leftPwmAverage: Number(leftPwmAverage.toFixed(1)),
     rightPwmAverage: Number(rightPwmAverage.toFixed(1)),
-    achievedSpeedRatio:
-      leftAbsActual > 0 && rightAbsActual > 0 ? Number((rightAbsActual / leftAbsActual).toFixed(3)) : null,
+    achievedDeltaRatio:
+      leftAbsDelta > 0 && rightAbsDelta > 0 ? Number((rightAbsDelta / leftAbsDelta).toFixed(3)) : null,
     pwmRatio:
       Math.abs(leftPwmAverage) > 0 && Math.abs(rightPwmAverage) > 0
         ? Number((Math.abs(rightPwmAverage) / Math.abs(leftPwmAverage)).toFixed(3))
         : null,
     suggestedRightScaleVsLeft:
-      leftAbsActual > 0 && rightAbsActual > 0 ? Number((leftAbsActual / rightAbsActual).toFixed(3)) : null,
+      leftAbsDelta > 0 && rightAbsDelta > 0 ? Number((leftAbsDelta / rightAbsDelta).toFixed(3)) : null,
   };
 }
 
@@ -260,8 +255,6 @@ async function runStep(bus, sequenceStart, mapping, label, leftTargetPhysical, r
       rightWheelTargetPhysicalMetersPerSecond: rightTargetPhysical,
       leftWheelTargetRawMetersPerSecond: leftTargetRaw,
       rightWheelTargetRawMetersPerSecond: rightTargetRaw,
-      leftWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.leftWheelActualMetersPerSecond, mapping.leftMotorForwardSign),
-      rightWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.rightWheelActualMetersPerSecond, mapping.rightMotorForwardSign),
     };
     samples.push(sample);
     console.log(label, sample);

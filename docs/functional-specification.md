@@ -277,7 +277,7 @@ Joystick speed/steering demands shall be mapped to left/right wheel speed target
 
 Manual-drive commands must never bypass the motor node control path.
 
-Manual-drive output commands shall be coalesced so tiny analogue stick jitter does not create unnecessary I2C writes, but a held non-zero manual command shall still be refreshed before the motor node watchdog timeout so steady operator input remains alive.
+Manual-drive output commands shall be coalesced so tiny analogue stick jitter does not create unnecessary I2C writes, and unchanged held commands shall not be resent to the motor node.
 
 If controller connectivity is lost while manual drive is armed, manual drive shall issue a gentle stop (zero wheel command, drive enabled) but shall keep manual drive armed for a short reconnect grace window so a flaky HID link can recover without the operator re-arming. If the grace window expires without reconnection, manual drive shall disarm via the normal stop path. A controller disconnect shall never trigger a hard motor disable.
 

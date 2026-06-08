@@ -45,6 +45,12 @@ function createSensorController() {
     controller: {
       beginMotionSession() {},
       endMotionSession() {},
+      async requestNeutralMotorOutputs() {
+        commands.push(['stop']);
+      },
+      async disableMotorDriver() {
+        commands.push(['halt']);
+      },
       async stopMotors() {
         commands.push(['stop']);
       },
@@ -65,7 +71,7 @@ async function waitFor(predicate, timeoutMs = 100) {
   }
 }
 
-test('manual drive refreshes a held moving command before the motor watchdog can expire', async () => {
+test('manual drive does not resend an unchanged held moving command', async () => {
   systemStop.clearStop('manual-drive-test');
   let now = 0;
   const hidController = new FakeHidController();
@@ -88,13 +94,12 @@ test('manual drive refreshes a held moving command before the motor watchdog can
   hidController.emit('update', createSnapshot());
   hidController.emit('right-top');
 
-  await waitFor(() => commands.length >= 3);
+  await waitFor(() => commands.length >= 1);
   await coordinator.stop();
 
   const wheelCommands = commands.filter((command) => command.length === 2);
-  assert.equal(wheelCommands.length >= 3, true);
-  assert.deepEqual(wheelCommands[0], wheelCommands[1]);
-  assert.deepEqual(wheelCommands[1], wheelCommands[2]);
+  assert.equal(wheelCommands.length, 1);
+  assert.deepEqual(wheelCommands[0], [0.6, 0.6]);
 });
 
 test('manual drive coalesces tiny held-stick output jitter', async () => {

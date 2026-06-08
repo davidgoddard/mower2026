@@ -166,7 +166,7 @@ export class ManualDriveCoordinator {
         if (systemStop.isStopped()) {
           if (this.drivingActive) {
             this.drivingActive = false;
-            await this.sensorController.haltMotors();
+            await this.sensorController.disableMotorDriver();
           }
           await this.sleep(this.controlIntervalMs);
           continue;
@@ -175,7 +175,7 @@ export class ManualDriveCoordinator {
         if (!this.manualDriveEnabled) {
           if (this.drivingActive) {
             this.drivingActive = false;
-            await this.sensorController.stopMotors();
+            await this.sensorController.requestNeutralMotorOutputs();
           }
           await this.sleep(this.controlIntervalMs);
           continue;
@@ -192,7 +192,7 @@ export class ManualDriveCoordinator {
             this.lastCommandedLeftWheelOutputPercent = null;
             this.lastCommandedRightWheelOutputPercent = null;
             this.lastCommandSentMillis = null;
-            await this.sensorController.stopMotors();
+            await this.sensorController.requestNeutralMotorOutputs();
           }
 
           const lostSince = this.controllerLostSinceMillis;
@@ -229,7 +229,7 @@ export class ManualDriveCoordinator {
             this.lastCommandedLeftWheelOutputPercent = null;
             this.lastCommandedRightWheelOutputPercent = null;
             this.lastCommandSentMillis = null;
-            await this.sensorController.stopMotors();
+            await this.sensorController.requestNeutralMotorOutputs();
           }
 
           if (this.nowMillis() - this.snapshotStaleSinceMillis >= this.controllerDisconnectGraceMs) {
@@ -293,13 +293,7 @@ export class ManualDriveCoordinator {
     ) {
       return true;
     }
-
-    const commandIsMoving = left !== 0 || right !== 0;
-    if (!commandIsMoving || this.lastCommandSentMillis === null) {
-      return false;
-    }
-
-    return this.nowMillis() - this.lastCommandSentMillis >= this.commandRefreshIntervalMs;
+    return false;
   }
 
   private async sendManualWheelCommand(left: number, right: number): Promise<void> {
@@ -340,7 +334,7 @@ export class ManualDriveCoordinator {
       this.sensorController.endMotionSession();
     }
     try {
-      await this.sensorController.stopMotors();
+      await this.sensorController.requestNeutralMotorOutputs();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn("control.manual_drive.stop_failed", { error: message });

@@ -64,6 +64,11 @@ export interface DriveLearningModelOptions {
 }
 
 export class DriveLearningModel {
+  private static readonly SHORT_DRIVE_MIN_LEARNING_RATE = 0.03;
+  private static readonly SHORT_DRIVE_MAX_LEARNING_RATE = 0.12;
+  private static readonly SHORT_DRIVE_MAX_FRACTION_STEP = 0.08;
+  private static readonly MAX_CTE_GAIN = 1.5;
+
   private readonly logger: LoggerScope;
   private readonly parametersPath: string;
   private readonly legacyParametersPath: string;
@@ -169,8 +174,17 @@ export class DriveLearningModel {
       const bucketIndex = this.getShortDriveBucketIndex(driveDistance);
       const currentFraction = this.getShortDriveBrakeFraction(data.startPosition, data.targetPosition, direction);
       const normalizedError = errorXValue / Math.max(bucketDistanceMeters, 0.05);
-      const learningRate = this.getAdaptiveLearningRate(Math.abs(errorXValue), Math.max(bucketDistanceMeters * 0.25, 0.04), 0.08, 0.30);
-      const adjustment = normalizedError * learningRate;
+      const learningRate = this.getAdaptiveLearningRate(
+        Math.abs(errorXValue),
+        Math.max(bucketDistanceMeters * 0.25, 0.04),
+        DriveLearningModel.SHORT_DRIVE_MIN_LEARNING_RATE,
+        DriveLearningModel.SHORT_DRIVE_MAX_LEARNING_RATE,
+      );
+      const adjustment = this.clamp(
+        normalizedError * learningRate,
+        -DriveLearningModel.SHORT_DRIVE_MAX_FRACTION_STEP,
+        DriveLearningModel.SHORT_DRIVE_MAX_FRACTION_STEP,
+      );
       const clampedFraction = Math.max(0.05, Math.min(0.95, currentFraction + adjustment));
       const cteGainBefore = this.getCteGainForDirection(direction);
       this.updateCteGain(direction, maxCteValue, avgCteValue);
@@ -243,18 +257,18 @@ export class DriveLearningModel {
 
     if (lateralSeverity > targetCte * 1.2) {
       // Lateral error is too high - increase gain more aggressively
-      gain *= 1.12;
+      gain *= 1.08;
     } else if (lateralSeverity > targetCte * 0.7) {
       // Lateral error is still meaningful - nudge gain upward
-      gain *= 1.06;
+      gain *= 1.03;
     } else if (lateralSeverity < targetCte * 0.35) {
       // Lateral error is very low - back gain off only slightly
-      gain *= 0.995;
+      gain *= 0.997;
     }
 
     // Keep the gain bounded, but allow it to rise well above unity so the
     // controller can become much more assertive when the mower is drifting.
-    const clampedGain = Math.max(0.1, Math.min(2.5, gain));
+    const clampedGain = this.clamp(gain, 0.1, DriveLearningModel.MAX_CTE_GAIN);
     if (directionSign > 0) {
       this.parameters.forwardCteGain = clampedGain;
     } else {
@@ -266,6 +280,10 @@ export class DriveLearningModel {
     const safeReference = Math.max(referenceMagnitude, 1e-6);
     const normalized = Math.max(0, Math.min(1, errorMagnitude / safeReference));
     return minRate + ((maxRate - minRate) * normalized);
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
   }
 
   private createDefaultParameters(): DriveParameters {
@@ -296,8 +314,8 @@ export class DriveLearningModel {
       return {
         version: 3,
         longDriveBrakeDistanceMeters: this.readNumber(raw.longDriveBrakeDistanceMeters ?? raw.brakeDistanceMeters, DRIVE_BRAKE_DISTANCE_DEFAULT_METERS),
-        forwardCteGain: this.readNumber(raw.forwardCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT),
-        reverseCteGain: this.readNumber(raw.reverseCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT),
+        forwardCteGain: this.clamp(this.readNumber(raw.forwardCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT), 0.1, DriveLearningModel.MAX_CTE_GAIN),
+        reverseCteGain: this.clamp(this.readNumber(raw.reverseCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT), 0.1, DriveLearningModel.MAX_CTE_GAIN),
         longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
         shortDriveBucketStepMeters: this.readNumber(raw.shortDriveBucketStepMeters, DRIVE_SHORT_BUCKET_STEP_METERS),
         shortDriveMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
@@ -314,8 +332,8 @@ export class DriveLearningModel {
     return {
       version: 3,
       longDriveBrakeDistanceMeters: this.readNumber(raw.longDriveBrakeDistanceMeters ?? raw.brakeDistanceMeters, DRIVE_BRAKE_DISTANCE_DEFAULT_METERS),
-      forwardCteGain: this.readNumber(raw.forwardCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT),
-      reverseCteGain: this.readNumber(raw.reverseCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT),
+      forwardCteGain: this.clamp(this.readNumber(raw.forwardCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT), 0.1, DriveLearningModel.MAX_CTE_GAIN),
+      reverseCteGain: this.clamp(this.readNumber(raw.reverseCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT), 0.1, DriveLearningModel.MAX_CTE_GAIN),
       longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBucketStepMeters: DRIVE_SHORT_BUCKET_STEP_METERS,
       shortDriveMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,

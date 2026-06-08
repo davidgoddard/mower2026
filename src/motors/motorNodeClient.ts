@@ -33,6 +33,10 @@ function clampNormalizedTarget(target: number): number {
   return Math.max(-1, Math.min(1, target));
 }
 
+function isReplacedTaskError(error: unknown, key: string): boolean {
+  return error instanceof Error && error.message === `i2c task replaced: ${key}`;
+}
+
 export class MotorNodeClient {
   private sequence = 0;
   private readonly controller: I2cBusController;
@@ -43,6 +47,7 @@ export class MotorNodeClient {
   private readonly maxReadAttempts: number;
   private readonly retryDelayMs: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private lastSentCommand: WheelSpeedCommand | null = null;
 
   constructor(controller: I2cBusController, options: MotorNodeClientOptions) {
     this.controller = controller;
@@ -69,7 +74,12 @@ export class MotorNodeClient {
       maxDecelerationPercentPerSecond: ratePerSecondFromRampMillis(this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS),
     };
 
+    if (this.isDuplicateCommand(command)) {
+      return;
+    }
+
     await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
+    this.lastSentCommand = command;
   }
 
   async stop(): Promise<void> {
@@ -81,7 +91,12 @@ export class MotorNodeClient {
       commandTimeoutMillis: this.commandTimeoutMillis,
     };
 
+    if (this.isDuplicateCommand(command)) {
+      return;
+    }
+
     await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
+    this.lastSentCommand = command;
   }
 
   async refreshFeedback(): Promise<MotorFeedbackSample> {
@@ -139,11 +154,33 @@ export class MotorNodeClient {
     );
     this.sequence = (this.sequence + 1) & 0xffff;
 
-    await this.controller.queueWrite({
-      key,
-      priority,
-      address: this.address,
-      payload: frame,
-    });
+    try {
+      await this.controller.queueWrite({
+        key,
+        priority,
+        address: this.address,
+        payload: frame,
+      });
+    } catch (error) {
+      if (isReplacedTaskError(error, key)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private isDuplicateCommand(command: WheelSpeedCommand): boolean {
+    const previous = this.lastSentCommand;
+    if (previous === null) {
+      return false;
+    }
+
+    return (
+      previous.leftWheelTargetPercent === command.leftWheelTargetPercent &&
+      previous.rightWheelTargetPercent === command.rightWheelTargetPercent &&
+      previous.enableDrive === command.enableDrive &&
+      previous.maxAccelerationPercentPerSecond === command.maxAccelerationPercentPerSecond &&
+      previous.maxDecelerationPercentPerSecond === command.maxDecelerationPercentPerSecond
+    );
   }
 }

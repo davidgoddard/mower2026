@@ -80,6 +80,32 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   assert.equal(writes[1].payload[3], 0x21);
 });
 
+test('MotorNodeClient suppresses duplicate unchanged commands', async () => {
+  const writes = [];
+  const fakeController = {
+    async queueWrite(request) {
+      writes.push(request);
+    },
+    async queueRead() {
+      throw new Error('not used in this test');
+    },
+  };
+
+  const client = new MotorNodeClient(fakeController, {
+    address: 0x66,
+    nowMillis: () => 100,
+  });
+
+  await client.sendWheelSpeedCommand(0.5, -0.5);
+  await client.sendWheelSpeedCommand(0.5, -0.5);
+  await client.stop();
+  await client.stop();
+
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].key, 'motor.speed');
+  assert.equal(writes[1].key, 'motor.stop');
+});
+
 test('MotorNodeClient decodes motor feedback sample frame', async () => {
   const queueReadCalls = [];
   const fakeController = {
@@ -108,4 +134,33 @@ test('MotorNodeClient decodes motor feedback sample frame', async () => {
   assert.equal(feedback.rightMotorCurrentAmps, 1.7);
   assert.equal(feedback.watchdogHealthy, true);
   assert.equal(feedback.faultFlags, 4);
+});
+
+test('MotorNodeClient treats same-key motor write replacement as benign coalescing', async () => {
+  const writes = [];
+  let firstCall = true;
+  const fakeController = {
+    async queueWrite(request) {
+      writes.push(request);
+      if (firstCall) {
+        firstCall = false;
+        throw new Error(`i2c task replaced: ${request.key}`);
+      }
+    },
+    async queueRead() {
+      throw new Error('not used in this test');
+    },
+  };
+
+  const client = new MotorNodeClient(fakeController, {
+    address: 0x66,
+    nowMillis: () => 100,
+  });
+
+  await client.sendWheelSpeedCommand(0.5, 0.5);
+  await client.stop();
+
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].key, 'motor.speed');
+  assert.equal(writes[1].key, 'motor.stop');
 });

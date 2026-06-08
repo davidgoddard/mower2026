@@ -121,14 +121,52 @@ GND                 ->  Driver GND
 ```text
 ESP32 Motor Node        Motors / Sensors
 ----------------       ----------------
-GPIO21              <-  Left FG/tach output
-GPIO22              <-  Right FG/tach output
+GPIO21              <-  74132-conditioned left FG/tach output
+GPIO22              <-  74132-conditioned right FG/tach output
 
 GPIO34              <-  Left current sensor output
 GPIO35              <-  Right current sensor output
 
 GND                 ->  Common sensor ground
 ```
+
+### FG / encoder conditioning with 74132
+
+The left and right motor FG/tach lines now pass through a `74132` quad
+Schmitt-trigger NAND stage before entering the ESP32. This conditions slow or
+noisy motor-feedback edges before they reach `GPIO21` and `GPIO22`.
+
+Use one NAND gate per wheel as an inverting Schmitt stage:
+
+- tie one NAND input high to `3.3V`
+- feed the pulled-up motor `FG` line into the other NAND input
+- route the NAND output to the ESP32 tach input
+
+Practical wiring per wheel:
+
+```text
+3.3V ---[4.7k to 10k]---+--------------------+
+                        |                    |
+                        +--- Motor FG        +--- 74132 input B tied to 3.3V
+                              output         |
+                                             v
+                                     +----------------+
+                                     | 74132 gate     |
+                                     | A <- FG line   |
+                                     | B <- 3.3V      |
+                                     | Y -> ESP32 GPIO|
+                                     +----------------+
+                                             |
+                                             +-------> GPIO21 (left) or GPIO22 (right)
+```
+
+74132 supply:
+
+- `VCC` -> `3.3V`
+- `GND` -> common ground
+
+The 74132 inverts the FG waveform once, which is acceptable here because the
+firmware counts edges rather than decoding quadrature phase.
 
 ### FG pull-up wiring
 
@@ -145,6 +183,7 @@ The FG lines are treated as `3.3V` logic and should have external pull-ups.
 ```
 
 Do not pull FG lines directly to `5V` into the ESP32.
+Do not power the `74132` from `5V` when its outputs feed the ESP32 GPIOs.
 
 ### Current sensors
 
@@ -189,8 +228,8 @@ Sensor VCC                   -> sensor supply appropriate to the module used
             | GPIO18 ---------- +----> Position LED|     | GPIO18 ---------- +----> Left DIR                |
             | GPIO19 ---------- +----> RTCM LED    |     | GPIO14 ---------- +----> Right PWM               |
             | GPIO21 SDA <------+----- Pi SDA      |     | GPIO19 ---------- +----> Right DIR               |
-            | GPIO22 SCL <------+----- Pi SCL      |     | GPIO21 <--------- +----- Left FG                 |
-            +--------------------------------------+     | GPIO22 <--------- +----- Right FG                |
+            | GPIO22 SCL <------+----- Pi SCL      |     | GPIO21 <--------- +----- 74132 <- Left FG        |
+            +--------------------------------------+     | GPIO22 <--------- +----- 74132 <- Right FG       |
                                                          | GPIO34 <--------- +----- Left current sensor     |
                                                          | GPIO35 <--------- +----- Right current sensor    |
                                                          +--------------------------------------------------+
@@ -218,5 +257,6 @@ Sensor VCC                   -> sensor supply appropriate to the module used
 - The UM982 UART wiring is crossed: UM982 `TXD -> ESP32 GPIO16`, UM982 `RXD <- ESP32 GPIO17`.
 - The project treats the inner UM982 header row as `COM2`.
 - FG/tach lines must be pulled up to `3.3V`, not `5V`.
+- The left and right FG/tach lines pass through a `74132` Schmitt-trigger stage before reaching `GPIO21` and `GPIO22`.
 - Do not feed `5V` directly into ESP32 GPIO pins.
 - UM982 board power should follow the module board's power design rather than assuming bare-chip supply rules.

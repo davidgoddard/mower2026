@@ -22,7 +22,7 @@ File:
 
 This firmware already uses the current wire protocol and feedback contract, but the wheel-speed execution is still intentionally simple:
 
-- feed-forward plus proportional speed assist
+- direct commanded PWM output with local ramping only
 - no hardware-tuned closed-loop controller yet
 
 That is good enough for manual bring-up and feedback validation, but not yet final precision control.
@@ -63,8 +63,10 @@ Wiring constraints:
 
 - common ground between the ESP32, motor driver, and motor feedback wiring is required
 - the `FG` lines are treated as `3.3 V` logic inputs on the ESP32 side
+- route each `FG` line through a `74132` Schmitt-trigger gate before the ESP32 input
 - use an external `4.7k-10k` pull-up to `3.3 V` on each `FG` line for mower installation
 - do not feed `5 V` directly into the ESP32 GPIO pins
+- do not power the `74132` from `5 V` when its outputs feed the ESP32
 
 ## FG feedback note
 
@@ -79,6 +81,7 @@ Known characteristics from the motor documentation:
 That means:
 
 - the ESP input needs a pull-up
+- the `74132` should be powered at `3.3 V` and used to square up each FG waveform before `GPIO21` / `GPIO22`
 - an external pull-up to `3.3 V` is preferred over relying only on the ESP32 internal pull-up
 - direction is inferred from a cached "last commanded direction" sign per wheel (`g_leftDirSign` / `g_rightDirSign`). The cache is updated in lockstep with the DIR-pin write inside `applyMotorHardware`, so the encoder ISR can sign each pulse from the cache without an extra `digitalRead`. This is correct during ramp-down and during the brake-to-stop coast (the cached sign is unchanged so coast pulses inherit the prior direction) and during direction reversals (the firmware ramps PWM through zero before flipping the cached sign, so deceleration pulses keep the OLD sign and post-flip pulses pick up the NEW sign).
 

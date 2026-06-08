@@ -184,7 +184,7 @@ test('SensorController only auto-recalibrates IMU bias after a long idle period'
   });
 });
 
-test('SensorController keeps replaying the last motor command even while sensor reads are slow', async () => {
+test('SensorController sends a motor command once and does not replay unchanged values while sensor reads are slow', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
       app: 'core-app',
@@ -257,9 +257,91 @@ test('SensorController keeps replaying the last motor command even while sensor 
     await controller.setMotorWheelOutputs(0.6, 0.6);
     await delay(260);
 
-    assert.equal(commands.length >= 3, true);
-    assert.deepEqual(commands[0], [0.6, 0.6]);
-    assert.deepEqual(commands[1], [0.6, 0.6]);
+    assert.deepEqual(commands, [[0.6, 0.6]]);
+
+    await controller.stop();
+    await logger.close();
+  });
+});
+
+test('SensorController sends an explicit zero-output command for a normal stop', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    let now = 0;
+    const commands = [];
+    const primitivesStore = new PrimitivesStore();
+    const gateway = {
+      async initialise() {},
+      async readImu() {
+        await delay(120);
+        now += 120;
+        return {
+          timestampMillis: now,
+          angularVelocity: { zDegreesPerSecond: 0 },
+        };
+      },
+      async readGnss() {
+        await delay(120);
+        now += 120;
+        return {
+          timestampMillis: now,
+          xMeters: 0,
+          yMeters: 0,
+          positionAccuracyMeters: 0.02,
+          headingAccuracyDegrees: 0.5,
+          fixType: 'fixed',
+          satellitesInUse: 24,
+          sampleAgeMillis: 20,
+        };
+      },
+      async readMotorFeedback() {
+        await delay(120);
+        now += 120;
+        return {
+          timestampMillis: now,
+          leftEncoderDelta: 0,
+          rightEncoderDelta: 0,
+          leftPwmAppliedPercent: 0,
+          rightPwmAppliedPercent: 0,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelOutputs(left, right) {
+        commands.push([left, right]);
+      },
+      async stopMotors() {
+        commands.push(['stop']);
+      },
+      async close() {},
+    };
+
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway,
+      pollIntervalMs: 1000,
+      sleep: async () => {},
+      nowMillis: () => now,
+      maxLoopCount: 1,
+    });
+
+    await controller.start();
+    await controller.setMotorWheelOutputs(0.6, 0.6);
+    await delay(30);
+    await controller.stopMotors();
+    await delay(30);
+
+    const zeroCommands = commands.filter((command) => command.length === 2 && command[0] === 0 && command[1] === 0);
+    assert.equal(zeroCommands.length >= 1, true);
+    assert.equal(commands.some((command) => command[0] === 'stop'), false);
 
     await controller.stop();
     await logger.close();

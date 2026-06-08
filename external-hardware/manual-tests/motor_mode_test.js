@@ -16,11 +16,14 @@
 // - duration in ms, default `2000`
 //
 // Direction mapping is controlled by env vars:
-// - `LEFT_FORWARD_SIGN` default `1`
+// - `LEFT_FORWARD_SIGN` default `-1`
 // - `RIGHT_FORWARD_SIGN` default `-1`
+//
+// Optional ramp-limit env vars:
+// - `MOTOR_MODE_MAX_ACCEL`  acceleration limit in normalized output per second
+// - `MOTOR_MODE_MAX_DECEL`  deceleration limit in normalized output per second
 
 import i2c from "i2c-bus";
-import { loadSystemParameters } from "./systemConfig.js";
 
 const I2C_ADDRESS = 0x66;
 const BUS_NUMBER = 1;
@@ -31,7 +34,8 @@ const NODE_ID_MOTOR = 0x20;
 const MESSAGE_TYPE_WHEEL_SPEED_COMMAND = 0x21;
 const MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
 
-const FEEDBACK_FRAME_SIZE = 9 + 26 + 2;
+const FEEDBACK_PAYLOAD_SIZE = 22;
+const FEEDBACK_FRAME_SIZE = 9 + FEEDBACK_PAYLOAD_SIZE + 2;
 const SAMPLE_INTERVAL_MS = 200;
 const MAX_FRAME_ATTEMPTS = 4;
 const RETRY_DELAY_MS = 60;
@@ -83,7 +87,7 @@ function decodeFrame(frame) {
     throw new Error(`bad message type: ${frame[3]}`);
   }
   const payloadLength = frame.readUInt16LE(7);
-  if (payloadLength !== 26) {
+  if (payloadLength !== FEEDBACK_PAYLOAD_SIZE) {
     throw new Error(`bad payload length: ${payloadLength}`);
   }
   const crc = frame.readUInt16LE(9 + payloadLength);
@@ -129,14 +133,14 @@ function encodeWheelSpeedCommand({
 function decodeMotorFeedbackPayload(payload) {
   return {
     timestampMillis: payload.readUInt32LE(0),
-    leftWheelActualMetersPerSecond: payload.readInt16LE(4) / 1000,
-    rightWheelActualMetersPerSecond: payload.readInt16LE(6) / 1000,
-    leftEncoderDelta: payload.readInt32LE(8),
-    rightEncoderDelta: payload.readInt32LE(12),
-    leftPwmAppliedPercent: payload.readInt8(16),
-    rightPwmAppliedPercent: payload.readInt8(17),
-    watchdogHealthy: payload[22] === 1,
-    faultFlags: payload.readUInt16LE(23),
+    leftEncoderDelta: payload.readInt32LE(4),
+    rightEncoderDelta: payload.readInt32LE(8),
+    leftPwmAppliedPercent: payload.readInt8(12),
+    rightPwmAppliedPercent: payload.readInt8(13),
+    leftMotorCurrentAmps: payload.readUInt16LE(14) === 0xffff ? null : payload.readUInt16LE(14) / 10,
+    rightMotorCurrentAmps: payload.readUInt16LE(16) === 0xffff ? null : payload.readUInt16LE(16) / 10,
+    watchdogHealthy: payload[18] === 1,
+    faultFlags: payload.readUInt16LE(19),
   };
 }
 
@@ -157,8 +161,30 @@ function toRawWheelTarget(physicalMetersPerSecond, forwardSign) {
   return physicalMetersPerSecond * forwardSign;
 }
 
-function toPhysicalWheelSpeed(rawMetersPerSecond, forwardSign) {
-  return rawMetersPerSecond * forwardSign;
+function parseMotorSign(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (parsed !== -1 && parsed !== 1) {
+    throw new Error(`Invalid ${name}="${raw}". Expected -1 or 1.`);
+  }
+  return parsed;
+}
+
+function parseOptionalPositiveNumber(name) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") {
+    return undefined;
+  }
+
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}="${raw}". Expected a positive number.`);
+  }
+  return parsed;
 }
 
 function parseMode(mode, speed, parameters) {
@@ -218,17 +244,19 @@ async function requestFeedback(bus, sequence) {
 }
 
 async function main() {
-  const { filePath, parameters } = await loadSystemParameters();
   const mode = (process.argv[2] ?? "FF").toUpperCase();
   const speed = Number.parseFloat(process.argv[3] ?? "0.25");
   const durationMs = Number.parseInt(process.argv[4] ?? "2000", 10);
-  const applyConfigRampLimits = process.env.MOTOR_MODE_APPLY_CONFIG_RAMP_LIMITS === "1";
-  const limits = applyConfigRampLimits
-    ? {
-      maxAccelerationMetersPerSecondSquared: parameters.maxWheelSpeedMetersPerSecond / (parameters.motorRampUpMillis / 1000),
-      maxDecelerationMetersPerSecondSquared: parameters.maxWheelSpeedMetersPerSecond / (parameters.motorRampDownMillis / 1000),
-    }
-    : {};
+  const parameters = {
+    leftMotorForwardSign: parseMotorSign("LEFT_FORWARD_SIGN", -1),
+    rightMotorForwardSign: parseMotorSign("RIGHT_FORWARD_SIGN", -1),
+  };
+  const maxAccelerationMetersPerSecondSquared = parseOptionalPositiveNumber("MOTOR_MODE_MAX_ACCEL");
+  const maxDecelerationMetersPerSecondSquared = parseOptionalPositiveNumber("MOTOR_MODE_MAX_DECEL");
+  const limits = {
+    ...(maxAccelerationMetersPerSecondSquared === undefined ? {} : { maxAccelerationMetersPerSecondSquared }),
+    ...(maxDecelerationMetersPerSecondSquared === undefined ? {} : { maxDecelerationMetersPerSecondSquared }),
+  };
   const bus = await i2c.openPromisified(BUS_NUMBER);
   const mapping = parseMode(mode, speed, parameters);
   let sequence = 1;
@@ -239,16 +267,12 @@ async function main() {
       mode,
       speed,
       durationMs,
-      configPath: filePath,
-      applyConfigRampLimits,
       LEFT_FORWARD_SIGN: parameters.leftMotorForwardSign,
       RIGHT_FORWARD_SIGN: parameters.rightMotorForwardSign,
       leftPhysicalMetersPerSecond: mapping.leftPhysical,
       rightPhysicalMetersPerSecond: mapping.rightPhysical,
       leftRawMetersPerSecond: mapping.leftRaw,
       rightRawMetersPerSecond: mapping.rightRaw,
-      motorRampUpMillis: parameters.motorRampUpMillis,
-      motorRampDownMillis: parameters.motorRampDownMillis,
       ...limits,
     });
 
@@ -266,8 +290,8 @@ async function main() {
       const feedback = await requestFeedback(bus, sequence++);
       console.log({
         ...feedback,
-        leftWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.leftWheelActualMetersPerSecond, parameters.leftMotorForwardSign),
-        rightWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.rightWheelActualMetersPerSecond, parameters.rightMotorForwardSign),
+        leftEncoderDirection: Math.sign(feedback.leftEncoderDelta) * parameters.leftMotorForwardSign,
+        rightEncoderDirection: Math.sign(feedback.rightEncoderDelta) * parameters.rightMotorForwardSign,
       });
     }
   } finally {
@@ -278,8 +302,8 @@ async function main() {
       const feedback = await requestFeedback(bus, sequence++);
       console.log("stop", {
         ...feedback,
-        leftWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.leftWheelActualMetersPerSecond, parameters.leftMotorForwardSign),
-        rightWheelActualPhysicalMetersPerSecond: toPhysicalWheelSpeed(feedback.rightWheelActualMetersPerSecond, parameters.rightMotorForwardSign),
+        leftEncoderDirection: Math.sign(feedback.leftEncoderDelta) * parameters.leftMotorForwardSign,
+        rightEncoderDirection: Math.sign(feedback.rightEncoderDelta) * parameters.rightMotorForwardSign,
       });
     }
   }

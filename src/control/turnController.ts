@@ -196,7 +196,7 @@ export class TurnController {
     if (this.stopRequested) {
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
       try {
-        await this.sensorController.stopMotors();
+        await this.sensorController.requestNeutralMotorOutputs();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("turn.stop_failed", { error: message });
@@ -275,7 +275,7 @@ export class TurnController {
         driveEnabled: !this.turnIsSmallAngle,
       });
       if (this.turnIsSmallAngle) {
-        await this.sensorController.stopMotors();
+        await this.sensorController.requestNeutralMotorOutputs();
       } else {
         await this.sensorController.setMotorWheelOutputs(0, 0);
 

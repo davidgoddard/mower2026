@@ -291,7 +291,7 @@ export class DriveController {
     try {
       await this.sensorController.setMotorWheelOutputs(reverseSpeed, reverseSpeed);
       const completed = await this.sleepWithStopChecks(durationMs);
-      await this.sensorController.stopMotors();
+      await this.sensorController.requestNeutralMotorOutputs();
       if (!completed) {
         return;
       }
@@ -360,10 +360,10 @@ export class DriveController {
         await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
         const driveCompleted = await this.sleepWithStopChecks(driveTimeMs);
         if (!driveCompleted || this.stopRequested || systemStop.isStopped()) {
-          await this.sensorController.stopMotors();
+          await this.sensorController.requestNeutralMotorOutputs();
           return results;
         }
-        await this.sensorController.stopMotors();
+        await this.sensorController.requestNeutralMotorOutputs();
 
         // Wait for motors to settle
         const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;

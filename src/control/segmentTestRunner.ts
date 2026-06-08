@@ -179,7 +179,7 @@ export class SegmentTestRunner {
 
         await this.sensorController.setMotorWheelOutputs(this.fullSpeedCommand, this.fullSpeedCommand);
         const driveCompleted = await this.sleepWithStopChecks(this.collectDriveMs);
-        await this.sensorController.stopMotors();
+        await this.sensorController.requestNeutralMotorOutputs();
         const settleCompleted = await this.sleepWithStopChecks(this.collectSettleMs);
 
         if (!driveCompleted || !settleCompleted || this.shouldStop()) {
@@ -308,7 +308,7 @@ export class SegmentTestRunner {
 
   stopCurrentTest(): void {
     this.stopRequested = true;
-    void this.sensorController.stopMotors();
+    void this.sensorController.requestNeutralMotorOutputs();
     void this.driveController.stopCurrentDrive();
   }
 

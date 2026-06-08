@@ -3,9 +3,14 @@
 #include "driver/ledc.h"
 
 // Second-generation motor controller for ESP32.
-// It accepts explicit left/right wheel percentage targets over I2C and returns
-// a coherent feedback snapshot with FG pulse deltas, applied PWM, and
-// watchdog/fault state.
+// It accepts explicit left/right wheel percentage targets over I2C, applies
+// local ramping and safe direction reversals, and returns a coherent feedback
+// snapshot with FG pulse deltas, applied PWM, current, and watchdog/fault
+// state.
+//
+// This sketch intentionally does NOT run any local wheel-speed regulation from
+// encoder feedback. The Pi is the controller. This ESP32 is only a ramped PWM
+// bridge plus telemetry source.
 //
 // Encoder signing: each tachometer line is single-channel (no quadrature), so
 // pulse direction is inferred from a cached "last commanded direction" sign
@@ -55,23 +60,12 @@ static const ledc_channel_t LEFT_CHANNEL = LEDC_CHANNEL_0;
 static const ledc_channel_t RIGHT_CHANNEL = LEDC_CHANNEL_1;
 static const int PWM_MAX_DUTY = 255;
 
-// ===== Feedback scaling =====
-// Provisional pulse-rate baseline for "full output" normalization used by the
-// local assist controller. This is intentionally pulse-domain only so physical
-// m/s conversion remains a Pi-side concern.
-static const float DEFAULT_FULL_OUTPUT_PULSES_PER_SECOND = 1735.7f;
-
 // ===== Control / reporting =====
 static const uint32_t CONTROL_PERIOD_MS = 10;      // 100 Hz
 static const uint32_t FEEDBACK_PERIOD_MS = 50;     // 20 Hz
-static const uint32_t DEFAULT_TIMEOUT_MS = 250;
 static const uint32_t DEFAULT_RAMP_UP_MS = 460;
 static const uint32_t DEFAULT_RAMP_DOWN_MS = 700;
 static const float DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT = 0.025f;
-static const float DEFAULT_SPEED_KP = 60.0f;       // PWM percent per output-percent error
-static const float DEFAULT_ENCODER_FAULT_OUTPUT_THRESHOLD_PERCENT = 0.20f;
-static const float DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD_PERCENT = 0.02f;
-static const uint32_t ENCODER_FAULT_DELAY_MS = 500;
 static const float CURRENT_SENSOR_SUPPLY_VOLTS = 3.3f;
 static const float CURRENT_SENSOR_VOLTS_PER_AMP = 0.185f;  // ACS712ELC-05B typical sensitivity
 static const float CURRENT_SENSOR_FILTER_ALPHA = 0.2f;
@@ -79,9 +73,6 @@ static const uint16_t CURRENT_SENSOR_CALIBRATION_SAMPLES = 128;
 static const uint16_t ADC_MAX_COUNT = 4095;
 
 // ===== Fault bits =====
-static const uint16_t MOTOR_FAULT_WATCHDOG_EXPIRED = (1u << 0);
-static const uint16_t MOTOR_FAULT_LEFT_ENCODER = (1u << 1);
-static const uint16_t MOTOR_FAULT_RIGHT_ENCODER = (1u << 2);
 static const uint16_t MOTOR_FAULT_LEFT_DRIVER = (1u << 3);
 static const uint16_t MOTOR_FAULT_RIGHT_DRIVER = (1u << 4);
 static const uint16_t MOTOR_FAULT_OVERCURRENT = (1u << 5);
@@ -122,8 +113,6 @@ struct MotorState {
   bool directionChangePending;
   float targetPercent;
   float rampedTargetPercent;
-  float measuredWheelOutputPercent;
-  uint32_t encoderFaultSinceMillis;
 };
 
 struct CurrentSensorState {
@@ -145,15 +134,14 @@ volatile int8_t g_leftDirSign = 1;
 volatile int8_t g_rightDirSign = 1;
 static const uint32_t ENCODER_DEBOUNCE_MICROS = 800;
 
-MotorState g_leftMotor = { "left", LEFT_CHANNEL, LEFT_PWM_PIN, LEFT_DIR_PIN, false, 0, 0, 1, false, 0.0f, 0.0f, 0.0f, 0 };
-MotorState g_rightMotor = { "right", RIGHT_CHANNEL, RIGHT_PWM_PIN, RIGHT_DIR_PIN, true, 0, 0, 1, false, 0.0f, 0.0f, 0.0f, 0 };
+MotorState g_leftMotor = { "left", LEFT_CHANNEL, LEFT_PWM_PIN, LEFT_DIR_PIN, false, 0, 0, 1, false, 0.0f, 0.0f };
+MotorState g_rightMotor = { "right", RIGHT_CHANNEL, RIGHT_PWM_PIN, RIGHT_DIR_PIN, true, 0, 0, 1, false, 0.0f, 0.0f };
 
-WheelSpeedCommand g_latestCommand = { 0, 0.0f, 0.0f, false, DEFAULT_TIMEOUT_MS, false, 0.0f, false, 0.0f };
+WheelSpeedCommand g_latestCommand = { 0, 0.0f, 0.0f, false, 0, false, 0.0f, false, 0.0f };
 FeedbackSnapshot g_latestFeedback = { 0, 0, 0, 0, 0, 0.0f, 0.0f, false, 0 };
 CurrentSensorState g_leftCurrentSensor = { LEFT_CURRENT_SENSE_PIN, CURRENT_SENSOR_SUPPLY_VOLTS / 2.0f, 0.0f };
 CurrentSensorState g_rightCurrentSensor = { RIGHT_CURRENT_SENSE_PIN, CURRENT_SENSOR_SUPPLY_VOLTS / 2.0f, 0.0f };
 
-uint32_t g_lastAcceptedCommandMillis = 0;
 uint16_t g_lastFeedbackRequestSequence = 0;
 bool g_haveFeedbackRequest = false;
 
@@ -223,8 +211,6 @@ int8_t clampPercent(int value) {
   if (value > 100) return 100;
   return static_cast<int8_t>(value);
 }
-
-int8_t estimateOpenLoopPwm(float targetPercent, float measuredWheelOutputPercent);
 
 float clampFloat(float value, float minValue, float maxValue) {
   if (value < minValue) return minValue;
@@ -373,47 +359,17 @@ void forceMotorStop(MotorState &motor) {
   applyMotorHardware(motor);
 }
 
-void stepWheelTargetTowardCommand(MotorState &motor, uint32_t elapsedMs, uint32_t rampUpMs, uint32_t rampDownMs) {
-  float deltaPercent = motor.targetPercent - motor.rampedTargetPercent;
-  float activeRampMs = fabs(motor.targetPercent) > fabs(motor.rampedTargetPercent)
-    ? static_cast<float>(rampUpMs)
-    : static_cast<float>(rampDownMs);
-  float maxStepPercent = static_cast<float>(elapsedMs) / max(1.0f, activeRampMs);
-
-  if (fabs(deltaPercent) <= maxStepPercent) {
-    motor.rampedTargetPercent = motor.targetPercent;
-  } else {
-    motor.rampedTargetPercent += (deltaPercent > 0.0f ? 1.0f : -1.0f) * maxStepPercent;
-  }
-
-  if (
-    motor.targetPercent == 0.0f
-    && fabs(motor.rampedTargetPercent) < DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT
-  ) {
-    motor.rampedTargetPercent = 0.0f;
-  }
-
-  // A non-zero command should not get stuck forever below the effective-motion
-  // floor. Promote startup immediately to the minimum effective output,
-  // then continue ramping from there.
-  if (
-    motor.targetPercent != 0.0f
-    && fabs(motor.rampedTargetPercent) < DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT
-  ) {
-    motor.rampedTargetPercent =
-      (motor.targetPercent > 0.0f ? 1.0f : -1.0f) * DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT;
-  }
-}
-
 void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t rampUpMs, uint32_t rampDownMs) {
-  // The Pi sends intent changes immediately. Keep a single interruptible slew
-  // layer here by ramping only the applied PWM toward the latest target.
+  // The Pi owns control. This ESP32 only ramps the requested duty toward the
+  // latest accepted target and handles safe direction reversals through zero.
   motor.rampedTargetPercent = motor.targetPercent;
 
   if (fabs(motor.rampedTargetPercent) < DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT) {
     motor.requestedPwmPercent = 0;
   } else {
-    motor.requestedPwmPercent = estimateOpenLoopPwm(motor.rampedTargetPercent, motor.measuredWheelOutputPercent);
+    motor.requestedPwmPercent = clampPercent(
+      static_cast<int>(motor.rampedTargetPercent * 100.0f)
+    );
   }
 
   int targetSign = motor.requestedPwmPercent >= 0 ? 1 : -1;
@@ -500,43 +456,6 @@ float readCurrentSensor(CurrentSensorState &sensor) {
   return sensor.filteredCurrentAmps;
 }
 
-void updateEncoderFault(MotorState &motor, bool leftMotor, uint32_t nowMillis) {
-  bool commandedToMove = fabs(motor.targetPercent) >= DEFAULT_ENCODER_FAULT_OUTPUT_THRESHOLD_PERCENT;
-  bool measuredMoving = fabs(motor.measuredWheelOutputPercent) >= DEFAULT_ENCODER_FAULT_MOVEMENT_THRESHOLD_PERCENT;
-  bool unexpectedIdleMotion = !commandedToMove && measuredMoving;
-
-  if ((commandedToMove && !measuredMoving) || unexpectedIdleMotion) {
-    if (motor.encoderFaultSinceMillis == 0) {
-      motor.encoderFaultSinceMillis = nowMillis;
-    }
-  } else {
-    motor.encoderFaultSinceMillis = 0;
-  }
-
-  uint16_t faultBit = leftMotor ? MOTOR_FAULT_LEFT_ENCODER : MOTOR_FAULT_RIGHT_ENCODER;
-  if (motor.encoderFaultSinceMillis != 0 && (nowMillis - motor.encoderFaultSinceMillis) >= ENCODER_FAULT_DELAY_MS) {
-    g_latestFeedback.faultFlags |= faultBit;
-  } else {
-    g_latestFeedback.faultFlags = static_cast<uint16_t>(g_latestFeedback.faultFlags & ~faultBit);
-  }
-}
-
-float pulsesToOutputPercent(int32_t pulses, float elapsedSeconds) {
-  if (elapsedSeconds <= 0.0f) {
-    return 0.0f;
-  }
-
-  float pulsesPerSecond = static_cast<float>(pulses) / elapsedSeconds;
-  return clampFloat(pulsesPerSecond / DEFAULT_FULL_OUTPUT_PULSES_PER_SECOND, -1.0f, 1.0f);
-}
-
-int8_t estimateOpenLoopPwm(float targetPercent, float measuredWheelOutputPercent) {
-  float normalizedFeedForward = targetPercent * 100.0f;
-  float outputError = targetPercent - measuredWheelOutputPercent;
-  float assist = outputError * DEFAULT_SPEED_KP;
-  return clampPercent(static_cast<int>(normalizedFeedForward + assist));
-}
-
 void refreshFeedbackSnapshot(uint32_t nowMillis) {
   static uint32_t lastSnapshotMillis = 0;
   uint32_t elapsedMs = nowMillis - lastSnapshotMillis;
@@ -558,11 +477,6 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   g_rightPulseAccumulator = 0;
   interrupts();
 
-  float elapsedSeconds = static_cast<float>(elapsedMs) / 1000.0f;
-
-  g_leftMotor.measuredWheelOutputPercent = pulsesToOutputPercent(signedLeftPulses, elapsedSeconds);
-  g_rightMotor.measuredWheelOutputPercent = pulsesToOutputPercent(signedRightPulses, elapsedSeconds);
-
   g_latestFeedback.timestampMillis = nowMillis;
   g_latestFeedback.leftEncoderDelta = signedLeftPulses;
   g_latestFeedback.rightEncoderDelta = signedRightPulses;
@@ -570,17 +484,8 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   g_latestFeedback.rightPwmAppliedPercent = g_rightMotor.appliedPwmPercent;
   g_latestFeedback.leftMotorCurrentAmps = readCurrentSensor(g_leftCurrentSensor);
   g_latestFeedback.rightMotorCurrentAmps = readCurrentSensor(g_rightCurrentSensor);
-
-  bool commandFresh = g_lastAcceptedCommandMillis != 0 && (nowMillis - g_lastAcceptedCommandMillis) <= g_latestCommand.commandTimeoutMillis;
-  g_latestFeedback.watchdogHealthy = commandFresh && g_latestCommand.enableDrive;
-  if (!g_latestFeedback.watchdogHealthy) {
-    g_latestFeedback.faultFlags |= MOTOR_FAULT_WATCHDOG_EXPIRED;
-  } else {
-    g_latestFeedback.faultFlags = static_cast<uint16_t>(g_latestFeedback.faultFlags & ~MOTOR_FAULT_WATCHDOG_EXPIRED);
-  }
-
-  updateEncoderFault(g_leftMotor, true, nowMillis);
-  updateEncoderFault(g_rightMotor, false, nowMillis);
+  g_latestFeedback.faultFlags = 0;
+  g_latestFeedback.watchdogHealthy = g_latestCommand.enableDrive;
 
   uint8_t payload[MOTOR_FEEDBACK_PAYLOAD_SIZE];
   encodeMotorFeedbackPayload(g_latestFeedback, payload);
@@ -590,8 +495,7 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
 void runControlStep(uint32_t nowMillis) {
   static uint32_t lastStepMillis = 0;
 
-  bool commandFresh = g_lastAcceptedCommandMillis != 0 && (nowMillis - g_lastAcceptedCommandMillis) <= g_latestCommand.commandTimeoutMillis;
-  bool allowDrive = commandFresh && g_latestCommand.enableDrive;
+  bool allowDrive = g_latestCommand.enableDrive;
 
   float leftTarget = allowDrive ? g_latestCommand.leftWheelTargetPercent : 0.0f;
   float rightTarget = allowDrive ? g_latestCommand.rightWheelTargetPercent : 0.0f;
@@ -649,10 +553,6 @@ void onReceive(int numBytes) {
     WheelSpeedCommand decoded;
     if (decodeWheelSpeedCommandPayload(payload, payloadLength, decoded)) {
       g_latestCommand = decoded;
-      if (g_latestCommand.commandTimeoutMillis == 0) {
-        g_latestCommand.commandTimeoutMillis = DEFAULT_TIMEOUT_MS;
-      }
-      g_lastAcceptedCommandMillis = millis();
     }
   } else if (messageType == MESSAGE_TYPE_MOTOR_FEEDBACK) {
     g_lastFeedbackRequestSequence = sequence;

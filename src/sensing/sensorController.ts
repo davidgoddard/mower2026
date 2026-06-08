@@ -62,7 +62,6 @@ const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
 const IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC = 1;
 const IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS = 2_000;
 const IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS = 30 * 60 * 1000;
-const MOTOR_REPLAY_INTERVAL_MS = 10;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
@@ -146,8 +145,6 @@ export class SensorController extends EventEmitter {
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
-  private motorReplayIntervalHandle: NodeJS.Timeout | null = null;
-  private motorReplayTickInFlight = false;
   private lastMotorCommand: MotorCommand | null = null;
   private stopRequestLogged = false;
   private previousMotorFeedbackTimestampMillis: number | null = null;
@@ -279,7 +276,6 @@ export class SensorController extends EventEmitter {
     });
 
     this.loopPromise = this.runLoop();
-    this.startMotorReplayTimer();
   }
 
   async stop(): Promise<void> {
@@ -288,7 +284,6 @@ export class SensorController extends EventEmitter {
     }
 
     this.running = false;
-    this.stopMotorReplayTimer();
     if (this.loopPromise) {
       await this.loopPromise;
       this.loopPromise = null;
@@ -404,7 +399,10 @@ export class SensorController extends EventEmitter {
       this.motorZeroCommandSinceMillis = null;
       this.lastImuMotionStopSummary = null;
     }
-    // The dedicated replay timer owns the actual motor-speed write path.
+    await this.gateway.setMotorWheelOutputs(
+      normalizedLeftWheelOutputPercent,
+      normalizedRightWheelOutputPercent,
+    );
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
@@ -451,7 +449,7 @@ export class SensorController extends EventEmitter {
     return Math.sign(value) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT;
   }
 
-  async stopMotors(): Promise<void> {
+  async requestNeutralMotorOutputs(): Promise<void> {
     if (!this.stopRequestLogged) {
       this.logger.warn("motors.stop_requested", {
         currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
@@ -463,12 +461,20 @@ export class SensorController extends EventEmitter {
     await this.sendGentleStopMotorsCommand();
   }
 
-  async haltMotors(): Promise<void> {
+  async disableMotorDriver(): Promise<void> {
     this.logger.warn("motors.halt_requested", {
       currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
       currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
     });
     await this.sendDisableMotorsCommand();
+  }
+
+  async stopMotors(): Promise<void> {
+    await this.requestNeutralMotorOutputs();
+  }
+
+  async haltMotors(): Promise<void> {
+    await this.disableMotorDriver();
   }
 
   getMotorZeroCommandSinceMillis(): number | null {
@@ -712,46 +718,14 @@ export class SensorController extends EventEmitter {
         }
       }
     } finally {
-      this.stopMotorReplayTimer();
-    }
-  }
-
-  private startMotorReplayTimer(): void {
-    if (this.motorReplayIntervalHandle !== null) {
-      return;
-    }
-
-    this.motorReplayIntervalHandle = setInterval(() => {
-      void this.runMotorReplayTick();
-    }, MOTOR_REPLAY_INTERVAL_MS);
-  }
-
-  private stopMotorReplayTimer(): void {
-    if (this.motorReplayIntervalHandle !== null) {
-      clearInterval(this.motorReplayIntervalHandle);
-      this.motorReplayIntervalHandle = null;
-    }
-  }
-
-  private async runMotorReplayTick(): Promise<void> {
-    if (!this.running || this.motorReplayTickInFlight) {
-      return;
-    }
-
-    this.motorReplayTickInFlight = true;
-    try {
       if (systemStop.isStopped()) {
         try {
-          await this.haltMotors();
+          await this.disableMotorDriver();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.warn("sensor.motors.stop_during_global_stop_failed", { error: message });
         }
-      } else {
-        await this.replayLastMotorCommand();
       }
-    } finally {
-      this.motorReplayTickInFlight = false;
     }
   }
 
@@ -807,6 +781,9 @@ export class SensorController extends EventEmitter {
   }
 
   private async pollAllSensors(): Promise<void> {
+    if (systemStop.isStopped()) {
+      await this.sendDisableMotorsCommand();
+    }
     await this.pollImu();
     await this.pollGnss();
     await this.pollMotors();
@@ -1210,11 +1187,6 @@ export class SensorController extends EventEmitter {
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
     this.stallDetectionLatched = false;
-    try {
-      await this.gateway.setMotorWheelOutputs(0, 0);
-    } catch (error) {
-      throw error instanceof Error ? error : new Error(String(error));
-    }
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
@@ -1223,6 +1195,8 @@ export class SensorController extends EventEmitter {
         commandedRightWheelOutputPercent: 0,
       },
     });
+
+    await this.gateway.setMotorWheelOutputs(0, 0);
   }
 
   private async sendDisableMotorsCommand(): Promise<void> {
@@ -1296,31 +1270,4 @@ export class SensorController extends EventEmitter {
     }
   }
 
-  /**
-   * Re-send the last motor instruction so the motor node keeps receiving it
-   * until some newer command supersedes it.
-   */
-  private async replayLastMotorCommand(): Promise<void> {
-    const command = this.lastMotorCommand;
-    if (!command) {
-      return;
-    }
-
-    try {
-      if (command.kind === "output") {
-        await this.gateway.setMotorWheelOutputs(
-          command.leftWheelOutputPercent,
-          command.rightWheelOutputPercent,
-        );
-      } else {
-        await this.gateway.stopMotors();
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error("sensor.motors.replay_failed", {
-        error: message,
-        commandKind: command.kind,
-      });
-    }
-  }
 }

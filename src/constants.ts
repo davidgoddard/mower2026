@@ -31,18 +31,16 @@ export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
 
 /**
  * Manual drive keepalive interval in milliseconds.
- * Held non-zero wheel commands are re-sent before the motor node's command
- * watchdog timeout so a steady joystick input does not expire on the ESP32.
+ * Manual drive uses this when deciding whether the HID snapshot stream has
+ * gone stale; unchanged wheel commands are no longer resent as keepalives.
  */
 export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
 
 /**
- * ESP motor-node command-watchdog timeout, in milliseconds, sent in every
- * wheel-speed frame. The ESP firmware hard-disables drive when no fresh
- * command has been received within this window, so the value is the upper
- * bound on how long a transient I2C contention can last without the ESP
- * forcing motors off. The mower is slow-moving so 1 s gives plenty of
- * margin for a stuck bus while still catching a genuinely dead Pi.
+ * Legacy wheel-command timeout field value, in milliseconds.
+ * The current ESP32 motor firmware ignores this field and simply latches the
+ * last accepted command until a new command arrives, but the field remains in
+ * the on-wire protocol for compatibility with older sketches and tools.
  */
 export const MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS = 1000;
 

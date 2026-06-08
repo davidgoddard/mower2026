@@ -1,5 +1,32 @@
+// GNSS rover ESP32 for mower navigation and RTCM relay.
+//
+// Pinout:
+// - UM982 TX -> ESP32 GPIO16 (Serial2 RX)
+// - UM982 RX -> ESP32 GPIO17 (Serial2 TX)
+// - I2C SDA -> ESP32 GPIO21
+// - I2C SCL -> ESP32 GPIO22
+// - Heading status LED -> ESP32 GPIO5
+// - Position status LED -> ESP32 GPIO18
+// - RTCM activity LED -> ESP32 GPIO19
+// - UM982/ESP32 grounds must be common
+//
+// Operation:
+// - receives RTCM corrections from the base station over ESP-NOW
+// - accepts the current fragmented RTCM transport and the older legacy chunk format
+// - reassembles RTCM frames, validates CRC, and forwards valid corrections to the UM982
+// - parses UM982 runtime logs to build a compact GNSS sample for the Pi
+// - serves that GNSS sample over I2C address 0x52
+// - drives three LEDs for heading quality, position quality, and RTCM activity
+//
+// Notes:
+// - the UM982 is expected to be provisioned already; boot-time configuration is
+//   intentionally passive by default
+// - base and rover must use the same fixed ESP-NOW Wi-Fi channel
+// - this sketch pairs with `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`
+
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <HardwareSerial.h>
 #include <Wire.h>
 
@@ -93,8 +120,15 @@ static const bool CONFIGURE_RECEIVER_AT_BOOT = false;
 static const bool VERIFY_EXPECTED_LOGS_AT_BOOT = true;
 
 // ===== RTCM relay =====
-static const size_t RTCM_BUFFER_SIZE = 2048;
+static const size_t RTCM_BUFFER_SIZE = 4096;
 static const uint8_t RTCM_PREAMBLE = 0xD3;
+static const uint8_t RTCM_TRANSPORT_MAGIC_0 = 0x52;
+static const uint8_t RTCM_TRANSPORT_MAGIC_1 = 0x54;
+static const uint8_t RTCM_TRANSPORT_VERSION = 0x01;
+static const uint8_t RTCM_TRANSPORT_MESSAGE_RTCM_FRAGMENT = 0x01;
+static const uint8_t RTCM_WIFI_CHANNEL = 1;
+static const uint8_t RTCM_TRANSPORT_HEADER_SIZE = 15;
+static const uint32_t RTCM_FRAGMENT_TIMEOUT_MILLIS = 100;
 static uint8_t g_rtcmBuffer[RTCM_BUFFER_SIZE];
 static int g_rtcmIndex = 0;
 static uint16_t g_lastRtcmSequence = 0;
@@ -102,8 +136,19 @@ static uint32_t g_lastRtcmMillis = 0;
 static uint32_t g_lastRtcmLedPulseMillis = 0;
 static uint32_t g_totalRtcmMessagesVerified = 0;
 static uint32_t g_totalRtcmMessagesRejected = 0;
+static uint32_t g_totalRtcmFragmentsAccepted = 0;
+static uint32_t g_totalRtcmFragmentsRejected = 0;
+static uint32_t g_totalRtcmFragmentsDuplicated = 0;
+static uint32_t g_totalRtcmAssemblyTimeouts = 0;
 static uint32_t g_totalRtcm1006Messages = 0;
 static uint32_t g_lastRtcm1006Millis = 0;
+static bool g_rtcmFragmentAssemblyActive = false;
+static uint16_t g_rtcmFragmentMessageId = 0;
+static uint8_t g_rtcmFragmentCount = 0;
+static uint8_t g_rtcmNextFragmentIndex = 0;
+static uint16_t g_rtcmExpectedTotalLength = 0;
+static uint32_t g_rtcmExpectedPayloadCrc = 0;
+static uint32_t g_rtcmFragmentAssemblyStartMillis = 0;
 
 // ===== LED status =====
 enum LedQualityState : uint8_t {
@@ -284,6 +329,12 @@ void writeI16LE(uint8_t *bytes, int16_t value) {
 
 void writeI32LE(uint8_t *bytes, int32_t value) {
   writeU32LE(bytes, static_cast<uint32_t>(value));
+}
+
+uint32_t readU24LE(const uint8_t *bytes) {
+  return static_cast<uint32_t>(bytes[0])
+    | (static_cast<uint32_t>(bytes[1]) << 8)
+    | (static_cast<uint32_t>(bytes[2]) << 16);
 }
 
 uint16_t readU16LE(const uint8_t *bytes) {
@@ -574,6 +625,14 @@ void printDebugStatus() {
   } else {
     Serial.print(rtcmAgeMillis);
   }
+  Serial.print(" rtcmFrags=");
+  Serial.print(g_totalRtcmFragmentsAccepted);
+  Serial.print("/");
+  Serial.print(g_totalRtcmFragmentsRejected);
+  Serial.print("/");
+  Serial.print(g_totalRtcmFragmentsDuplicated);
+  Serial.print("/");
+  Serial.print(g_totalRtcmAssemblyTimeouts);
   Serial.print(" rtcm1006=");
   Serial.print(g_totalRtcm1006Messages);
   Serial.print(" rtcm1006AgeMs=");
@@ -982,9 +1041,56 @@ bool noteRtcm1006BasePosition(const uint8_t *payload, int payloadLength) {
   return true;
 }
 
-// ===== RTCM relay =====
-void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
-  (void)info;
+void resetRtcmFragmentAssembly(bool countTimeout) {
+  if (countTimeout) {
+    g_totalRtcmAssemblyTimeouts += 1;
+  }
+  g_rtcmFragmentAssemblyActive = false;
+  g_rtcmFragmentMessageId = 0;
+  g_rtcmFragmentCount = 0;
+  g_rtcmNextFragmentIndex = 0;
+  g_rtcmExpectedTotalLength = 0;
+  g_rtcmExpectedPayloadCrc = 0;
+  g_rtcmFragmentAssemblyStartMillis = 0;
+  g_rtcmIndex = 0;
+}
+
+bool handleCompleteRtcmMessage(const uint8_t *message, int totalLength) {
+  if (totalLength < 6) {
+    g_totalRtcmMessagesRejected += 1;
+    return false;
+  }
+  if (message[0] != RTCM_PREAMBLE) {
+    g_totalRtcmMessagesRejected += 1;
+    return false;
+  }
+
+  const int payloadLength = ((message[1] & 0x03) << 8) | message[2];
+  if ((payloadLength + 6) != totalLength) {
+    g_totalRtcmMessagesRejected += 1;
+    return false;
+  }
+
+  const uint32_t expectedCrc =
+    (static_cast<uint32_t>(message[totalLength - 3]) << 16)
+    | (static_cast<uint32_t>(message[totalLength - 2]) << 8)
+    | static_cast<uint32_t>(message[totalLength - 1]);
+  const uint32_t actualCrc = crc24q(message, totalLength - 3);
+  if (actualCrc != expectedCrc) {
+    g_totalRtcmMessagesRejected += 1;
+    return false;
+  }
+
+  noteRtcm1006BasePosition(&message[3], payloadLength);
+  UM982.write(message, totalLength);
+  g_lastRtcmMillis = millis();
+  g_lastRtcmLedPulseMillis = g_lastRtcmMillis;
+  g_totalRtcmMessagesVerified += 1;
+  digitalWrite(LED_RTCM_PIN, HIGH);
+  return true;
+}
+
+void appendLegacyRtcmChunk(const uint8_t *incomingData, int len) {
   if (len < 3) {
     return;
   }
@@ -1021,26 +1127,121 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
       return;
     }
     if (g_rtcmIndex >= totalLength) {
-      const uint32_t expectedCrc =
-        (static_cast<uint32_t>(g_rtcmBuffer[totalLength - 3]) << 16)
-        | (static_cast<uint32_t>(g_rtcmBuffer[totalLength - 2]) << 8)
-        | static_cast<uint32_t>(g_rtcmBuffer[totalLength - 1]);
-      const uint32_t actualCrc = crc24q(g_rtcmBuffer, totalLength - 3);
-
-      if (actualCrc == expectedCrc) {
-        noteRtcm1006BasePosition(&g_rtcmBuffer[3], payloadLength);
-        UM982.write(g_rtcmBuffer, totalLength);
-        g_lastRtcmMillis = millis();
-        g_lastRtcmLedPulseMillis = g_lastRtcmMillis;
-        g_totalRtcmMessagesVerified += 1;
-        digitalWrite(LED_RTCM_PIN, HIGH);
-      } else {
-        g_totalRtcmMessagesRejected += 1;
-      }
-
+      handleCompleteRtcmMessage(g_rtcmBuffer, totalLength);
       g_rtcmIndex = 0;
     }
   }
+}
+
+bool isNewRtcmTransportPacket(const uint8_t *incomingData, int len) {
+  return len >= static_cast<int>(RTCM_TRANSPORT_HEADER_SIZE)
+    && incomingData[0] == RTCM_TRANSPORT_MAGIC_0
+    && incomingData[1] == RTCM_TRANSPORT_MAGIC_1
+    && incomingData[2] == RTCM_TRANSPORT_VERSION;
+}
+
+void appendFragmentedRtcmPacket(const uint8_t *incomingData, int len) {
+  if (len < static_cast<int>(RTCM_TRANSPORT_HEADER_SIZE)) {
+    g_totalRtcmFragmentsRejected += 1;
+    return;
+  }
+
+  const uint32_t nowMillis = millis();
+  if (g_rtcmFragmentAssemblyActive && (nowMillis - g_rtcmFragmentAssemblyStartMillis) > RTCM_FRAGMENT_TIMEOUT_MILLIS) {
+    resetRtcmFragmentAssembly(true);
+  }
+
+  const uint8_t messageType = incomingData[3];
+  const uint16_t messageId = readU16LE(&incomingData[5]);
+  const uint8_t fragmentIndex = incomingData[7];
+  const uint8_t fragmentCount = incomingData[8];
+  const uint8_t fragmentPayloadLength = incomingData[9];
+  const uint16_t totalLength = readU16LE(&incomingData[10]);
+  const uint32_t payloadCrc = readU24LE(&incomingData[12]);
+
+  if (messageType != RTCM_TRANSPORT_MESSAGE_RTCM_FRAGMENT
+    || fragmentCount == 0
+    || fragmentIndex >= fragmentCount
+    || totalLength > RTCM_BUFFER_SIZE
+    || len != static_cast<int>(RTCM_TRANSPORT_HEADER_SIZE + fragmentPayloadLength)
+    || fragmentPayloadLength == 0) {
+    g_totalRtcmFragmentsRejected += 1;
+    return;
+  }
+
+  if (fragmentIndex == 0) {
+    resetRtcmFragmentAssembly(false);
+    g_rtcmFragmentAssemblyActive = true;
+    g_rtcmFragmentMessageId = messageId;
+    g_rtcmFragmentCount = fragmentCount;
+    g_rtcmNextFragmentIndex = 0;
+    g_rtcmExpectedTotalLength = totalLength;
+    g_rtcmExpectedPayloadCrc = payloadCrc;
+    g_rtcmFragmentAssemblyStartMillis = nowMillis;
+  }
+
+  if (!g_rtcmFragmentAssemblyActive
+    || messageId != g_rtcmFragmentMessageId
+    || fragmentCount != g_rtcmFragmentCount
+    || totalLength != g_rtcmExpectedTotalLength
+    || payloadCrc != g_rtcmExpectedPayloadCrc) {
+    g_totalRtcmFragmentsRejected += 1;
+    return;
+  }
+
+  if (fragmentIndex < g_rtcmNextFragmentIndex) {
+    g_totalRtcmFragmentsDuplicated += 1;
+    return;
+  }
+
+  if (fragmentIndex != g_rtcmNextFragmentIndex) {
+    g_totalRtcmFragmentsRejected += 1;
+    resetRtcmFragmentAssembly(false);
+    return;
+  }
+
+  if ((g_rtcmIndex + fragmentPayloadLength) > static_cast<int>(RTCM_BUFFER_SIZE)) {
+    g_totalRtcmFragmentsRejected += 1;
+    resetRtcmFragmentAssembly(false);
+    return;
+  }
+
+  memcpy(g_rtcmBuffer + g_rtcmIndex, incomingData + RTCM_TRANSPORT_HEADER_SIZE, fragmentPayloadLength);
+  g_rtcmIndex += fragmentPayloadLength;
+  g_rtcmNextFragmentIndex += 1;
+  g_totalRtcmFragmentsAccepted += 1;
+  g_rtcmFragmentAssemblyStartMillis = nowMillis;
+
+  if (g_rtcmNextFragmentIndex < g_rtcmFragmentCount) {
+    return;
+  }
+
+  if (g_rtcmIndex != static_cast<int>(g_rtcmExpectedTotalLength)) {
+    g_totalRtcmFragmentsRejected += 1;
+    resetRtcmFragmentAssembly(false);
+    return;
+  }
+
+  const uint32_t actualPayloadCrc = readU24LE(&g_rtcmBuffer[g_rtcmIndex - 3]);
+  if (actualPayloadCrc != g_rtcmExpectedPayloadCrc) {
+    g_totalRtcmFragmentsRejected += 1;
+    resetRtcmFragmentAssembly(false);
+    return;
+  }
+
+  handleCompleteRtcmMessage(g_rtcmBuffer, g_rtcmIndex);
+  resetRtcmFragmentAssembly(false);
+}
+
+// ===== RTCM relay =====
+void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
+  (void)info;
+  if (isNewRtcmTransportPacket(incomingData, len)) {
+    appendFragmentedRtcmPacket(incomingData, len);
+    return;
+  }
+
+  appendLegacyRtcmChunk(incomingData, len);
 }
 
 // ===== UM982 configuration =====
@@ -1551,6 +1752,9 @@ void onRequest() {
 // ===== Setup / loop =====
 void setupEspNow() {
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_channel(RTCM_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (esp_now_init() != ESP_OK) {
     return;
   }

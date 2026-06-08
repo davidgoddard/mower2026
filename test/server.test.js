@@ -111,8 +111,11 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(drivePage.includes('Distance (cm)'), true);
   assert.equal(drivePage.includes('id="startDriveTuning"'), true);
   assert.equal(drivePage.includes('id="stopDriveTuning"'), true);
+  assert.equal(drivePage.includes('id="resetDriveLearning"'), true);
   assert.equal(drivePage.includes('id="startDistanceCm"'), true);
   assert.equal(drivePage.includes('start tuning'), true);
+  assert.equal(drivePage.includes('Are you sure you want to reset drive learning parameters to defaults?'), true);
+  assert.equal(drivePage.includes('/api/drive/reset-learning'), true);
   assert.equal(drivePage.includes('cache: "no-store"'), true);
   assert.equal(drivePage.includes('maxDistanceMeters: endAtMeters'), true);
   assert.equal(drivePage.includes('const maxDriveResultRows = 500;'), true);

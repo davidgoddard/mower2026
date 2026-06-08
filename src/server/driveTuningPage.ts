@@ -378,6 +378,7 @@ ${getSensorWidgetScriptTag()}
               <div class="buttons">
                 <button id="startDriveTuning" class="primary">start tuning</button>
                 <button id="stopDriveTuning" class="danger">STOP</button>
+                <button id="resetDriveLearning" class="secondary">reset learning</button>
               </div>
             </div>
             <div class="summary" id="driveSummary">Drive tuning idle.</div>
@@ -654,6 +655,17 @@ ${getAppDialogScript()}
         } finally {
           stopRequestPending = false;
           syncDriveButtons();
+        }
+      });
+
+      document.getElementById("resetDriveLearning").addEventListener("click", async () => {
+        if (await window.appConfirm("Are you sure you want to reset drive learning parameters to defaults?")) {
+          try {
+            await fetch("/api/drive/reset-learning", { method: "POST" });
+            await update();
+          } catch (error) {
+            alert("Failed to reset drive learning: " + (error instanceof Error ? error.message : String(error)));
+          }
         }
       });
 

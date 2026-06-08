@@ -83,8 +83,13 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorNodeClient.ts`: Pi-side motor I2C client, including ramp timing injection and percent-based command transmission.
 - `src/sensing/sensorController.ts`: converts raw motor encoder deltas into wheel-speed estimates using persisted calibration.
 - `src/sensing/sensorHardwareGateway.ts`: clamps normalized wheel outputs (`-1..1`) and applies direction mapping before sending to the motor client.
-- `external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino`: ESP32 motor controller firmware and ramp logic; treats wheel targets as percentages of full output.
+- `external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino`: ESP32 motor controller firmware; acts as a ramped PWM bridge that applies commanded wheel targets, handles safe zero-crossing on reversals, and reports encoder/current telemetry back to the Pi without local wheel-speed regulation.
 - `src/motors/motorMapping.ts`: motor sign mapping and normalized wheel-output clamp helpers.
+
+## GNSS ESP32 Firmware
+- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover-side GNSS ESP32 firmware; receives RTCM over ESP-NOW, relays corrections to the UM982, parses receiver logs, and serves compact GNSS frames to the Pi over I2C.
+- `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`: base-side GNSS ESP32 firmware; reads RTCM from the UM980 base receiver and forwards it to rover peers over the current fragmented ESP-NOW RTCM transport.
+- `external-hardware/esp32/gnss-base-station-v1/README.md`: base-station wiring and peer-configuration notes.
 
 ## Turn Controller
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
@@ -301,7 +306,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
 - `src/control/manualDriveCoordinator.ts`: manual-drive loop; maps controller input to motor commands.
   - arm/disarm mapping: `right-top` arms, `left-top` disarms and stops.
-  - coalesces tiny held-stick command jitter while refreshing held non-zero commands before the motor-node watchdog expires.
+  - coalesces tiny held-stick command jitter and only sends a motor command when the requested wheel pair actually changes.
   - safety behavior: controller disconnect while armed triggers disarm + stop.
 - `src/protocols/commonProtocol.ts`: shared node/message identifiers and frame header shape.
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
@@ -317,7 +322,7 @@ This document maps problem domains to candidate files removing the need for Code
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
-  - motor API: `setMotorWheelOutputs(...)` updates the latest desired wheel pair, `stopMotors()` issues an explicit graceful stop, and `haltMotors()` issues a hard disable; a dedicated fast motor replay timer is the sole motor-speed writer and keeps the latest command refreshed independently of the sensor poll cadence so long reads cannot starve motor output
+  - motor API: `setMotorWheelOutputs(...)` sends the desired wheel pair through the normal I2C queue, `stopMotors()` issues an explicit graceful zero-output command, and `haltMotors()` issues a hard disable; unchanged motor commands are suppressed and the ESP32 latches the last accepted command until a newer one arrives
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU
