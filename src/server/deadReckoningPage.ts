@@ -54,7 +54,7 @@ ${getAppDialogStyles()}
       .header-content {
         max-width: 1400px;
         margin: 0 auto;
-        padding: 1rem 1.5rem;
+        padding: 0.75rem 1.5rem;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -62,7 +62,7 @@ ${getAppDialogStyles()}
         flex-wrap: wrap;
       }
 
-      h1 { margin: 0; font-size: 1.8rem; }
+      h1 { margin: 0; font-size: 1.5rem; }
 
       .back-link {
         color: var(--primary-color);
@@ -73,54 +73,58 @@ ${getAppDialogStyles()}
       .container {
         max-width: 1400px;
         margin: 0 auto;
-        padding: 1rem 1.5rem;
+        padding: 0.75rem 1.5rem;
         width: 100%;
         flex: 1;
       }
 
-      .page-layout {
+      /* Widgets row across the top, scaled smaller than full size */
+      .widgets-row {
         display: grid;
-        grid-template-columns: minmax(380px, 420px) minmax(0, 1fr);
-        gap: 1rem;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.75rem;
+        margin-bottom: 0.75rem;
         align-items: start;
       }
 
-      .sidebar-column {
-        position: sticky;
-        top: 5.5rem;
-        display: grid;
-        grid-template-rows: 1fr 1fr;
-        gap: 1rem;
-        align-self: start;
+      .widgets-row > * {
+        zoom: 0.82;
       }
 
-      .main-column { min-width: 0; }
+      /* Two-column layout for Controls + Test Moves */
+      .work-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 1rem;
+        align-items: start;
+        margin-bottom: 1rem;
+      }
 
       .panel {
         background: var(--bg-primary);
         border: 1px solid var(--border-color);
         border-radius: 0.75rem;
         box-shadow: var(--shadow-md);
-        padding: 1.25rem;
-        margin-bottom: 1rem;
+        padding: 1rem 1.1rem;
+        margin-bottom: 0.75rem;
       }
 
       .panel h2 {
-        margin: 0 0 1rem;
-        font-size: 1.1rem;
+        margin: 0 0 0.75rem;
+        font-size: 1rem;
         font-weight: 600;
         color: var(--text-secondary);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         border-bottom: 1px solid var(--border-color);
-        padding-bottom: 0.75rem;
+        padding-bottom: 0.5rem;
       }
 
       .buttons {
         display: flex;
-        gap: 0.75rem;
+        gap: 0.6rem;
         flex-wrap: wrap;
-        margin-bottom: 1rem;
+        margin-bottom: 0.75rem;
       }
 
       .input-row {
@@ -128,17 +132,17 @@ ${getAppDialogStyles()}
         grid-template-columns: minmax(180px, 1fr) auto;
         gap: 0.75rem;
         align-items: end;
-        margin-bottom: 1rem;
+        margin-bottom: 0.75rem;
       }
 
       .field {
         display: flex;
         flex-direction: column;
-        gap: 0.35rem;
+        gap: 0.3rem;
       }
 
       .field label {
-        font-size: 0.8rem;
+        font-size: 0.75rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.05em;
@@ -148,8 +152,8 @@ ${getAppDialogStyles()}
       .field input {
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
-        padding: 0.75rem 0.9rem;
-        font-size: 1rem;
+        padding: 0.55rem 0.75rem;
+        font-size: 0.95rem;
         background: var(--bg-primary);
         color: var(--text-primary);
         font-variant-numeric: tabular-nums;
@@ -163,8 +167,8 @@ ${getAppDialogStyles()}
       button {
         border: none;
         border-radius: 0.5rem;
-        padding: 0.75rem 1.5rem;
-        font-size: 1rem;
+        padding: 0.55rem 1.1rem;
+        font-size: 0.95rem;
         font-weight: 700;
         cursor: pointer;
         transition: background 0.15s;
@@ -186,15 +190,15 @@ ${getAppDialogStyles()}
       /* Phase progress */
       .phase-bar {
         display: flex;
-        gap: 0.375rem;
-        margin-bottom: 1rem;
+        gap: 0.3rem;
+        margin-bottom: 0.5rem;
       }
 
       .phase-step {
         flex: 1;
-        padding: 0.4rem 0.5rem;
+        padding: 0.3rem 0.4rem;
         border-radius: 0.375rem;
-        font-size: 0.72rem;
+        font-size: 0.7rem;
         font-weight: 600;
         text-align: center;
         background: var(--bg-tertiary);
@@ -223,14 +227,14 @@ ${getAppDialogStyles()}
 
       /* Status message */
       .status-message {
-        padding: 0.75rem 1rem;
+        padding: 0.5rem 0.75rem;
         border-radius: 0.5rem;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         background: var(--bg-tertiary);
         border: 1px solid var(--border-color);
         color: var(--text-secondary);
-        margin-bottom: 1rem;
-        min-height: 2.5rem;
+        margin-bottom: 0.6rem;
+        min-height: 2rem;
       }
 
       .status-message.warning {
@@ -255,27 +259,27 @@ ${getAppDialogStyles()}
       .stats-grid {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
-        gap: 0.75rem;
-        margin-bottom: 1rem;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
       }
 
       .stat {
         background: var(--bg-tertiary);
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
-        padding: 0.75rem;
+        padding: 0.5rem 0.6rem;
       }
 
       .stat-label {
-        font-size: 0.72rem;
+        font-size: 0.7rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         color: var(--text-secondary);
-        margin-bottom: 0.25rem;
+        margin-bottom: 0.2rem;
       }
 
       .stat-value {
-        font-size: 1.2rem;
+        font-size: 1rem;
         font-weight: 700;
         font-variant-numeric: tabular-nums;
       }
@@ -289,13 +293,13 @@ ${getAppDialogStyles()}
         background: var(--bg-primary);
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
-        padding: 1rem;
-        margin-bottom: 0.75rem;
+        padding: 0.75rem;
+        margin-bottom: 0.6rem;
       }
 
       .phase-result h3 {
-        margin: 0 0 0.75rem;
-        font-size: 0.95rem;
+        margin: 0 0 0.5rem;
+        font-size: 0.9rem;
         font-weight: 600;
         display: flex;
         align-items: center;
@@ -320,24 +324,24 @@ ${getAppDialogStyles()}
       .phase-metrics {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-        gap: 0.5rem;
+        gap: 0.4rem;
       }
 
       .phase-metric {
         background: var(--bg-tertiary);
         border-radius: 0.375rem;
-        padding: 0.5rem 0.6rem;
+        padding: 0.4rem 0.5rem;
       }
 
       .phase-metric-label {
-        font-size: 0.7rem;
+        font-size: 0.68rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         color: var(--text-secondary);
       }
 
       .phase-metric-value {
-        font-size: 1rem;
+        font-size: 0.95rem;
         font-weight: 600;
         font-variant-numeric: tabular-nums;
       }
@@ -348,7 +352,7 @@ ${getAppDialogStyles()}
         border-radius: 0.5rem;
         background: var(--bg-tertiary);
         overflow: hidden;
-        margin-top: 0.75rem;
+        margin-top: 0.5rem;
       }
 
       canvas {
@@ -362,50 +366,50 @@ ${getAppDialogStyles()}
         background: #ecfdf5;
         border: 1px solid var(--success-color);
         border-radius: 0.5rem;
-        padding: 1rem 1.25rem;
-        margin-bottom: 1rem;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.75rem;
         display: none;
       }
 
       .suggestion-banner.visible { display: block; }
 
       .suggestion-title {
-        font-size: 0.85rem;
+        font-size: 0.8rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         color: #065f46;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.4rem;
       }
 
       .suggestion-value {
-        font-size: 1.6rem;
+        font-size: 1.4rem;
         font-weight: 800;
         font-variant-numeric: tabular-nums;
         color: #065f46;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.3rem;
       }
 
       .suggestion-prev {
-        font-size: 0.85rem;
+        font-size: 0.8rem;
         color: var(--text-secondary);
       }
 
       .warning-list {
-        margin: 0.5rem 0 0;
+        margin: 0.4rem 0 0;
         padding: 0 0 0 1.25rem;
         color: #92400e;
-        font-size: 0.85rem;
+        font-size: 0.8rem;
       }
 
       .gnss-warn-banner {
         background: #fffbeb;
         border: 1px solid var(--warning-color);
         border-radius: 0.5rem;
-        padding: 0.75rem 1rem;
-        font-size: 0.85rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8rem;
         color: #92400e;
-        margin-bottom: 0.75rem;
+        margin-bottom: 0.5rem;
         display: none;
       }
 
@@ -413,22 +417,116 @@ ${getAppDialogStyles()}
 
       .apply-button-wrap {
         display: flex;
-        gap: 0.75rem;
+        gap: 0.6rem;
         align-items: center;
-        margin-top: 0.75rem;
+        margin-top: 0.5rem;
       }
 
       .apply-note {
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         color: var(--text-secondary);
       }
 
+      /* Test-moves direction pad */
+      .move-pad {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.4rem;
+        margin-bottom: 0.6rem;
+      }
+
+      .move-pad button {
+        padding: 0.55rem 0.4rem;
+        font-size: 0.85rem;
+        font-weight: 700;
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.1;
+      }
+
+      .move-pad button:hover:not(:disabled) {
+        background: #dbeafe;
+        border-color: var(--primary-color);
+        color: var(--primary-color);
+      }
+
+      .move-pad .pad-center {
+        font-size: 0.7rem;
+        color: var(--text-secondary);
+        background: transparent;
+        border: 1px dashed var(--border-color);
+        cursor: default;
+      }
+
+      .move-pad .pad-center:hover { background: transparent; color: var(--text-secondary); border-color: var(--border-color); }
+
+      .move-controls {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.6rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .move-status {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        flex: 1;
+        min-width: 8rem;
+      }
+
+      .move-results {
+        margin-top: 0.5rem;
+        max-height: 14rem;
+        overflow: auto;
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+      }
+
+      .move-results table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .move-results th,
+      .move-results td {
+        padding: 0.35rem 0.5rem;
+        border-bottom: 1px solid var(--border-color);
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .move-results th:first-child,
+      .move-results td:first-child { text-align: left; }
+
+      .move-results thead th {
+        background: var(--bg-tertiary);
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 0.68rem;
+        color: var(--text-secondary);
+      }
+
+      .move-results .err-good { color: #065f46; }
+      .move-results .err-warn { color: #92400e; }
+      .move-results .err-bad  { color: #991b1b; }
+
+      @media (max-width: 1024px) {
+        .work-row { grid-template-columns: 1fr; }
+      }
+
       @media (max-width: 760px) {
-        .page-layout { grid-template-columns: 1fr; }
-        .sidebar-column { position: static; }
+        .widgets-row { grid-template-columns: 1fr; }
+        .widgets-row > * { zoom: 1; }
         .stats-grid { grid-template-columns: repeat(2, 1fr); }
-        .buttons { flex-direction: column; }
-        button { width: 100%; }
       }
     </style>
 ${getSensorWidgetScriptTag()}
@@ -442,119 +540,167 @@ ${getSensorWidgetScriptTag()}
     </div>
 
     <div class="container">
-      <div class="page-layout">
-        <!-- ================================================================
-             Left sidebar – live sensor widgets
-        ================================================================ -->
-        <aside class="sidebar-column" aria-label="Live sensors">
-          <imu-sensor-widget id="imu-widget"></imu-sensor-widget>
-          <gnss-position-widget id="gnss-widget"></gnss-position-widget>
-        </aside>
+      <!-- ================================================================
+           Live sensors row — IMU, GNSS, Motor Odometry (scaled smaller)
+      ================================================================ -->
+      <section class="widgets-row" aria-label="Live sensors">
+        <imu-sensor-widget id="imu-widget"></imu-sensor-widget>
+        <gnss-position-widget id="gnss-widget"></gnss-position-widget>
+        <motor-odometry-widget id="motor-odometry-widget"></motor-odometry-widget>
+      </section>
 
-        <!-- ================================================================
-             Main column – controls + results
-        ================================================================ -->
-        <main class="main-column">
+      <!-- ================================================================
+           Controls + Test Moves side-by-side
+      ================================================================ -->
+      <div class="work-row">
+        <!-- Calibration controls -->
+        <section class="panel">
+          <h2>Controls</h2>
 
-          <!-- Control panel -->
-          <section class="panel">
-            <h2>Controls</h2>
+          <div class="gnss-warn-banner" id="gnssWarnBanner"></div>
 
-            <div class="gnss-warn-banner" id="gnssWarnBanner"></div>
-
-            <div class="input-row">
-              <div class="field">
-                <label for="lineDistanceMeters">Straight distance</label>
-                <input id="lineDistanceMeters" type="number" min="0.5" max="20" step="0.5" value="5" inputmode="decimal" />
-              </div>
-            </div>
-
-            <!-- Phase progress indicator -->
-            <div class="phase-bar">
-              <div class="phase-step" id="phaseWait">Waiting for fix</div>
-              <div class="phase-step" id="phaseStraight">1 – Straight</div>
-              <div class="phase-step" id="phaseArcRight">2 – Pivot CW</div>
-              <div class="phase-step" id="phaseArcLeft">3 – Pivot CCW</div>
-              <div class="phase-step" id="phaseAnalyse">Analysis</div>
-            </div>
-
-            <div class="status-message" id="statusMessage">Idle – press Start to begin calibration.</div>
-
-            <div class="buttons">
-              <button id="startBtn" class="primary">Start Calibration</button>
-              <button id="stopBtn" class="danger" disabled>STOP</button>
-            </div>
-
-            <!-- Summary stats shown while / after running -->
-            <div class="stats-grid" id="summaryStats" style="display:none">
-              <div class="stat">
-                <div class="stat-label">Phase</div>
-                <div class="stat-value" id="statPhase">—</div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">GNSS Fix</div>
-                <div class="stat-value" id="statFix">—</div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">GNSS Accuracy</div>
-                <div class="stat-value" id="statAccuracy">—</div>
-              </div>
-            </div>
-          </section>
-
-          <!-- Suggested calibration value -->
-          <div class="suggestion-banner" id="suggestionBanner">
-            <div class="suggestion-title">Suggested Calibration</div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0.6rem;margin-bottom:0.75rem">
-              <div>
-                <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Left m/tick</div>
-                <div class="suggestion-value" id="suggestedLeft">—</div>
-              </div>
-              <div>
-                <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Right m/tick</div>
-                <div class="suggestion-value" id="suggestedRight">—</div>
-              </div>
-              <div>
-                <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Wheelbase</div>
-                <div class="suggestion-value" id="suggestedWheelbase">—</div>
-              </div>
-              <div>
-                <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Avg DR error</div>
-                <div class="suggestion-value" id="suggestedDrError">—</div>
-              </div>
-            </div>
-            <div class="suggestion-prev" id="prevValue"></div>
-            <ul class="warning-list" id="warningList" style="display:none"></ul>
-            <div class="apply-button-wrap">
-              <button id="applyBtn" class="primary">Apply & Save</button>
-              <span class="apply-note" id="applyNote"></span>
+          <div class="input-row">
+            <div class="field">
+              <label for="lineDistanceMeters">Straight distance</label>
+              <input id="lineDistanceMeters" type="number" min="0.5" max="20" step="0.5" value="5" inputmode="decimal" />
             </div>
           </div>
 
-          <!-- Phase result cards -->
-          <div id="phaseResults"></div>
+          <!-- Phase progress indicator -->
+          <div class="phase-bar">
+            <div class="phase-step" id="phaseWait">Wait fix</div>
+            <div class="phase-step" id="phaseStraight">1 – Straight</div>
+            <div class="phase-step" id="phaseArcRight">2 – CW</div>
+            <div class="phase-step" id="phaseArcLeft">3 – CCW</div>
+            <div class="phase-step" id="phaseAnalyse">Analyse</div>
+          </div>
 
-          <!-- Arc tracking canvas -->
-          <section class="panel" id="canvasSection" style="display:none">
-            <h2>Arc Encoder Tracking</h2>
-            <p style="font-size:0.85rem;color:var(--text-secondary);margin:0 0 0.75rem">
-              Pivot diagnostics. These plots are retained for continuity but are
-              not used in the final wheelbase calculation.
-            </p>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
-              <div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Pivot CW</div>
-                <div class="canvas-wrap"><canvas id="canvasArcRight" width="400" height="400"></canvas></div>
-              </div>
-              <div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.4rem">Pivot CCW</div>
-                <div class="canvas-wrap"><canvas id="canvasArcLeft" width="400" height="400"></canvas></div>
-              </div>
+          <div class="status-message" id="statusMessage">Idle – press Start to begin calibration.</div>
+
+          <div class="buttons">
+            <button id="startBtn" class="primary">Start Calibration</button>
+            <button id="stopBtn" class="danger" disabled>STOP</button>
+          </div>
+
+          <!-- Summary stats shown while / after running -->
+          <div class="stats-grid" id="summaryStats" style="display:none">
+            <div class="stat">
+              <div class="stat-label">Phase</div>
+              <div class="stat-value" id="statPhase">—</div>
             </div>
-          </section>
+            <div class="stat">
+              <div class="stat-label">GNSS Fix</div>
+              <div class="stat-value" id="statFix">—</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">GNSS Acc</div>
+              <div class="stat-value" id="statAccuracy">—</div>
+            </div>
+          </div>
+        </section>
 
-        </main>
+        <!-- Test Moves panel -->
+        <section class="panel">
+          <h2>Test Moves (1 m, 45° steps)</h2>
+          <p style="font-size:0.8rem;color:var(--text-secondary);margin:-0.25rem 0 0.6rem">
+            Drives to <code>current&nbsp;pose&nbsp;+&nbsp;Δ</code>. Compares GNSS-measured vs encoder-DR
+            position and heading change.
+          </p>
+
+          <div class="move-pad">
+            <button data-dx="-0.7071" data-dy="0.7071"  data-label="–X +Y">–X +Y</button>
+            <button data-dx="0"       data-dy="1"       data-label="+Y">+Y</button>
+            <button data-dx="0.7071"  data-dy="0.7071"  data-label="+X +Y">+X +Y</button>
+            <button data-dx="-1"      data-dy="0"       data-label="–X">–X</button>
+            <button class="pad-center" disabled>Δ&nbsp;=&nbsp;1 m</button>
+            <button data-dx="1"       data-dy="0"       data-label="+X">+X</button>
+            <button data-dx="-0.7071" data-dy="-0.7071" data-label="–X –Y">–X –Y</button>
+            <button data-dx="0"       data-dy="-1"      data-label="–Y">–Y</button>
+            <button data-dx="0.7071"  data-dy="-0.7071" data-label="+X –Y">+X –Y</button>
+          </div>
+
+          <div class="move-controls">
+            <button id="moveStopBtn" class="danger" disabled>STOP MOVE</button>
+            <button id="moveClearBtn" class="secondary">Clear results</button>
+            <span class="move-status" id="moveStatus">Idle.</span>
+          </div>
+
+          <div class="move-results">
+            <table>
+              <thead>
+                <tr>
+                  <th>Cmd Δ</th>
+                  <th>GNSS Δx</th>
+                  <th>GNSS Δy</th>
+                  <th>DR Δx</th>
+                  <th>DR Δy</th>
+                  <th>Δ pos err</th>
+                  <th>GNSS Δhdg</th>
+                  <th>DR Δhdg</th>
+                  <th>Δ hdg err</th>
+                </tr>
+              </thead>
+              <tbody id="moveResultsBody">
+                <tr><td colspan="9" style="text-align:center;color:var(--text-secondary);font-style:italic">No moves yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
+
+      <!-- ================================================================
+           Calibration outputs (suggestion banner, phase cards, canvases)
+      ================================================================ -->
+
+      <!-- Suggested calibration value -->
+      <div class="suggestion-banner" id="suggestionBanner">
+        <div class="suggestion-title">Suggested Calibration</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0.6rem;margin-bottom:0.6rem">
+          <div>
+            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Left m/tick</div>
+            <div class="suggestion-value" id="suggestedLeft">—</div>
+          </div>
+          <div>
+            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Right m/tick</div>
+            <div class="suggestion-value" id="suggestedRight">—</div>
+          </div>
+          <div>
+            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Wheelbase</div>
+            <div class="suggestion-value" id="suggestedWheelbase">—</div>
+          </div>
+          <div>
+            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Avg DR error</div>
+            <div class="suggestion-value" id="suggestedDrError">—</div>
+          </div>
+        </div>
+        <div class="suggestion-prev" id="prevValue"></div>
+        <ul class="warning-list" id="warningList" style="display:none"></ul>
+        <div class="apply-button-wrap">
+          <button id="applyBtn" class="primary">Apply &amp; Save</button>
+          <span class="apply-note" id="applyNote"></span>
+        </div>
+      </div>
+
+      <!-- Phase result cards -->
+      <div id="phaseResults"></div>
+
+      <!-- Arc tracking canvas -->
+      <section class="panel" id="canvasSection" style="display:none">
+        <h2>Arc Encoder Tracking</h2>
+        <p style="font-size:0.8rem;color:var(--text-secondary);margin:0 0 0.5rem">
+          Pivot diagnostics. Retained for continuity, not used in the final wheelbase calculation.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+          <div>
+            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Pivot CW</div>
+            <div class="canvas-wrap"><canvas id="canvasArcRight" width="400" height="400"></canvas></div>
+          </div>
+          <div>
+            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Pivot CCW</div>
+            <div class="canvas-wrap"><canvas id="canvasArcLeft" width="400" height="400"></canvas></div>
+          </div>
+        </div>
+      </section>
     </div>
 
 ${getAppDialogHtml()}
@@ -562,6 +708,9 @@ ${getAppDialogHtml()}
     <script>
 ${getAppDialogScript()}
 
+      // -----------------------------------------------------------------------
+      // Live sidebar widgets (IMU + GNSS + Motor Odometry)
+      // -----------------------------------------------------------------------
       function updateSidebar(payload) {
         const primitives = payload?.primitives ?? {};
         const imu        = primitives.imu        ?? {};
@@ -570,6 +719,8 @@ ${getAppDialogScript()}
 
         const imuWidget = document.getElementById('imu-widget');
         const gnssWidget = document.getElementById('gnss-widget');
+        const motorOdoWidget = document.getElementById('motor-odometry-widget');
+
         if (imuWidget) {
           imuWidget.setAttribute('status', imu.status || 'idle');
           if (imu.error != null) imuWidget.setAttribute('error', imu.error);
@@ -590,8 +741,16 @@ ${getAppDialogScript()}
           if (gnss.satellitesInUse != null) gnssWidget.setAttribute('satellites', gnss.satellitesInUse);
           gnssWidget.setAttribute('synced', poseFusion.usingGnssHeading === true ? 'true' : 'false');
         }
+        if (motorOdoWidget) {
+          motorOdoWidget.setAttribute('status', poseFusion.status || 'idle');
+          if (poseFusion.encoderOnlyHeadingDeg != null) motorOdoWidget.setAttribute('heading-deg', poseFusion.encoderOnlyHeadingDeg);
+          if (poseFusion.encoderOnlyXMeters != null) motorOdoWidget.setAttribute('x-meters', poseFusion.encoderOnlyXMeters);
+          if (poseFusion.encoderOnlyYMeters != null) motorOdoWidget.setAttribute('y-meters', poseFusion.encoderOnlyYMeters);
+          motorOdoWidget.setAttribute('confidence', poseFusion.drConfidence ?? 1);
+          motorOdoWidget.setAttribute('synced', poseFusion.encoderSynced === true ? 'true' : 'false');
+        }
 
-        // Page-specific: summary stats strip and GNSS quality warning banner
+        // Page-specific summary stats and GNSS warning banner
         const statFix = document.getElementById('statFix');
         const statAcc = document.getElementById('statAccuracy');
         if (statFix) statFix.textContent = gnss.fixType || '—';
@@ -619,7 +778,7 @@ ${getAppDialogScript()}
       }
 
       // -----------------------------------------------------------------------
-      // Phase indicator
+      // Phase indicator (for calibration procedure)
       // -----------------------------------------------------------------------
       const PHASE_IDS = {
         'waiting-for-fix': 'phaseWait',
@@ -762,11 +921,9 @@ ${getAppDialogScript()}
         const pad = 40;
         ctx.clearRect(0, 0, W, H);
 
-        // Background
         ctx.fillStyle = '#f9fafb';
         ctx.fillRect(0, 0, W, H);
 
-        // Diagonal (ideal tracking)
         ctx.strokeStyle = '#d1d5db';
         ctx.lineWidth = 1.5;
         ctx.setLineDash([6, 4]);
@@ -784,7 +941,6 @@ ${getAppDialogScript()}
           return;
         }
 
-        // Compute fractions
         const first = samples[0];
         const last  = samples[samples.length - 1];
         const totalEnc = Math.max(1, (last.leftTicksTotal - first.leftTicksTotal + last.rightTicksTotal - first.rightTicksTotal) / 2);
@@ -796,11 +952,9 @@ ${getAppDialogScript()}
           return { x: encFrac, y: imuFrac };
         });
 
-        // Draw encoder line (x-axis = enc, y-axis = imu)
         const toCanvasX = (f) => pad + f * (W - 2 * pad);
         const toCanvasY = (f) => (H - pad) - f * (H - 2 * pad);
 
-        // Plot points
         ctx.strokeStyle = '#2563eb';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -812,7 +966,6 @@ ${getAppDialogScript()}
         });
         ctx.stroke();
 
-        // Dots
         ctx.fillStyle = '#2563eb';
         points.forEach(p => {
           ctx.beginPath();
@@ -820,7 +973,6 @@ ${getAppDialogScript()}
           ctx.fill();
         });
 
-        // Axis labels
         ctx.fillStyle = '#6b7280';
         ctx.font = '11px sans-serif';
         ctx.textAlign = 'center';
@@ -889,8 +1041,11 @@ ${getAppDialogScript()}
       }
 
       // -----------------------------------------------------------------------
-      // Main status polling
+      // Status polling (calibration procedure + live primitives)
       // -----------------------------------------------------------------------
+      let cachedPrimitives = null;
+      let calibrationRunning = false;
+
       async function fetchStatus() {
         const [statusRes, primitivesRes] = await Promise.all([
           fetch('/api/dead-reckoning/status?ts=' + Date.now(), { cache: 'no-store' }),
@@ -902,11 +1057,10 @@ ${getAppDialogScript()}
         };
       }
 
-      let lastPhase = 'idle';
-
       async function update() {
         try {
           const payload = await fetchStatus();
+          cachedPrimitives = payload.primitives;
           updateSidebar(payload.primitives);
 
           const data = payload.status;
@@ -914,11 +1068,10 @@ ${getAppDialogScript()}
           const message = data.phaseMessage ?? '';
           const running = data.running ?? false;
           const result  = data.result ?? null;
+          calibrationRunning = running;
 
-          // Update phase bar
           updatePhaseBar(phase);
 
-          // Status message
           const msgEl = document.getElementById('statusMessage');
           if (msgEl) {
             msgEl.textContent = message || 'Idle.';
@@ -928,25 +1081,24 @@ ${getAppDialogScript()}
             else if (phase === 'stopped') msgEl.className += ' warning';
           }
 
-          // Summary stats visibility
           const summaryStats = document.getElementById('summaryStats');
           if (summaryStats) summaryStats.style.display = running ? 'grid' : 'none';
 
           const statPhase = document.getElementById('statPhase');
           if (statPhase) statPhase.textContent = phase;
 
-          // Buttons
-          document.getElementById('startBtn').disabled = running;
+          document.getElementById('startBtn').disabled = running || moveRunning;
           document.getElementById('stopBtn').disabled = !running;
           const lineDistanceInput = document.getElementById('lineDistanceMeters');
           if (lineDistanceInput) lineDistanceInput.disabled = running;
 
-          // Phase result cards
+          // Disable test-move pad while calibration is running
+          updateMoveButtonsEnabled();
+
           if (result) {
             renderPhaseResults(result);
             updateSuggestionBanner(result);
 
-            // Arc canvases
             const canvasSection = document.getElementById('canvasSection');
             if (canvasSection) canvasSection.style.display = '';
             if (result.arcRightPhase) {
@@ -956,15 +1108,13 @@ ${getAppDialogScript()}
               drawArcCanvas('canvasArcLeft', result.arcLeftPhase.steadyStateSamples);
             }
           }
-
-          lastPhase = phase;
         } catch (err) {
           console.error('Status update failed:', err);
         }
       }
 
       // -----------------------------------------------------------------------
-      // Button handlers
+      // Calibration button handlers
       // -----------------------------------------------------------------------
       document.getElementById('startBtn').addEventListener('click', async () => {
         const lineDistanceInput = document.getElementById('lineDistanceMeters');
@@ -974,7 +1124,6 @@ ${getAppDialogScript()}
         document.getElementById('phaseResults').innerHTML = '';
         document.getElementById('suggestionBanner').classList.remove('visible');
         document.getElementById('canvasSection').style.display = 'none';
-        pendingSuggestedValue = null;
         try {
           const lineDistanceMeters = Number(lineDistanceInput.value);
           if (!Number.isFinite(lineDistanceMeters) || lineDistanceMeters <= 0) {
@@ -1043,6 +1192,216 @@ ${getAppDialogScript()}
         } catch (err) {
           await appAlert('Network error: ' + err.message);
         }
+      });
+
+      // -----------------------------------------------------------------------
+      // Test-move logic — drive 1m relative to current pose, then compare
+      // GNSS-measured displacement / heading change vs encoder-DR-measured.
+      // -----------------------------------------------------------------------
+      let moveRunning = false;
+
+      function setMoveStatus(text, kind) {
+        const el = document.getElementById('moveStatus');
+        if (!el) return;
+        el.textContent = text;
+        el.style.color = kind === 'error' ? '#991b1b'
+                       : kind === 'success' ? '#065f46'
+                       : kind === 'running' ? 'var(--primary-color)'
+                       : 'var(--text-secondary)';
+      }
+
+      function updateMoveButtonsEnabled() {
+        const padButtons = document.querySelectorAll('.move-pad button[data-dx]');
+        const disable = moveRunning || calibrationRunning;
+        padButtons.forEach((btn) => { btn.disabled = disable; });
+        document.getElementById('moveStopBtn').disabled = !moveRunning;
+      }
+
+      function readPoseSnapshot(prim) {
+        const p = prim?.primitives ?? {};
+        const gnss = p.gnss ?? {};
+        const pf = p.poseFusion ?? {};
+        return {
+          gnssX: gnss.xMeters,
+          gnssY: gnss.yMeters,
+          gnssHeadingDeg: gnss.headingDeg,
+          gnssHeadingValid: gnss.headingDeg != null && gnss.headingAccuracyDeg != null && gnss.headingAccuracyDeg < 180,
+          encX: pf.encoderOnlyXMeters,
+          encY: pf.encoderOnlyYMeters,
+          encHeadingDeg: pf.encoderOnlyHeadingDeg,
+          fixType: gnss.fixType,
+          posAccuracy: gnss.positionAccuracyMeters,
+        };
+      }
+
+      async function fetchPoseSnapshot() {
+        const res = await fetch('/api/primitives', { cache: 'no-store' });
+        const data = await res.json();
+        return readPoseSnapshot(data);
+      }
+
+      function angleDiff(a, b) {
+        // Smallest signed difference a-b in (-180, 180]
+        if (a == null || b == null || isNaN(a) || isNaN(b)) return null;
+        let d = a - b;
+        while (d > 180) d -= 360;
+        while (d <= -180) d += 360;
+        return d;
+      }
+
+      function classifyError(meters) {
+        if (meters == null || isNaN(meters)) return '';
+        const cm = Math.abs(meters) * 100;
+        if (cm <= 5)  return 'err-good';
+        if (cm <= 15) return 'err-warn';
+        return 'err-bad';
+      }
+
+      function classifyHeadingError(deg) {
+        if (deg == null || isNaN(deg)) return '';
+        const a = Math.abs(deg);
+        if (a <= 2)  return 'err-good';
+        if (a <= 5)  return 'err-warn';
+        return 'err-bad';
+      }
+
+      function appendMoveResult(row) {
+        const tbody = document.getElementById('moveResultsBody');
+        // Clear placeholder row
+        if (tbody.children.length === 1 && tbody.children[0].children.length === 1) {
+          tbody.innerHTML = '';
+        }
+
+        const tr = document.createElement('tr');
+        const fmtNum = (v, d) => (v == null || isNaN(v)) ? '—' : v.toFixed(d);
+
+        const gnssDxStr = fmtNum(row.gnssDx, 3) + ' m';
+        const gnssDyStr = fmtNum(row.gnssDy, 3) + ' m';
+        const drDxStr   = fmtNum(row.drDx,   3) + ' m';
+        const drDyStr   = fmtNum(row.drDy,   3) + ' m';
+
+        const posErrM = (row.gnssDx != null && row.drDx != null && row.gnssDy != null && row.drDy != null)
+          ? Math.hypot(row.drDx - row.gnssDx, row.drDy - row.gnssDy)
+          : null;
+        const posErrCls = classifyError(posErrM);
+        const posErrStr = posErrM != null ? (posErrM * 100).toFixed(1) + ' cm' : '—';
+
+        const hdgErr = (row.gnssDHeading != null && row.drDHeading != null) ? angleDiff(row.drDHeading, row.gnssDHeading) : null;
+        const hdgErrCls = classifyHeadingError(hdgErr);
+        const hdgErrStr = hdgErr != null ? hdgErr.toFixed(1) + '°' : '—';
+
+        const gnssHdgStr = row.gnssDHeading != null ? row.gnssDHeading.toFixed(1) + '°' : '—';
+        const drHdgStr   = row.drDHeading   != null ? row.drDHeading.toFixed(1)   + '°' : '—';
+
+        tr.innerHTML =
+          '<td>' + row.label + '</td>' +
+          '<td>' + gnssDxStr + '</td>' +
+          '<td>' + gnssDyStr + '</td>' +
+          '<td>' + drDxStr   + '</td>' +
+          '<td>' + drDyStr   + '</td>' +
+          '<td class="' + posErrCls + '">' + posErrStr + '</td>' +
+          '<td>' + gnssHdgStr + '</td>' +
+          '<td>' + drHdgStr   + '</td>' +
+          '<td class="' + hdgErrCls + '">' + hdgErrStr + '</td>';
+        tbody.insertBefore(tr, tbody.firstChild);
+      }
+
+      async function runTestMove(dx, dy, label) {
+        if (moveRunning || calibrationRunning) return;
+
+        // Snapshot starting pose
+        let before;
+        try {
+          before = await fetchPoseSnapshot();
+        } catch (err) {
+          await appAlert('Could not read current pose: ' + err.message);
+          return;
+        }
+        if (before.gnssX == null || before.gnssY == null) {
+          await appAlert('No GNSS position available — cannot compute target.');
+          return;
+        }
+
+        const targetX = before.gnssX + dx;
+        const targetY = before.gnssY + dy;
+
+        moveRunning = true;
+        updateMoveButtonsEnabled();
+        setMoveStatus('Driving ' + label + ' toward (' + targetX.toFixed(2) + ', ' + targetY.toFixed(2) + ')…', 'running');
+
+        let driveResult = null;
+        try {
+          const res = await fetch('/api/drive/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetX,
+              targetY,
+              learningEnabled: false,
+            }),
+          });
+          driveResult = await res.json();
+          if (!res.ok) {
+            setMoveStatus('Drive failed: ' + (driveResult?.error || res.statusText), 'error');
+            return;
+          }
+        } catch (err) {
+          setMoveStatus('Network error during drive: ' + err.message, 'error');
+          return;
+        } finally {
+          moveRunning = false;
+          updateMoveButtonsEnabled();
+        }
+
+        // Snapshot ending pose
+        let after;
+        try {
+          after = await fetchPoseSnapshot();
+        } catch (err) {
+          setMoveStatus('Drive complete but failed to read end pose: ' + err.message, 'error');
+          return;
+        }
+
+        const status = driveResult?.status ?? 'unknown';
+        const kind = status === 'success' ? 'success' : (status === 'stopped' ? 'error' : 'error');
+        setMoveStatus('Move ' + label + ' finished (' + status + ').', kind);
+
+        appendMoveResult({
+          label,
+          gnssDx: (before.gnssX != null && after.gnssX != null) ? (after.gnssX - before.gnssX) : null,
+          gnssDy: (before.gnssY != null && after.gnssY != null) ? (after.gnssY - before.gnssY) : null,
+          drDx:   (before.encX != null && after.encX != null) ? (after.encX - before.encX) : null,
+          drDy:   (before.encY != null && after.encY != null) ? (after.encY - before.encY) : null,
+          gnssDHeading: angleDiff(after.gnssHeadingDeg, before.gnssHeadingDeg),
+          drDHeading:   angleDiff(after.encHeadingDeg, before.encHeadingDeg),
+        });
+      }
+
+      document.querySelectorAll('.move-pad button[data-dx]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const dx = Number(btn.getAttribute('data-dx'));
+          const dy = Number(btn.getAttribute('data-dy'));
+          const label = btn.getAttribute('data-label') || '';
+          await runTestMove(dx, dy, label);
+        });
+      });
+
+      document.getElementById('moveStopBtn').addEventListener('click', async () => {
+        try {
+          await fetch('/api/drive/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          setMoveStatus('Stop requested.', 'error');
+        } catch (err) {
+          setMoveStatus('Failed to send stop: ' + err.message, 'error');
+        }
+      });
+
+      document.getElementById('moveClearBtn').addEventListener('click', () => {
+        document.getElementById('moveResultsBody').innerHTML =
+          '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);font-style:italic">No moves yet.</td></tr>';
       });
 
       // -----------------------------------------------------------------------

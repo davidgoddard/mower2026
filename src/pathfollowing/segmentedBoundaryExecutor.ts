@@ -252,10 +252,10 @@ function chordViolation(
   const end = points[probeIndex];
 
   for (let index = anchorIndex + 1; index < probeIndex; index += 1) {
-    if (toleranceMeters > 0 && pointToSegmentDistance(points[index], start, end) > toleranceMeters) {
+    if (pointToSegmentDistance(points[index], start, end) > toleranceMeters) {
       return true;
     }
-    if (cosLimit < 1 && vertexTurnExceeds(points, index, cosLimit)) {
+    if (vertexTurnExceeds(points, index, cosLimit)) {
       return true;
     }
   }

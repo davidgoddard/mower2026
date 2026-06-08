@@ -203,10 +203,13 @@ test("buildVerificationApproachPlan stages to the outer edge with a tangential j
   assert.ok(farPlan);
   assert.equal(farPlan.turnOnly, false);
   assert.equal(farPlan.pathDirection, "forward");
-  assert.equal(farPlan.joinPoint.xMeters, 1);
+  // Pose (0.2, 0.4) is closer to (0,0) than to any other recorded point, so
+  // (0,0) is the join point. The tangent heading there points toward (1,0)
+  // (i.e. 0°), so the standoff stages 10 cm before the join along that line.
+  assert.equal(farPlan.joinPoint.xMeters, 0);
   assert.equal(farPlan.joinPoint.yMeters, 0);
-  assert.equal(farPlan.approachTarget.xMeters, 0.9);
-  assert.equal(farPlan.approachTarget.yMeters, 0);
+  assert.equal(Number(farPlan.approachTarget.xMeters.toFixed(6)), -0.1);
+  assert.equal(Number(farPlan.approachTarget.yMeters.toFixed(6)), 0);
 
   const loopPoints = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -277,6 +280,8 @@ test("buildSegmentedBoundaryTargets fuses gentle wiggles within tolerance into a
 test("buildSegmentedBoundaryTargets keeps a vertex whose turn exceeds the configured limit", () => {
   // 90-degree corner: simplifier must keep the corner vertex even though chord
   // tolerance alone would also keep it; this test asserts the turn-angle gate works.
+  // The two 1 m straight chords are then resampled at the 0.5 m max segment length
+  // so the segment drive controller has frequent re-anchor opportunities.
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
@@ -289,7 +294,9 @@ test("buildSegmentedBoundaryTargets keeps a vertex whose turn exceeds the config
     targets.map((point) => [point.xMeters, point.yMeters]),
     [
       [0, 0],
+      [0.5, 0],
       [1, 0],
+      [1, 0.5],
       [1, 1],
     ],
   );

@@ -142,7 +142,20 @@ export function buildVerificationPathPointsFromPlan(
   plan: VerificationApproachPlan,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
-  return buildDrivePathPointsForDirection(points, pose, plan.pathDirection, parameters);
+  const drivePoints = buildDrivePathPointsForDirection(points, pose, plan.pathDirection, parameters);
+  if (drivePoints.length < 2) {
+    return drivePoints;
+  }
+
+  // Verify always returns to the join point. For closed loops the drive helper
+  // already appends a duplicate trailing point; for open paths we add it here
+  // so the segmented executor drives back to where it joined.
+  const first = drivePoints[0];
+  const last = drivePoints[drivePoints.length - 1];
+  if (first.xMeters === last.xMeters && first.yMeters === last.yMeters) {
+    return drivePoints;
+  }
+  return drivePoints.concat([first]);
 }
 
 export function buildPerimeterDrivePathPoints(
