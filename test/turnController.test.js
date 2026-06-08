@@ -40,6 +40,12 @@ describe("TurnController", () => {
         wheelSpeedLeft = 0;
         wheelSpeedRight = 0;
       }),
+      requestNeutralMotorOutputs: mock.fn(async () => {
+        wheelSpeedLeft = 0;
+        wheelSpeedRight = 0;
+      }),
+      beginMotionSession: mock.fn(),
+      endMotionSession: mock.fn(),
       _testSetHeading: (h) => { heading = h; },
       _testGetWheelSpeeds: () => ({ left: wheelSpeedLeft, right: wheelSpeedRight }),
 
@@ -196,12 +202,6 @@ describe("TurnController", () => {
   it("watchdog fires when no IMU heading update arrives during the active turn", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
-    // Augment the mock with the motion-session and neutral-output surface that
-    // the watchdog cleanup path may invoke if no real implementation exists.
-    mockSensor.beginMotionSession = mock.fn();
-    mockSensor.endMotionSession = mock.fn();
-    mockSensor.requestNeutralMotorOutputs = mock.fn(async () => {});
-
     const mockLearning = createMockLearningModel();
 
     let elapsed = 0;

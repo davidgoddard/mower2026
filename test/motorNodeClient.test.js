@@ -72,8 +72,11 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   const commandView = new DataView(writes[0].payload.buffer, writes[0].payload.byteOffset, writes[0].payload.byteLength);
   assert.equal(commandView.getInt16(13, true), 500);
   assert.equal(commandView.getInt16(15, true), -500);
-  assert.equal(commandView.getUint16(20, true), 1000);
-  assert.equal(commandView.getUint16(22, true), 1000);
+  // Acceleration / deceleration rates are derived from the configured ramp-up
+  // (460ms) and ramp-down (700ms) defaults that match the firmware spec.
+  // Encoded value = round((1 / rampSeconds) * 1000).
+  assert.equal(commandView.getUint16(20, true), 2174);
+  assert.equal(commandView.getUint16(22, true), 1429);
 
   // Motor wheel-speed command frame type.
   assert.equal(writes[0].payload[3], 0x21);
