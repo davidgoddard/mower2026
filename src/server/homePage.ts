@@ -117,9 +117,15 @@ ${getSensorWidgetLayoutStyles()}
 
       .dashboard-grid {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1.5rem;
-        margin-bottom: 1.5rem;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        align-items: start;
+      }
+
+      /* Scale every top-row tile down so all four fit on a single line */
+      .dashboard-grid > * {
+        zoom: 0.72;
       }
 
       .sensor-card {
@@ -598,10 +604,22 @@ ${getSensorWidgetLayoutStyles()}
         font-variant-numeric: tabular-nums;
       }
 
-      @media (max-width: 1024px) {
+      @media (max-width: 1400px) {
+        .dashboard-grid > * { zoom: 0.66; }
+      }
+
+      @media (max-width: 1100px) {
+        .dashboard-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .dashboard-grid > * { zoom: 0.85; }
+      }
+
+      @media (max-width: 640px) {
         .dashboard-grid {
           grid-template-columns: 1fr;
         }
+        .dashboard-grid > * { zoom: 1; }
       }
 
       @media (max-width: 768px) {
@@ -663,16 +681,14 @@ ${getSensorWidgetScriptTag()}
     </div>
 
     <div class="container">
-      <!-- Sensor Dashboard -->
+      <!-- Sensor Dashboard — IMU, GNSS, Motor Odometry, Motor Status across one row -->
       <div class="dashboard-grid">
         <imu-sensor-widget id="imu-widget"></imu-sensor-widget>
         <gnss-position-widget id="gnss-widget"></gnss-position-widget>
+        <motor-odometry-widget id="motor-odometry-widget"></motor-odometry-widget>
 
-        <!-- Motors Card -->
-        <div style="display: flex; flex-direction: column; gap: 1rem;">
-          <motor-odometry-widget id="motor-odometry-widget"></motor-odometry-widget>
-
-          <div class="sensor-card">
+        <!-- Motor Status -->
+        <div class="sensor-card">
             <div class="sensor-header">
               <div class="sensor-title">Motor Status</div>
               <span class="status-dot" id="motor-status"></span>
@@ -745,7 +761,6 @@ ${getSensorWidgetScriptTag()}
               </div>
             </div>
             <div id="motor-error" class="error-message" style="display: none;"></div>
-          </div>
         </div>
       </div>
       <div id="gnss-sat-warning" class="warning-banner" role="status" aria-live="polite"></div>

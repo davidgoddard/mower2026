@@ -1352,6 +1352,90 @@ test('SensorController detects a stall when a commanded wheel stops moving after
   });
 });
 
+test('SensorController obstruction event reports the latest wheel speeds, not literal zero', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    systemStop.clearStop('obstruction-wheel-speeds-test');
+    try {
+      let now = 0;
+      const primitivesStore = new PrimitivesStore();
+      const gateway = {
+        async initialise() {},
+        async readImu() {
+          now += 100;
+          return { timestampMillis: now, angularVelocity: { zDegreesPerSecond: 0 } };
+        },
+        async readGnss() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            xMeters: 1,
+            yMeters: 1,
+            positionAccuracyMeters: 0.01,
+            fixType: 'fixed',
+            satellitesInUse: 22,
+            sampleAgeMillis: 20,
+          };
+        },
+        async readMotorFeedback() {
+          now += 100;
+          return {
+            timestampMillis: now,
+            leftEncoderDelta: 16,
+            rightEncoderDelta: 0,
+            leftPwmAppliedPercent: 80,
+            rightPwmAppliedPercent: 0,
+            leftMotorCurrentAmps: 2.4,
+            rightMotorCurrentAmps: 0.4,
+            watchdogHealthy: true,
+            faultFlags: 0,
+          };
+        },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      };
+
+      const controller = new SensorController({
+        logger,
+        primitivesStore,
+        gateway,
+        pollIntervalMs: 0,
+        sleep: async () => {},
+        nowMillis: () => now,
+        maxLoopCount: 20,
+      });
+
+      const obstructionEvents = [];
+      controller.on('obstructionDetected', (event) => obstructionEvents.push(event));
+
+      await controller.start();
+      await controller.setMotorWheelOutputs(0.8, 0);
+      await delay(20);
+
+      const stallEvent = obstructionEvents.find((e) => e.type === 'stall');
+      assert.ok(stallEvent, 'expected a stall obstruction event');
+      // Left wheel is moving (encoder delta 16 ticks per cycle). The event must
+      // reflect the observed wheel speed, not a hardcoded zero.
+      assert.notEqual(stallEvent.leftWheelSpeedMetersPerSecond, 0,
+        'left wheel speed in obstruction event should not be zero when encoder ticks are non-zero');
+      assert.equal(typeof stallEvent.rightWheelSpeedMetersPerSecond, 'number');
+
+      await controller.stop();
+    } finally {
+      systemStop.clearStop('obstruction-wheel-speeds-test-cleanup');
+      await logger.close();
+    }
+  });
+});
+
 test('SensorController does not stall while commanded motion keeps making GNSS progress', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({

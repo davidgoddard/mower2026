@@ -1187,10 +1187,14 @@ export class DriveLineController {
     if (this.cteSamples.length === 0) {
       return createMeters(0);
     }
-    return this.cteSamples.reduce((max, cte) =>
-      Math.abs(unwrapMeters(cte)) > Math.abs(unwrapMeters(max)) ? cte : max,
-      createMeters(0)
-    );
+    let maxAbs = 0;
+    for (const cte of this.cteSamples) {
+      const mag = Math.abs(unwrapMeters(cte));
+      if (mag > maxAbs) {
+        maxAbs = mag;
+      }
+    }
+    return createMeters(maxAbs);
   }
 
   private calculateAvgCte(): Meters {

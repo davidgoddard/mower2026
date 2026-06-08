@@ -1151,8 +1151,8 @@ export class SensorController extends EventEmitter {
       timestampMillis: this.nowMillis(),
       leftMotorCurrentAmps: leftMotorCurrentAmps ?? 0,
       rightMotorCurrentAmps: rightMotorCurrentAmps ?? 0,
-      leftWheelSpeedMetersPerSecond: 0,
-      rightWheelSpeedMetersPerSecond: 0,
+      leftWheelSpeedMetersPerSecond: current.leftWheelSpeedMetersPerSecond ?? 0,
+      rightWheelSpeedMetersPerSecond: current.rightWheelSpeedMetersPerSecond ?? 0,
     });
     systemStop.requestStop("sensors", "motor_stall_detected");
   }
