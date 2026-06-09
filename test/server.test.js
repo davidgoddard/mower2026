@@ -33,7 +33,6 @@ test('routeServerRequest serves health and primitives payloads', () => {
   assert.equal(typeof primitivesPayload.primitives.sampledAt, 'string');
   assert.equal(typeof primitivesPayload.primitives.imu, 'object');
   assert.equal(typeof primitivesPayload.primitives.gnss, 'object');
-  assert.equal(Array.isArray(primitivesPayload.primitives.gnssHistory), true);
   assert.equal(typeof primitivesPayload.primitives.poseFusion, 'object');
   assert.equal(typeof primitivesPayload.primitives.poseFusion.usingGnssHeading, 'boolean');
   assert.equal(typeof primitivesPayload.primitives.motors, 'object');
@@ -49,8 +48,8 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   assert.equal(homeRoute.body.includes('Path Tracing'), false);
   assert.equal(homeRoute.body.includes('Manual Drive'), false);
   assert.equal(homeRoute.body.includes('Segment Testing'), true);
-  assert.equal(homeRoute.body.includes('GNSS Satellites History (last hour)'), true);
-  assert.equal(homeRoute.body.includes('GNSS Fix State History (last hour)'), true);
+  assert.equal(homeRoute.body.includes('GNSS Satellites History (last hour)'), false);
+  assert.equal(homeRoute.body.includes('GNSS Fix State History (last hour)'), false);
   assert.equal(homeRoute.body.includes('id="gnss-sat-warning"'), true);
   assert.equal(homeRoute.body.includes('Heading History (last hour)'), false);
   assert.equal(homeRoute.body.includes('Position Accuracy History (last hour)'), false);

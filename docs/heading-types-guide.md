@@ -177,7 +177,7 @@ class SensorController {
 
   private async pollImu(): Promise<void> {
     const sample = await this.gateway.readImu();
-    const deltaSeconds = 0.005; // 200Hz
+    const deltaSeconds = 0.008; // ~125Hz
     
     // Project the gyro vector onto the gravity axis derived from pitch/roll,
     // then integrate the tilt-compensated yaw rate.

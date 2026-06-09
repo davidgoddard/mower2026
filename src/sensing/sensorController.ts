@@ -28,7 +28,10 @@ import {
 } from "../geometry/positionTypes.js";
 import {
   ENCODER_METERS_PER_TICK_DEFAULT,
-  SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+  SENSOR_SCHEDULER_TICK_MS,
+  IMU_POLL_INTERVAL_MS,
+  GNSS_POLL_INTERVAL_MS,
+  MOTOR_FEEDBACK_POLL_INTERVAL_MS,
   MOTOR_STALL_COMMAND_THRESHOLD_PERCENT,
   MOTOR_STALL_ENCODER_DELTA_THRESHOLD,
   MOTOR_STALL_GNSS_ACCURACY_MAX_METERS,
@@ -70,7 +73,19 @@ interface SensorControllerOptions {
   imuCalibration?: ImuCalibration;
   poseCalibration?: PoseCalibration;
   geometryCalibration?: GeometryCalibration;
+  /**
+   * Scheduler tick interval (ms). On each tick the controller checks each
+   * sensor's per-sensor cadence and reads only those whose deadlines have
+   * elapsed. When omitted, defaults to SENSOR_SCHEDULER_TICK_MS.
+   */
   pollIntervalMs?: number;
+  /**
+   * Per-sensor poll cadences (ms). When omitted, the controller reads that
+   * sensor on every scheduler tick — useful for tests with stub gateways.
+   */
+  imuIntervalMs?: number;
+  gnssIntervalMs?: number;
+  motorFeedbackIntervalMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
   maxLoopCount?: number;
@@ -139,9 +154,16 @@ export class SensorController extends EventEmitter {
   private readonly poseCalibration: PoseCalibration | null;
   private readonly geometryCalibration: GeometryCalibration | null;
   private readonly pollIntervalMs: number;
+  private readonly imuIntervalMs: number;
+  private readonly gnssIntervalMs: number;
+  private readonly motorFeedbackIntervalMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly maxLoopCount: number | null;
+
+  private nextImuDueMillis = 0;
+  private nextGnssDueMillis = 0;
+  private nextMotorFeedbackDueMillis = 0;
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
@@ -194,7 +216,13 @@ export class SensorController extends EventEmitter {
     this.imuCalibration = options.imuCalibration ?? null;
     this.poseCalibration = options.poseCalibration ?? null;
     this.geometryCalibration = options.geometryCalibration ?? null;
-    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS;
+    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_SCHEDULER_TICK_MS;
+    // When per-sensor intervals are omitted, fall back to "every tick" so
+    // legacy callers and unit tests behave as before. Production wiring
+    // passes the IMU_/GNSS_/MOTOR_FEEDBACK_POLL_INTERVAL_MS constants.
+    this.imuIntervalMs = options.imuIntervalMs ?? 0;
+    this.gnssIntervalMs = options.gnssIntervalMs ?? 0;
+    this.motorFeedbackIntervalMs = options.motorFeedbackIntervalMs ?? 0;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
     this.maxLoopCount = options.maxLoopCount ?? null;
@@ -691,12 +719,15 @@ export class SensorController extends EventEmitter {
 
   private async runLoop(): Promise<void> {
     let nextTickMillis = this.nowMillis();
+    this.nextImuDueMillis = nextTickMillis;
+    this.nextGnssDueMillis = nextTickMillis;
+    this.nextMotorFeedbackDueMillis = nextTickMillis;
     let loopCount = 0;
 
     try {
       while (this.running) {
         const loopStartedMillis = this.nowMillis();
-        await this.pollAllSensors();
+        await this.pollDueSensors(loopStartedMillis);
         this.maybeAutoRecalibrateImuYawBias();
         const loopDurationMs = this.nowMillis() - loopStartedMillis;
 
@@ -709,8 +740,13 @@ export class SensorController extends EventEmitter {
         });
 
         nextTickMillis += this.pollIntervalMs;
-        const waitMillis = Math.max(0, nextTickMillis - this.nowMillis());
-        await this.sleep(waitMillis);
+        const now = this.nowMillis();
+        // Catch-up guard: if a slow tick has put us more than one interval
+        // behind real time, snap forward instead of busy-spinning to catch up.
+        if (nextTickMillis < now) {
+          nextTickMillis = now + this.pollIntervalMs;
+        }
+        await this.sleep(Math.max(0, nextTickMillis - now));
 
         loopCount += 1;
         if (this.maxLoopCount !== null && loopCount >= this.maxLoopCount) {
@@ -780,13 +816,37 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  private async pollAllSensors(): Promise<void> {
+  private async pollDueSensors(nowMillis: number): Promise<void> {
     if (systemStop.isStopped()) {
       await this.sendDisableMotorsCommand();
     }
-    await this.pollImu();
-    await this.pollGnss();
-    await this.pollMotors();
+    if (nowMillis >= this.nextImuDueMillis) {
+      await this.pollImu();
+      this.nextImuDueMillis = this.nextDueAfter(this.nextImuDueMillis, this.imuIntervalMs, nowMillis);
+    }
+    if (nowMillis >= this.nextGnssDueMillis) {
+      await this.pollGnss();
+      this.nextGnssDueMillis = this.nextDueAfter(this.nextGnssDueMillis, this.gnssIntervalMs, nowMillis);
+    }
+    if (nowMillis >= this.nextMotorFeedbackDueMillis) {
+      await this.pollMotors();
+      this.nextMotorFeedbackDueMillis = this.nextDueAfter(
+        this.nextMotorFeedbackDueMillis,
+        this.motorFeedbackIntervalMs,
+        nowMillis,
+      );
+    }
+  }
+
+  private nextDueAfter(previousDueMillis: number, intervalMs: number, nowMillis: number): number {
+    if (intervalMs <= 0) {
+      return nowMillis;
+    }
+    let next = previousDueMillis + intervalMs;
+    if (next <= nowMillis) {
+      next = nowMillis + intervalMs;
+    }
+    return next;
   }
 
   private async pollImu(): Promise<void> {
@@ -921,21 +981,6 @@ export class SensorController extends EventEmitter {
           satellitesInUse: sample.satellitesInUse,
           sampleAgeMillis: sample.sampleAgeMillis,
         },
-      });
-
-      this.primitivesStore.appendGnssHistory({
-        sampledAt: new Date(sample.timestampMillis).toISOString(),
-        timestampMillis: sample.timestampMillis,
-        xMeters: adjustedXMeters,
-        yMeters: adjustedYMeters,
-        headingDeg: internalHeadingDeg,
-        positionAccuracyMeters: sample.positionAccuracyMeters,
-        headingAccuracyDeg: sample.headingAccuracyDegrees ?? null,
-        fixType: sample.fixType,
-        satellitesInUse: sample.satellitesInUse,
-        sampleAgeMillis: sample.sampleAgeMillis,
-        headingValid: sample.headingValid ?? null,
-        groundSpeedMetersPerSecond: sample.groundSpeedMetersPerSecond ?? null,
       });
 
       this.latestGnssPosition = adjustedPosition;

@@ -224,7 +224,7 @@ The sensor interface shall be implemented as one Sensor Controller boundary in t
 - application-facing sensor state and polling orchestration
 - hardware-facing adapters/drivers for each device.
 
-The Sensor Controller will be responsible for polling each configured sensor device in turn and storing only the latest successful state (plus last error state where relevant).  Polling is asynchronous to the main control code and the sensor loop runs at 200Hz.
+The Sensor Controller will be responsible for polling each configured sensor device on its own cadence and storing only the latest successful state (plus last error state where relevant). A single scheduler loop wakes every ~8 ms and dispatches reads only to the sensors whose individual deadline has elapsed: IMU at ~125 Hz, motor feedback at 50 Hz, and GNSS at 20 Hz. Polling is asynchronous to the main control code.
 
 The Sensor Controller is the single owner of sensor polling cadence.  Device-specific polling loops are not to be run independently outside this controller in production runtime.
 
@@ -232,11 +232,13 @@ The Sensor Controller should expose a snapshot/read API for the latest sensor st
 
 #### Motor interface
 
-The sensor controller shall poll motor feedback each loop and expose the latest motor state in primitives.
+The sensor controller shall poll motor feedback at the motor cadence (~50 Hz) and expose the latest motor state in primitives.
 
 The sensor controller shall expose motor command methods for:
 - setting left and right wheel target percentages, where 1.0 is full output and 0.0 is stop
 - issuing a stop command
+
+Motor speed commands shall be latest-wins: if the application enqueues several speed commands before the bus drains, only the most recent target reaches the ESP32. Every motor speed command is merged with the global system-stop flag so that once stop is latched, any pending or subsequent speed command is rewritten as a disable until the global flag is cleared.
 
 The Pi-to-motor-node command protocol shall use normalized percentages rather than metres-per-second targets.
 The ESP32 motor controller shall treat the requested target percentage as the top-of-ramp destination and apply ramp-up/ramp-down over the configured duration.

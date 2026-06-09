@@ -16,13 +16,22 @@ This keeps application logic independent from device/protocol details.
 
 ## Polling Model
 
-- Poll loop target: ~200Hz (`5ms` default)
-- Poll order in each loop:
-  1. IMU
-  2. GNSS
-  3. Motors
-- Latest successful value is retained per sensor.
-- On sensor error, last good values are preserved and error state is updated.
+- One scheduler loop drives all sensor reads, but each sensor has its own
+  cadence. The loop wakes at `SENSOR_SCHEDULER_TICK_MS` (8 ms by default)
+  and only enqueues an I2C read for a sensor whose own deadline has elapsed.
+- Default per-sensor cadences (from `src/constants.ts`):
+  - IMU: `IMU_POLL_INTERVAL_MS` ≈ 8 ms (~125 Hz). Turn execution needs >100 Hz
+    yaw integration to be accurate.
+  - Motor feedback: `MOTOR_FEEDBACK_POLL_INTERVAL_MS` ≈ 20 ms (50 Hz).
+    Encoders feed dead-reckoning and current sensing feeds stall detection.
+  - GNSS: `GNSS_POLL_INTERVAL_MS` ≈ 50 ms (20 Hz). Matches the GNSS node's
+    update rate; reading faster wastes I2C bandwidth.
+- The IMU read is one 12-byte burst that returns gyro + accelerometer in a
+  single I2C transaction.
+- Latest successful value is retained per sensor; on error, last good values
+  are preserved and error state is updated.
+- If a tick falls more than one interval behind real time the scheduler
+  snaps forward instead of busy-spinning to catch up.
 
 ## Application-Facing API
 
@@ -163,7 +172,7 @@ The BMI160 gyro is configured for the `2000 dps` range, which corresponds to `16
 - subsequent samples integrate using sample-to-sample timestamp delta
 - heading always normalized to `(-180, 180]`
 
-`SensorController` also keeps a short in-memory IMU diagnostic window so the runtime can emit one compact turn summary when pose fusion rebases GNSS heading. That gives us the raw sample interval and integrated yaw evidence without writing a log line for every 200Hz sample.
+`SensorController` also keeps a short in-memory IMU diagnostic window so the runtime can emit one compact turn summary when pose fusion rebases GNSS heading. That gives us the raw sample interval and integrated yaw evidence without writing a log line for every IMU sample.
 When a non-zero motor command transitions to a stop command, the controller snapshots that same window as `sensor.imu.motion_stop_summary`. Pose fusion prefers this stop-time summary when it later logs a GNSS heading rebase, because the actual turn may be several seconds behind the stationary rebase.
 
 GNSS heading rebases are only allowed when the motor command is stopped and the latest tilt-compensated yaw rate is within 1 deg/s. During active turns the GNSS heading can still be observed for quality and position updates, but it does not write back into the IMU heading baseline.

@@ -6,6 +6,7 @@ import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtoc
 import { decodeMotorFeedbackSample, encodeWheelSpeedCommand, motorFeedbackSampleLength } from "./motorCodec.js";
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
+import { systemStop } from "../control/systemStop.js";
 
 interface MotorNodeClientOptions {
   address: number;
@@ -64,6 +65,14 @@ export class MotorNodeClient {
     leftWheelTargetPercent: number,
     rightWheelTargetPercent: number,
   ): Promise<void> {
+    // The global stop flag is the single authority on motor enable. Once it
+    // latches, every speed send is rewritten as a disable so a stale
+    // motion command queued before the stop cannot reach the ESP32.
+    if (systemStop.isStopped()) {
+      await this.stop();
+      return;
+    }
+
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
       leftWheelTargetPercent: clampNormalizedTarget(leftWheelTargetPercent),

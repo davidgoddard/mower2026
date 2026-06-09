@@ -4,7 +4,7 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Constants
 - `src/constants.ts`: system-wide DESIGN DECISION constants (see `docs/CONSTANTS-ARCHITECTURE.md`).
-  - timing design decisions: sensor poll intervals (200Hz), manual drive loop rate, retry policies
+  - timing design decisions: sensor scheduler tick + per-sensor cadences (IMU ~125 Hz, motor 50 Hz, GNSS 20 Hz), manual drive loop rate, retry policies
   - I2C hardware addresses: GNSS (0x52), motor (0x66), IMU (0x69) - system topology
   - manual drive tuning: 12 parameters for joystick response, deadbands, spin thresholds
   - motor configuration: direction signs for hardware inversion, max wheel speed
@@ -312,7 +312,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
 - `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
 - `src/bus/crc.ts`: CRC16-CCITT implementation.
-- `src/sensing/sensorController.ts`: single 200Hz sensor polling controller and latest sensor state integration.
+- `src/sensing/sensorController.ts`: single sensor scheduler with per-sensor cadences (IMU ~125 Hz, motor 50 Hz, GNSS 20 Hz) and latest sensor state integration.
   - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading, timestampMillis?)` for timestamp-aware absolute heading reset integration.
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
   - IMU yaw integration: projects the 3-axis gyro vector onto the gravity axis derived from pitch and roll, then uses `addRelativeAngle()` with `RelativeAngle` deltas from that tilt-compensated yaw rate and applies the persisted IMU yaw scale factor before updating the heading.
@@ -351,7 +351,7 @@ This document maps problem domains to candidate files removing the need for Code
   - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
   - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; after a zero-speed stop has persisted for long enough, a good GNSS heading may rebase the IMU again even if it is no longer close; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw.
   - exposes a primitive snapshot flag indicating whether GNSS heading is currently being used to rebase the IMU so the web UI can tint the widgets without re-deriving that state
-  - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without 200Hz disk writes
+  - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without per-sample disk writes
   - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps
   - encoder dead-reckoning: integrates motor encoder deltas for position during GNSS gaps
   - heading reset API: `setHeading()` for external absolute heading corrections
@@ -372,7 +372,7 @@ This document maps problem domains to candidate files removing the need for Code
   - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
-- `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab and live GNSS satellite/fix history charts on the dashboard, rendered from the buffered GNSS history stream, plus a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
+- `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
 - `src/server/deadReckoningPage.ts`: dead-reckoning calibration page — three-phase calibration procedure UI (straight line, arc right, arc left); live IMU, GNSS, and motor-odometry widgets in a scaled row across the top; controls panel and a 45°-step test-moves panel side-by-side beneath; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
   - Test-moves panel: 8 directional buttons (1 m at 45° increments) drive the mower to `current GNSS pose + Δ` via `POST /api/drive/execute` with learning disabled, snapshot pose before and after each move, and tabulate GNSS-measured Δx/Δy/Δheading vs encoder-DR Δx/Δy/Δheading plus their differences for direct comparison of motor-encoder dead-reckoning fidelity.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
@@ -388,7 +388,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `getSensorWidgetScriptTag()`: returns `<script src="/sensor-widgets.js" defer></script>` for page `<head>`
   - `getSensorWidgetLayoutStyles()`: returns minimal layout CSS (flex/grid placement of the custom elements); contains no typography or colour rules so it cannot override component shadow CSS
   - used by: deadReckoningPage, driveTuningPage, homePage, segmentTestingPage, turnTuningPage
-- `src/server/primitivesStore.ts`: in-memory primitives state holder plus rolling GNSS history buffer for dashboard diagnostics.
+- `src/server/primitivesStore.ts`: in-memory primitives state holder for the live web widgets.
   - primitives payload shape contains `imu`, `gnss`, `poseFusion`, and `motors` sections.
   - `poseFusion.usingGnssHeading` is the app-level flag consumed by the live widgets to show whether GNSS is currently rebasing the IMU heading.
   - all four sections (`imu`, `gnss`, `poseFusion`, `motors`) are guaranteed non-null objects — initialised with defaults at construction and deep-merged on update.

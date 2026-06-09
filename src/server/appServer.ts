@@ -35,7 +35,10 @@ import { createPosition, unwrapMeters } from "../geometry/positionTypes.js";
 import {
   MAX_PORT_NUMBER,
   MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
-  SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+  SENSOR_SCHEDULER_TICK_MS,
+  IMU_POLL_INTERVAL_MS,
+  GNSS_POLL_INTERVAL_MS,
+  MOTOR_FEEDBACK_POLL_INTERVAL_MS,
   ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE,
   ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE,
   WHEEL_BASE_METERS_MIN_PLAUSIBLE,
@@ -1712,7 +1715,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       imuCalibration: imuCalibration!,
       poseCalibration: poseCalibration!,
       geometryCalibration: geometryCalibration!,
-      pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+      pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_SCHEDULER_TICK_MS,
+      imuIntervalMs: IMU_POLL_INTERVAL_MS,
+      gnssIntervalMs: GNSS_POLL_INTERVAL_MS,
+      motorFeedbackIntervalMs: MOTOR_FEEDBACK_POLL_INTERVAL_MS,
     });
     await sensorController.start();
 
@@ -1744,14 +1750,17 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       imuCalibration: imuCalibration!,
       poseCalibration: poseCalibration!,
       geometryCalibration: geometryCalibration!,
-      pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+      pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_SCHEDULER_TICK_MS,
+      imuIntervalMs: IMU_POLL_INTERVAL_MS,
+      gnssIntervalMs: GNSS_POLL_INTERVAL_MS,
+      motorFeedbackIntervalMs: MOTOR_FEEDBACK_POLL_INTERVAL_MS,
     });
     await sensorController.start();
 
     primitives.update({
       sensorController: {
         status: "error",
-        pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+        pollIntervalMs: options.sensorPollingIntervalMs ?? SENSOR_SCHEDULER_TICK_MS,
         lastLoopDurationMs: null,
       },
       imu: {

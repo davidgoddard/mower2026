@@ -13,16 +13,30 @@
 // =============================================================================
 
 /**
- * Default sensor polling interval in milliseconds
- * 33ms ≈ 30Hz update rate
+ * Sensor scheduler tick interval in milliseconds.
+ * The single scheduler wakes at this cadence and dispatches each sensor's read
+ * only when its own per-sensor interval has elapsed. Set to the highest
+ * required sensor rate (IMU).
  */
-export const SENSOR_POLL_INTERVAL_MS = 33;
+export const SENSOR_SCHEDULER_TICK_MS = 8;
 
 /**
- * Sensor controller polling interval in milliseconds
- * 5ms ≈ 200Hz update rate for the controller's internal sensor loop
+ * IMU read interval in milliseconds (~125 Hz).
+ * Turn execution needs >100 Hz heading integration to be accurate.
  */
-export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 5;
+export const IMU_POLL_INTERVAL_MS = 8;
+
+/**
+ * Motor feedback read interval in milliseconds (50 Hz).
+ * Encoder ticks for dead-reckoning + current sensing for stall detection.
+ */
+export const MOTOR_FEEDBACK_POLL_INTERVAL_MS = 20;
+
+/**
+ * GNSS read interval in milliseconds (20 Hz).
+ * Matches the GNSS node's update rate; reading faster wastes I2C bandwidth.
+ */
+export const GNSS_POLL_INTERVAL_MS = 50;
 
 /**
  * Manual drive control loop interval in milliseconds
@@ -317,7 +331,7 @@ export const MAX_PORT_NUMBER = 65535;
 /**
  * Turn controller polling interval in milliseconds
  * How often to check heading during turn execution
- * Matches the current turn control cadence; kept separate from the 200Hz sensor loop.
+ * Matches the current turn control cadence; kept separate from the IMU sensor cadence.
  */
 export const TURN_POLLING_INTERVAL_MS = 33;
 

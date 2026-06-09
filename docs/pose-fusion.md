@@ -36,7 +36,7 @@ There is **no DR-vs-GNSS agreement gate** — the validator alone decides whethe
 | IMU integrated heading (`InternalHeading`) | `IMU_HEADING_UPDATE` | `onImuHeadingUpdate` |
 | GNSS position + heading + fix metadata | `GNSS_POSITION_UPDATE` | `onGnssPositionUpdate` |
 
-The sensor controller polls all three at 200 Hz; pose fusion is purely event-driven and stateless between events.
+The sensor controller polls each sensor on its own cadence (IMU ~125 Hz, motor feedback 50 Hz, GNSS 20 Hz); pose fusion is purely event-driven and stateless between events.
 
 ---
 

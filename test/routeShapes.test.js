@@ -34,7 +34,6 @@ test("/api/primitives wraps the snapshot in a {state, primitives} envelope", () 
   assert.ok("motors" in body.primitives);
   assert.ok("poseFusion" in body.primitives);
   assert.equal(typeof body.primitives.poseFusion.usingGnssHeading, "boolean");
-  assert.ok(Array.isArray(body.primitives.gnssHistory));
 });
 
 test("/api/turn/status returns 503 with error code when controller is missing", () => {

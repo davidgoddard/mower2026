@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MotorNodeClient, I2C_PRIORITY } from '../dist/index.js';
+import { systemStop } from '../dist/control/systemStop.js';
+
+test.beforeEach(() => {
+  systemStop.clearStop('motor-node-client-test');
+});
 
 function crc16Ccitt(data) {
   let crc = 0xffff;
