@@ -46,6 +46,8 @@ import {
   MOTOR_RAMP_DOWN_TIME_MS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
   DRIVE_SHORT_BUCKET_MAX_METERS,
+  DRIVE_SHORT_BUCKET_DISTANCES_METERS,
+  DRIVE_LONG_SAMPLE_DISTANCES_METERS,
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
   DRIVE_SEGMENT_MIN_DISTANCE_METERS,
   DRIVE_SEGMENT_MAX_DISTANCE_METERS,
@@ -247,9 +249,9 @@ export class DriveController {
     systemStop.requestStop("drive", "drive_stop_requested");
     const stopCurrentTurn = (this.turnController as any).stopCurrentTurn;
     if (typeof stopCurrentTurn === "function") {
-      void stopCurrentTurn.call(this.turnController);
+      await stopCurrentTurn.call(this.turnController);
     }
-    void this.lineDriveController.stopCurrentDrive();
+    await this.lineDriveController.stopCurrentDrive();
   }
 
   /**
@@ -516,7 +518,7 @@ export class DriveController {
           directionSign: null,
           targetXErrorMeters,
           completedDrives: results.length,
-          totalPlannedDrives: Math.round(DRIVE_SHORT_BUCKET_MAX_METERS / DRIVE_SHORT_BUCKET_STEP_METERS) * (includeReverseLegs ? 2 : 1),
+          totalPlannedDrives: (DRIVE_SHORT_BUCKET_DISTANCES_METERS.length + DRIVE_LONG_SAMPLE_DISTANCES_METERS.length) * (includeReverseLegs ? 2 : 1),
           message: `Short-distance training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
           timestamp: new Date().toISOString(),
           resultStatus: "success",

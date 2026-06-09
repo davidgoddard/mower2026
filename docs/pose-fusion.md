@@ -272,7 +272,8 @@ A normal mowing session looks like this:
 
 ### GNSS sample-to-sample teleport
 
-- No physical-jump check exists yet — there is no calibrated max-vehicle-speed value to gate against.
+- No physical-jump check is used.
+- There is currently no calibrated mower translational-speed model, so meters-per-second plausibility gates are intentionally forbidden in validator logic.
 - The temporal filter (3 consecutive valid epochs before promotion) plus the strict RTK Fixed + ≤ 5 cm accuracy filter is the only protection.
 - A single rogue sample that happens to claim RTK Fixed will snap position once, but the validator's 3-epoch promotion window means it would need 3 in a row to do lasting damage.
 
@@ -289,7 +290,7 @@ A normal mowing session looks like this:
 - **It does not consult dead-reckoning to gate GNSS.** DR vs GNSS disagreement is *diagnostic* (the encoder-only track is exposed for the UI), never a validator input.
 - **It does not blend GNSS and DR position.** When validator says TRUSTED, fused position is a hard snap to GNSS; when REJECTED, fused position is pure DR. There is no weighted average.
 - **It does not own the IMU yaw integrator.** That lives in `SensorController`; pose fusion only reads the integrated heading and writes new baselines via `setHeading()` on rebase events.
-- **It does not check for physical-jump teleports.** Calibrated vehicle speed bounds aren't available yet.
+- **It does not check for physical-jump teleports.** Speed-based plausibility gates are intentionally excluded until the project explicitly defines a calibrated mower-speed model.
 
 ---
 

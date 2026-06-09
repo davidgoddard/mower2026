@@ -54,8 +54,8 @@ function createSensorController() {
       async stopMotors() {
         commands.push(['stop']);
       },
-      async setMotorWheelOutputs(left, right) {
-        commands.push([left, right]);
+      async setMotorWheelOutputs(left, right, options) {
+        commands.push([left, right, options ?? null]);
       },
     },
   };
@@ -97,9 +97,9 @@ test('manual drive does not resend an unchanged held moving command', async () =
   await waitFor(() => commands.length >= 1);
   await coordinator.stop();
 
-  const wheelCommands = commands.filter((command) => command.length === 2);
+  const wheelCommands = commands.filter((command) => command.length >= 2 && typeof command[0] === 'number');
   assert.equal(wheelCommands.length, 1);
-  assert.deepEqual(wheelCommands[0], [0.6, 0.6]);
+  assert.deepEqual(wheelCommands[0], [0.6, 0.6, { rampUpTimeMs: 120, rampDownTimeMs: 120 }]);
 });
 
 test('manual drive coalesces tiny held-stick output jitter', async () => {
@@ -130,9 +130,9 @@ test('manual drive coalesces tiny held-stick output jitter', async () => {
   await new Promise((resolve) => setTimeout(resolve, 10));
   await coordinator.stop();
 
-  const wheelCommands = commands.filter((command) => command.length === 2);
+  const wheelCommands = commands.filter((command) => command.length >= 2 && typeof command[0] === 'number');
   assert.equal(wheelCommands.length, 1);
-  assert.deepEqual(wheelCommands[0], [0.6, 0.6]);
+  assert.deepEqual(wheelCommands[0], [0.6, 0.6, { rampUpTimeMs: 120, rampDownTimeMs: 120 }]);
 });
 
 test('manual drive gentle-halts on controller disconnect and stays armed within the grace window', async () => {
@@ -158,7 +158,7 @@ test('manual drive gentle-halts on controller disconnect and stays armed within 
   hidController.emit('update', createSnapshot({ speed: 0.6 }));
   hidController.emit('right-top');
 
-  await waitFor(() => commands.some((command) => command.length === 2 && command[0] !== 0));
+  await waitFor(() => commands.some((command) => command.length >= 2 && command[0] !== 0));
   const beforeDisconnect = commands.length;
 
   hidController.emit('update', createSnapshot({ connected: false, speed: 0.6 }));
@@ -172,7 +172,7 @@ test('manual drive gentle-halts on controller disconnect and stays armed within 
   await waitFor(() => {
     const wheelCommandsAfterReconnect = commands
       .slice(stopIndex + 1)
-      .filter((command) => command.length === 2);
+      .filter((command) => command.length >= 2 && typeof command[0] === 'number');
     return wheelCommandsAfterReconnect.some((command) => command[0] !== 0 || command[1] !== 0);
   });
 
@@ -201,7 +201,7 @@ test('manual drive disarms after the controller disconnect grace window expires'
   coordinator.start();
   hidController.emit('update', createSnapshot({ speed: 0.6 }));
   hidController.emit('right-top');
-  await waitFor(() => commands.some((command) => command.length === 2 && command[0] !== 0));
+  await waitFor(() => commands.some((command) => command.length >= 2 && command[0] !== 0));
 
   hidController.emit('update', createSnapshot({ connected: false, speed: 0.6 }));
 
@@ -236,7 +236,7 @@ test('manual drive requests a normal stop when HID updates go stale and resumes 
   hidController.emit('update', createSnapshot({ speed: 0.6, lastUpdateMillis: now }));
   hidController.emit('right-top');
 
-  await waitFor(() => commands.some((command) => command.length === 2 && command[0] !== 0));
+  await waitFor(() => commands.some((command) => command.length >= 2 && command[0] !== 0));
   const beforeStale = commands.length;
 
   await waitFor(() => commands.slice(beforeStale).some((command) => command[0] === 'stop'), 500);
@@ -246,7 +246,7 @@ test('manual drive requests a normal stop when HID updates go stale and resumes 
   await waitFor(() => {
     const wheelCommandsAfterRecovery = commands
       .slice(beforeStale)
-      .filter((command) => command.length === 2);
+      .filter((command) => command.length >= 2 && typeof command[0] === 'number');
     return wheelCommandsAfterRecovery.some((command) => command[0] !== 0 || command[1] !== 0);
   }, 500);
 
@@ -275,12 +275,16 @@ test('manual drive sends a normal zero command when the stick centres', async ()
   hidController.emit('update', createSnapshot({ speed: 0.6 }));
   hidController.emit('right-top');
 
-  await waitFor(() => commands.length >= 1);
+  await waitFor(() => commands.some((command) => command.length >= 2 && typeof command[0] === 'number'));
 
   hidController.emit('update', createSnapshot({ speed: 0 }));
-  await waitFor(() => commands.some((command) => command.length === 2 && command[0] === 0 && command[1] === 0));
+  await waitFor(() => commands.some((command) => command.length >= 2 && command[0] === 0 && command[1] === 0));
   await coordinator.stop();
 
-  const wheelCommands = commands.filter((command) => command.length === 2);
+  const wheelCommands = commands.filter((command) => command.length >= 2 && typeof command[0] === 'number');
   assert.equal(wheelCommands.some((command) => command[0] === 0 && command[1] === 0), true);
+  assert.deepEqual(
+    wheelCommands.find((command) => command[0] === 0 && command[1] === 0),
+    [0, 0, { rampUpTimeMs: 120, rampDownTimeMs: 120 }],
+  );
 });

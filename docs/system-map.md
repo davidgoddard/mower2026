@@ -4,7 +4,7 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Constants
 - `src/constants.ts`: system-wide DESIGN DECISION constants (see `docs/CONSTANTS-ARCHITECTURE.md`).
-  - timing design decisions: sensor scheduler tick + per-sensor cadences (IMU ~125 Hz, motor 50 Hz, GNSS 20 Hz), manual drive loop rate, retry policies
+  - timing design decisions: sensor poll intervals (sensor loop 50Hz, GNSS polling 20Hz, motor polling 50Hz), pose-fusion downstream emit cadence (50Hz), manual drive loop rate, retry policies
   - I2C hardware addresses: GNSS (0x52), motor (0x66), IMU (0x69) - system topology
   - manual drive tuning: 12 parameters for joystick response, deadbands, spin thresholds
   - motor configuration: direction signs for hardware inversion, max wheel speed
@@ -57,7 +57,10 @@ This document maps problem domains to candidate files removing the need for Code
 ## Stop State
 - `src/control/systemStop.ts`: global stop latch for user actions, timeouts, and runtime safety faults.
 - `src/server/appServer.ts`: stop API entry points and operation reset wiring.
+  - `POST /api/stop` is the unconditional emergency-stop route used by the web UI; it raises `systemStop`, immediately sends a hard motor halt, and then fans out stop requests to active controllers/runners.
 - `src/sensing/sensorController.ts`: sensor loop stop checks and stop-command keepalive while stopped.
+  - every wheel-output write merges the current global stop latch into the motor payload enable/disable flag, so once stop is raised no later command can re-enable drive until a new user-requested session clears the latch
+  - neutral stop requests while `systemStop` is latched must resend disabled motor frames rather than zero-speed enabled frames, so the ESP32 keeps seeing a hard stop and never resumes on a stale command
   - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
 - `src/control/turnController.ts`: turn stop checks and stop handling.
@@ -69,12 +72,14 @@ This document maps problem domains to candidate files removing the need for Code
 - `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.
 - `src/sensing/poseFusion.ts`: fused pose estimate
   - maintains the latest IMU/GNSS/encoder-derived pose estimate
+  - throttles downstream `poseUpdate` emissions so control consumers do not rerun on every upstream IMU/GNSS/encoder event burst
   - GNSS heading accuracy and fix quality drive IMU heading priming/rebasing; GNSS position accuracy is used separately for trusting x/y pose updates
   - the first good GNSS heading primes the IMU immediately, then IMU remains the live heading reference with GNSS only nudging the IMU when the fix is good, the heading is stable, and the GNSS heading is already close to the current IMU heading
   - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, heading stability, and the current IMU/GNSS heading alignment gate all pass for the part of pose being updated
   - `getCurrentPose()` returns the latest fused pose without settling
 - `src/sensing/gnssValidator.ts`: GNSS sample acceptance / trust state machine
   - position and heading are validated separately, with heading requiring position to pass first
+  - no speed-based or meters-per-second physical-jump gate is allowed at the current project stage; trust is based on GNSS quality/accuracy plus temporal promotion/demotion and heading consistency only
   - heading trust now demotes only after a much longer failure window so brief slow-mower glitches do not flicker it off
 
 ## Motor Control
@@ -82,6 +87,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorCodec.ts`: motor command/feedback frame encoding and decoding.
 - `src/motors/motorNodeClient.ts`: Pi-side motor I2C client, including ramp timing injection and percent-based command transmission.
 - `src/sensing/sensorController.ts`: converts raw motor encoder deltas into wheel-speed estimates using persisted calibration.
+  - runs the top-level sensor loop, with IMU on every loop tick while GNSS and motor polling run at their own lower cadences to reduce CPU and I2C load
 - `src/sensing/sensorHardwareGateway.ts`: clamps normalized wheel outputs (`-1..1`) and applies direction mapping before sending to the motor client.
 - `external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino`: ESP32 motor controller firmware; acts as a ramped PWM bridge that applies commanded wheel targets, handles safe zero-crossing on reversals, and reports encoder/current telemetry back to the Pi without local wheel-speed regulation.
 - `src/motors/motorMapping.ts`: motor sign mapping and normalized wheel-output clamp helpers.
@@ -96,6 +102,8 @@ This document maps problem domains to candidate files removing the need for Code
   - executes on-the-spot turns using IMU heading integration
   - polls heading at the sensor controller update rate
   - adaptive brake angle learning per turn angle and direction
+  - pauses for a deliberate one-second settle before final measurement and learning, and inserts a one-second pause between successive training turns so the operator can see each turn fully finish before the next begins
+  - both large-angle and small-angle training now repeat each requested angle until the turn error is within target or the per-angle retry cap is reached
   - emergency stop support during turn execution
   - large-angle and small-angle tuning runners for comprehensive parameter learning
   - integrates with retry system for obstruction recovery
@@ -144,22 +152,23 @@ This document maps problem domains to candidate files removing the need for Code
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
   - delegates to line controller immediately after the turn, then records successful segment history
+  - stop requests are unconditional: they are awaited through both the turn phase and the line-drive phase when active, and still issue an immediate stop command even when no drive is currently active
   - surfaces short-distance and segment training progress to the drive tuning page state while a training run is active
   - segment-learning runner for 105cm to 6m fixed-line runs in 20cm steps
   - integrates with retry system for obstruction recovery
 - `src/control/driveLineController.ts`: straight-line drive controller using regulated pure pursuit and brake distance learning
   - executes straight-line drives from current position to target position
-  - computes a lookahead point on the travel line, converts curvature into differential wheel speeds, and keeps a high cruise speed with only modest slow-down near the target and on the tightest curves so grass friction does not dominate
+  - computes a lookahead point on the travel line, converts curvature into differential wheel speeds, and keeps a high cruise speed until the learned brake trigger is reached; only curvature/heading recovery reduce speed before that so the stop learner sees a stable ramp-up / maybe-plateau / ramp-down model
   - reverse travel uses the same geometric controller with the correct body-heading reference
-  - hard arrival stop plus long-drive brake distance learning
-  - short-drive bucket learning for 5cm increments up to 1m and a single shared 1.05m brake bucket for longer straight runs up to 4m
-  - short-drive training uses the entered distance as the sweep boundary; below 4m it runs the normal incremental sweep up to 4m, while above 4m it runs a single forward/reverse pair at exactly the entered distance
+  - hard arrival stop plus shared full-speed brake distance learning for drives beyond 1m
+  - short-drive stop-trigger learning uses exact buckets at 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, and 100cm
+  - straight-line training runs those short buckets plus longer shared-brake sample distances at 2m, 3m, and 4m
   - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
   - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
   - self-contained stop handling and learning updates for the line-following phase
 - `src/control/driveLearningModel.ts`: drive parameter learning and persistence
   - long-drive brake distance learning from final X error
-  - short-drive brake fractions bucketed by 5cm increments from 5cm to 1m plus one shared 1.05m bucket for longer straight runs up to 4m
+  - short-drive brake fractions bucketed at the exact short distances from 5cm through 100cm; all longer plateau drives reuse the shared long-drive brake distance
   - direction-specific CTE gain adaptation from peak CTE and average CTE remains persisted for compatibility with the tuning UI and historical learning data
   - JSON persistence at `config/drive-learning-params.json`
 - Drive sequence: settle → get pose → turn to target → settle → delegate line drive with CTE correction and arrival braking → measure errors → update learning
@@ -307,12 +316,13 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/manualDriveCoordinator.ts`: manual-drive loop; maps controller input to motor commands.
   - arm/disarm mapping: `right-top` arms, `left-top` disarms and stops.
   - coalesces tiny held-stick command jitter and only sends a motor command when the requested wheel pair actually changes.
+  - uses a faster 20ms operator loop and manual-specific 120ms ramp-up/ramp-down overrides while still sending commands through the normal motor node path.
   - safety behavior: controller disconnect while armed triggers disarm + stop.
 - `src/protocols/commonProtocol.ts`: shared node/message identifiers and frame header shape.
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
 - `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
 - `src/bus/crc.ts`: CRC16-CCITT implementation.
-- `src/sensing/sensorController.ts`: single sensor scheduler with per-sensor cadences (IMU ~125 Hz, motor 50 Hz, GNSS 20 Hz) and latest sensor state integration.
+- `src/sensing/sensorController.ts`: single 200Hz sensor polling controller and latest sensor state integration.
   - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading, timestampMillis?)` for timestamp-aware absolute heading reset integration.
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
   - IMU yaw integration: projects the 3-axis gyro vector onto the gravity axis derived from pitch and roll, then uses `addRelativeAngle()` with `RelativeAngle` deltas from that tilt-compensated yaw rate and applies the persisted IMU yaw scale factor before updating the heading.
@@ -351,13 +361,13 @@ This document maps problem domains to candidate files removing the need for Code
   - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
   - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; after a zero-speed stop has persisted for long enough, a good GNSS heading may rebase the IMU again even if it is no longer close; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw.
   - exposes a primitive snapshot flag indicating whether GNSS heading is currently being used to rebase the IMU so the web UI can tint the widgets without re-deriving that state
-  - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without per-sample disk writes
+  - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without 200Hz disk writes
   - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps
   - encoder dead-reckoning: integrates motor encoder deltas for position during GNSS gaps
   - heading reset API: `setHeading()` for external absolute heading corrections
   - pose API: `getCurrentPose()` returns current position, heading, and quality
   - encoder calibration is persisted via `src/config/poseCalibration.ts`
-  - emits `poseUpdate` events on every update
+  - emits bounded-rate `poseUpdate` events for downstream control consumers, while trusted GNSS corrections can still force an immediate emission
 - `src/geometry/positionTypes.ts`: branded types for position and pose.
   - `Meters`: branded number for type-safe distance values
   - `Position`: X/Y position in meters
@@ -366,9 +376,13 @@ This document maps problem domains to candidate files removing the need for Code
   - vehicle geometry helpers: body-frame offset translation and projection for GNSS control-point calibration
 
 ## Operation And Server Entry
-- `src/server/main.ts`: production server entrypoint (compiled to `dist/server/main.js`).
-- `src/server/appServer.ts`: HTTP server bootstrapping, routing, and graceful shutdown.
-  - wires all HTTP routes for all pages and API endpoints
+- `src/server/main.ts`: production supervisor entrypoint (compiled to `dist/server/main.js`).
+  - starts a lightweight public web process and a separate local-only control process, then waits for the control process to become healthy before exposing the public listener
+- `src/server/controlMain.ts`: control-process entrypoint for the hardware-facing runtime (compiled to `dist/server/controlMain.js`).
+- `src/server/webServer.ts`: public web server that serves operator pages and proxies `/api/*`, `/health`, and other non-page requests to the control process.
+- `src/server/appServer.ts`: control-process HTTP server bootstrapping, routing, and graceful shutdown.
+  - retains the hardware-facing routes, controller lifecycle wiring, and graceful-stop behavior for the control process
+  - still knows how to render pages, but the production public listener now serves those pages from the separate web process
   - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`

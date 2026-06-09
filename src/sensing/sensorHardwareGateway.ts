@@ -9,12 +9,22 @@ import { Bmi160ImuSensor } from "../imu/bmi160ImuSensor.js";
 import { ImuSample } from "../imu/types.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
 
+export interface MotorCommandOptions {
+  rampUpTimeMs?: number;
+  rampDownTimeMs?: number;
+}
+
 export interface SensorHardwareGateway {
   initialise(): Promise<void>;
   readImu(): Promise<ImuSample>;
   readGnss(): Promise<GnssSample>;
   readMotorFeedback(): Promise<MotorFeedbackSample>;
-  setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void>;
+  setMotorWheelOutputs(
+    leftWheelOutputPercent: number,
+    rightWheelOutputPercent: number,
+    enableDrive?: boolean,
+    options?: MotorCommandOptions,
+  ): Promise<void>;
   stopMotors(): Promise<void>;
   close(): Promise<void>;
 }
@@ -86,7 +96,12 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     return mapRawMotorFeedbackToAppConvention(this.motorMapping, raw);
   }
 
-  async setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void> {
+  async setMotorWheelOutputs(
+    leftWheelOutputPercent: number,
+    rightWheelOutputPercent: number,
+    enableDrive: boolean = true,
+    options?: MotorCommandOptions,
+  ): Promise<void> {
     if (!this.motorClient) {
       throw new Error("sensor gateway not initialised");
     }
@@ -97,7 +112,7 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     });
     const raw = mapNormalizedWheelTargetsToRaw(this.motorMapping, normalized);
 
-    await this.motorClient.sendWheelSpeedCommand(raw.leftPercent, raw.rightPercent);
+    await this.motorClient.sendWheelSpeedCommand(raw.leftPercent, raw.rightPercent, enableDrive, options);
   }
 
   async stopMotors(): Promise<void> {

@@ -1222,7 +1222,7 @@ void appendFragmentedRtcmPacket(const uint8_t *incomingData, int len) {
     return;
   }
 
-  const uint32_t actualPayloadCrc = readU24LE(&g_rtcmBuffer[g_rtcmIndex - 3]);
+  const uint32_t actualPayloadCrc = crc24q(g_rtcmBuffer, static_cast<size_t>(g_rtcmIndex - 3));
   if (actualPayloadCrc != g_rtcmExpectedPayloadCrc) {
     g_totalRtcmFragmentsRejected += 1;
     resetRtcmFragmentAssembly(false);

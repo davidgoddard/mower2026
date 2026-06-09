@@ -24,6 +24,7 @@ import {
 import {
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
   TURN_SETTLE_TIME_MS,
+  TURN_TRAINING_INTER_TURN_PAUSE_MS,
   TURN_HISTORY_MAX_SIZE,
   MOTOR_RAMP_DOWN_TIME_MS,
   TURN_SMALL_CRAWL_SPEED_FACTOR,
@@ -460,7 +461,7 @@ export class TurnController {
       mode: "large",
       iterations,
       anglesToTest,
-      targetErrorDeg: 3,
+      targetErrorDeg: 2,
     });
   }
 
@@ -499,6 +500,7 @@ export class TurnController {
     try {
       if (options.mode === "large") {
         const iterations = options.iterations ?? 1;
+        const MAX_ATTEMPTS_PER_ANGLE = 10;
 
         for (let i = 0; i < iterations; i += 1) {
           if (systemStop.isStopped()) {
@@ -512,32 +514,70 @@ export class TurnController {
               this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
               return results;
             }
-            if (this.stopRequested || this.tuningStopRequested) {
-              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
-              return results;
-            }
+            let attempt = 0;
 
-            const result = await this.executeTurn({
-              targetAngle: createRelativeAngle(angleDeg),
-              direction: angleDeg > 0 ? "ccw" : "cw",
-              learningEnabled: true,
-            });
-            results.push(result);
+            while (attempt < MAX_ATTEMPTS_PER_ANGLE) {
+              if (this.stopRequested || this.tuningStopRequested) {
+                this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+                return results;
+              }
 
-            if (this.stopRequested || this.tuningStopRequested) {
-              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
-              return results;
-            }
+              attempt += 1;
+              this.logger.info("turn.training.large_iteration", {
+                angleDeg,
+                attempt,
+                maxAttempts: MAX_ATTEMPTS_PER_ANGLE,
+                targetErrorDeg: options.targetErrorDeg,
+                sweepIteration: i + 1,
+                totalSweepIterations: iterations,
+              });
 
-            if (systemStop.isStopped()) {
-              this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
-              return results;
-            }
+              const result = await this.executeTurn({
+                targetAngle: createRelativeAngle(angleDeg),
+                direction: angleDeg > 0 ? "ccw" : "cw",
+                learningEnabled: true,
+              });
+              results.push(result);
 
-            const pauseCompleted = await this.sleepWithStopChecks(500);
-            if (!pauseCompleted || this.stopRequested || this.tuningStopRequested) {
-              this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
-              return results;
+              const absErrorDeg = Math.abs(unwrapRelativeAngle(result.errorAngle));
+              this.logger.info("turn.training.large_result", {
+                angleDeg,
+                attempt,
+                achievedAngleDeg: unwrapRelativeAngle(result.achievedAngle),
+                errorDeg: unwrapRelativeAngle(result.errorAngle),
+                absErrorDeg,
+                targetErrorDeg: options.targetErrorDeg,
+              });
+
+              if (this.stopRequested || this.tuningStopRequested) {
+                this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+                return results;
+              }
+
+              if (systemStop.isStopped()) {
+                this.logger.warn("turn.training.stopped", { completed: results.length, reason: "system_stop" });
+                return results;
+              }
+
+              if (absErrorDeg <= options.targetErrorDeg) {
+                break;
+              }
+
+              if (attempt >= MAX_ATTEMPTS_PER_ANGLE) {
+                this.logger.warn("turn.training.max_attempts_reached", {
+                  angleDeg,
+                  attempt,
+                  absErrorDeg,
+                  targetErrorDeg: options.targetErrorDeg,
+                });
+                break;
+              }
+
+              const pauseCompleted = await this.sleepWithStopChecks(TURN_TRAINING_INTER_TURN_PAUSE_MS);
+              if (!pauseCompleted || this.stopRequested || this.tuningStopRequested) {
+                this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
+                return results;
+              }
             }
           }
         }
@@ -603,7 +643,7 @@ export class TurnController {
               return results;
             }
 
-            const pauseCompleted = await this.sleepWithStopChecks(500);
+            const pauseCompleted = await this.sleepWithStopChecks(TURN_TRAINING_INTER_TURN_PAUSE_MS);
             if (!pauseCompleted || this.stopRequested || this.tuningStopRequested) {
               this.logger.warn("turn.training.stopped", { completed: results.length, mode: options.mode });
               return results;

@@ -1,0 +1,73 @@
+import { startMowerServer, resolveServerPort } from "./appServer.js";
+import {
+  HTTP_SERVER_PORT_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_ADDRESS_MOTOR_DEFAULT,
+  MOTOR_LEFT_FORWARD_SIGN_DEFAULT,
+  MOTOR_RIGHT_FORWARD_SIGN_DEFAULT,
+  SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+  CONTROLLER_STEERING_SIGN_DEFAULT,
+  CONTROLLER_SPEED_SIGN_DEFAULT,
+  MANUAL_DRIVE_LOOP_INTERVAL_MS,
+  MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
+} from "../constants.js";
+
+const CONTROL_HOST_DEFAULT = "127.0.0.1";
+
+const host = process.env.MOWER_CONTROL_HOST ?? process.env.MOWER_CORE_APP_HOST ?? CONTROL_HOST_DEFAULT;
+const port = resolveServerPort(
+  process.env.MOWER_CONTROL_PORT ?? process.env.MOWER_CORE_APP_PORT,
+  HTTP_SERVER_PORT_DEFAULT + 1,
+);
+const logDir = process.env.MOWER_LOG_DIR;
+const i2cBusNumber = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
+const gnssI2cAddress = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? I2C_ADDRESS_GNSS_DEFAULT);
+const motorI2cAddress = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? I2C_ADDRESS_MOTOR_DEFAULT);
+const leftMotorForwardSign = Number(process.env.MOWER_LEFT_MOTOR_FORWARD_SIGN ?? MOTOR_LEFT_FORWARD_SIGN_DEFAULT);
+const rightMotorForwardSign = Number(process.env.MOWER_RIGHT_MOTOR_FORWARD_SIGN ?? MOTOR_RIGHT_FORWARD_SIGN_DEFAULT);
+const sensorPollingIntervalMs = Number(process.env.MOWER_SENSOR_POLL_INTERVAL_MS ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS);
+const controllerEnabled = (process.env.MOWER_CONTROLLER_ENABLED ?? "1") !== "0";
+const controllerSteeringSign = Number(process.env.MOWER_CONTROLLER_STEERING_SIGN ?? CONTROLLER_STEERING_SIGN_DEFAULT);
+const controllerSpeedSign = Number(process.env.MOWER_CONTROLLER_SPEED_SIGN ?? CONTROLLER_SPEED_SIGN_DEFAULT);
+const manualDriveLoopMs = Number(process.env.MOWER_MANUAL_DRIVE_LOOP_MS ?? MANUAL_DRIVE_LOOP_INTERVAL_MS);
+const maxWheelOutputPercent = Number(process.env.MOWER_MAX_WHEEL_OUTPUT_PERCENT ?? MAX_WHEEL_OUTPUT_PERCENT_DEFAULT);
+
+const runningServer = await startMowerServer({
+  appName: "mower-core-control",
+  host,
+  port,
+  logDir,
+  i2cBusNumber,
+  gnssI2cAddress,
+  motorI2cAddress,
+  leftMotorForwardSign,
+  rightMotorForwardSign,
+  sensorPollingIntervalMs,
+  controllerEnabled,
+  controllerSteeringSign,
+  controllerSpeedSign,
+  manualDriveLoopMs,
+  maxWheelOutputPercent,
+});
+
+console.log(`mower-core control listening on http://${runningServer.host}:${runningServer.port}`);
+
+async function shutdown(signal: string): Promise<void> {
+  console.log(`mower-core control received ${signal}; stopping server`);
+  try {
+    await runningServer.close();
+    process.exit(0);
+  } catch (error) {
+    console.error("mower-core control failed to stop cleanly", error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});

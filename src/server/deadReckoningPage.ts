@@ -579,7 +579,7 @@ ${getSensorWidgetScriptTag()}
 
           <div class="buttons">
             <button id="startBtn" class="primary">Start Calibration</button>
-            <button id="stopBtn" class="danger" disabled>STOP</button>
+            <button id="stopBtn" class="danger">STOP</button>
           </div>
 
           <!-- Summary stats shown while / after running -->
@@ -1088,7 +1088,7 @@ ${getAppDialogScript()}
           if (statPhase) statPhase.textContent = phase;
 
           document.getElementById('startBtn').disabled = running || moveRunning;
-          document.getElementById('stopBtn').disabled = !running;
+          document.getElementById('stopBtn').disabled = false;
           const lineDistanceInput = document.getElementById('lineDistanceMeters');
           if (lineDistanceInput) lineDistanceInput.disabled = running;
 
@@ -1119,7 +1119,6 @@ ${getAppDialogScript()}
       document.getElementById('startBtn').addEventListener('click', async () => {
         const lineDistanceInput = document.getElementById('lineDistanceMeters');
         document.getElementById('startBtn').disabled = true;
-        document.getElementById('stopBtn').disabled = false;
         lineDistanceInput.disabled = true;
         document.getElementById('phaseResults').innerHTML = '';
         document.getElementById('suggestionBanner').classList.remove('visible');
@@ -1128,7 +1127,6 @@ ${getAppDialogScript()}
           const lineDistanceMeters = Number(lineDistanceInput.value);
           if (!Number.isFinite(lineDistanceMeters) || lineDistanceMeters <= 0) {
             document.getElementById('startBtn').disabled = false;
-            document.getElementById('stopBtn').disabled = true;
             lineDistanceInput.disabled = false;
             await appAlert('Please enter a valid straight distance in metres.');
             return;
@@ -1152,7 +1150,7 @@ ${getAppDialogScript()}
 
       document.getElementById('stopBtn').addEventListener('click', async () => {
         try {
-          await fetch('/api/dead-reckoning/stop', {
+          await fetch('/api/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({}),
@@ -1388,7 +1386,7 @@ ${getAppDialogScript()}
 
       document.getElementById('moveStopBtn').addEventListener('click', async () => {
         try {
-          await fetch('/api/drive/stop', {
+          await fetch('/api/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({}),

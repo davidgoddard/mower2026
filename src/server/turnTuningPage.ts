@@ -1040,7 +1040,7 @@ ${getAppDialogScript()}
 
       const stopButton = document.getElementById('stopCurrentRun');
       if (stopButton) {
-        stopButton.disabled = stopRequestPending || !runActive;
+        stopButton.disabled = false;
       }
     }
 
@@ -1237,16 +1237,11 @@ ${getAppDialogScript()}
     });
 
     document.getElementById('stopCurrentRun').addEventListener('click', async () => {
-      stopRequestPending = true;
-      syncTurnButtons();
       try {
-        await fetch('/api/turn/stop', { method: 'POST' });
+        await fetch('/api/stop', { method: 'POST' });
         await updateStatus();
       } catch (error) {
         alert('Failed to stop current run: ' + error.message);
-      } finally {
-        stopRequestPending = false;
-        syncTurnButtons();
       }
     });
 

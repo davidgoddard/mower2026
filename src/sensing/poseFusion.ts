@@ -60,6 +60,7 @@ import {
 } from "../geometry/positionTypes.js";
 import {
   ENCODER_METERS_PER_TICK_DEFAULT,
+  POSE_FUSION_EMIT_INTERVAL_MS,
   WHEEL_BASE_METERS_DEFAULT,
 } from "../constants.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
@@ -185,6 +186,7 @@ export class PoseFusion extends EventEmitter {
   // Most recent encoder feedback delta — surfaced for the heartbeat so we can
   // see the per-wheel ticks that drove the latest DR step.
   private lastMotorFeedback: { leftEncoderDelta: number; rightEncoderDelta: number } | null = null;
+  private lastPoseEmitMillis: number | null = null;
 
   declare on: <K extends keyof PoseFusionEvents>(event: K, listener: (data: PoseFusionEvents[K]) => void) => this;
   declare off: <K extends keyof PoseFusionEvents>(event: K, listener: (data: PoseFusionEvents[K]) => void) => this;
@@ -238,6 +240,16 @@ export class PoseFusion extends EventEmitter {
       this.currentHeading,
       this.currentQualityWithStalenessCheck(nowMs),
     );
+  }
+
+  private emitPoseUpdate(force = false): void {
+    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
+    if (!force && this.lastPoseEmitMillis !== null && nowMs - this.lastPoseEmitMillis < POSE_FUSION_EMIT_INTERVAL_MS) {
+      return;
+    }
+
+    this.lastPoseEmitMillis = nowMs;
+    this.emit("poseUpdate", this.getCurrentPose());
   }
 
   private currentQualityWithStalenessCheck(nowMs: number): "gnss" | "dead-reckoning" | "unknown" {
@@ -536,7 +548,7 @@ export class PoseFusion extends EventEmitter {
       this.currentQuality = "dead-reckoning";
     }
 
-    this.emit("poseUpdate", this.getCurrentPose());
+    this.emitPoseUpdate();
   }
 
   // ---------------------------------------------------------------------------
@@ -546,7 +558,7 @@ export class PoseFusion extends EventEmitter {
   private onImuHeadingUpdate(event: ImuHeadingUpdateEvent): void {
     if (!this.running) return;
     this.currentHeading = event.heading;
-    this.emit("poseUpdate", this.getCurrentPose());
+    this.emitPoseUpdate();
   }
 
   // ---------------------------------------------------------------------------
@@ -644,7 +656,7 @@ export class PoseFusion extends EventEmitter {
       this.isUsingGnssHeading = false;
     }
 
-    this.emit("poseUpdate", this.getCurrentPose());
+    this.emitPoseUpdate(true);
   }
 
   private recordValidationRejection(validation: GnssValidationResult, nowMs: number): void {

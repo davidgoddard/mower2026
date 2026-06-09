@@ -593,7 +593,7 @@ ${getAppDialogStyles()}
           <button id="startMowingBtn" class="button button-success" type="button">
             <span>🌿</span> Mow Area
           </button>
-          <button id="stopMowingBtn" class="button button-danger" type="button" style="display:none">
+          <button id="stopMowingBtn" class="button button-danger" type="button">
             <span>⏹</span> Stop Mowing
           </button>
         </div>
@@ -1560,7 +1560,7 @@ ${getAppDialogScript()}
 
       const isRunning = status.phase !== 'idle' && status.phase !== 'complete' && status.phase !== 'stopped' && status.phase !== 'error';
       startMowingBtn.style.display = isRunning ? 'none' : '';
-      stopMowingBtn.style.display = isRunning ? '' : 'none';
+      stopMowingBtn.style.display = '';
       mowingActive = isRunning;
     }
 
@@ -1615,7 +1615,7 @@ ${getAppDialogScript()}
 
     stopMowingBtn.addEventListener('click', async () => {
       try {
-        const response = await fetch('/api/mowing/stop', { method: 'POST' });
+        const response = await fetch('/api/stop', { method: 'POST' });
         const result = await response.json();
         if (!response.ok) {
           throw new Error(result.error || 'Failed to stop mowing');
@@ -1902,7 +1902,7 @@ ${getAppDialogScript()}
 
     window.stopPathOperation = async function() {
       try {
-        const response = await fetch('/api/path/stop', {
+        const response = await fetch('/api/stop', {
           method: 'POST',
         });
 

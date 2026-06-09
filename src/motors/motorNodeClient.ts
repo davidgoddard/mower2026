@@ -18,6 +18,11 @@ interface MotorNodeClientOptions {
   sleep?: (delayMs: number) => Promise<void>;
 }
 
+interface WheelSpeedCommandOptions {
+  rampUpTimeMs?: number;
+  rampDownTimeMs?: number;
+}
+
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -64,23 +69,23 @@ export class MotorNodeClient {
   async sendWheelSpeedCommand(
     leftWheelTargetPercent: number,
     rightWheelTargetPercent: number,
+    enableDrive: boolean = true,
+    options: WheelSpeedCommandOptions = {},
   ): Promise<void> {
-    // The global stop flag is the single authority on motor enable. Once it
-    // latches, every speed send is rewritten as a disable so a stale
-    // motion command queued before the stop cannot reach the ESP32.
-    if (systemStop.isStopped()) {
-      await this.stop();
-      return;
-    }
-
+    // The global stop flag is the single authority on motor enable. Any
+    // pending or new speed command is merged with the latch so once stop is
+    // raised the ESP32 only ever sees disabled frames until the latch clears.
+    const effectiveEnableDrive = enableDrive && !systemStop.isStopped();
+    const rampUpTimeMs = options.rampUpTimeMs ?? this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS;
+    const rampDownTimeMs = options.rampDownTimeMs ?? this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
-      leftWheelTargetPercent: clampNormalizedTarget(leftWheelTargetPercent),
-      rightWheelTargetPercent: clampNormalizedTarget(rightWheelTargetPercent),
-      enableDrive: true,
+      leftWheelTargetPercent: effectiveEnableDrive ? clampNormalizedTarget(leftWheelTargetPercent) : 0,
+      rightWheelTargetPercent: effectiveEnableDrive ? clampNormalizedTarget(rightWheelTargetPercent) : 0,
+      enableDrive: effectiveEnableDrive,
       commandTimeoutMillis: this.commandTimeoutMillis,
-      maxAccelerationPercentPerSecond: ratePerSecondFromRampMillis(this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS),
-      maxDecelerationPercentPerSecond: ratePerSecondFromRampMillis(this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS),
+      maxAccelerationPercentPerSecond: ratePerSecondFromRampMillis(rampUpTimeMs),
+      maxDecelerationPercentPerSecond: ratePerSecondFromRampMillis(rampDownTimeMs),
     };
 
     if (this.isDuplicateCommand(command)) {
@@ -99,10 +104,6 @@ export class MotorNodeClient {
       enableDrive: false,
       commandTimeoutMillis: this.commandTimeoutMillis,
     };
-
-    if (this.isDuplicateCommand(command)) {
-      return;
-    }
 
     await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
     this.lastSentCommand = command;

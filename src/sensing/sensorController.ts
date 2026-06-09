@@ -28,10 +28,9 @@ import {
 } from "../geometry/positionTypes.js";
 import {
   ENCODER_METERS_PER_TICK_DEFAULT,
-  SENSOR_SCHEDULER_TICK_MS,
-  IMU_POLL_INTERVAL_MS,
-  GNSS_POLL_INTERVAL_MS,
-  MOTOR_FEEDBACK_POLL_INTERVAL_MS,
+  SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+  SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS,
+  SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS,
   MOTOR_STALL_COMMAND_THRESHOLD_PERCENT,
   MOTOR_STALL_ENCODER_DELTA_THRESHOLD,
   MOTOR_STALL_GNSS_ACCURACY_MAX_METERS,
@@ -43,6 +42,7 @@ import {
   MOTOR_OUTPUT_DEADBAND_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
+import type { MotorCommandOptions } from "./sensorHardwareGateway.js";
 import {
   SensorControllerEvents,
   SENSOR_EVENTS,
@@ -73,19 +73,7 @@ interface SensorControllerOptions {
   imuCalibration?: ImuCalibration;
   poseCalibration?: PoseCalibration;
   geometryCalibration?: GeometryCalibration;
-  /**
-   * Scheduler tick interval (ms). On each tick the controller checks each
-   * sensor's per-sensor cadence and reads only those whose deadlines have
-   * elapsed. When omitted, defaults to SENSOR_SCHEDULER_TICK_MS.
-   */
   pollIntervalMs?: number;
-  /**
-   * Per-sensor poll cadences (ms). When omitted, the controller reads that
-   * sensor on every scheduler tick — useful for tests with stub gateways.
-   */
-  imuIntervalMs?: number;
-  gnssIntervalMs?: number;
-  motorFeedbackIntervalMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
   maxLoopCount?: number;
@@ -154,16 +142,11 @@ export class SensorController extends EventEmitter {
   private readonly poseCalibration: PoseCalibration | null;
   private readonly geometryCalibration: GeometryCalibration | null;
   private readonly pollIntervalMs: number;
-  private readonly imuIntervalMs: number;
-  private readonly gnssIntervalMs: number;
-  private readonly motorFeedbackIntervalMs: number;
+  private readonly gnssPollIntervalMs: number;
+  private readonly motorPollIntervalMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly maxLoopCount: number | null;
-
-  private nextImuDueMillis = 0;
-  private nextGnssDueMillis = 0;
-  private nextMotorFeedbackDueMillis = 0;
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
@@ -175,6 +158,8 @@ export class SensorController extends EventEmitter {
   private motorStoppedSinceMillis: number | null = null;
   private motionSessionDepth = 0;
   private motionSessionIdleSinceMillis: number | null = null;
+  private lastGnssPollStartedMillis: number | null = null;
+  private lastMotorPollStartedMillis: number | null = null;
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
   private stallMotionAnchorPosition: Position | null = null;
@@ -216,13 +201,9 @@ export class SensorController extends EventEmitter {
     this.imuCalibration = options.imuCalibration ?? null;
     this.poseCalibration = options.poseCalibration ?? null;
     this.geometryCalibration = options.geometryCalibration ?? null;
-    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_SCHEDULER_TICK_MS;
-    // When per-sensor intervals are omitted, fall back to "every tick" so
-    // legacy callers and unit tests behave as before. Production wiring
-    // passes the IMU_/GNSS_/MOTOR_FEEDBACK_POLL_INTERVAL_MS constants.
-    this.imuIntervalMs = options.imuIntervalMs ?? 0;
-    this.gnssIntervalMs = options.gnssIntervalMs ?? 0;
-    this.motorFeedbackIntervalMs = options.motorFeedbackIntervalMs ?? 0;
+    this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS;
+    this.gnssPollIntervalMs = Math.max(this.pollIntervalMs, SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS);
+    this.motorPollIntervalMs = Math.max(this.pollIntervalMs, SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS);
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
     this.maxLoopCount = options.maxLoopCount ?? null;
@@ -242,6 +223,8 @@ export class SensorController extends EventEmitter {
     this.motorStoppedSinceMillis = null;
     this.motionSessionDepth = 0;
     this.motionSessionIdleSinceMillis = this.nowMillis();
+    this.lastGnssPollStartedMillis = null;
+    this.lastMotorPollStartedMillis = null;
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
     this.stallMotionAnchorPosition = null;
@@ -353,7 +336,11 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  async setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void> {
+  async setMotorWheelOutputs(
+    leftWheelOutputPercent: number,
+    rightWheelOutputPercent: number,
+    options?: MotorCommandOptions,
+  ): Promise<void> {
     const deadbandedLeftWheelOutputPercent = this.applyMotorOutputDeadband(leftWheelOutputPercent);
     const deadbandedRightWheelOutputPercent = this.applyMotorOutputDeadband(rightWheelOutputPercent);
     const {
@@ -430,6 +417,8 @@ export class SensorController extends EventEmitter {
     await this.gateway.setMotorWheelOutputs(
       normalizedLeftWheelOutputPercent,
       normalizedRightWheelOutputPercent,
+      !systemStop.isStopped(),
+      options,
     );
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
@@ -484,6 +473,11 @@ export class SensorController extends EventEmitter {
         currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
       });
       this.stopRequestLogged = true;
+    }
+
+    if (systemStop.isStopped()) {
+      await this.sendDisableMotorsCommand();
+      return;
     }
 
     await this.sendGentleStopMotorsCommand();
@@ -719,15 +713,12 @@ export class SensorController extends EventEmitter {
 
   private async runLoop(): Promise<void> {
     let nextTickMillis = this.nowMillis();
-    this.nextImuDueMillis = nextTickMillis;
-    this.nextGnssDueMillis = nextTickMillis;
-    this.nextMotorFeedbackDueMillis = nextTickMillis;
     let loopCount = 0;
 
     try {
       while (this.running) {
         const loopStartedMillis = this.nowMillis();
-        await this.pollDueSensors(loopStartedMillis);
+        await this.pollAllSensors(loopStartedMillis);
         this.maybeAutoRecalibrateImuYawBias();
         const loopDurationMs = this.nowMillis() - loopStartedMillis;
 
@@ -740,13 +731,8 @@ export class SensorController extends EventEmitter {
         });
 
         nextTickMillis += this.pollIntervalMs;
-        const now = this.nowMillis();
-        // Catch-up guard: if a slow tick has put us more than one interval
-        // behind real time, snap forward instead of busy-spinning to catch up.
-        if (nextTickMillis < now) {
-          nextTickMillis = now + this.pollIntervalMs;
-        }
-        await this.sleep(Math.max(0, nextTickMillis - now));
+        const waitMillis = Math.max(0, nextTickMillis - this.nowMillis());
+        await this.sleep(waitMillis);
 
         loopCount += 1;
         if (this.maxLoopCount !== null && loopCount >= this.maxLoopCount) {
@@ -816,37 +802,27 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  private async pollDueSensors(nowMillis: number): Promise<void> {
+  private async pollAllSensors(loopStartedMillis: number): Promise<void> {
     if (systemStop.isStopped()) {
       await this.sendDisableMotorsCommand();
     }
-    if (nowMillis >= this.nextImuDueMillis) {
-      await this.pollImu();
-      this.nextImuDueMillis = this.nextDueAfter(this.nextImuDueMillis, this.imuIntervalMs, nowMillis);
-    }
-    if (nowMillis >= this.nextGnssDueMillis) {
+    await this.pollImu();
+    if (this.shouldPoll(loopStartedMillis, this.lastGnssPollStartedMillis, this.gnssPollIntervalMs)) {
+      this.lastGnssPollStartedMillis = loopStartedMillis;
       await this.pollGnss();
-      this.nextGnssDueMillis = this.nextDueAfter(this.nextGnssDueMillis, this.gnssIntervalMs, nowMillis);
     }
-    if (nowMillis >= this.nextMotorFeedbackDueMillis) {
+    if (this.shouldPoll(loopStartedMillis, this.lastMotorPollStartedMillis, this.motorPollIntervalMs)) {
+      this.lastMotorPollStartedMillis = loopStartedMillis;
       await this.pollMotors();
-      this.nextMotorFeedbackDueMillis = this.nextDueAfter(
-        this.nextMotorFeedbackDueMillis,
-        this.motorFeedbackIntervalMs,
-        nowMillis,
-      );
     }
   }
 
-  private nextDueAfter(previousDueMillis: number, intervalMs: number, nowMillis: number): number {
-    if (intervalMs <= 0) {
-      return nowMillis;
-    }
-    let next = previousDueMillis + intervalMs;
-    if (next <= nowMillis) {
-      next = nowMillis + intervalMs;
-    }
-    return next;
+  private shouldPoll(
+    nowMillis: number,
+    lastPollStartedMillis: number | null,
+    intervalMs: number,
+  ): boolean {
+    return lastPollStartedMillis === null || nowMillis - lastPollStartedMillis >= intervalMs;
   }
 
   private async pollImu(): Promise<void> {
@@ -1246,9 +1222,6 @@ export class SensorController extends EventEmitter {
 
   private async sendDisableMotorsCommand(): Promise<void> {
     const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
-    if (this.lastMotorCommand?.kind === "stop") {
-      return;
-    }
 
     this.lastMotorCommand = {
       kind: "stop",

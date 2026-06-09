@@ -10,6 +10,8 @@ import {
   MANUAL_DRIVE_CONTROLLER_DISCONNECT_GRACE_MS,
   MANUAL_DRIVE_LOOP_INTERVAL_MS,
   MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT,
+  MANUAL_DRIVE_RAMP_DOWN_TIME_MS,
+  MANUAL_DRIVE_RAMP_UP_TIME_MS,
 } from "../constants.js";
 
 interface ManualDriveCoordinatorOptions {
@@ -301,7 +303,10 @@ export class ManualDriveCoordinator {
     this.lastCommandedLeftWheelOutputPercent = left;
     this.lastCommandedRightWheelOutputPercent = right;
     this.lastCommandSentMillis = this.nowMillis();
-    await this.sensorController.setMotorWheelOutputs(left, right);
+    await this.sensorController.setMotorWheelOutputs(left, right, {
+      rampUpTimeMs: MANUAL_DRIVE_RAMP_UP_TIME_MS,
+      rampDownTimeMs: MANUAL_DRIVE_RAMP_DOWN_TIME_MS,
+    });
   }
 
   private async sleepWithStopChecks(delayMs: number): Promise<boolean> {

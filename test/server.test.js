@@ -20,13 +20,13 @@ test('resolveServerPort returns fallback for invalid values', () => {
 test('routeServerRequest serves health and primitives payloads', () => {
   const primitives = new PrimitivesStore();
 
-  const healthRoute = routeServerRequest('GET', '/health', 'running', 'mower-core-test', primitives.snapshot());
+  const healthRoute = routeServerRequest('GET', '/health', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(healthRoute.statusCode, 200);
   const health = JSON.parse(healthRoute.body);
   assert.equal(health.ok, true);
   assert.equal(health.state, 'running');
 
-  const primitivesRoute = routeServerRequest('GET', '/api/primitives', 'running', 'mower-core-test', primitives.snapshot());
+  const primitivesRoute = routeServerRequest('GET', '/api/primitives', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(primitivesRoute.statusCode, 200);
   const primitivesPayload = JSON.parse(primitivesRoute.body);
   assert.equal(primitivesPayload.state, 'running');
@@ -41,7 +41,7 @@ test('routeServerRequest serves health and primitives payloads', () => {
 test('routeServerRequest serves tabbed home page and 404 responses', () => {
   const primitives = new PrimitivesStore();
 
-  const homeRoute = routeServerRequest('GET', '/', 'running', 'mower-core-test', primitives.snapshot());
+  const homeRoute = routeServerRequest('GET', '/', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(homeRoute.statusCode, 200);
   assert.equal(homeRoute.contentType.startsWith('text/html'), true);
   assert.equal(homeRoute.body.includes('Drive &amp; Paths'), true);
@@ -55,7 +55,7 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   assert.equal(homeRoute.body.includes('Position Accuracy History (last hour)'), false);
   assert.equal(homeRoute.body.includes('id="gnss-accuracy"'), true);
 
-  const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot());
+  const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(manualRoute.statusCode, 200);
   assert.equal(manualRoute.contentType.startsWith('text/html'), true);
   assert.equal(manualRoute.body.includes('Drive & Paths'), true);
@@ -72,12 +72,12 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   assert.equal(manualRoute.body.includes('GNSS'), false);
   assert.equal(manualRoute.body.includes('IMU'), false);
 
-  const pathRoute = routeServerRequest('GET', '/path-tracing', 'running', 'mower-core-test', primitives.snapshot());
+  const pathRoute = routeServerRequest('GET', '/path-tracing', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(pathRoute.statusCode, 200);
   assert.equal(pathRoute.contentType.startsWith('text/html'), true);
   assert.equal(pathRoute.body, getManualDrivePageHtml());
 
-  const missingRoute = routeServerRequest('GET', '/missing', 'running', 'mower-core-test', primitives.snapshot());
+  const missingRoute = routeServerRequest('GET', '/missing', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(missingRoute.statusCode, 404);
   const missingPayload = JSON.parse(missingRoute.body);
   assert.equal(missingPayload.error, 'not_found');
@@ -100,7 +100,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(turnPage.includes('id="validationStatus"'), true);
   assert.equal(turnPage.includes('const turnActionButtons = ['), true);
   assert.equal(turnPage.includes('function syncTurnButtons()'), true);
-  assert.equal(turnPage.includes("stopButton.disabled = stopRequestPending || !runActive;"), true);
+  assert.equal(turnPage.includes("stopButton.disabled = false;"), true);
 
   const drivePage = getDriveTuningPageHtml();
   assert.equal(drivePage.includes('class="page-layout"'), true);
@@ -122,7 +122,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(drivePage.includes('let startHandshakePending = false;'), true);
   assert.equal(drivePage.includes('function syncDriveButtons()'), true);
   assert.equal(drivePage.includes('startButton.disabled = startHandshakePending || trainingActive;'), true);
-  assert.equal(drivePage.includes('stopButton.disabled = stopRequestPending || !trainingActive;'), true);
+  assert.equal(drivePage.includes('stopButton.disabled = false;'), true);
   assert.equal(drivePage.includes('appendDriveRows(history);'), true);
   assert.equal(drivePage.includes('appendDriveRows(liveResults);'), true);
   assert.equal(drivePage.includes('driveResultRows.slice(-maxDriveResultRows).reverse()'), true);
@@ -144,7 +144,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(segmentPage.includes('let segmentStateSnapshot = { phase: "idle", running: false };'), true);
   assert.equal(segmentPage.includes('function syncSegmentButtons()'), true);
   assert.equal(segmentPage.includes('startButton.disabled = startHandshakePending || runActive;'), true);
-  assert.equal(segmentPage.includes('stopButton.disabled = stopRequestPending || !runActive;'), true);
+  assert.equal(segmentPage.includes('stopButton.disabled = false;'), true);
   assert.equal(segmentPage.includes('id="segmentResultsTableBody"'), true);
   assert.equal(segmentPage.includes('Segment Results'), true);
   assert.equal(segmentPage.includes('Run Segment Test'), true);

@@ -114,6 +114,33 @@ test('MotorNodeClient suppresses duplicate unchanged commands', async () => {
   assert.equal(writes[1].key, 'motor.stop');
 });
 
+test('MotorNodeClient encodes per-command ramp overrides', async () => {
+  const writes = [];
+  const fakeController = {
+    async queueWrite(request) {
+      writes.push(request);
+    },
+    async queueRead() {
+      throw new Error('not used in this test');
+    },
+  };
+
+  const client = new MotorNodeClient(fakeController, {
+    address: 0x66,
+    nowMillis: () => 100,
+  });
+
+  await client.sendWheelSpeedCommand(1, 1, true, {
+    rampUpTimeMs: 120,
+    rampDownTimeMs: 120,
+  });
+
+  assert.equal(writes.length, 1);
+  const commandView = new DataView(writes[0].payload.buffer, writes[0].payload.byteOffset, writes[0].payload.byteLength);
+  assert.equal(commandView.getUint16(20, true), 8333);
+  assert.equal(commandView.getUint16(22, true), 8333);
+});
+
 test('MotorNodeClient decodes motor feedback sample frame', async () => {
   const queueReadCalls = [];
   const fakeController = {

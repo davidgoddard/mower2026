@@ -439,6 +439,79 @@ test('SensorController hard-disables motors when system stop is requested', asyn
   });
 });
 
+test('SensorController treats neutral requests as hard-disable while system stop is latched', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    systemStop.clearStop('sensor-controller-neutral-under-stop-test');
+    const commands = [];
+    const primitivesStore = new PrimitivesStore();
+    const gateway = {
+      async initialise() {},
+      async readImu() {
+        return { timestampMillis: 0, angularVelocity: { zDegreesPerSecond: 0 } };
+      },
+      async readGnss() {
+        return {
+          timestampMillis: 0,
+          xMeters: 0,
+          yMeters: 0,
+          positionAccuracyMeters: 1,
+          fixType: 'none',
+          satellitesInUse: 0,
+          sampleAgeMillis: 0,
+        };
+      },
+      async readMotorFeedback() {
+        return {
+          timestampMillis: 0,
+          leftEncoderDelta: 0,
+          rightEncoderDelta: 0,
+          leftPwmAppliedPercent: 0,
+          rightPwmAppliedPercent: 0,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelOutputs(left, right) {
+        commands.push(['speed', left, right]);
+      },
+      async stopMotors() {
+        commands.push(['stop']);
+      },
+      async close() {},
+    };
+
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway,
+      pollIntervalMs: 100,
+      sleep: async () => {},
+      nowMillis: () => 0,
+      maxLoopCount: 1,
+    });
+
+    await controller.setMotorWheelOutputs(0.5, 0.5);
+    systemStop.requestStop('test', 'panic');
+    await controller.requestNeutralMotorOutputs();
+
+    assert.deepEqual(commands, [
+      ['speed', 0.5, 0.5],
+      ['stop'],
+    ]);
+
+    systemStop.clearStop('sensor-controller-neutral-under-stop-test-cleanup');
+    await logger.close();
+  });
+});
+
 test('SensorController applies the persisted IMU yaw scale factor to heading integration', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
@@ -1264,7 +1337,9 @@ test('SensorController detects a stall after a startup grace period and requests
         primitivesStore,
         gateway,
         pollIntervalMs: 0,
-        sleep: async () => {},
+        sleep: async () => {
+          await delay(0);
+        },
         nowMillis: () => now,
         // Generous loop count: stall needs the GNSS observation window
         // (4000ms mocked) to elapse before consecutive-sample accumulation
@@ -1353,7 +1428,9 @@ test('SensorController detects a stall when a commanded wheel stops moving after
         primitivesStore,
         gateway,
         pollIntervalMs: 0,
-        sleep: async () => {},
+        sleep: async () => {
+          await delay(0);
+        },
         nowMillis: () => now,
         maxLoopCount: 60,
       });

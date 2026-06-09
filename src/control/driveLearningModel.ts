@@ -10,9 +10,8 @@ import {
   DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
   DRIVE_CTE_GAIN_DEFAULT,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
-  DRIVE_SHORT_BUCKET_COARSE_START_METERS,
-  DRIVE_SHORT_BUCKET_MAX_METERS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
+  DRIVE_SHORT_BUCKET_DISTANCES_METERS,
   DRIVE_SHORT_MIN_LEARNING_RATE,
   DRIVE_SHORT_MAX_LEARNING_RATE,
   DRIVE_SHORT_MAX_FRACTION_STEP,
@@ -138,7 +137,7 @@ export class DriveLearningModel {
 
   getBrakeDistanceForDrive(startPosition: Position, targetPosition: Position, directionSign?: 1 | -1): Meters {
     const driveDistance = unwrapMeters(distanceBetween(startPosition, targetPosition));
-    if (driveDistance > this.parameters.shortDriveMaxDistanceMeters) {
+    if (driveDistance > this.parameters.longDriveMinDistanceMeters) {
       return this.parameters.longDriveBrakeDistanceMeters as Meters;
     }
 
@@ -169,7 +168,7 @@ export class DriveLearningModel {
     const direction: 1 | -1 = data.driveDirectionSign ?? this.getShortDriveDirectionSign(data.startPosition, data.targetPosition);
 
     const driveDistance = unwrapMeters(distanceBetween(data.startPosition, data.targetPosition));
-    if (driveDistance <= this.parameters.shortDriveMaxDistanceMeters) {
+    if (driveDistance <= this.parameters.longDriveMinDistanceMeters) {
       const bucketDistanceMeters = this.getShortDriveBucketDistance(driveDistance);
       const bucketIndex = this.getShortDriveBucketIndex(driveDistance);
       const currentFraction = this.getShortDriveBrakeFraction(data.startPosition, data.targetPosition, direction);
@@ -294,7 +293,7 @@ export class DriveLearningModel {
       reverseCteGain: DRIVE_CTE_GAIN_DEFAULT,
       longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBucketStepMeters: DRIVE_SHORT_BUCKET_STEP_METERS,
-      shortDriveMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+      shortDriveMaxDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBrakeFractionsPositive: this.createNumericArray(this.getShortDriveBucketCount(), 0.5),
       shortDriveBrakeFractionsNegative: this.createNumericArray(this.getShortDriveBucketCount(), 0.5),
       shortDriveSampleCountsPositive: this.createNumericArray(this.getShortDriveBucketCount(), 0),
@@ -318,7 +317,7 @@ export class DriveLearningModel {
         reverseCteGain: this.clamp(this.readNumber(raw.reverseCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT), 0.1, DriveLearningModel.MAX_CTE_GAIN),
         longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
         shortDriveBucketStepMeters: this.readNumber(raw.shortDriveBucketStepMeters, DRIVE_SHORT_BUCKET_STEP_METERS),
-        shortDriveMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+        shortDriveMaxDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
         shortDriveBrakeFractionsPositive: this.normalizeNumericArray(raw.shortDriveBrakeFractionsPositive, 0.5),
         shortDriveBrakeFractionsNegative: this.normalizeNumericArray(raw.shortDriveBrakeFractionsNegative, 0.5),
         shortDriveSampleCountsPositive: this.normalizeNumericArray(raw.shortDriveSampleCountsPositive, 0),
@@ -336,7 +335,7 @@ export class DriveLearningModel {
       reverseCteGain: this.clamp(this.readNumber(raw.reverseCteGain ?? raw.cteGain, DRIVE_CTE_GAIN_DEFAULT), 0.1, DriveLearningModel.MAX_CTE_GAIN),
       longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBucketStepMeters: DRIVE_SHORT_BUCKET_STEP_METERS,
-      shortDriveMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+      shortDriveMaxDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBrakeFractionsPositive: this.createNumericArray(this.getShortDriveBucketCount(), this.readNumber(raw.shortDriveBrakeFractionPositive ?? raw.shortDriveBrakeFractionCcw ?? raw.shortDriveBrakeDistancePositive, 0.5)),
       shortDriveBrakeFractionsNegative: this.createNumericArray(this.getShortDriveBucketCount(), this.readNumber(raw.shortDriveBrakeFractionNegative ?? raw.shortDriveBrakeFractionCw ?? raw.shortDriveBrakeDistanceNegative, 0.5)),
       shortDriveSampleCountsPositive: this.createNumericArray(this.getShortDriveBucketCount(), this.readNumber(raw.shortDriveSampleCountPositive, 0)),
@@ -380,7 +379,7 @@ export class DriveLearningModel {
   }
 
   private getShortDriveBucketDistance(requestedDistanceMeters: number): number {
-    const requested = Math.max(DRIVE_SHORT_BUCKET_STEP_METERS, Math.min(this.parameters.shortDriveMaxDistanceMeters, Math.abs(requestedDistanceMeters)));
+    const requested = Math.max(DRIVE_SHORT_BUCKET_STEP_METERS, Math.min(this.parameters.longDriveMinDistanceMeters, Math.abs(requestedDistanceMeters)));
     const distances = this.getShortDriveBucketDistances();
     let nearest = distances[0];
     let nearestError = Math.abs(requested - nearest);
@@ -447,14 +446,6 @@ export class DriveLearningModel {
   }
 
   private getShortDriveBucketDistances(): number[] {
-    const distances: number[] = [];
-
-    for (let distance = DRIVE_SHORT_BUCKET_STEP_METERS; distance <= DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS + 1e-9; distance += DRIVE_SHORT_BUCKET_STEP_METERS) {
-      distances.push(Number(distance.toFixed(2)));
-    }
-
-    distances.push(Number(DRIVE_SHORT_BUCKET_COARSE_START_METERS.toFixed(2)));
-
-    return distances;
+    return [...DRIVE_SHORT_BUCKET_DISTANCES_METERS];
   }
 }

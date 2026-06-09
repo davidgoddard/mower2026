@@ -536,7 +536,7 @@ ${getAppDialogScript()}
         }
 
         startButton.disabled = startHandshakePending || trainingActive;
-        stopButton.disabled = stopRequestPending || !trainingActive;
+        stopButton.disabled = false;
       }
 
       async function fetchStatus() {
@@ -645,16 +645,11 @@ ${getAppDialogScript()}
       });
 
       document.getElementById("stopDriveTuning").addEventListener("click", async () => {
-        stopRequestPending = true;
-        syncDriveButtons();
         try {
-          await postAction("stop");
+          await fetch("/api/stop", { method: "POST" });
           await update();
         } catch (error) {
           alert("Failed to stop drive tuning: " + (error instanceof Error ? error.message : String(error)));
-        } finally {
-          stopRequestPending = false;
-          syncDriveButtons();
         }
       });
 

@@ -51,7 +51,8 @@ import {
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
   DRIVE_SHORT_BUCKET_MAX_METERS,
-  DRIVE_SHORT_BUCKET_COARSE_STEP_METERS,
+  DRIVE_SHORT_BUCKET_DISTANCES_METERS,
+  DRIVE_LONG_SAMPLE_DISTANCES_METERS,
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
   DRIVE_ARRIVAL_TOLERANCE_METERS,
   DRIVE_PURSUIT_TARGET_SPEED_SCALE,
@@ -59,8 +60,6 @@ import {
   DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS,
   DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS,
   DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS,
-  DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS,
-  DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE,
   DRIVE_PURSUIT_CURVATURE_SPEED_GAIN,
   DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
   DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
@@ -222,8 +221,10 @@ export class DriveLineController {
       subscribed = true;
 
       this.status = "driving";
-      const startSpeed = this.fullSpeedCommand * this.driveDirectionSign;
-      await this.sensorController.setMotorWheelOutputs(startSpeed, startSpeed);
+      const initialRemainingAlongTrackDistance = unwrapMeters(
+        distanceBetween(this.driveLineStart, this.driveLineEnd),
+      );
+      await this.applyRegulatedPurePursuitControl(startPose, initialRemainingAlongTrackDistance);
 
       this.logger.info("drive.line.driving", {
         startPosition: {
@@ -590,6 +591,12 @@ export class DriveLineController {
   async stopCurrentDrive(): Promise<void> {
     this.stopRequested = true;
     systemStop.requestStop("drive", "drive_stop_requested");
+    this.poseFusion.off("poseUpdate", this.onPoseUpdate);
+    if (this.currentDrive !== null && this.driveResolve !== null) {
+      await this.finishStoppedDrive("Drive stopped by user request");
+      return;
+    }
+    await this.sensorController.disableMotorDriver();
   }
 
   getState(): DriveControllerState {
@@ -652,7 +659,7 @@ export class DriveLineController {
     if (this.stopRequested) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       try {
-        await this.sensorController.requestNeutralMotorOutputs();
+        await this.sensorController.disableMotorDriver();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("drive.line.stop_failed", { error: message });
@@ -682,7 +689,7 @@ export class DriveLineController {
 
     if (systemStop.isStopped()) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      await this.sensorController.requestNeutralMotorOutputs();
+      await this.sensorController.disableMotorDriver();
       this.status = "stopped";
       this.currentDrive = null;
       this.logger.warn("drive.line.stopped", { durationMs: this.nowMillis() - this.driveStartTime, reason: "system_stop" });
@@ -749,40 +756,37 @@ export class DriveLineController {
   }
 
   private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number {
-    const requestedDistance = Number.isFinite(startDistanceMeters) ? (startDistanceMeters as number) : DRIVE_SHORT_BUCKET_STEP_METERS;
-    const upperBound = Math.max(DRIVE_SHORT_BUCKET_MAX_METERS, maxDistanceMeters);
-    const clampedDistance = Math.max(
-      DRIVE_SHORT_BUCKET_STEP_METERS,
-      Math.min(upperBound, requestedDistance),
-    );
-    const alignedDistance = Math.ceil((clampedDistance - 1e-9) / DRIVE_SHORT_BUCKET_STEP_METERS) * DRIVE_SHORT_BUCKET_STEP_METERS;
-    return Number(Math.max(
-      DRIVE_SHORT_BUCKET_STEP_METERS,
-      Math.min(upperBound, alignedDistance),
-    ).toFixed(2));
+    const availableDistances = this.getStraightLineTrainingDistances();
+    const requestedDistance = Number.isFinite(startDistanceMeters)
+      ? (startDistanceMeters as number)
+      : availableDistances[0];
+    const boundedMaxDistance = Math.max(availableDistances[0], Math.min(availableDistances.at(-1) ?? DRIVE_SHORT_BUCKET_MAX_METERS, maxDistanceMeters));
+    const firstIncludedDistance = availableDistances.find((distance) => distance >= requestedDistance - 1e-9 && distance <= boundedMaxDistance + 1e-9);
+    return firstIncludedDistance ?? availableDistances[0];
   }
 
   private normalizeShortTrainingMaxDistanceMeters(maxDistanceMeters?: number, startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS): number {
-    const requestedDistance = Number.isFinite(maxDistanceMeters) ? (maxDistanceMeters as number) : DRIVE_SHORT_BUCKET_MAX_METERS;
-    const minimumDistance = Math.max(startDistanceMeters, DRIVE_SHORT_BUCKET_STEP_METERS);
-    const clampedDistance = Math.max(minimumDistance, requestedDistance);
-    return Number(clampedDistance.toFixed(2));
+    const availableDistances = this.getStraightLineTrainingDistances();
+    const requestedDistance = Number.isFinite(maxDistanceMeters)
+      ? (maxDistanceMeters as number)
+      : (availableDistances.at(-1) ?? DRIVE_SHORT_BUCKET_MAX_METERS);
+    const minimumDistance = Math.max(startDistanceMeters, availableDistances[0]);
+    const eligibleDistances = availableDistances.filter((distance) => distance >= minimumDistance - 1e-9 && distance <= requestedDistance + 1e-9);
+    return eligibleDistances.at(-1) ?? Math.max(minimumDistance, availableDistances[0]);
   }
 
   private buildStraightLineTrainingDistances(startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number[] {
-    const distances: number[] = [];
     const start = Math.max(DRIVE_SHORT_BUCKET_STEP_METERS, startDistanceMeters);
     const max = Math.max(start, maxDistanceMeters);
+    return this.getStraightLineTrainingDistances()
+      .filter((distance) => distance >= start - 1e-9 && distance <= max + 1e-9);
+  }
 
-    for (let distance = start; distance <= max + 1e-9; ) {
-      distances.push(Number(distance.toFixed(2)));
-      const step = distance <= DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS + 1e-9
-        ? DRIVE_SHORT_BUCKET_STEP_METERS
-        : DRIVE_SHORT_BUCKET_COARSE_STEP_METERS;
-      distance = Number((distance + step).toFixed(2));
-    }
-
-    return distances;
+  private getStraightLineTrainingDistances(): readonly number[] {
+    return [
+      ...DRIVE_SHORT_BUCKET_DISTANCES_METERS,
+      ...DRIVE_LONG_SAMPLE_DISTANCES_METERS,
+    ];
   }
 
   private async applyRegulatedPurePursuitControl(
@@ -918,17 +922,12 @@ export class DriveLineController {
 
   private calculateTargetLinearSpeedMps(remainingAlongTrackDistance: number, curvature: number): number {
     const nominalTargetSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
-    const approachScale = this.clamp(
-      remainingAlongTrackDistance / DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS,
-      DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE,
-      1,
-    );
     const curvatureScale = this.clamp(
       1 / (1 + (Math.abs(curvature) * DRIVE_PURSUIT_CURVATURE_SPEED_GAIN)),
       DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
       1,
     );
-    return nominalTargetSpeedMps * approachScale * curvatureScale;
+    return nominalTargetSpeedMps * curvatureScale;
   }
 
   private toRobotFrame(
@@ -1160,7 +1159,7 @@ export class DriveLineController {
     this.currentDrive = null;
     this.stopRequested = false;
     systemStop.requestStop("drive", errorMessage);
-    await this.sensorController.requestNeutralMotorOutputs();
+    await this.sensorController.disableMotorDriver();
     this.logger.warn("drive.line.stopped", {
       durationMs: this.nowMillis() - this.driveStartTime,
       reason: errorMessage,

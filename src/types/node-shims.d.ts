@@ -18,6 +18,11 @@ declare module "node:path" {
 
 declare module "node:http" {
   export const createServer: any;
+  export const request: any;
+  export type IncomingHttpHeaders = any;
+  export type IncomingMessage = any;
+  export type RequestOptions = any;
+  export type ServerResponse = any;
 }
 
 declare module "node:events" {
@@ -59,6 +64,7 @@ declare module "node:worker_threads" {
 declare const process: {
   env: Record<string, string | undefined>;
   argv: string[];
+  execPath: string;
   cwd: () => string;
   on: (event: string, handler: () => void) => void;
   exit: (code?: number) => never;

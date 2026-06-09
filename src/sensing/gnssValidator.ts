@@ -5,13 +5,6 @@
  * use for navigation. It does NOT consult dead-reckoning — DR vs GNSS
  * disagreement is not a gate here, by design.
  *
- * Teleport guard: a position sample is rejected if it lands further from
- * the previous accepted sample than the vehicle could plausibly have moved
- * in the elapsed time. The ceiling is `max(jump_floor, max_speed × safety
- * × dt)`. After a long outage (dt > gate-widen) the check is skipped so
- * the validator can re-prime; the temporal promotion filter then guards
- * against a single bad re-prime sliding through.
- *
  * Rules (verbatim from spec):
  *
  *   POSITION ACCEPTANCE
@@ -39,12 +32,6 @@
 import { LoggerScope } from "../logging/types.js";
 import { GnssPositionUpdateEvent } from "./sensorEvents.js";
 import { unwrapInternalHeading, InternalHeading } from "../geometry/headingTypes.js";
-import {
-  GNSS_MAX_VEHICLE_GROUND_SPEED_METERS_PER_SECOND,
-  GNSS_JUMP_SAFETY_FACTOR,
-  GNSS_JUMP_FLOOR_METERS,
-  GNSS_JUMP_GATE_WIDEN_AFTER_SECONDS,
-} from "../constants.js";
 
 export type GnssValidationState = "TRUSTED" | "DEGRADED" | "REJECTED";
 
@@ -52,7 +39,6 @@ export type GnssRejectionReason =
   | "fix_not_rtk_fixed"
   | "satellites_low"
   | "accuracy_high"
-  | "position_jump_too_far"
   | "no_heading"
   | "heading_invalid_flag"
   | "heading_baseline_out_of_range"
@@ -75,14 +61,6 @@ export interface GnssValidatorOptions {
   readonly minSatellites?: number;
   /** Application accuracy ceiling for position (m). */
   readonly maxPositionAccuracyMeters?: number;
-  /** Maximum credible vehicle ground speed (m/s). Used by the jump guard. */
-  readonly maxVehicleGroundSpeedMetersPerSecond?: number;
-  /** Multiplicative slack on the jump ceiling. */
-  readonly jumpSafetyFactor?: number;
-  /** Floor for the jump ceiling regardless of dt (m). */
-  readonly jumpFloorMeters?: number;
-  /** dt above which the jump check is skipped as a re-prime (s). */
-  readonly jumpGateWidenAfterSeconds?: number;
   /** Application accuracy ceiling for heading (deg). Spec robotics tier: 0.5°. */
   readonly maxHeadingAccuracyDeg?: number;
   /**
@@ -109,10 +87,6 @@ export interface GnssValidatorOptions {
 const DEFAULTS = {
   minSatellites: 8,
   maxPositionAccuracyMeters: 0.05,
-  maxVehicleGroundSpeedMetersPerSecond: GNSS_MAX_VEHICLE_GROUND_SPEED_METERS_PER_SECOND,
-  jumpSafetyFactor: GNSS_JUMP_SAFETY_FACTOR,
-  jumpFloorMeters: GNSS_JUMP_FLOOR_METERS,
-  jumpGateWidenAfterSeconds: GNSS_JUMP_GATE_WIDEN_AFTER_SECONDS,
   maxHeadingAccuracyDeg: 1.0,
   baselineNominalMeters: 0.30,
   baselineToleranceMeters: 0.05,
@@ -135,12 +109,6 @@ export class GnssValidator {
   private headingState: GnssValidationState = "REJECTED";
 
   private lastSample: { x: number; y: number; t: number; headingDeg: number | null } | null = null;
-  /**
-   * Anchor for the position-jump (teleport) check. Only updated when a
-   * position sample passes every gate. A series of rejected samples
-   * therefore does not let the anchor drift.
-   */
-  private lastAcceptedPosition: { x: number; y: number; t: number } | null = null;
 
   constructor(options: GnssValidatorOptions) {
     this.logger = options.logger;
@@ -148,11 +116,6 @@ export class GnssValidator {
       logger: options.logger,
       minSatellites: options.minSatellites ?? DEFAULTS.minSatellites,
       maxPositionAccuracyMeters: options.maxPositionAccuracyMeters ?? DEFAULTS.maxPositionAccuracyMeters,
-      maxVehicleGroundSpeedMetersPerSecond:
-        options.maxVehicleGroundSpeedMetersPerSecond ?? DEFAULTS.maxVehicleGroundSpeedMetersPerSecond,
-      jumpSafetyFactor: options.jumpSafetyFactor ?? DEFAULTS.jumpSafetyFactor,
-      jumpFloorMeters: options.jumpFloorMeters ?? DEFAULTS.jumpFloorMeters,
-      jumpGateWidenAfterSeconds: options.jumpGateWidenAfterSeconds ?? DEFAULTS.jumpGateWidenAfterSeconds,
       maxHeadingAccuracyDeg: options.maxHeadingAccuracyDeg ?? DEFAULTS.maxHeadingAccuracyDeg,
       baselineNominalMeters: options.baselineNominalMeters ?? DEFAULTS.baselineNominalMeters,
       baselineToleranceMeters: options.baselineToleranceMeters ?? DEFAULTS.baselineToleranceMeters,
@@ -188,14 +151,6 @@ export class GnssValidator {
       headingDeg: sample.heading === null ? null : unwrapInternalHeading(sample.heading),
     };
 
-    if (positionRejections.length === 0) {
-      this.lastAcceptedPosition = {
-        x: sample.xMeters,
-        y: sample.yMeters,
-        t: sample.timestampMillis,
-      };
-    }
-
     return result;
   }
 
@@ -227,33 +182,6 @@ export class GnssValidator {
       sample.positionAccuracyMeters > this.opts.maxPositionAccuracyMeters
     ) {
       rejections.push("accuracy_high");
-    }
-
-    // Teleport guard: only meaningful once we have a previous *accepted*
-    // sample within a credible time window. After a long outage the gate
-    // widens to a re-prime so the next first-accepted sample anchors a new
-    // position; the temporal-filter promotion epochs then protect against
-    // a single bad re-prime sliding through.
-    if (this.lastAcceptedPosition !== null) {
-      const dtSeconds = Math.max(0, (sample.timestampMillis - this.lastAcceptedPosition.t) / 1000);
-      if (dtSeconds <= this.opts.jumpGateWidenAfterSeconds) {
-        const ceiling = Math.max(
-          this.opts.jumpFloorMeters,
-          this.opts.maxVehicleGroundSpeedMetersPerSecond * this.opts.jumpSafetyFactor * dtSeconds,
-        );
-        const distance = Math.hypot(
-          sample.xMeters - this.lastAcceptedPosition.x,
-          sample.yMeters - this.lastAcceptedPosition.y,
-        );
-        if (distance > ceiling) {
-          rejections.push("position_jump_too_far");
-          this.logger.warn("gnss_validator.position_jump_too_far", {
-            distanceMeters: distance,
-            ceilingMeters: ceiling,
-            dtSeconds,
-          });
-        }
-      }
     }
 
     return rejections;

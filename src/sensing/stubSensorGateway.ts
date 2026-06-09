@@ -4,6 +4,7 @@
  */
 
 import { SensorHardwareGateway } from "./sensorHardwareGateway.js";
+import type { MotorCommandOptions } from "./sensorHardwareGateway.js";
 
 export class StubSensorGateway implements SensorHardwareGateway {
   private readonly error = new Error("Stub sensor gateway - no hardware available");
@@ -30,7 +31,12 @@ export class StubSensorGateway implements SensorHardwareGateway {
     throw this.error;
   }
 
-  async setMotorWheelOutputs(_leftOutputPercent: number, _rightOutputPercent: number): Promise<void> {
+  async setMotorWheelOutputs(
+    _leftOutputPercent: number,
+    _rightOutputPercent: number,
+    _enableDrive: boolean = true,
+    _options?: MotorCommandOptions,
+  ): Promise<void> {
     // Silently ignore motor commands when no hardware
     return Promise.resolve();
   }

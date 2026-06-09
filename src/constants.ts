@@ -13,35 +13,44 @@
 // =============================================================================
 
 /**
- * Sensor scheduler tick interval in milliseconds.
- * The single scheduler wakes at this cadence and dispatches each sensor's read
- * only when its own per-sensor interval has elapsed. Set to the highest
- * required sensor rate (IMU).
+ * Default sensor polling interval in milliseconds
+ * 33ms ≈ 30Hz update rate
  */
-export const SENSOR_SCHEDULER_TICK_MS = 8;
+export const SENSOR_POLL_INTERVAL_MS = 33;
 
 /**
- * IMU read interval in milliseconds (~125 Hz).
- * Turn execution needs >100 Hz heading integration to be accurate.
+ * Sensor controller polling interval in milliseconds
+ * 20ms ≈ 50Hz update rate for the controller's internal sensor loop.
+ * This keeps stop/control responsiveness comfortably sub-100ms while reducing
+ * shared-process CPU and I2C pressure.
  */
-export const IMU_POLL_INTERVAL_MS = 8;
+export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 20;
 
 /**
- * Motor feedback read interval in milliseconds (50 Hz).
- * Encoder ticks for dead-reckoning + current sensing for stall detection.
+ * GNSS polling interval in milliseconds.
+ * The GNSS source is configured for 20Hz output, so poll at the same 50ms
+ * cadence rather than at the much faster control-loop rate.
+ *
+ * GNSS samples do not arrive usefully at the 200Hz control-loop cadence, so
+ * poll them separately to avoid burning CPU and I2C bandwidth on duplicate
+ * reads.
  */
-export const MOTOR_FEEDBACK_POLL_INTERVAL_MS = 20;
+export const SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS = 50;
 
 /**
- * GNSS read interval in milliseconds (20 Hz).
- * Matches the GNSS node's update rate; reading faster wastes I2C bandwidth.
+ * Motor feedback polling interval in milliseconds.
+ * Wheel encoder/current feedback remains fast enough for stop detection and
+ * line driving without forcing every sensor-loop tick to hit the motor
+ * node over I2C.
  */
-export const GNSS_POLL_INTERVAL_MS = 50;
+export const SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS = 20;
 
 /**
- * Manual drive control loop interval in milliseconds
+ * Manual drive control loop interval in milliseconds.
+ * Manual driving is operator-facing, so it should react much faster than the
+ * conservative autonomous loops.
  */
-export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
+export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 20;
 
 /**
  * Manual drive keepalive interval in milliseconds.
@@ -49,6 +58,27 @@ export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 100;
  * gone stale; unchanged wheel commands are no longer resent as keepalives.
  */
 export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
+
+/**
+ * Manual drive motor ramp-up time in milliseconds.
+ * Manual drive needs a much snappier feel than autonomous motion while still
+ * staying on the normal motor command path.
+ */
+export const MANUAL_DRIVE_RAMP_UP_TIME_MS = 120;
+
+/**
+ * Manual drive motor ramp-down time in milliseconds.
+ * Stick release should settle quickly without relying on a hard disable.
+ */
+export const MANUAL_DRIVE_RAMP_DOWN_TIME_MS = 120;
+
+/**
+ * Maximum pose-update emission rate in milliseconds.
+ * Pose fusion still ingests IMU, GNSS, and encoder updates at their native
+ * cadence, but downstream consumers such as the drive controller only need a
+ * bounded control-loop rate rather than a burst on every upstream event.
+ */
+export const POSE_FUSION_EMIT_INTERVAL_MS = 20;
 
 /**
  * Legacy wheel-command timeout field value, in milliseconds.
@@ -331,14 +361,21 @@ export const MAX_PORT_NUMBER = 65535;
 /**
  * Turn controller polling interval in milliseconds
  * How often to check heading during turn execution
- * Matches the current turn control cadence; kept separate from the IMU sensor cadence.
+ * Matches the current turn control cadence; kept separate from the 200Hz sensor loop.
  */
 export const TURN_POLLING_INTERVAL_MS = 33;
 
 /**
  * Settle time after motor ramp-down before reading final heading
  */
-export const TURN_SETTLE_TIME_MS = 200;
+export const TURN_SETTLE_TIME_MS = 1000;
+
+/**
+ * Pause between successive turn-training runs.
+ * This gives the mower a visibly settled pause so the operator can see that
+ * measuring and learning has happened before the next turn starts.
+ */
+export const TURN_TRAINING_INTER_TURN_PAUSE_MS = 1000;
 
 /**
  * Motor ramp-down time from hardware spec (milliseconds).
@@ -405,30 +442,6 @@ export const TURN_HISTORY_MAX_SIZE = 100;
  * (worst-case 180° at low GNSS-rebase wheel speed) cannot trip it.
  */
 export const TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS = 30_000;
-
-/**
- * GNSS validator — physical jump (teleport) guard.
- * The mower cannot exceed this ground speed in any direction. If a GNSS
- * sample lands further from the previous accepted sample than is credible
- * for the elapsed time, the sample is rejected even if it otherwise looks
- * valid. Tuned for the Flymo H400 platform top wheel speed (~0.5 m/s) with
- * generous slack: ground speed ceiling × safety factor × dt.
- */
-export const GNSS_MAX_VEHICLE_GROUND_SPEED_METERS_PER_SECOND = 1.0;
-
-/** Multiplicative slack on the jump ceiling so honest GNSS noise is never penalised. */
-export const GNSS_JUMP_SAFETY_FACTOR = 4.0;
-
-/** Floor for the jump ceiling regardless of dt; always allow at least this much. */
-export const GNSS_JUMP_FLOOR_METERS = 0.30;
-
-/**
- * After this elapsed time without a previous accepted sample, the jump check
- * is treated as a re-prime and skipped — the validator already required N
- * consecutive good epochs to re-promote, which is its own teleport defence
- * once GNSS coverage returns from a long outage.
- */
-export const GNSS_JUMP_GATE_WIDEN_AFTER_SECONDS = 5.0;
 
 /**
  * Turn learning parameters file path (relative to project root)
@@ -598,8 +611,7 @@ export const DRIVE_PURSUIT_PIVOT_SPEED_SCALE = 0.35;
 export const DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
 
 /**
- * Upper bound for the 5cm fine short-drive buckets (meters)
- * The short-drive learner still uses one shared 1.05m bucket for longer runs.
+ * Upper bound for the dedicated short-distance stop-trigger buckets (meters).
  */
 export const DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS = 1.0;
 
@@ -609,19 +621,27 @@ export const DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS = 1.0;
 export const DRIVE_SHORT_BUCKET_STEP_METERS = 0.05;
 
 /**
- * Maximum distance covered by short-drive bucket learning (meters)
+ * Exact short-distance training / learning buckets (meters).
+ * These runs are too short to assume the mower has definitely reached the
+ * shared full-speed plateau before braking.
+ */
+export const DRIVE_SHORT_BUCKET_DISTANCES_METERS = [
+  0.05, 0.10, 0.15, 0.20, 0.25, 0.30,
+  0.35, 0.40, 0.45, 0.50, 0.55, 0.60,
+  0.70, 0.80, 0.90, 1.00,
+] as const;
+
+/**
+ * Longer straight-drive sample distances (meters) used to keep exercising the
+ * shared full-speed brake distance under real conditions without introducing
+ * extra long-distance buckets.
+ */
+export const DRIVE_LONG_SAMPLE_DISTANCES_METERS = [2.0, 3.0, 4.0] as const;
+
+/**
+ * Maximum distance covered by straight-line training runs (meters).
  */
 export const DRIVE_SHORT_BUCKET_MAX_METERS = 4.0;
-
-/**
- * Start of the coarse short-drive bucket range (meters)
- */
-export const DRIVE_SHORT_BUCKET_COARSE_START_METERS = 1.05;
-
-/**
- * Step size for the coarse short-drive bucket range (meters)
- */
-export const DRIVE_SHORT_BUCKET_COARSE_STEP_METERS = 0.5;
 
 /**
  * Target absolute X error for short-drive learning runs (meters)

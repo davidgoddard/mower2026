@@ -40,6 +40,10 @@ describe("DriveController", () => {
         wheelSpeedLeft = 0;
         wheelSpeedRight = 0;
       }),
+      disableMotorDriver: mock.fn(async () => {
+        wheelSpeedLeft = 0;
+        wheelSpeedRight = 0;
+      }),
       beginMotionSession: mock.fn(),
       endMotionSession: mock.fn(),
       _testGetWheelSpeeds: () => ({ left: wheelSpeedLeft, right: wheelSpeedRight }),
@@ -188,6 +192,7 @@ describe("DriveController", () => {
     const mockPose = createMockPoseFusion();
     const mockTurn = createMockTurnController();
     const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
 
     let elapsed = 0;
     const controller = new DriveController({
@@ -196,6 +201,7 @@ describe("DriveController", () => {
       turnController: mockTurn,
       logger: mockLogger,
       learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
@@ -234,9 +240,7 @@ describe("DriveController", () => {
     const result = await drivePromise;
 
     assert.equal(result.status, "success");
-    assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
-    assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
-    assert.equal(mockLearning.updateFromDrive.mock.calls.length, 1);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 
   it("executes drive with initial turn when >5 degrees off", async () => {
@@ -245,6 +249,7 @@ describe("DriveController", () => {
     const mockPose = createMockPoseFusion();
     const mockTurn = createMockTurnController();
     const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
 
     // Start facing east (0 degrees) but target is north (90 degrees)
     mockPose._testSetPose({
@@ -260,6 +265,7 @@ describe("DriveController", () => {
       turnController: mockTurn,
       logger: mockLogger,
       learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
@@ -301,6 +307,7 @@ describe("DriveController", () => {
     const mockPose = createMockPoseFusion();
     const mockTurn = createMockTurnController();
     const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
 
     let elapsed = 0;
     const controller = new DriveController({
@@ -309,6 +316,7 @@ describe("DriveController", () => {
       turnController: mockTurn,
       logger: mockLogger,
       learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
@@ -333,7 +341,7 @@ describe("DriveController", () => {
 
     assert.equal(result.status, "stopped");
     assert.equal(result.errorMessage, "Drive stopped by user request");
-    assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
+    assert.equal(mockLineDrive.stopCurrentDrive.mock.calls.length > 0, true);
   });
 
   it("tracks drive history", async () => {
@@ -342,6 +350,7 @@ describe("DriveController", () => {
     const mockPose = createMockPoseFusion();
     const mockTurn = createMockTurnController();
     const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
 
     let elapsed = 0;
     const controller = new DriveController({
@@ -350,6 +359,7 @@ describe("DriveController", () => {
       turnController: mockTurn,
       logger: mockLogger,
       learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
@@ -383,6 +393,7 @@ describe("DriveController", () => {
     const mockPose = createMockPoseFusion();
     const mockTurn = createMockTurnController();
     const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
 
     const controller = new DriveController({
       sensorController: mockSensor,
@@ -390,6 +401,7 @@ describe("DriveController", () => {
       turnController: mockTurn,
       logger: mockLogger,
       learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
       sleep: async () => {},
     });
 
@@ -764,9 +776,11 @@ describe("DriveLineController", () => {
 
   function createMockSensorController() {
     const requestNeutralMotorOutputs = mock.fn(async () => {});
+    const disableMotorDriver = mock.fn(async () => {});
     return {
       setMotorWheelOutputs: mock.fn(async () => {}),
       requestNeutralMotorOutputs,
+      disableMotorDriver,
       stopMotors: requestNeutralMotorOutputs,
       beginMotionSession: mock.fn(() => {}),
       endMotionSession: mock.fn(async () => {}),
@@ -1224,6 +1238,7 @@ describe("DriveLineController", () => {
     assert.equal(Number(commanded[0]) < Number(commanded[1]), true);
 
     await controller.stopCurrentDrive();
+    assert.equal(mockSensor.disableMotorDriver.mock.calls.length > 0, true);
     mockPose.setPose({
       position: createPosition(0, 0),
       heading: createInternalHeading(0),
@@ -1349,7 +1364,7 @@ describe("DriveLineController", () => {
     assert.equal(Math.abs(reverseCommand.rightCommand) >= 0.3, true);
   });
 
-  it("slows down as it approaches the target while staying on line", async () => {
+  it("holds cruise speed on a straight line until the brake trigger is reached", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
@@ -1380,7 +1395,7 @@ describe("DriveLineController", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     mockPose.setPose({
-      position: createPosition(4.92, 0),
+      position: createPosition(4.7, 0),
       heading: createInternalHeading(0),
       quality: "gnss",
     });
@@ -1398,7 +1413,7 @@ describe("DriveLineController", () => {
 
     assert.equal(Math.abs(farLeft - farRight) < 1e-9, true);
     assert.equal(Math.abs(nearLeft - nearRight) < 1e-9, true);
-    assert.ok(Math.abs(farLeft) > Math.abs(nearLeft));
+    assert.ok(Math.abs(Math.abs(farLeft) - Math.abs(nearLeft)) < 1e-9);
 
     await controller.stopCurrentDrive();
     mockPose.setPose({
@@ -1916,7 +1931,7 @@ describe("DriveLearningModel", () => {
     }
   });
 
-  it("uses the 1.05 m bucket for longer short straight drives", async () => {
+  it("uses the shared long-drive brake distance beyond the 1 m short buckets", async () => {
     const mockLogger = createMockLogger();
     const model = new DriveLearningModel({
       logger: mockLogger,
@@ -1924,16 +1939,16 @@ describe("DriveLearningModel", () => {
     });
 
     await model.loadParameters();
-    const nearBucketBrake = model.getBrakeDistanceForDrive(
+    const shortBucketBrake = model.getBrakeDistanceForDrive(
       createPosition(0, 0),
-      createPosition(1.05, 0),
+      createPosition(1.0, 0),
     );
     const longDriveBrake = model.getBrakeDistanceForDrive(
       createPosition(0, 0),
       createPosition(2.4, 0),
     );
 
-    assert.equal(longDriveBrake, nearBucketBrake);
+    assert.notEqual(longDriveBrake, shortBucketBrake);
   });
 
   it("learns faster from larger short-drive errors than smaller ones", async () => {
