@@ -29,6 +29,8 @@ import {
 import {
   ENCODER_METERS_PER_TICK_DEFAULT,
   SENSOR_CONTROLLER_POLL_INTERVAL_MS,
+  SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS,
+  SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS,
   MOTOR_STALL_COMMAND_THRESHOLD_PERCENT,
   MOTOR_STALL_ENCODER_DELTA_THRESHOLD,
   MOTOR_STALL_GNSS_ACCURACY_MAX_METERS,
@@ -40,6 +42,7 @@ import {
   MOTOR_OUTPUT_DEADBAND_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
+import type { MotorCommandOptions } from "./sensorHardwareGateway.js";
 import {
   SensorControllerEvents,
   SENSOR_EVENTS,
@@ -139,6 +142,8 @@ export class SensorController extends EventEmitter {
   private readonly poseCalibration: PoseCalibration | null;
   private readonly geometryCalibration: GeometryCalibration | null;
   private readonly pollIntervalMs: number;
+  private readonly gnssPollIntervalMs: number;
+  private readonly motorPollIntervalMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly maxLoopCount: number | null;
@@ -153,6 +158,8 @@ export class SensorController extends EventEmitter {
   private motorStoppedSinceMillis: number | null = null;
   private motionSessionDepth = 0;
   private motionSessionIdleSinceMillis: number | null = null;
+  private lastGnssPollStartedMillis: number | null = null;
+  private lastMotorPollStartedMillis: number | null = null;
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
   private stallMotionAnchorPosition: Position | null = null;
@@ -195,6 +202,8 @@ export class SensorController extends EventEmitter {
     this.poseCalibration = options.poseCalibration ?? null;
     this.geometryCalibration = options.geometryCalibration ?? null;
     this.pollIntervalMs = options.pollIntervalMs ?? SENSOR_CONTROLLER_POLL_INTERVAL_MS;
+    this.gnssPollIntervalMs = Math.max(this.pollIntervalMs, SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS);
+    this.motorPollIntervalMs = Math.max(this.pollIntervalMs, SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS);
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
     this.maxLoopCount = options.maxLoopCount ?? null;
@@ -214,6 +223,8 @@ export class SensorController extends EventEmitter {
     this.motorStoppedSinceMillis = null;
     this.motionSessionDepth = 0;
     this.motionSessionIdleSinceMillis = this.nowMillis();
+    this.lastGnssPollStartedMillis = null;
+    this.lastMotorPollStartedMillis = null;
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
     this.stallMotionAnchorPosition = null;
@@ -325,7 +336,11 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  async setMotorWheelOutputs(leftWheelOutputPercent: number, rightWheelOutputPercent: number): Promise<void> {
+  async setMotorWheelOutputs(
+    leftWheelOutputPercent: number,
+    rightWheelOutputPercent: number,
+    options?: MotorCommandOptions,
+  ): Promise<void> {
     const deadbandedLeftWheelOutputPercent = this.applyMotorOutputDeadband(leftWheelOutputPercent);
     const deadbandedRightWheelOutputPercent = this.applyMotorOutputDeadband(rightWheelOutputPercent);
     const {
@@ -402,6 +417,8 @@ export class SensorController extends EventEmitter {
     await this.gateway.setMotorWheelOutputs(
       normalizedLeftWheelOutputPercent,
       normalizedRightWheelOutputPercent,
+      !systemStop.isStopped(),
+      options,
     );
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
@@ -456,6 +473,11 @@ export class SensorController extends EventEmitter {
         currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
       });
       this.stopRequestLogged = true;
+    }
+
+    if (systemStop.isStopped()) {
+      await this.sendDisableMotorsCommand();
+      return;
     }
 
     await this.sendGentleStopMotorsCommand();
@@ -696,7 +718,7 @@ export class SensorController extends EventEmitter {
     try {
       while (this.running) {
         const loopStartedMillis = this.nowMillis();
-        await this.pollAllSensors();
+        await this.pollAllSensors(loopStartedMillis);
         this.maybeAutoRecalibrateImuYawBias();
         const loopDurationMs = this.nowMillis() - loopStartedMillis;
 
@@ -780,13 +802,27 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  private async pollAllSensors(): Promise<void> {
+  private async pollAllSensors(loopStartedMillis: number): Promise<void> {
     if (systemStop.isStopped()) {
       await this.sendDisableMotorsCommand();
     }
     await this.pollImu();
-    await this.pollGnss();
-    await this.pollMotors();
+    if (this.shouldPoll(loopStartedMillis, this.lastGnssPollStartedMillis, this.gnssPollIntervalMs)) {
+      this.lastGnssPollStartedMillis = loopStartedMillis;
+      await this.pollGnss();
+    }
+    if (this.shouldPoll(loopStartedMillis, this.lastMotorPollStartedMillis, this.motorPollIntervalMs)) {
+      this.lastMotorPollStartedMillis = loopStartedMillis;
+      await this.pollMotors();
+    }
+  }
+
+  private shouldPoll(
+    nowMillis: number,
+    lastPollStartedMillis: number | null,
+    intervalMs: number,
+  ): boolean {
+    return lastPollStartedMillis === null || nowMillis - lastPollStartedMillis >= intervalMs;
   }
 
   private async pollImu(): Promise<void> {
@@ -1201,9 +1237,6 @@ export class SensorController extends EventEmitter {
 
   private async sendDisableMotorsCommand(): Promise<void> {
     const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
-    if (this.lastMotorCommand?.kind === "stop") {
-      return;
-    }
 
     this.lastMotorCommand = {
       kind: "stop",

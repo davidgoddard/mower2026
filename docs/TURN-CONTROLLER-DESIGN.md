@@ -22,6 +22,7 @@ The Turn Controller is a supervised self-learning component responsible for exec
 - Adjust brake angle parameters to reduce future errors
 - Persist learned parameters for next turn
 - Learn the small-angle brake fractions for discrete angle buckets as well as the large-turn brake distance
+- Repeat both large-angle and small-angle training requests per angle until the measured absolute error is within 2°, or until the maximum attempts for that angle are reached
 
 ### Special Considerations
 - **Small angle challenge**: For turns up to ~60°, the learned brake fraction must vary by angle bucket so each turn size gets a closer brake point
@@ -516,7 +517,8 @@ export const TURN_POLLING_INTERVAL_MS = 33; // 30Hz
 /**
  * Settle time after motor ramp-down before reading final heading
  */
-export const TURN_SETTLE_TIME_MS = 200;
+export const TURN_SETTLE_TIME_MS = 1000;
+export const TURN_TRAINING_INTER_TURN_PAUSE_MS = 1000;
 
 /**
  * Motor ramp-down time from hardware spec (milliseconds)

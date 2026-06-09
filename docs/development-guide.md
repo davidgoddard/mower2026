@@ -14,6 +14,7 @@
 - Keep protocol payloads compact and versionable.
 - Do not bypass runtime interfaces for turn-tuning, drive-tuning, or control code.
 - Keep operator docs current when runtime workflows or persisted parameters change.
+- There is currently no calibrated mower translational-speed model in the app. Do not introduce meters-per-second vehicle-speed assumptions or speed-based plausibility gates into runtime control, GNSS validation, or learning logic until the project explicitly adds that capability to the functional specification.
 
 ## Current stabilization priorities
 
@@ -32,4 +33,4 @@
 - Current manual I2C exercisers depend on `i2c-bus`, which is not presently a safe choice for Node 22.
 - Use `nvm` to select Node 20 before running `npm install` or any manual hardware script.
 - Rebuild native dependencies whenever the Node major version changes.
-- The production launcher executes `dist/server/main.js`, so `npm run build` is required before `npm run start` or `systemctl start mower`.
+- The production launcher executes `dist/server/main.js`, which now supervises a public web process and a separate local control process (`dist/server/controlMain.js`), so `npm run build` is required before `npm run start` or `systemctl start mower`.

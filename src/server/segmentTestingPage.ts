@@ -761,7 +761,7 @@ ${getAppDialogScript()}
           startButton.disabled = startHandshakePending || runActive;
         }
         if (stopButton) {
-          stopButton.disabled = stopRequestPending || !runActive;
+          stopButton.disabled = false;
         }
       }
 
@@ -876,16 +876,11 @@ ${getAppDialogScript()}
       });
 
       document.getElementById("stopSegmentTest").addEventListener("click", async () => {
-        stopRequestPending = true;
-        syncSegmentButtons();
         try {
-          await postAction("stop");
+          await fetch("/api/stop", { method: "POST" });
           await update();
         } catch (error) {
           alert("Failed to stop segment testing: " + (error instanceof Error ? error.message : String(error)));
-        } finally {
-          stopRequestPending = false;
-          syncSegmentButtons();
         }
       });
 

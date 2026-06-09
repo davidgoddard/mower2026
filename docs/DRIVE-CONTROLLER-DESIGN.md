@@ -463,7 +463,7 @@ export interface DriveControllerState {
   - Target Y input (meters)
   - "Execute Single Drive" button
   - "Run Test Pattern" button (grid of test points)
-  - "Train Short Distances Forward/Reverse" button for straight-line bucket learning from 5cm to 1m plus a shared 1.05m bucket for longer runs up to 4m
+  - "Train Short Distances Forward/Reverse" button for straight-line learning at 5,10,15,20,25,30,35,40,45,50,55,60,70,80,90,100cm plus longer shared-brake sample runs at 2m, 3m, and 4m
   - "Train Segments Forward/Reverse" button for 105cm to 6m segment learning from a fixed start line
   - **Red "STOP" button** (prominent)
 - Learning parameters section

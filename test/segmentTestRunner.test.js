@@ -76,7 +76,7 @@ test("SegmentTestRunner collects waypoints, drives home first, then tests random
   assert.equal(sensorController.beginMotionSession.mock.calls.length, 1);
   assert.equal(sensorController.endMotionSession.mock.calls.length, 1);
   assert.equal(sensorController.setMotorWheelOutputs.mock.calls.length, 6);
-  assert.equal(sensorController.stopMotors.mock.calls.length, 6);
+  assert.equal(sensorController.requestNeutralMotorOutputs.mock.calls.length, 6);
   assert.equal(driveController.executeDrive.mock.calls.length, 2);
   assert.equal(poseProvider.mock.calls.length, 11);
 
@@ -167,7 +167,7 @@ test("SegmentTestRunner waits for the collection settle period before sampling t
   assert.equal(results.length, 1);
   assert.deepEqual(sleepDelays, [1, 2, 1, 2]);
   assert.equal(sensorController.setMotorWheelOutputs.mock.calls.length, 2);
-  assert.equal(sensorController.stopMotors.mock.calls.length, 2);
+  assert.equal(sensorController.requestNeutralMotorOutputs.mock.calls.length, 2);
   assert.equal(poseProvider.mock.calls.length, 5);
   assert.equal(runner.getState().phase, "completed");
 });

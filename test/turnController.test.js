@@ -71,6 +71,7 @@ describe("TurnController", () => {
       getBrakeAngle: mock.fn((angleDeg, direction) => {
         return createRelativeAngle(angleDeg * 0.7);
       }),
+      getSmallTurnBrakeFraction: mock.fn(() => 0.5),
       getMotorRampDownTime: () => 700,
       getMotorRampUpTime: () => 460,
       getSmallAngleThreshold: () => 20,
@@ -128,7 +129,7 @@ describe("TurnController", () => {
 
     assert.equal(result.status, "success");
     assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
-    assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
+    assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length > 0, true);
     assert.equal(mockLearning.updateFromTurn.mock.calls.length, 1);
   });
 
@@ -196,7 +197,7 @@ describe("TurnController", () => {
 
     assert.equal(result.status, "stopped");
     assert.equal(result.errorMessage, "Turn stopped by user request");
-    assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
+    assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length > 0, true);
   });
 
   it("watchdog fires when no IMU heading update arrives during the active turn", async () => {
@@ -297,7 +298,7 @@ describe("TurnController", () => {
     assert.equal(state.turnsCompleted, 0);
   });
 
-  it("runs large-angle training through the requested sweep", async () => {
+  it("repeats large-angle training until each angle is within target error", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockLearning = createMockLearningModel();
@@ -309,15 +310,24 @@ describe("TurnController", () => {
     });
 
     const requestedAngles = [];
+    const attemptsByAngle = new Map();
     controller.executeTurn = mock.fn(async (request) => {
       const angleDeg = unwrapRelativeAngle(request.targetAngle);
       requestedAngles.push(angleDeg);
-      return createTrainingResult(angleDeg, 4);
+
+      const attempt = attemptsByAngle.get(angleDeg) ?? 0;
+      attemptsByAngle.set(angleDeg, attempt + 1);
+
+      const errorSequence = angleDeg > 0 ? [5, 2] : [4, 1];
+      const errorDeg = errorSequence[Math.min(attempt, errorSequence.length - 1)];
+      return createTrainingResult(angleDeg, errorDeg);
     });
 
     await controller.runLargeAngleTraining(1, [70, -70]);
 
-    assert.deepEqual(requestedAngles, [70, -70]);
+    assert.equal(attemptsByAngle.get(70), 2);
+    assert.equal(attemptsByAngle.get(-70), 2);
+    assert.deepEqual(requestedAngles, [70, 70, -70, -70]);
   });
 
   it("repeats small-angle training until each angle is within three degrees", async () => {

@@ -405,6 +405,29 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     }
   }
 
+  async function requestEmergencyStop(reason: string): Promise<void> {
+    systemStop.requestStop("api", reason);
+    await sensorController?.haltMotors();
+
+    const stopOperations: Promise<unknown>[] = [];
+
+    turnValidationRunner?.stopCurrentValidation();
+    mowingExecutor?.stop();
+    segmentTestRunner?.stopCurrentTest();
+    deadReckoningCalibrator?.requestStop();
+    void retryManager?.endSession();
+    operationContextTracker?.clearContext();
+
+    if (turnController) {
+      stopOperations.push(turnController.stopCurrentTurn());
+    }
+    if (driveController) {
+      stopOperations.push(driveController.stopCurrentDrive());
+    }
+
+    await Promise.allSettled(stopOperations);
+  }
+
   const server = createServer(async (request: any, response: any) => {
     const method = request.method ?? "GET";
     const baseUrl = `http://${request.headers?.host ?? "localhost"}`;
@@ -598,6 +621,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       try {
         const body = await readRequestBody(request);
 
+        if (requestUrl.pathname === "/api/stop") {
+          await requestEmergencyStop("emergency_stop");
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ stopped: true }));
+          return;
+        }
+
         // Turn execution
         if (requestUrl.pathname === "/api/turn/execute" && turnController) {
           const data = JSON.parse(body);
@@ -640,9 +670,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop turn
         if (requestUrl.pathname === "/api/turn/stop" && turnController) {
-          systemStop.requestStop("api", "turn_stop");
-          await turnController.stopCurrentTurn();
-          turnValidationRunner?.stopCurrentValidation();
+          await requestEmergencyStop("turn_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
@@ -1414,8 +1442,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop active mowing
         if (requestUrl.pathname === "/api/mowing/stop") {
-          systemStop.requestStop("api", "mowing_stop");
-          mowingExecutor?.stop();
+          await requestEmergencyStop("mowing_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
@@ -1457,8 +1484,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop active path following
         if (requestUrl.pathname === "/api/path/stop") {
-          systemStop.requestStop("api", "path_stop_requested");
-          await driveController?.stopCurrentDrive();
+          await requestEmergencyStop("path_stop_requested");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
@@ -1479,8 +1505,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop segment test
         if (requestUrl.pathname === "/api/segment/stop" && segmentTestRunner) {
-          systemStop.requestStop("api", "segment_stop");
-          segmentTestRunner.stopCurrentTest();
+          await requestEmergencyStop("segment_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
@@ -1508,7 +1533,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop dead-reckoning calibration
         if (requestUrl.pathname === "/api/dead-reckoning/stop" && deadReckoningCalibrator) {
-          deadReckoningCalibrator.requestStop();
+          await requestEmergencyStop("dead_reckoning_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
@@ -1594,8 +1619,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Stop drive
         if (requestUrl.pathname === "/api/drive/stop" && driveController) {
-          systemStop.requestStop("api", "drive_stop");
-          await driveController.stopCurrentDrive();
+          await requestEmergencyStop("drive_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ stopped: true }));
           return;
