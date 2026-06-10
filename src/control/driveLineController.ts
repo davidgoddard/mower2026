@@ -738,6 +738,16 @@ export class DriveLineController {
     // enough distance left before the target to make it worthwhile.
     if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
       this.brakeDecisionPoseQuality = pose.quality;
+      this.logger.info("drive.line.brake_trigger", {
+        reason: "arrival_tolerance",
+        elapsedMs: this.nowMillis() - this.driveStartTime,
+        remainingAlongTrackMeters: remainingAlongTrackDistance,
+        targetDistanceMeters: targetDistance,
+        arrivalToleranceMeters: DRIVE_ARRIVAL_TOLERANCE_METERS,
+        fusedX: unwrapMeters(pose.position.xMeters),
+        fusedY: unwrapMeters(pose.position.yMeters),
+        fusedHeadingDeg: unwrapInternalHeading(pose.heading),
+      });
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       await this.completeDrive();
       return;
@@ -751,6 +761,16 @@ export class DriveLineController {
       remainingAlongTrackDistance <= unwrapMeters(brakeDistance)
     ) {
       this.brakeDecisionPoseQuality = pose.quality;
+      this.logger.info("drive.line.brake_trigger", {
+        reason: "brake_distance",
+        elapsedMs: this.nowMillis() - this.driveStartTime,
+        remainingAlongTrackMeters: remainingAlongTrackDistance,
+        targetDistanceMeters: targetDistance,
+        brakeDistanceMeters: unwrapMeters(brakeDistance),
+        fusedX: unwrapMeters(pose.position.xMeters),
+        fusedY: unwrapMeters(pose.position.yMeters),
+        fusedHeadingDeg: unwrapInternalHeading(pose.heading),
+      });
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       await this.completeDrive();
       return;
