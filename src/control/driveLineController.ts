@@ -873,12 +873,45 @@ export class DriveLineController {
   /**
    * Emit a per-drive diagnostic heartbeat at HEARTBEAT_INTERVAL_MS cadence.
    * Captures the contributions of every sensor source so a failed drive can
-   * be diagnosed from the log alone — see redesign notes in CLAUDE.md.
+   * be diagnosed from the log alone.  In particular logs both the fused
+   * pose (which is what the controller steers against) and the raw GNSS
+   * position (uncorrected by the lever-arm projection) so post-mortem
+   * analysis can tell whether observed CTE excursions came from the
+   * antenna-reported ground track or from the body-frame projection.
    */
   private emitHeartbeatIfDue(pose: Pose, cte: Meters): void {
-    // Heartbeat logging intentionally disabled for normal operation.
-    void pose;
-    void cte;
+    if (this.driveLineStart === null || this.driveLineEnd === null) {
+      return;
+    }
+
+    const nowMs = this.nowMillis();
+    if (this.lastHeartbeatMs !== 0 && nowMs - this.lastHeartbeatMs < DriveLineController.HEARTBEAT_INTERVAL_MS) {
+      return;
+    }
+    this.lastHeartbeatMs = nowMs;
+
+    const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
+    const projectedAlongTrackDistance = this.projectAlongTrackDistance(pose.position);
+    const remainingAlongTrackDistance = Math.max(0, totalDistance - projectedAlongTrackDistance);
+    const diag = this.poseFusion.getDiagnosticSnapshot();
+    const lineHeadingDeg = unwrapInternalHeading(this.getDriveLineHeading());
+
+    this.logger.info("drive.line.heartbeat", {
+      elapsedMs: nowMs - this.driveStartTime,
+      driveDirectionSign: this.driveDirectionSign,
+      cteMeters: unwrapMeters(cte),
+      alongTrackMeters: projectedAlongTrackDistance,
+      remainingMeters: remainingAlongTrackDistance,
+      lineHeadingDeg,
+      fused: diag.fused,
+      gnssRaw: diag.gnss.raw,
+      gnssToFusedSeparationMeters: diag.gnss.gnssToFusedSeparationMeters,
+      gnssLastAcceptedAgoMs: diag.gnss.lastAcceptedAgoMs,
+      encoderDeltas: {
+        left: diag.encoder.lastLeftDelta,
+        right: diag.encoder.lastRightDelta,
+      },
+    });
   }
 
   private projectAlongTrackDistance(position: Position): number {
