@@ -118,12 +118,11 @@ The `poseFusion.usingGnssHeading` flag is the app-level indicator the live widge
 The controller exposes motor command methods:
 
 - `setMotorWheelOutputs(leftWheelOutputPercent, rightWheelOutputPercent)` to update the latest controller-level motion request
-- `stopMotors()` for a normal ramp-down stop
-- `haltMotors()` for an immediate hard disable
+- `stopMotors()` brings the wheels to rest under the configured deceleration profile by sending a ramped target=0 with the drive still enabled. This is the only stop path used by drive completion, turn completion, mowing handovers, and similar end-of-operation transitions
+- `emergencyStopMotors()` immediately disables the H-bridges. Reserved for the operator stop button (`POST /api/stop` and any per-feature "stop" button), confirmed stall detection, the I2C watchdog, and other genuine emergencies — anywhere the drivetrain shock of a hard kill is preferable to letting the wheels keep coasting for the deceleration window
 
-`stopMotors()` maps to a dedicated stop command with higher I2C priority than normal output commands, while `haltMotors()` maps to the emergency disable path.
 The latest requested wheel pair is sent through the normal I2C queue only when it changes. The ESP32 motor node latches the most recent accepted command until some newer command replaces it.
-Every normal wheel-output write also carries the current global stop latch in the motor payload `enableDrive` flag. That means a user stop immediately changes the payload shape for subsequent motor writes, so the next write is forced out with drive disabled even if the wheel targets themselves did not change.
+While `systemStop` is latched, `setMotorWheelOutputs` short-circuits and the sensor loop re-asserts the H-bridge disable on every poll; both together guarantee that no in-flight wheel-target value can race the latch.
 The stationary pose-fusion timer is armed by an explicit zero-output command or a user/abort stop path, so a mower that has been stopped by the controller can still qualify for a GNSS heading rebase after the timeout.
 Motor output commands at or below 10% magnitude are treated as zero before transmission, which gives the controller a little tolerance around the joystick center and helps stationary detection settle cleanly.
 Non-zero motor output commands are raised to at least 30% magnitude before transmission. A one-wheel motion command is converted into a minimum active arc command so the hardware is not asked to move with only one active motor.

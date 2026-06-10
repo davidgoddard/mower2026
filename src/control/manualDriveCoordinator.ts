@@ -166,9 +166,12 @@ export class ManualDriveCoordinator {
     while (this.running) {
       try {
         if (systemStop.isStopped()) {
+          // The sensor loop is already re-asserting the H-bridge disable
+          // every tick while systemStop is latched.  We just need to
+          // release our local "actively driving" flag so we don't keep
+          // sending speed updates that would race with the disable.
           if (this.drivingActive) {
             this.drivingActive = false;
-            await this.sensorController.disableMotorDriver();
           }
           await this.sleep(this.controlIntervalMs);
           continue;

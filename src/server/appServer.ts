@@ -421,7 +421,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
   async function requestEmergencyStop(reason: string): Promise<void> {
     systemStop.requestStop("api", reason);
-    await sensorController?.haltMotors();
+    await sensorController?.emergencyStopMotors();
 
     const stopOperations: Promise<unknown>[] = [];
 
@@ -686,7 +686,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Stop turn
+        // Stop turn (operator-initiated stop button → emergency disable)
         if (requestUrl.pathname === "/api/turn/stop" && turnController) {
           await requestEmergencyStop("turn_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1458,7 +1458,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Stop active mowing
+        // Stop active mowing (operator-initiated stop button → emergency disable)
         if (requestUrl.pathname === "/api/mowing/stop") {
           await requestEmergencyStop("mowing_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1500,7 +1500,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Stop active path following
+        // Stop active path following (operator-initiated stop button → emergency disable)
         if (requestUrl.pathname === "/api/path/stop") {
           await requestEmergencyStop("path_stop_requested");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1521,7 +1521,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Stop segment test
+        // Stop segment test (operator-initiated stop button → emergency disable)
         if (requestUrl.pathname === "/api/segment/stop" && segmentTestRunner) {
           await requestEmergencyStop("segment_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1549,7 +1549,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Stop dead-reckoning calibration
+        // Stop dead-reckoning calibration (operator-initiated stop button → emergency disable)
         if (requestUrl.pathname === "/api/dead-reckoning/stop" && deadReckoningCalibrator) {
           await requestEmergencyStop("dead_reckoning_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1635,7 +1635,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Stop drive
+        // Stop drive (operator-initiated stop button → emergency disable)
         if (requestUrl.pathname === "/api/drive/stop" && driveController) {
           await requestEmergencyStop("drive_stop");
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });

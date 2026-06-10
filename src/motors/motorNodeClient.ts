@@ -6,7 +6,6 @@ import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtoc
 import { decodeMotorFeedbackSample, encodeWheelSpeedCommand, motorFeedbackSampleLength } from "./motorCodec.js";
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
-import { systemStop } from "../control/systemStop.js";
 
 interface MotorNodeClientOptions {
   address: number;
@@ -69,20 +68,22 @@ export class MotorNodeClient {
   async sendWheelSpeedCommand(
     leftWheelTargetPercent: number,
     rightWheelTargetPercent: number,
-    enableDrive: boolean = true,
     options: WheelSpeedCommandOptions = {},
   ): Promise<void> {
-    // The global stop flag is the single authority on motor enable. Any
-    // pending or new speed command is merged with the latch so once stop is
-    // raised the ESP32 only ever sees disabled frames until the latch clears.
-    const effectiveEnableDrive = enableDrive && !systemStop.isStopped();
+    // The motor drive stays enabled by default. Bringing the mower to rest
+    // is the responsibility of {@link SensorController.stopMotors}, which
+    // sends a ramped target=0 with the drive still enabled so the ESP32
+    // honours the configured deceleration profile rather than slamming the
+    // H-bridges off. The dedicated {@link stop} method (and the systemStop
+    // re-assert in the sensor loop) are the only paths that send
+    // enableDrive=false.
     const rampUpTimeMs = options.rampUpTimeMs ?? this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS;
     const rampDownTimeMs = options.rampDownTimeMs ?? this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
-      leftWheelTargetPercent: effectiveEnableDrive ? clampNormalizedTarget(leftWheelTargetPercent) : 0,
-      rightWheelTargetPercent: effectiveEnableDrive ? clampNormalizedTarget(rightWheelTargetPercent) : 0,
-      enableDrive: effectiveEnableDrive,
+      leftWheelTargetPercent: clampNormalizedTarget(leftWheelTargetPercent),
+      rightWheelTargetPercent: clampNormalizedTarget(rightWheelTargetPercent),
+      enableDrive: true,
       commandTimeoutMillis: this.commandTimeoutMillis,
       maxAccelerationPercentPerSecond: ratePerSecondFromRampMillis(rampUpTimeMs),
       maxDecelerationPercentPerSecond: ratePerSecondFromRampMillis(rampDownTimeMs),

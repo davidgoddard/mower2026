@@ -130,7 +130,7 @@ test('MotorNodeClient encodes per-command ramp overrides', async () => {
     nowMillis: () => 100,
   });
 
-  await client.sendWheelSpeedCommand(1, 1, true, {
+  await client.sendWheelSpeedCommand(1, 1, {
     rampUpTimeMs: 120,
     rampDownTimeMs: 120,
   });

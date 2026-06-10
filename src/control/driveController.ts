@@ -212,8 +212,10 @@ export class DriveController {
         resolve(lineResult);
         return;
       } catch (error) {
-        // Cleanup on error
-        systemStop.requestStop("drive", "drive_error");
+        // Cleanup on error: status only. The line driver's own catch
+        // brings the wheels to rest under the ramp profile; we do not
+        // raise systemStop here because that would force a hard disable
+        // which would slam the drivetrain.
         this.status = preserveLearningState ? "learning" : "idle";
         this.currentDrive = null;
 
@@ -242,11 +244,13 @@ export class DriveController {
   }
 
   /**
-   * Stop current drive immediately (emergency stop)
+   * Cancel the in-flight drive and bring the wheels to rest under the
+   * deceleration profile.  This does NOT raise systemStop — the H-bridge
+   * disable is reserved for the operator stop button, stall detection,
+   * and other genuine emergencies.
    */
   async stopCurrentDrive(): Promise<void> {
     this.stopRequested = true;
-    systemStop.requestStop("drive", "drive_stop_requested");
     const stopCurrentTurn = (this.turnController as any).stopCurrentTurn;
     if (typeof stopCurrentTurn === "function") {
       await stopCurrentTurn.call(this.turnController);

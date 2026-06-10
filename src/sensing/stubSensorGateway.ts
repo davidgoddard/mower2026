@@ -34,7 +34,6 @@ export class StubSensorGateway implements SensorHardwareGateway {
   async setMotorWheelOutputs(
     _leftOutputPercent: number,
     _rightOutputPercent: number,
-    _enableDrive: boolean = true,
     _options?: MotorCommandOptions,
   ): Promise<void> {
     // Silently ignore motor commands when no hardware

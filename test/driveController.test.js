@@ -40,7 +40,7 @@ describe("DriveController", () => {
         wheelSpeedLeft = 0;
         wheelSpeedRight = 0;
       }),
-      disableMotorDriver: mock.fn(async () => {
+      emergencyStopMotors: mock.fn(async () => {
         wheelSpeedLeft = 0;
         wheelSpeedRight = 0;
       }),
@@ -776,11 +776,11 @@ describe("DriveLineController", () => {
 
   function createMockSensorController() {
     const requestNeutralMotorOutputs = mock.fn(async () => {});
-    const disableMotorDriver = mock.fn(async () => {});
+    const emergencyStopMotors = mock.fn(async () => {});
     return {
       setMotorWheelOutputs: mock.fn(async () => {}),
       requestNeutralMotorOutputs,
-      disableMotorDriver,
+      emergencyStopMotors,
       stopMotors: requestNeutralMotorOutputs,
       beginMotionSession: mock.fn(() => {}),
       endMotionSession: mock.fn(async () => {}),
@@ -1238,7 +1238,10 @@ describe("DriveLineController", () => {
     assert.equal(Number(commanded[0]) < Number(commanded[1]), true);
 
     await controller.stopCurrentDrive();
-    assert.equal(mockSensor.disableMotorDriver.mock.calls.length > 0, true);
+    // stopCurrentDrive brings the wheels to rest under the ramp profile
+    // (stopMotors), not the H-bridge disable.  The emergency-disable
+    // path is reserved for the operator stop button and stall events.
+    assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
     mockPose.setPose({
       position: createPosition(0, 0),
       heading: createInternalHeading(0),

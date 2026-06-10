@@ -334,7 +334,7 @@ This document maps problem domains to candidate files removing the need for Code
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
-  - motor API: `setMotorWheelOutputs(...)` sends the desired wheel pair through the normal I2C queue, `stopMotors()` issues an explicit graceful zero-output command, and `haltMotors()` issues a hard disable; unchanged motor commands are suppressed and the ESP32 latches the last accepted command until a newer one arrives
+  - motor API: `setMotorWheelOutputs(...)` sends the desired wheel pair through the normal I2C queue, `stopMotors()` issues a ramped zero-output stop with the drive still enabled so the ESP32 honours the configured deceleration profile, and `emergencyStopMotors()` issues a hard H-bridge disable for the operator stop button / stall detection / watchdog only; unchanged motor commands are suppressed and the ESP32 latches the last accepted command until a newer one arrives
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU

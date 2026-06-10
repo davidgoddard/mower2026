@@ -235,9 +235,8 @@ export class DriveLineController {
       if (subscribed) {
         this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       }
-      systemStop.requestStop("drive", "drive_line_error");
       try {
-        await this.sensorController.requestNeutralMotorOutputs();
+        await this.sensorController.stopMotors();
       } catch (stopError) {
         const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
         this.logger.warn("drive.line.stop_failed", { error: stopMessage });
@@ -587,13 +586,16 @@ export class DriveLineController {
 
   async stopCurrentDrive(): Promise<void> {
     this.stopRequested = true;
-    systemStop.requestStop("drive", "drive_stop_requested");
     this.poseFusion.off("poseUpdate", this.onPoseUpdate);
     if (this.currentDrive !== null && this.driveResolve !== null) {
       await this.finishStoppedDrive("Drive stopped by user request");
       return;
     }
-    await this.sensorController.disableMotorDriver();
+    // No drive in flight — just bring the wheels to rest under the ramp
+    // profile. The genuine emergency-stop path (operator stop button,
+    // stall detection) raises systemStop separately and disables drive
+    // there.
+    await this.sensorController.stopMotors();
   }
 
   getState(): DriveControllerState {
@@ -656,7 +658,10 @@ export class DriveLineController {
     if (this.stopRequested) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       try {
-        await this.sensorController.disableMotorDriver();
+        // User-initiated mid-drive stop: bring the wheels to rest under
+        // the deceleration profile. Only the emergency-stop path disables
+        // drive.
+        await this.sensorController.stopMotors();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn("drive.line.stop_failed", { error: message });
@@ -688,7 +693,9 @@ export class DriveLineController {
 
     if (systemStop.isStopped()) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
-      await this.sensorController.disableMotorDriver();
+      // systemStop is latched: the sensor loop is already re-asserting
+      // the H-bridge disable on every tick. We just need to terminate the
+      // in-flight drive promise. No motor command needed here.
       this.status = "stopped";
       this.currentDrive = null;
       this.logger.warn("drive.line.stopped", { durationMs: this.nowMillis() - this.driveStartTime, reason: "system_stop" });
@@ -1168,9 +1175,13 @@ export class DriveLineController {
     } catch (error) {
       this.status = "idle";
       this.currentDrive = null;
-      systemStop.requestStop("drive", "drive_completion_error");
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("drive.line.completion_error", { error: errorMessage });
+      try {
+        await this.sensorController.stopMotors();
+      } catch {
+        // Best-effort ramp during a completion error.
+      }
 
       this.driveResolve?.({
         startPosition: this.driveStartPosition,
@@ -1203,8 +1214,10 @@ export class DriveLineController {
     this.status = "stopped";
     this.currentDrive = null;
     this.stopRequested = false;
-    systemStop.requestStop("drive", errorMessage);
-    await this.sensorController.disableMotorDriver();
+    // Mid-drive bail-out (CTE limit, user stop, etc.): bring the wheels
+    // to rest under the deceleration profile. The emergency-stop path
+    // owns the H-bridge disable separately.
+    await this.sensorController.stopMotors();
     this.logger.warn("drive.line.stopped", {
       durationMs: this.nowMillis() - this.driveStartTime,
       reason: errorMessage,

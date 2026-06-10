@@ -22,7 +22,6 @@ export interface SensorHardwareGateway {
   setMotorWheelOutputs(
     leftWheelOutputPercent: number,
     rightWheelOutputPercent: number,
-    enableDrive?: boolean,
     options?: MotorCommandOptions,
   ): Promise<void>;
   stopMotors(): Promise<void>;
@@ -99,7 +98,6 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
   async setMotorWheelOutputs(
     leftWheelOutputPercent: number,
     rightWheelOutputPercent: number,
-    enableDrive: boolean = true,
     options?: MotorCommandOptions,
   ): Promise<void> {
     if (!this.motorClient) {
@@ -112,7 +110,7 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     });
     const raw = mapNormalizedWheelTargetsToRaw(this.motorMapping, normalized);
 
-    await this.motorClient.sendWheelSpeedCommand(raw.leftPercent, raw.rightPercent, enableDrive, options);
+    await this.motorClient.sendWheelSpeedCommand(raw.leftPercent, raw.rightPercent, options);
   }
 
   async stopMotors(): Promise<void> {

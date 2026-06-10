@@ -122,7 +122,10 @@ export class TurnController {
     this.status = "idle";
     const stalledTurn = this.currentTurn ?? request;
     this.currentTurn = null;
-    systemStop.requestStop("turn", "turn_heading_update_watchdog_expired");
+    // IMU watchdog expired: bring the wheels to rest under the ramp
+    // profile.  We do not raise systemStop because the H-bridge disable
+    // is reserved for the operator stop button and confirmed-stall
+    // detections; a stalled IMU update stream is bad but not motor-side.
     void this.sensorController.requestNeutralMotorOutputs().catch(() => {});
     const r = this.turnResolve;
     this.turnResolve = null;
@@ -210,11 +213,15 @@ export class TurnController {
       const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelOutputPercent);
       await this.sensorController.setMotorWheelOutputs(initialSpeeds.left, initialSpeeds.right);
     } catch (error) {
-      systemStop.requestStop("turn", "turn_error");
       if (subscribed) {
         this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
       }
       this.clearHeadingUpdateWatchdog();
+      try {
+        await this.sensorController.stopMotors();
+      } catch {
+        // Best-effort ramp during a turn-start failure.
+      }
       this.status = "idle";
       this.currentTurn = null;
       throw error;
@@ -421,12 +428,17 @@ export class TurnController {
       // Resolve the promise
       this.turnResolve?.(result);
     } catch (error) {
-      // Error during completion - ensure cleanup
+      // Error during completion - ensure cleanup. Ramped stop only; the
+      // emergency-disable path is reserved for genuine emergencies.
       this.status = "idle";
       this.currentTurn = null;
-      systemStop.requestStop("turn", "turn_completion_error");
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("turn.completion_error", { error: errorMessage });
+      try {
+        await this.sensorController.stopMotors();
+      } catch {
+        // Best-effort ramp during a completion error.
+      }
 
       this.turnResolve?.({
         requestedAngle: request.targetAngle,
@@ -443,14 +455,16 @@ export class TurnController {
   }
 
   /**
-   * Stop current turn immediately (emergency stop)
+   * Cancel the in-flight turn and bring the wheels to rest under the
+   * deceleration profile. Does NOT raise systemStop — the H-bridge
+   * disable is reserved for the operator stop button, stall detection,
+   * and other genuine emergencies.
    */
   async stopCurrentTurn(): Promise<void> {
     this.tuningStopRequested = this.tuningSequenceActive;
     if (this.currentTurn) {
       this.stopRequested = true;
     }
-    systemStop.requestStop("turn", "turn_stop_requested");
   }
 
   /**

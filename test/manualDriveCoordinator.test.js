@@ -48,7 +48,7 @@ function createSensorController() {
       async requestNeutralMotorOutputs() {
         commands.push(['stop']);
       },
-      async disableMotorDriver() {
+      async emergencyStopMotors() {
         commands.push(['halt']);
       },
       async stopMotors() {

@@ -298,6 +298,9 @@ export class SensorController extends EventEmitter {
     }
 
     try {
+      // Process shutdown is a legitimate H-bridge disable: there will be no
+      // further command for the watchdog to honour, so the motors must be
+      // explicitly off.
       await this.sendDisableMotorsCommand();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -411,10 +414,25 @@ export class SensorController extends EventEmitter {
       this.motorZeroCommandSinceMillis = null;
       this.lastImuMotionStopSummary = null;
     }
+    // While systemStop is latched, swallow the speed command rather than
+    // sending an enableDrive=false equivalent. The sensor loop is
+    // simultaneously re-asserting the dedicated disable command on every
+    // tick, so the H-bridges stay off and any in-flight wheel-target value
+    // reaching the ESP32 here would just race that disable.
+    if (systemStop.isStopped()) {
+      const current = this.primitivesStore.snapshot().motors;
+      this.primitivesStore.update({
+        motors: {
+          ...current,
+          commandedLeftWheelOutputPercent: normalizedLeftWheelOutputPercent,
+          commandedRightWheelOutputPercent: normalizedRightWheelOutputPercent,
+        },
+      });
+      return;
+    }
     await this.gateway.setMotorWheelOutputs(
       normalizedLeftWheelOutputPercent,
       normalizedRightWheelOutputPercent,
-      !systemStop.isStopped(),
       options,
     );
     const current = this.primitivesStore.snapshot().motors;
@@ -472,28 +490,31 @@ export class SensorController extends EventEmitter {
       this.stopRequestLogged = true;
     }
 
-    if (systemStop.isStopped()) {
-      await this.sendDisableMotorsCommand();
-      return;
-    }
-
+    // Always send a ramped target=0 with the drive enabled. The motor ESP32
+    // honours the configured deceleration profile only while enableDrive is
+    // true, so a "hard kill" stop would slam the H-bridges off and shock
+    // the drivetrain. Only the emergency stop path (systemStop latched +
+    // emergencyStopMotors()) is permitted to disable the drive.
     await this.sendGentleStopMotorsCommand();
-  }
-
-  async disableMotorDriver(): Promise<void> {
-    this.logger.warn("motors.halt_requested", {
-      currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
-      currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
-    });
-    await this.sendDisableMotorsCommand();
   }
 
   async stopMotors(): Promise<void> {
     await this.requestNeutralMotorOutputs();
   }
 
-  async haltMotors(): Promise<void> {
-    await this.disableMotorDriver();
+  /**
+   * Genuine emergency: kill the H-bridges immediately. Reserved for the
+   * operator stop button, a confirmed stall, the I2C watchdog, and other
+   * fatal-fault paths. Every other code site that wants to bring the
+   * mower to rest uses {@link stopMotors} so the deceleration profile is
+   * honoured and the drivetrain is not shocked.
+   */
+  async emergencyStopMotors(): Promise<void> {
+    this.logger.warn("motors.emergency_stop", {
+      currentCommandedLeftWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent,
+      currentCommandedRightWheelOutputPercent: this.primitivesStore.snapshot().motors.commandedRightWheelOutputPercent,
+    });
+    await this.sendDisableMotorsCommand();
   }
 
   getMotorZeroCommandSinceMillis(): number | null {
@@ -739,7 +760,7 @@ export class SensorController extends EventEmitter {
     } finally {
       if (systemStop.isStopped()) {
         try {
-          await this.disableMotorDriver();
+          await this.emergencyStopMotors();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logger.warn("sensor.motors.stop_during_global_stop_failed", { error: message });
@@ -800,6 +821,9 @@ export class SensorController extends EventEmitter {
   }
 
   private async pollAllSensors(loopStartedMillis: number): Promise<void> {
+    // While systemStop is latched the H-bridges must be off.  Re-asserting
+    // the disable on every loop tick is what defeats a stuck-on motor that
+    // was already commanded just before the latch took effect.
     if (systemStop.isStopped()) {
       await this.sendDisableMotorsCommand();
     }

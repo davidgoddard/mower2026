@@ -974,8 +974,9 @@ test('SensorController requires an active motor operation for speed commands and
     assert.equal(controller.getMotorZeroCommandSinceMillis(), 0);
     assert.equal(controller.getHeadingRebaseReadiness().safe, true);
 
-    // stopMotors() now issues a normalised zero-output speed command rather
-    // than asserting motor disable. Hard disable is reserved for haltMotors.
+    // stopMotors() issues a normalised zero-output speed command (with
+    // enableDrive=true) so the ESP32 honours the configured deceleration
+    // profile.  Hard disable is reserved for emergencyStopMotors().
     assert.deepEqual(calls, [
       { type: 'speed', left: 0.5, right: -0.5 },
       { type: 'speed', left: 0, right: 0 },
