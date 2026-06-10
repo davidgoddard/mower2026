@@ -110,7 +110,6 @@ export interface PoseFusionPrimitiveState {
   readonly yMeters: number | null;
   readonly headingDeg: number | null;
   readonly quality: "gnss" | "dead-reckoning" | "unknown";
-  readonly speedMetersPerSecond: number | null;
   readonly usingGnssHeading: boolean;
   readonly wheelSlipSuspected: boolean;
   /** Milliseconds since the last accepted good-quality GNSS position fix, or null if never received */
@@ -298,7 +297,6 @@ export class PoseFusion extends EventEmitter {
       yMeters: fusedY,
       headingDeg: fusedHeadingDeg,
       quality: this.currentQualityWithStalenessCheck(nowMs),
-      speedMetersPerSecond: null,
       usingGnssHeading: this.isUsingGnssHeading,
       wheelSlipSuspected: this.wheelSlipSuspected,
       gnssPositionAgeMs,
@@ -423,9 +421,9 @@ export class PoseFusion extends EventEmitter {
   }
 
   /**
-   * Live wheelbase used for differential odometry and consumed by the
-   * regulated pure-pursuit controllers so a calibration update takes effect
-   * mid-session without restart.
+   * Live wheelbase used for encoder differential odometry. Updated at the
+   * end of a dead-reckoning calibration run so future encoder integrations
+   * use the measured value without a session restart.
    */
   getWheelbaseMeters(): number {
     return this.wheelbaseMeters;
@@ -647,8 +645,8 @@ export class PoseFusion extends EventEmitter {
       this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
         disagreementDeg: headingDisagreementDeg,
         maxOverrideDisagreementDeg: STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG,
-        leftWheelSpeedMetersPerSecond: rebaseReadiness.leftWheelSpeedMetersPerSecond,
-        rightWheelSpeedMetersPerSecond: rebaseReadiness.rightWheelSpeedMetersPerSecond,
+        leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
+        rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
       });
       this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
       this.isUsingGnssHeading = true;

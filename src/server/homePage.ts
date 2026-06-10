@@ -645,11 +645,11 @@ ${getSensorWidgetScriptTag()}
             </div>
             <div class="metric-grid" style="grid-template-columns: repeat(2, 1fr);">
               <div class="metric">
-                <div class="metric-label">Left Speed</div>
+                <div class="metric-label">Left Encoder Δ</div>
                 <div class="metric-value" id="motor-left">—</div>
               </div>
               <div class="metric">
-                <div class="metric-label">Right Speed</div>
+                <div class="metric-label">Right Encoder Δ</div>
                 <div class="metric-value" id="motor-right">—</div>
               </div>
             </div>
@@ -827,11 +827,11 @@ ${getSensorWidgetScriptTag()}
             document.getElementById('motor-error').style.display = 'none';
           }
 
-          document.getElementById('motor-left').textContent = motors.leftWheelSpeedMetersPerSecond !== null
-            ? motors.leftWheelSpeedMetersPerSecond.toFixed(3) + ' m/s'
+          document.getElementById('motor-left').textContent = motors.leftEncoderDelta !== null
+            ? motors.leftEncoderDelta + ' ticks'
             : '—';
-          document.getElementById('motor-right').textContent = motors.rightWheelSpeedMetersPerSecond !== null
-            ? motors.rightWheelSpeedMetersPerSecond.toFixed(3) + ' m/s'
+          document.getElementById('motor-right').textContent = motors.rightEncoderDelta !== null
+            ? motors.rightEncoderDelta + ' ticks'
             : '—';
 
           // Update VU meters with peak tracking

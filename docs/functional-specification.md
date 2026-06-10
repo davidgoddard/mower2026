@@ -46,10 +46,10 @@ The system shall:
         - settle 
         - get current pose again
         - compute the travel line to the target
-        - apply a regulated pure pursuit controller that:
-            - finds a lookahead point on the line
-            - converts the line curvature into differential wheel speeds
-            - keeps a high cruise speed and only eases off modestly as the mower approaches the target or enters the tightest curves so grass friction does not dominate
+        - apply a straight-line drive controller that:
+            - holds full forward or full reverse wheel power throughout the drive — the cutting blade and drive are mechanically coupled and slow speeds risk stalling on grass
+            - applies a proportional left/right wheel trim from the current cross-track error to keep the mower on the line
+            - pivots in place toward the line heading when the body heading is badly misaligned and the mower is not yet inside the final approach window
             - uses the same geometry for reverse travel with the correct body-heading reference
         - loop reading current pose and measure CTE and remaining distance
         - when remaining distance to target is less than the learned braking distance request zero motor speed if that braking point is still before the target distance.
@@ -89,7 +89,7 @@ The system shall store persistent configuration in the `config/` folder, split b
 - `config/pose-calibration.json`
   - encoder meters-per-tick calibration
 - `config/path-following-parameters.json`
-  - closed-loop detection, verification standoff, turn-only threshold, obstacle outward offset, and pure-pursuit lookahead values used for traced obstacle path following
+  - closed-loop detection, verification standoff, turn-only threshold, and obstacle outward offset values used for traced obstacle path following
 - `config/turn-learning-parameters.json`
   - turn brake distances and turn learning history
 - `config/drive-learning-params.json`
@@ -601,7 +601,7 @@ The safe transition sequence at a strip end is therefore:
 1. **Stop at the standoff point.** The strip drive ends when the mower reaches the point on the strip that is the standoff distance back from the boundary.  If this is the first arrival at this boundary the mower performs the boundary trace described above before continuing.
 2. **Turn to face along the boundary.** The mower performs a turn-on-the-spot to align its heading tangentially with the recorded boundary at the nearest boundary point.
 3. **Line-follow the boundary to the next strip entry.** The mower switches to path-follower mode and travels along the recorded boundary — known safe ground — until it reaches the standoff point of the next strip's entry end.  Because the boundary has already been traced at this stage, this leg travels inward of the boundary by the standoff distance rather than on the boundary line itself.
-4. **Segment drive down the next strip.** At the next strip's entry standoff point the mower executes a segment drive: it turns on the spot to face along the strip axis and then drives the strip in a straight line using the pure-pursuit controller until it reaches the standoff point at the far end.
+4. **Segment drive down the next strip.** At the next strip's entry standoff point the mower executes a segment drive: it turns on the spot to face along the strip axis and then drives the strip in a straight line using the straight-line drive controller until it reaches the standoff point at the far end.
 
 This means inter-strip travel is always composed of two phases: a boundary-following phase (safe known ground, inside the standoff margin) and a segment-drive phase (straight mowing pass).  The planner pre-computes the full sequence of strip standoff endpoints and connector waypoints before motion starts so the operator can preview the entire planned route on the canvas.
 

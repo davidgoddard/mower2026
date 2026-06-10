@@ -1,12 +1,14 @@
 /**
- * Drive line controller - executes straight-line drives with regulated pure pursuit.
+ * Drive line controller - executes straight-line drives at full power.
  *
  * This component assumes the mower is already aligned with the line of travel.
- * It is responsible only for following the line, braking, learning, and short
- * distance training. Forward and reverse line travel share the same geometric
- * line-following model while reverse motion uses the correct body-heading
- * reference. Short training samples a fresh pose/heading for each leg.
- * Segment orchestration is handled by DriveController.
+ * It runs the wheels at full forward (or full reverse) power and applies a
+ * proportional left/right wheel-trim to keep cross-track error small; the
+ * trim is the only deviation from full power. The drive ends at the brake
+ * trigger learned by the drive learning model. There are no curved paths,
+ * no pure pursuit, and no concept of m/s in this controller — keeping motor
+ * load high is required because the cutting blade and drive are mechanically
+ * coupled and slow speeds can stall the mower.
  */
 
 import { SessionLogger } from "../logging/index.js";
@@ -25,7 +27,6 @@ import {
   distanceBetween,
   crossTrackError,
   calculateXError,
-  pointAlongLine,
 } from "../geometry/positionTypes.js";
 import {
   InternalHeading,
@@ -46,25 +47,17 @@ import {
   DRIVE_SETTLE_TIME_MS,
   DRIVE_HISTORY_MAX_SIZE,
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
-  MAX_WHEEL_SPEED_MPS_DEFAULT,
   MOTOR_RAMP_DOWN_TIME_MS,
-  DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_SHORT_BUCKET_STEP_METERS,
   DRIVE_SHORT_BUCKET_MAX_METERS,
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
   DRIVE_LONG_SAMPLE_DISTANCES_METERS,
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
   DRIVE_ARRIVAL_TOLERANCE_METERS,
-  DRIVE_PURSUIT_TARGET_SPEED_SCALE,
-  DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS,
-  DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS,
-  DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS,
-  DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS,
-  DRIVE_PURSUIT_CURVATURE_SPEED_GAIN,
-  DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
-  DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
-  DRIVE_PURSUIT_PIVOT_SPEED_SCALE,
-  DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS,
+  DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
+  DRIVE_STEERING_PIVOT_OUTPUT_PERCENT,
+  DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS,
+  DRIVE_STEERING_MAX_TRIM_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
@@ -111,6 +104,7 @@ export class DriveLineController {
   private driveStartPosition: Position | null = null;
   private driveStartHeading: InternalHeading | null = null;
   private driveStartPoseQuality: "gnss" | "dead-reckoning" | "unknown" = "unknown";
+  private brakeDecisionPoseQuality: "gnss" | "dead-reckoning" | "unknown" = "unknown";
   private driveTargetPosition: Position | null = null;
   private driveLineStart: Position | null = null;
   private driveLineEnd: Position | null = null;
@@ -160,6 +154,8 @@ export class DriveLineController {
           status: "error",
           errorMessage,
           timestamp: new Date().toISOString(),
+          learnApplied: false,
+          learnSkipReason: "drive_error",
         });
       });
     });
@@ -175,6 +171,7 @@ export class DriveLineController {
       this.driveStartTime = this.nowMillis();
       this.cteSamples = [];
       this.totalEncoderTicks = 0;
+      this.brakeDecisionPoseQuality = "unknown";
 
       const startPose = this.poseFusion.getCurrentPose();
       this.driveStartPosition = startPose.position;
@@ -224,7 +221,7 @@ export class DriveLineController {
       const initialRemainingAlongTrackDistance = unwrapMeters(
         distanceBetween(this.driveLineStart, this.driveLineEnd),
       );
-      await this.applyRegulatedPurePursuitControl(startPose, initialRemainingAlongTrackDistance);
+      await this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
 
       this.logger.info("drive.line.driving", {
         startPosition: {
@@ -682,6 +679,8 @@ export class DriveLineController {
         status: "stopped",
         errorMessage: "Drive stopped by user request",
         timestamp: new Date().toISOString(),
+        learnApplied: false,
+        learnSkipReason: "drive_stopped",
       });
       this.driveResolve = null;
       return;
@@ -706,6 +705,8 @@ export class DriveLineController {
         status: "stopped",
         errorMessage: "Drive stopped by system stop",
         timestamp: new Date().toISOString(),
+        learnApplied: false,
+        learnSkipReason: "drive_stopped",
       });
       this.stopRequested = false;
       this.driveResolve = null;
@@ -731,11 +732,12 @@ export class DriveLineController {
     const targetDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
     const projectedAlongTrackDistance = this.projectAlongTrackDistance(currentPosition);
     const remainingAlongTrackDistance = Math.max(0, targetDistance - projectedAlongTrackDistance);
-    await this.applyRegulatedPurePursuitControl(pose, remainingAlongTrackDistance);
+    await this.applyStraightLineControl(pose, remainingAlongTrackDistance);
 
     // Arrival is the hard stop condition. Braking only helps if there is still
     // enough distance left before the target to make it worthwhile.
     if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
+      this.brakeDecisionPoseQuality = pose.quality;
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       await this.completeDrive();
       return;
@@ -748,6 +750,7 @@ export class DriveLineController {
       unwrapMeters(brakeDistance) < targetDistance &&
       remainingAlongTrackDistance <= unwrapMeters(brakeDistance)
     ) {
+      this.brakeDecisionPoseQuality = pose.quality;
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       await this.completeDrive();
       return;
@@ -789,7 +792,7 @@ export class DriveLineController {
     ];
   }
 
-  private async applyRegulatedPurePursuitControl(
+  private async applyStraightLineControl(
     pose: Pose,
     remainingAlongTrackDistance: number,
   ): Promise<void> {
@@ -804,55 +807,50 @@ export class DriveLineController {
       return;
     }
 
+    // The "control heading" is the body heading projected forward along the
+    // commanded travel direction — the rear of the mower for reverse drives.
+    // Steering decisions compare it to the line heading.
     const lineHeading = this.getDriveLineHeading();
     const controlHeading = this.driveDirectionSign > 0
       ? pose.heading
       : createInternalHeading(unwrapInternalHeading(pose.heading) + 180);
-    const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)));
-    const ignoreTargetEndpoint = remainingAlongTrackDistance <= DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS;
+    const headingDiff = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading));
+    const headingErrorDeg = Math.abs(headingDiff);
 
-    if (headingErrorDeg >= DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG && remainingAlongTrackDistance > DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS) {
-      const turnSign = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)) >= 0 ? 1 : -1;
+    // Large heading errors are recovered by an in-place pivot rather than by
+    // trying to steer through them under power.  Skipped in the final
+    // approach window so we never pivot right next to the target.
+    if (
+      headingErrorDeg >= DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG &&
+      remainingAlongTrackDistance > DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS
+    ) {
+      const turnSign = headingDiff >= 0 ? 1 : -1;
       const { leftCommand, rightCommand } = this.calculatePivotCommands(turnSign, false);
       await this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
       return;
     }
 
-    const projectedAlongTrackDistance = this.projectAlongTrackDistance(pose.position);
-    const lookaheadDistance = this.calculateLookaheadDistance(remainingAlongTrackDistance, ignoreTargetEndpoint);
-    const lookaheadAlongTrackDistance = ignoreTargetEndpoint
-      ? Math.max(0, projectedAlongTrackDistance + lookaheadDistance)
-      : Math.max(
-          0,
-          Math.min(totalDistance, projectedAlongTrackDistance + lookaheadDistance),
-        );
-    const lookaheadPoint = pointAlongLine(
-      this.driveLineStart,
-      this.driveLineEnd,
-      createMeters(lookaheadAlongTrackDistance),
+    // Cross-track error is positive when the mower is to the right of the
+    // line (looking from start to end).  We bias the right wheel "forward"
+    // and the left wheel "back" by the same amount to rotate the body
+    // counterclockwise, pulling it back onto the line.  The same asymmetry
+    // applies in reverse — the base command flips sign, the trim direction
+    // does not.
+    const cte = unwrapMeters(crossTrackError(pose.position, this.driveLineStart, this.driveLineEnd));
+    const cteGain = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
+    const trim = this.clamp(
+      cte * cteGain,
+      -DRIVE_STEERING_MAX_TRIM_PERCENT,
+      DRIVE_STEERING_MAX_TRIM_PERCENT,
     );
-    const lookaheadFrame = this.toRobotFrame(pose.position, lookaheadPoint, controlHeading);
-    const lookaheadDistanceMeters = Math.hypot(lookaheadFrame.x, lookaheadFrame.y);
 
-    if (!Number.isFinite(lookaheadDistanceMeters) || lookaheadDistanceMeters < 1e-6) {
-      await this.sensorController.setMotorWheelOutputs(0, 0);
-      return;
-    }
-
-    const curvature = (2 * lookaheadFrame.y) / (lookaheadDistanceMeters * lookaheadDistanceMeters);
-    const targetLinearSpeedMps = this.calculateTargetLinearSpeedMps(remainingAlongTrackDistance, curvature);
-    const signedLinearSpeedMps = targetLinearSpeedMps * this.driveDirectionSign;
-    const angularSpeedRadPerSec = targetLinearSpeedMps * curvature;
-    const wheelBaseMeters = this.poseFusion.getWheelbaseMeters();
-    const leftWheelSpeedMps = signedLinearSpeedMps - (angularSpeedRadPerSec * wheelBaseMeters / 2);
-    const rightWheelSpeedMps = signedLinearSpeedMps + (angularSpeedRadPerSec * wheelBaseMeters / 2);
-
-    const leftCommand = this.clampNormalizedSpeed(leftWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
-    const rightCommand = this.clampNormalizedSpeed(rightWheelSpeedMps / MAX_WHEEL_SPEED_MPS_DEFAULT);
+    const baseCommand = this.driveDirectionSign * this.fullSpeedCommand;
+    const leftCommand = this.clampNormalizedSpeed(baseCommand - trim);
+    const rightCommand = this.clampNormalizedSpeed(baseCommand + trim);
     const normalizedCommands = this.enforceMinimumActiveArcCommands(
       leftCommand,
       rightCommand,
-      curvature,
+      trim,
     );
 
     await this.sensorController.setMotorWheelOutputs(
@@ -900,61 +898,21 @@ export class DriveLineController {
     return dx * lineDx + dy * lineDy;
   }
 
-  private calculateLookaheadDistance(remainingAlongTrackDistance: number, ignoreTargetEndpoint = false): number {
-    const targetSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
-    const dynamicLookahead = DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS +
-      (targetSpeedMps * DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS);
-    const clampedLookahead = Math.max(
-      DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS,
-      Math.min(DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS, dynamicLookahead),
-    );
-
-    if (ignoreTargetEndpoint) {
-      return clampedLookahead;
-    }
-
-    if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
-      return DRIVE_ARRIVAL_TOLERANCE_METERS;
-    }
-
-    return Math.min(clampedLookahead, Math.max(DRIVE_ARRIVAL_TOLERANCE_METERS, remainingAlongTrackDistance));
-  }
-
-  private calculateTargetLinearSpeedMps(remainingAlongTrackDistance: number, curvature: number): number {
-    const nominalTargetSpeedMps = MAX_WHEEL_SPEED_MPS_DEFAULT * this.fullSpeedCommand * DRIVE_PURSUIT_TARGET_SPEED_SCALE;
-    const curvatureScale = this.clamp(
-      1 / (1 + (Math.abs(curvature) * DRIVE_PURSUIT_CURVATURE_SPEED_GAIN)),
-      DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE,
-      1,
-    );
-    return nominalTargetSpeedMps * curvatureScale;
-  }
-
-  private toRobotFrame(
-    currentPosition: Position,
-    targetPosition: Position,
-    heading: InternalHeading,
-  ): { x: number; y: number } {
-    const dx = unwrapMeters(targetPosition.xMeters) - unwrapMeters(currentPosition.xMeters);
-    const dy = unwrapMeters(targetPosition.yMeters) - unwrapMeters(currentPosition.yMeters);
-    const theta = (unwrapInternalHeading(heading) * Math.PI) / 180;
-    const cosTheta = Math.cos(theta);
-    const sinTheta = Math.sin(theta);
-
-    return {
-      x: (dx * cosTheta) + (dy * sinTheta),
-      y: (-dx * sinTheta) + (dy * cosTheta),
-    };
-  }
-
   private clampNormalizedSpeed(speed: number): number {
     return this.clamp(speed, -this.fullSpeedCommand, this.fullSpeedCommand);
   }
 
+  /**
+   * Wheel-command sanity pass. If the trim has flipped one wheel's sign or
+   * zeroed it (which would otherwise issue a one-wheel scrub) the controller
+   * pivots in place toward the requested rotation direction instead. Otherwise
+   * each command is floored at the minimum active output so the motors do not
+   * stall on grass.
+   */
   private enforceMinimumActiveArcCommands(
     leftCommand: number,
     rightCommand: number,
-    curvature: number,
+    trim: number,
   ): { leftCommand: number; rightCommand: number } {
     if (leftCommand === 0 && rightCommand === 0) {
       return { leftCommand: 0, rightCommand: 0 };
@@ -963,7 +921,7 @@ export class DriveLineController {
     const leftSign = Math.sign(leftCommand);
     const rightSign = Math.sign(rightCommand);
     if (leftSign === 0 || rightSign === 0 || leftSign !== rightSign) {
-      const turnSign = curvature >= 0 ? 1 : -1;
+      const turnSign = trim >= 0 ? 1 : -1;
       return this.calculatePivotCommands(turnSign, true);
     }
 
@@ -979,7 +937,7 @@ export class DriveLineController {
   ): { leftCommand: number; rightCommand: number } {
     const pivotSpeed = Math.max(
       MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
-      this.fullSpeedCommand * DRIVE_PURSUIT_PIVOT_SPEED_SCALE,
+      DRIVE_STEERING_PIVOT_OUTPUT_PERCENT,
     );
     const directionSign = followTravelDirection ? this.driveDirectionSign : 1;
 
@@ -1064,19 +1022,46 @@ export class DriveLineController {
         driveDirectionSign: this.driveDirectionSign,
       });
 
-      if (this.currentDrive?.learningEnabled !== false) {
-        this.status = "learning";
-        await this.learningModel.updateFromDrive({
-          startPosition: this.driveStartPosition,
-          targetPosition: this.driveTargetPosition,
-          finalPosition,
-          driveDirectionSign: this.driveDirectionSign,
-          errorX,
-          errorY,
-          maxCte,
-          avgCte,
-          brakeDistanceUsed: brakeDistance,
-        });
+      let learnApplied = false;
+      let learnSkipReason: string | undefined;
+      if (this.currentDrive?.learningEnabled === false) {
+        learnSkipReason = "learning_disabled";
+      } else {
+        // Only feed a drive into the learner when every pose sample that
+        // shaped the drive was GNSS-quality: the start anchor (defines the
+        // line geometry and so the CTE), the brake-decision pose (defines
+        // when braking actually fired), and the final pose (defines the
+        // measured X/Y error). A dead-reckoning sample for any of the three
+        // would teach the learner to compensate for encoder drift rather
+        // than for the brake-time-vs-overshoot relationship we want it to
+        // model.
+        const learningPoseQualityOk =
+          this.driveStartPoseQuality === "gnss" &&
+          this.brakeDecisionPoseQuality === "gnss" &&
+          finalPose.quality === "gnss";
+        if (learningPoseQualityOk) {
+          this.status = "learning";
+          await this.learningModel.updateFromDrive({
+            startPosition: this.driveStartPosition,
+            targetPosition: this.driveTargetPosition,
+            finalPosition,
+            driveDirectionSign: this.driveDirectionSign,
+            errorX,
+            errorY,
+            maxCte,
+            avgCte,
+            brakeDistanceUsed: brakeDistance,
+          });
+          learnApplied = true;
+        } else {
+          learnSkipReason = "non_gnss_pose_sample";
+          this.logger.warn("drive.line.learning_skipped", {
+            reason: learnSkipReason,
+            startPoseQuality: this.driveStartPoseQuality,
+            brakeDecisionPoseQuality: this.brakeDecisionPoseQuality,
+            finalPoseQuality: finalPose.quality,
+          });
+        }
 
         // Only calibrate when both poses are GNSS-quality and the drive was
         // substantially straight (avg CTE < 3 cm), so encoder ticks reflect
@@ -1117,6 +1102,11 @@ export class DriveLineController {
         brakeDistanceUsed: brakeDistance,
         status: "success",
         timestamp: new Date().toISOString(),
+        learnApplied,
+        learnSkipReason,
+        startPoseQuality: this.driveStartPoseQuality,
+        brakeDecisionPoseQuality: this.brakeDecisionPoseQuality,
+        finalPoseQuality: finalPose.quality,
       };
 
       this.addToHistory(result);
@@ -1142,6 +1132,8 @@ export class DriveLineController {
         status: "error",
         errorMessage,
         timestamp: new Date().toISOString(),
+        learnApplied: false,
+        learnSkipReason: "drive_error",
       });
       this.driveResolve = null;
     }
@@ -1178,6 +1170,8 @@ export class DriveLineController {
       status: "stopped",
       errorMessage,
       timestamp: new Date().toISOString(),
+      learnApplied: false,
+      learnSkipReason: "drive_stopped",
     });
     this.driveResolve = null;
   }

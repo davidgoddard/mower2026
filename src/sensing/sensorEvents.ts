@@ -49,8 +49,6 @@ export interface GnssPositionUpdateEvent {
  * Emitted each time motor feedback is read (sensor loop cadence)
  */
 export interface MotorFeedbackUpdateEvent {
-  readonly leftWheelSpeedMetersPerSecond: number;
-  readonly rightWheelSpeedMetersPerSecond: number;
   readonly leftEncoderDelta: number;
   readonly rightEncoderDelta: number;
   readonly leftPwmAppliedPercent: number;
@@ -76,8 +74,8 @@ export interface ObstructionDetectedEvent {
   readonly timestampMillis: number;
   readonly leftMotorCurrentAmps: number;
   readonly rightMotorCurrentAmps: number;
-  readonly leftWheelSpeedMetersPerSecond: number;
-  readonly rightWheelSpeedMetersPerSecond: number;
+  readonly leftEncoderDelta: number;
+  readonly rightEncoderDelta: number;
 }
 
 /**

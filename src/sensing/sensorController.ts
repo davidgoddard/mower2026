@@ -27,7 +27,6 @@ import {
   createBodyFrameOffset,
 } from "../geometry/positionTypes.js";
 import {
-  ENCODER_METERS_PER_TICK_DEFAULT,
   SENSOR_CONTROLLER_POLL_INTERVAL_MS,
   SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS,
   SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS,
@@ -54,11 +53,13 @@ const DEG_TO_RAD = Math.PI / 180;
 const IMU_DIAGNOSTIC_WINDOW_MS = 5_000;
 const IMU_DIAGNOSTIC_MAX_SAMPLES = 1_000;
 const IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT = 20;
-// Wheel-speed magnitude (m/s) below which both wheels are considered
-// stationary for heading-rebase / stop-detection purposes. Picked above
-// encoder + sensor noise; the slow mower will never mistake genuine motion
-// for noise at 1 cm/s.
-const WHEELS_STATIONARY_SPEED_THRESHOLD_MPS = 0.01;
+// Encoder-delta magnitude (ticks per motor poll) at or below which a wheel
+// is considered stationary for heading-rebase / stop-detection purposes.
+// Zero ticks is the most honest signal; a tolerance of one tick absorbs
+// single-count counter jitter without admitting genuine motion. We do not
+// derive m/s here because the encoder-to-metres calibration is not yet
+// available and the rest of the system avoids absolute speeds on principle.
+const WHEELS_STATIONARY_TICK_THRESHOLD = 1;
 const IMU_BIAS_RECALIBRATION_WINDOW_MS = 2_000;
 const IMU_BIAS_RECALIBRATION_MIN_SAMPLES = 20;
 const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
@@ -128,10 +129,10 @@ export interface ImuDiagnosticSummary {
 export interface HeadingRebaseReadiness {
   readonly safe: boolean;
   readonly motorCommandActive: boolean;
-  readonly leftWheelSpeedMetersPerSecond: number | null;
-  readonly rightWheelSpeedMetersPerSecond: number | null;
+  readonly leftEncoderDelta: number | null;
+  readonly rightEncoderDelta: number | null;
   readonly wheelsStationary: boolean;
-  readonly maxWheelSpeedMetersPerSecond: number;
+  readonly maxStationaryTickDelta: number;
 }
 
 export class SensorController extends EventEmitter {
@@ -152,7 +153,6 @@ export class SensorController extends EventEmitter {
   private loopPromise: Promise<void> | null = null;
   private lastMotorCommand: MotorCommand | null = null;
   private stopRequestLogged = false;
-  private previousMotorFeedbackTimestampMillis: number | null = null;
   private motorCommandActiveSinceMillis: number | null = null;
   private motorZeroCommandSinceMillis: number | null = null;
   private motorStoppedSinceMillis: number | null = null;
@@ -217,7 +217,6 @@ export class SensorController extends EventEmitter {
     this.running = true;
     systemStop.clearStop("sensor-controller-start");
     this.lastMotorCommand = null;
-    this.previousMotorFeedbackTimestampMillis = null;
     this.motorCommandActiveSinceMillis = null;
     this.motorZeroCommandSinceMillis = null;
     this.motorStoppedSinceMillis = null;
@@ -262,8 +261,6 @@ export class SensorController extends EventEmitter {
         error: null,
         commandedLeftWheelOutputPercent: null,
         commandedRightWheelOutputPercent: null,
-        leftWheelSpeedMetersPerSecond: null,
-        rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
         rightRpm: null,
         leftEncoderDelta: null,
@@ -506,25 +503,25 @@ export class SensorController extends EventEmitter {
   getHeadingRebaseReadiness(): HeadingRebaseReadiness {
     const motorCommandActive = this.isMotorCommandMotion(this.lastMotorCommand);
     const motors = this.primitivesStore.snapshot().motors;
-    const leftWheelSpeedMetersPerSecond = motors.leftWheelSpeedMetersPerSecond;
-    const rightWheelSpeedMetersPerSecond = motors.rightWheelSpeedMetersPerSecond;
-    // Treat unknown wheel speed (no feedback yet) as stationary so the
+    const leftEncoderDelta = motors.leftEncoderDelta;
+    const rightEncoderDelta = motors.rightEncoderDelta;
+    // Treat unknown encoder delta (no feedback yet) as stationary so the
     // bootstrap rebase can fire before the first motor-feedback sample.
     const leftStationary =
-      leftWheelSpeedMetersPerSecond === null ||
-      Math.abs(leftWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS;
+      leftEncoderDelta === null ||
+      Math.abs(leftEncoderDelta) <= WHEELS_STATIONARY_TICK_THRESHOLD;
     const rightStationary =
-      rightWheelSpeedMetersPerSecond === null ||
-      Math.abs(rightWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS;
+      rightEncoderDelta === null ||
+      Math.abs(rightEncoderDelta) <= WHEELS_STATIONARY_TICK_THRESHOLD;
     const wheelsStationary = leftStationary && rightStationary;
 
     return {
       safe: !motorCommandActive && wheelsStationary,
       motorCommandActive,
-      leftWheelSpeedMetersPerSecond,
-      rightWheelSpeedMetersPerSecond,
+      leftEncoderDelta,
+      rightEncoderDelta,
       wheelsStationary,
-      maxWheelSpeedMetersPerSecond: WHEELS_STATIONARY_SPEED_THRESHOLD_MPS,
+      maxStationaryTickDelta: WHEELS_STATIONARY_TICK_THRESHOLD,
     };
   }
 
@@ -797,8 +794,8 @@ export class SensorController extends EventEmitter {
       idleThresholdMs: IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS,
       zeroCommandSinceMillis: this.motorZeroCommandSinceMillis,
       stoppedSinceMillis,
-      leftWheelSpeedMetersPerSecond: rebaseReadiness.leftWheelSpeedMetersPerSecond,
-      rightWheelSpeedMetersPerSecond: rebaseReadiness.rightWheelSpeedMetersPerSecond,
+      leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
+      rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
     });
   }
 
@@ -1001,19 +998,12 @@ export class SensorController extends EventEmitter {
   private async pollMotors(): Promise<void> {
     try {
       const sample = await this.gateway.readMotorFeedback();
-      const leftMetersPerTick  = this.poseCalibration?.getLeftEncoderMetersPerTick()  ?? ENCODER_METERS_PER_TICK_DEFAULT;
-      const rightMetersPerTick = this.poseCalibration?.getRightEncoderMetersPerTick() ?? ENCODER_METERS_PER_TICK_DEFAULT;
-      const leftWheelSpeed  = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.leftEncoderDelta,  leftMetersPerTick);
-      const rightWheelSpeed = this.computeWheelSpeedMetersPerSecond(sample.timestampMillis, sample.rightEncoderDelta, rightMetersPerTick);
-      this.previousMotorFeedbackTimestampMillis = sample.timestampMillis;
       const current = this.primitivesStore.snapshot().motors;
       this.primitivesStore.update({
         motors: {
           ...current,
           status: "running",
           error: null,
-          leftWheelSpeedMetersPerSecond: leftWheelSpeed,
-          rightWheelSpeedMetersPerSecond: rightWheelSpeed,
           leftRpm: null,
           rightRpm: null,
           leftEncoderDelta: sample.leftEncoderDelta,
@@ -1029,8 +1019,6 @@ export class SensorController extends EventEmitter {
 
       // Emit motor feedback update event
       this.emit(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, {
-        leftWheelSpeedMetersPerSecond: leftWheelSpeed,
-        rightWheelSpeedMetersPerSecond: rightWheelSpeed,
         leftEncoderDelta: sample.leftEncoderDelta,
         rightEncoderDelta: sample.rightEncoderDelta,
         leftPwmAppliedPercent: sample.leftPwmAppliedPercent,
@@ -1049,7 +1037,7 @@ export class SensorController extends EventEmitter {
         sample.rightMotorCurrentAmps ?? null,
         sample.faultFlags,
       );
-      this.updateMotorStoppedState(leftWheelSpeed, rightWheelSpeed);
+      this.updateMotorStoppedState(sample.leftEncoderDelta, sample.rightEncoderDelta);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.primitivesStore.snapshot().motors;
@@ -1172,8 +1160,8 @@ export class SensorController extends EventEmitter {
       timestampMillis: this.nowMillis(),
       leftMotorCurrentAmps: leftMotorCurrentAmps ?? 0,
       rightMotorCurrentAmps: rightMotorCurrentAmps ?? 0,
-      leftWheelSpeedMetersPerSecond: current.leftWheelSpeedMetersPerSecond ?? 0,
-      rightWheelSpeedMetersPerSecond: current.rightWheelSpeedMetersPerSecond ?? 0,
+      leftEncoderDelta: current.leftEncoderDelta ?? 0,
+      rightEncoderDelta: current.rightEncoderDelta ?? 0,
     });
     systemStop.requestStop("sensors", "motor_stall_detected");
   }
@@ -1249,33 +1237,15 @@ export class SensorController extends EventEmitter {
     });
   }
 
-  private computeWheelSpeedMetersPerSecond(
-    timestampMillis: number,
-    encoderDelta: number,
-    metersPerTick: number,
-  ): number {
-    if (this.previousMotorFeedbackTimestampMillis === null) {
-      return 0;
-    }
-
-    const elapsedMillis = timestampMillis - this.previousMotorFeedbackTimestampMillis;
-    if (elapsedMillis <= 0) {
-      return 0;
-    }
-
-    const elapsedSeconds = elapsedMillis / 1000;
-    return (encoderDelta * metersPerTick) / elapsedSeconds;
-  }
-
   private updateMotorStoppedState(
-    leftWheelSpeedMetersPerSecond: number,
-    rightWheelSpeedMetersPerSecond: number,
+    leftEncoderDelta: number,
+    rightEncoderDelta: number,
   ): void {
     const command = this.lastMotorCommand;
     const stopCommandIssued = command !== null && !this.isMotorCommandMotion(command);
     const wheelsStationary =
-      Math.abs(leftWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS &&
-      Math.abs(rightWheelSpeedMetersPerSecond) <= WHEELS_STATIONARY_SPEED_THRESHOLD_MPS;
+      Math.abs(leftEncoderDelta) <= WHEELS_STATIONARY_TICK_THRESHOLD &&
+      Math.abs(rightEncoderDelta) <= WHEELS_STATIONARY_TICK_THRESHOLD;
 
     if (!stopCommandIssued || !wheelsStationary) {
       this.motorStoppedSinceMillis = null;

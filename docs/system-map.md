@@ -157,9 +157,9 @@ This document maps problem domains to candidate files removing the need for Code
   - surfaces short-distance and segment training progress to the drive tuning page state while a training run is active
   - segment-learning runner for 105cm to 6m fixed-line runs in 20cm steps
   - integrates with retry system for obstruction recovery
-- `src/control/driveLineController.ts`: straight-line drive controller using regulated pure pursuit and brake distance learning
+- `src/control/driveLineController.ts`: straight-line drive controller with proportional cross-track trim and brake distance learning
   - executes straight-line drives from current position to target position
-  - computes a lookahead point on the travel line, converts curvature into differential wheel speeds, and keeps a high cruise speed until the learned brake trigger is reached; only curvature/heading recovery reduce speed before that so the stop learner sees a stable ramp-up / maybe-plateau / ramp-down model
+  - holds full forward (or full reverse) wheel power and applies a proportional left/right wheel trim from the cross-track error to keep the mower on the line; the only deviations from full power are this trim and an in-place pivot when heading error exceeds the rotate-to-heading threshold and the mower is not yet inside the final approach window
   - reverse travel uses the same geometric controller with the correct body-heading reference
   - hard arrival stop plus shared full-speed brake distance learning for drives beyond 1m
   - short-drive stop-trigger learning uses exact buckets at 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, and 100cm

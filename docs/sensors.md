@@ -90,7 +90,6 @@ Current sensor-related shape:
     "yMeters": -1.234,
     "headingDeg": 42.1,
     "quality": "gnss",
-    "speedMetersPerSecond": null,
     "usingGnssHeading": true
   },
   "motors": {
@@ -98,8 +97,6 @@ Current sensor-related shape:
     "error": null,
     "commandedLeftWheelOutputPercent": null,
     "commandedRightWheelOutputPercent": null,
-    "leftWheelSpeedMetersPerSecond": null,
-    "rightWheelSpeedMetersPerSecond": null,
     "leftRpm": null,
     "rightRpm": null,
     "leftEncoderDelta": null,
@@ -325,9 +322,9 @@ Motor message types:
 - `watchdogHealthy` (`uint8`)
 - `faultFlags` (`uint16`)
 
-The ESP32 motor node now sends raw encoder deltas only. The Pi-side sensor controller converts those deltas into wheel speed estimates using the persisted encoder calibration in `config/pose-calibration.json`.
+The ESP32 motor node sends raw encoder deltas only. The Pi-side sensor controller exposes those deltas verbatim — no metres-per-second conversion is performed at runtime, because the encoder-to-metres calibration is the responsibility of the dead-reckoning calibrator alone and the rest of the system avoids absolute speeds on principle.
 
-For control/odometry purposes the most important motor feedback value is encoder delta per sample (`leftEncoderDelta`, `rightEncoderDelta`), which is intended to be integrated over time.
+For control and stationary-detection purposes the only motor feedback values consumed are the raw encoder deltas per sample (`leftEncoderDelta`, `rightEncoderDelta`).
 
 ### Motor queue priorities
 

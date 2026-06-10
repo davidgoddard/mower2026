@@ -384,10 +384,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   let rebaseReadiness = {
     safe: true,
     motorCommandActive: false,
-    leftWheelSpeedMetersPerSecond: 0,
-    rightWheelSpeedMetersPerSecond: 0,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
     wheelsStationary: true,
-    maxWheelSpeedMetersPerSecond: 0.01,
+    maxStationaryTickDelta: 1,
   };
   sensorController.setHeading = mock.fn();
   if (!sensorController.getHeadingRebaseReadiness) {
@@ -425,10 +425,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   rebaseReadiness = {
     safe: false,
     motorCommandActive: true,
-    leftWheelSpeedMetersPerSecond: 0.4,
-    rightWheelSpeedMetersPerSecond: 0.4,
+    leftEncoderDelta: 12,
+    rightEncoderDelta: 12,
     wheelsStationary: false,
-    maxWheelSpeedMetersPerSecond: 0.01,
+    maxStationaryTickDelta: 1,
   };
   sensorController.getCurrentTimeMillis = mock.fn(() => 2000);
 
@@ -456,10 +456,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   rebaseReadiness = {
     safe: true,
     motorCommandActive: false,
-    leftWheelSpeedMetersPerSecond: 0,
-    rightWheelSpeedMetersPerSecond: 0,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
     wheelsStationary: true,
-    maxWheelSpeedMetersPerSecond: 0.01,
+    maxStationaryTickDelta: 1,
   };
   sensorController.getCurrentTimeMillis = mock.fn(() => 2300);
 
@@ -578,7 +578,6 @@ test("PoseFusion initialises encoder-only track from first IMU heading on first 
   sensorController.emit("motorFeedbackUpdate", {
     leftEncoderDelta: 100, rightEncoderDelta: 100,
     leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-    leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
     leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
     watchdogHealthy: true, faultFlags: 0,
     timestampMillis: 200,
@@ -615,7 +614,6 @@ test("PoseFusion drConfidence starts at 1 and remains at 1 when encoders agree w
     sensorController.emit("motorFeedbackUpdate", {
       leftEncoderDelta: 10, rightEncoderDelta: 10,
       leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
       leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
       watchdogHealthy: true, faultFlags: 0,
       timestampMillis: 105 + i * 5,
@@ -655,7 +653,6 @@ test("PoseFusion drConfidence decays when encoder-implied turn disagrees with IM
     sensorController.emit("motorFeedbackUpdate", {
       leftEncoderDelta: 5, rightEncoderDelta: 200,
       leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
       leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
       watchdogHealthy: true, faultFlags: 0,
       timestampMillis: 105 + i * 5,
@@ -692,7 +689,6 @@ test("PoseFusion drConfidence recovers after slip resolves", async () => {
     sensorController.emit("motorFeedbackUpdate", {
       leftEncoderDelta: 5, rightEncoderDelta: 200,
       leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
       leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
       watchdogHealthy: true, faultFlags: 0,
       timestampMillis: 105 + i * 5,
@@ -710,7 +706,6 @@ test("PoseFusion drConfidence recovers after slip resolves", async () => {
     sensorController.emit("motorFeedbackUpdate", {
       leftEncoderDelta: 10, rightEncoderDelta: 10,
       leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-      leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
       leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
       watchdogHealthy: true, faultFlags: 0,
       timestampMillis: 305 + i * 5,
@@ -731,10 +726,10 @@ test("PoseFusion re-anchors encoder-only X/Y on every TRUSTED GNSS position even
   sensorController.getHeadingRebaseReadiness = () => ({
     safe: false,
     motorCommandActive: true,
-    leftWheelSpeedMetersPerSecond: 0.4,
-    rightWheelSpeedMetersPerSecond: 0.4,
+    leftEncoderDelta: 12,
+    rightEncoderDelta: 12,
     wheelsStationary: false,
-    maxWheelSpeedMetersPerSecond: 0.01,
+    maxStationaryTickDelta: 1,
   });
   sensorController.getMotorZeroCommandSinceMillis = () => null;
   sensorController.getCurrentTimeMillis = () => 99999;
@@ -761,7 +756,6 @@ test("PoseFusion re-anchors encoder-only X/Y on every TRUSTED GNSS position even
   sensorController.emit("motorFeedbackUpdate", {
     leftEncoderDelta: 500, rightEncoderDelta: 500,
     leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-    leftWheelSpeedMetersPerSecond: 0.4, rightWheelSpeedMetersPerSecond: 0.4,
     leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
     watchdogHealthy: true, faultFlags: 0, timestampMillis: 400,
   });
@@ -835,7 +829,6 @@ test("PoseFusion re-anchors encoder-only track and boosts confidence when GNSS r
   sensorController.emit("motorFeedbackUpdate", {
     leftEncoderDelta: 500, rightEncoderDelta: 500,
     leftMotorCurrentAmps: 0, rightMotorCurrentAmps: 0,
-    leftWheelSpeedMetersPerSecond: 0, rightWheelSpeedMetersPerSecond: 0,
     leftPwmAppliedPercent: 50, rightPwmAppliedPercent: 50,
     watchdogHealthy: true, faultFlags: 0, timestampMillis: 350,
   });

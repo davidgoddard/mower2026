@@ -410,11 +410,12 @@ ${getSensorWidgetScriptTag()}
                     <th>X Error</th>
                     <th>Y Error</th>
                     <th>Status</th>
+                    <th>Learned</th>
                   </tr>
                 </thead>
                 <tbody id="driveResultsTableBody">
                   <tr>
-                    <td colspan="6" class="empty">Run drive tuning to see distance, average and maximum CTE, and arrival error here.</td>
+                    <td colspan="7" class="empty">Run drive tuning to see distance, average and maximum CTE, arrival error, and whether the learner accepted each run here.</td>
                   </tr>
                 </tbody>
               </table>
@@ -499,7 +500,27 @@ ${getAppDialogScript()}
           item.errorY ?? "",
           item.avgCteMeters ?? "",
           item.maxCteMeters ?? "",
+          item.learnApplied ?? "",
+          item.learnSkipReason ?? "",
         ].join("|");
+      }
+
+      function describeLearnSkipReason(reason) {
+        if (reason === "non_gnss_pose_sample") return "GNSS lost during run";
+        if (reason === "learning_disabled") return "Learning disabled";
+        if (reason === "drive_stopped") return "Run stopped";
+        if (reason === "drive_error") return "Run errored";
+        return reason || "Unknown";
+      }
+
+      function describeLearnedCell(item) {
+        if (item.learnApplied === true) {
+          return { className: "good", text: "Yes" };
+        }
+        if (item.learnApplied === false) {
+          return { className: "bad", text: "No: " + describeLearnSkipReason(item.learnSkipReason) };
+        }
+        return { className: "warn", text: "—" };
       }
 
       function appendDriveRows(rows) {
@@ -577,7 +598,7 @@ ${getAppDialogScript()}
           const rows = driveResultRows.slice(-maxDriveResultRows).reverse();
           const tbody = document.getElementById("driveResultsTableBody");
           if (rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">Run drive tuning to see distance, average and maximum CTE, and arrival error here.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="empty">Run drive tuning to see distance, average and maximum CTE, arrival error, and whether the learner accepted each run here.</td></tr>';
             return;
           }
 
@@ -587,6 +608,10 @@ ${getAppDialogScript()}
             const maxCteMeters = item.maxCteMeters ?? 0;
             const xErrorMeters = item.errorX ?? 0;
             const yErrorMeters = item.errorY ?? 0;
+            const learnedCell = describeLearnedCell(item);
+            const statusText = item.status === "error" && item.errorMessage
+              ? item.status + ": " + item.errorMessage
+              : (item.status ?? "-");
             return \`
               <tr>
                 <td>\${formatCm(distanceMeters)}</td>
@@ -594,7 +619,8 @@ ${getAppDialogScript()}
                 <td class="\${statusClass(maxCteMeters)}">\${formatCm(maxCteMeters)}</td>
                 <td class="\${statusClass(xErrorMeters)}">\${formatCm(xErrorMeters)}</td>
                 <td class="\${statusClass(yErrorMeters)}">\${formatCm(yErrorMeters)}</td>
-                <td>\${item.status ?? "-"}</td>
+                <td>\${statusText}</td>
+                <td class="\${learnedCell.className}">\${learnedCell.text}</td>
               </tr>
             \`;
           }).join("");

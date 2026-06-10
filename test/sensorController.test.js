@@ -101,8 +101,8 @@ test('SensorController polls IMU and stores latest integrated heading state', as
     assert.equal(snapshot.gnss.headingDeg, 90);
     assert.equal(snapshot.gnss.fixType, 'fixed');
     assert.equal(snapshot.motors.status, 'running');
-    assert.equal(snapshot.motors.leftWheelSpeedMetersPerSecond, 0.2);
-    assert.equal(snapshot.motors.rightWheelSpeedMetersPerSecond, 0.21);
+    assert.equal(snapshot.motors.leftEncoderDelta, 200);
+    assert.equal(snapshot.motors.rightEncoderDelta, 210);
 
     const imuDiagnostics = controller.getRecentImuDiagnosticSummary();
     assert.ok(imuDiagnostics);
@@ -1523,10 +1523,10 @@ test('SensorController obstruction event reports the latest wheel speeds, not li
       const stallEvent = obstructionEvents.find((e) => e.type === 'stall');
       assert.ok(stallEvent, 'expected a stall obstruction event');
       // Left wheel is moving (encoder delta 16 ticks per cycle). The event must
-      // reflect the observed wheel speed, not a hardcoded zero.
-      assert.notEqual(stallEvent.leftWheelSpeedMetersPerSecond, 0,
-        'left wheel speed in obstruction event should not be zero when encoder ticks are non-zero');
-      assert.equal(typeof stallEvent.rightWheelSpeedMetersPerSecond, 'number');
+      // reflect the observed encoder delta rather than a hardcoded zero.
+      assert.notEqual(stallEvent.leftEncoderDelta, 0,
+        'left encoder delta in obstruction event should not be zero when encoder ticks are non-zero');
+      assert.equal(typeof stallEvent.rightEncoderDelta, 'number');
 
       await controller.stop();
     } finally {

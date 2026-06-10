@@ -1820,8 +1820,6 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         error: message,
         commandedLeftWheelOutputPercent: null,
         commandedRightWheelOutputPercent: null,
-        leftWheelSpeedMetersPerSecond: null,
-        rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
         rightRpm: null,
         leftEncoderDelta: null,

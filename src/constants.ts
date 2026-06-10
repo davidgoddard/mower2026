@@ -272,12 +272,6 @@ export const CONTROLLER_SPEED_SIGN_DEFAULT = 1;
 // =============================================================================
 
 /**
- * Default maximum wheel speed in meters per second (physical system limit)
- * Based on 185 RPM motors with wheel circumference
- */
-export const MAX_WHEEL_SPEED_MPS_DEFAULT = 0.75;
-
-/**
  * Default maximum wheel output command (normalized range [-1, 1])
  * 1.0 = full forward output
  */
@@ -289,11 +283,6 @@ export const MAX_WHEEL_OUTPUT_PERCENT_DEFAULT = 1.0;
  * the sensor controller treats it as a likely stall.
  */
 export const MOTOR_STALL_COMMAND_THRESHOLD_PERCENT = 0.35;
-
-/**
- * Motor stall detection threshold for measured wheel speed.
- */
-export const MOTOR_STALL_SPEED_THRESHOLD_MPS = 0.01;
 
 /**
  * Motor stall detection threshold for encoder deltas.
@@ -515,20 +504,6 @@ export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 2.0;
 export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
 
 /**
- * Nonlinear CTE correction factor.
- * Higher = correction grows faster as lateral drift grows.
- */
-export const DRIVE_CTE_NONLINEARITY_DEFAULT = 3.0;
-
-/**
- * Default wheel base used by the regulated pure pursuit controller (meters).
- * Treated as an uncalibrated starting point — overwritten when the operator
- * runs the dead-reckoning calibration tool.  Keep aligned with
- * WHEEL_BASE_METERS_DEFAULT below.
- */
-export const DRIVE_WHEEL_BASE_METERS_DEFAULT = 0.55;
-
-/**
  * Default wheel track / wheelbase for dead-reckoning differential odometry (meters).
  * Centre-to-centre distance between the left and right wheels.  This is the
  * starting value used when no calibration file exists; the dead-reckoning
@@ -546,69 +521,32 @@ export const WHEEL_BASE_METERS_MIN_PLAUSIBLE = 0.20;
 export const WHEEL_BASE_METERS_MAX_PLAUSIBLE = 1.50;
 
 /**
- * Fraction of maximum wheel speed used as the nominal target speed for regulated pure pursuit.
- * Tuned to keep the mower moving with useful inertia while the ESP32 handles motor ramping.
+ * Heading-error angle at which the straight-line driver gives up trying to
+ * steer through the misalignment under power and pivots in place to
+ * re-acquire the line first.
  */
-export const DRIVE_PURSUIT_TARGET_SPEED_SCALE = 1.0;
+export const DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG = 45;
 
 /**
- * Base lookahead distance used by regulated pure pursuit (meters).
+ * Wheel output magnitude used for the in-place pivot recovery.  Kept above
+ * the motor minimum-active output so it never deadbands out.
  */
-export const DRIVE_PURSUIT_BASE_LOOKAHEAD_METERS = 0.3;
+export const DRIVE_STEERING_PIVOT_OUTPUT_PERCENT = 0.35;
 
 /**
- * Minimum pure pursuit lookahead distance (meters).
+ * Within this remaining-along-track distance from the target the driver no
+ * longer reaches for an in-place pivot.  The brake trigger is imminent and
+ * pivoting next to the target would just waste arrival accuracy.
  */
-export const DRIVE_PURSUIT_MIN_LOOKAHEAD_METERS = 0.3;
+export const DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
 
 /**
- * Maximum pure pursuit lookahead distance (meters).
+ * Maximum left/right wheel-trim magnitude applied by the proportional CTE
+ * correction.  Trims above this would make one wheel reverse while the other
+ * is still forward, which the minimum-active-arc handler turns into an
+ * in-place pivot — capping here keeps that pivot escalation deliberate.
  */
-export const DRIVE_PURSUIT_MAX_LOOKAHEAD_METERS = 0.9;
-
-/**
- * How long the lookahead distance grows in proportion to the commanded speed (seconds).
- */
-export const DRIVE_PURSUIT_LOOKAHEAD_TIME_SECONDS = 1.5;
-
-/**
- * Distance over which the controller starts to slow down as it approaches the target (meters).
- */
-export const DRIVE_PURSUIT_APPROACH_SCALING_DISTANCE_METERS = 0.6;
-
-/**
- * Minimum speed scale applied while approaching the target.
- * Kept high enough to preserve momentum through grass tufts.
- */
-export const DRIVE_PURSUIT_MIN_APPROACH_SPEED_SCALE = 0.85;
-
-/**
- * Gain applied to curvature when slowing down for tighter arcs.
- * Lower values keep more speed through moderate bends.
- */
-export const DRIVE_PURSUIT_CURVATURE_SPEED_GAIN = 1.5;
-
-/**
- * Minimum speed scale allowed by curvature regulation.
- */
-export const DRIVE_PURSUIT_MIN_CURVATURE_SPEED_SCALE = 0.75;
-
-/**
- * Angle threshold at which the controller rotates in place to recover heading alignment.
- */
-export const DRIVE_PURSUIT_ROTATE_TO_HEADING_MIN_ANGLE_DEG = 45;
-
-/**
- * Wheel output scale used for in-place rotation recovery.
- */
-export const DRIVE_PURSUIT_PIVOT_SPEED_SCALE = 0.35;
-
-/**
- * Once the mower is within this distance of the target, the target endpoint
- * should stop influencing steering. The controller should keep following the
- * original straight line using the current cross-track error only.
- */
-export const DRIVE_PURSUIT_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
+export const DRIVE_STEERING_MAX_TRIM_PERCENT = 0.35;
 
 /**
  * Upper bound for the dedicated short-distance stop-trigger buckets (meters).
@@ -692,25 +630,3 @@ export const ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE = 1e-2;
  */
 export const DRIVE_TARGET_CTE_METERS = 0.05;
 
-/**
- * Distance from the target within which heading preview correction fades out (meters)
- * This keeps the controller from making sharp turn-ins right at the target.
- */
-export const DRIVE_HEADING_CORRECTION_FADEOUT_METERS = 0.25;
-
-/**
- * Maximum distance used when projecting heading error into an equivalent lateral offset (meters)
- * Larger remaining distances still cap at this preview range to avoid over-correction.
- */
-export const DRIVE_HEADING_CORRECTION_MAX_LOOKAHEAD_METERS = 1.0;
-
-/**
- * Blend factor for heading-preview correction
- * Higher = heading errors influence steering more strongly.
- */
-export const DRIVE_HEADING_CORRECTION_BLEND = 0.65;
-
-/**
- * Maximum absolute heading error used by the preview correction (degrees)
- */
-export const DRIVE_HEADING_CORRECTION_MAX_DEGREES = 45;

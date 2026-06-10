@@ -1966,7 +1966,7 @@ ${getAppDialogScript()}
 
         if (primitives.poseFusion && primitives.poseFusion.status === 'ok') {
           const pose = primitives.poseFusion;
-          $("mapStats").textContent = \`Pose: \${format(pose.headingDeg, 1)}° | speed: \${format(pose.speedMetersPerSecond, 3)} m/s\`;
+          $("mapStats").textContent = \`Pose: \${format(pose.headingDeg, 1)}° | quality: \${pose.quality}\`;
           if (pose.xMeters != null && pose.yMeters != null) {
             addPositionToHistory(
               pose.xMeters,

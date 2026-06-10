@@ -19,6 +19,8 @@ export interface DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
 }
 
+export type DrivePoseQuality = "gnss" | "dead-reckoning" | "unknown";
+
 export interface DriveResult {
   readonly startPosition: Position;
   readonly targetPosition: Position;
@@ -32,6 +34,26 @@ export interface DriveResult {
   readonly status: "success" | "error" | "stopped";
   readonly errorMessage?: string;
   readonly timestamp: string;
+  /**
+   * Did this drive's measurements feed the brake-distance / CTE-gain learner?
+   * False for any non-success status, for drives whose `learningEnabled` flag
+   * was off, and for drives where any of the three pose-quality samples
+   * (start, brake-decision, final) was not GNSS.
+   */
+  readonly learnApplied?: boolean;
+  /**
+   * Short reason the learner was not applied — populated only when
+   * `learnApplied` is false and the run otherwise succeeded. Examples:
+   * `"learning_disabled"`, `"non_gnss_pose_sample"`.
+   */
+  readonly learnSkipReason?: string;
+  /**
+   * Pose-quality samples taken at the three points the learner cares about.
+   * Surfaced on the result so operators can see why a run was skipped.
+   */
+  readonly startPoseQuality?: DrivePoseQuality;
+  readonly brakeDecisionPoseQuality?: DrivePoseQuality;
+  readonly finalPoseQuality?: DrivePoseQuality;
 }
 
 export type SegmentTrainingPhase =

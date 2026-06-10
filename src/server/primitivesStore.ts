@@ -31,7 +31,6 @@ export interface PrimitiveSnapshot {
     yMeters: number | null;
     headingDeg: number | null;
     quality: "gnss" | "dead-reckoning" | "unknown";
-    speedMetersPerSecond: number | null;
     usingGnssHeading: boolean;
     gnssPositionAgeMs: number | null;
     encoderOnlyXMeters: number | null;
@@ -45,8 +44,6 @@ export interface PrimitiveSnapshot {
     error: string | null;
     commandedLeftWheelOutputPercent: number | null;
     commandedRightWheelOutputPercent: number | null;
-    leftWheelSpeedMetersPerSecond: number | null;
-    rightWheelSpeedMetersPerSecond: number | null;
     leftRpm: number | null;
     rightRpm: number | null;
     leftEncoderDelta: number | null;
@@ -135,7 +132,6 @@ export class PrimitivesStore {
         yMeters: null,
         headingDeg: null,
         quality: "unknown",
-        speedMetersPerSecond: null,
         usingGnssHeading: false,
         gnssPositionAgeMs: null,
         encoderOnlyXMeters: null,
@@ -149,8 +145,6 @@ export class PrimitivesStore {
         error: null,
         commandedLeftWheelOutputPercent: null,
         commandedRightWheelOutputPercent: null,
-        leftWheelSpeedMetersPerSecond: null,
-        rightWheelSpeedMetersPerSecond: null,
         leftRpm: null,
         rightRpm: null,
         leftEncoderDelta: null,
