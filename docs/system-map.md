@@ -58,6 +58,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/systemStop.ts`: global stop latch for user actions, timeouts, and runtime safety faults.
 - `src/server/appServer.ts`: stop API entry points and operation reset wiring.
   - `POST /api/stop` is the unconditional emergency-stop route used by the web UI; it raises `systemStop`, immediately sends a hard motor halt, and then fans out stop requests to active controllers/runners.
+  - every other POST action route clears `systemStop` before handling, so any non-stop operator action on the web UI re-enables motion after a prior stop button press
 - `src/sensing/sensorController.ts`: sensor loop stop checks and stop-command keepalive while stopped.
   - every wheel-output write merges the current global stop latch into the motor payload enable/disable flag, so once stop is raised no later command can re-enable drive until a new user-requested session clears the latch
   - neutral stop requests while `systemStop` is latched must resend disabled motor frames rather than zero-speed enabled frames, so the ESP32 keeps seeing a hard stop and never resumes on a stale command
@@ -312,6 +313,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorNodeClient.ts`: motor command send + feedback polling over framed I2C protocol.
   - includes motor current sensing data in feedback samples
 - `src/controller/hidGameController.ts`: HID game controller input adapter and button event source.
+- `external-hardware/manual-tests/controller_inspector.js`: HID controller bring-up inspector; prints connection state, decoded axes/buttons, and raw packet data without depending on the legacy full-system parameter file.
 - `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
 - `src/control/manualDriveCoordinator.ts`: manual-drive loop; maps controller input to motor commands.
   - arm/disarm mapping: `right-top` arms, `left-top` disarms and stops.

@@ -1,5 +1,4 @@
 import { HidGameController } from "./hidGameController.js";
-import { loadSystemParameters } from "./systemConfig.js";
 
 let lastPrintedMillis = 0;
 const observedRange = {
@@ -61,10 +60,20 @@ function formatSnapshot(snapshot) {
   };
 }
 
-const { parameters } = await loadSystemParameters();
+const controllerSteeringSign = Number(process.env.MOWER_CONTROLLER_STEERING_SIGN ?? -1);
+const controllerSpeedSign = Number(process.env.MOWER_CONTROLLER_SPEED_SIGN ?? 1);
+
+if (controllerSteeringSign !== -1 && controllerSteeringSign !== 1) {
+  throw new Error("MOWER_CONTROLLER_STEERING_SIGN must be -1 or 1.");
+}
+
+if (controllerSpeedSign !== -1 && controllerSpeedSign !== 1) {
+  throw new Error("MOWER_CONTROLLER_SPEED_SIGN must be -1 or 1.");
+}
+
 const controller = new HidGameController({
-  steeringSign: parameters.controllerSteeringSign,
-  speedSign: parameters.controllerSpeedSign,
+  steeringSign: controllerSteeringSign,
+  speedSign: controllerSpeedSign,
 });
 
 const heartbeat = setInterval(() => {

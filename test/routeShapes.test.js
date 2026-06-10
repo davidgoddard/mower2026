@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PrimitivesStore, routeServerRequest } from "../dist/index.js";
+import { PrimitivesStore, routeServerRequest, shouldClearSystemStopForPost } from "../dist/index.js";
 
 const APP = "mower-core-test";
 
@@ -145,4 +145,19 @@ test("unknown routes return a 404 not_found envelope", () => {
   assert.equal(route.statusCode, 404);
   const body = JSON.parse(route.body);
   assert.equal(body.error, "not_found");
+});
+
+test("non-stop POST actions clear the stop latch while stop actions do not", () => {
+  assert.equal(shouldClearSystemStopForPost("/api/turn/execute"), true);
+  assert.equal(shouldClearSystemStopForPost("/api/drive/execute"), true);
+  assert.equal(shouldClearSystemStopForPost("/api/path/record/start"), true);
+  assert.equal(shouldClearSystemStopForPost("/api/mowing/start"), true);
+
+  assert.equal(shouldClearSystemStopForPost("/api/stop"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/turn/stop"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/drive/stop"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/path/stop"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/segment/stop"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/mowing/stop"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/dead-reckoning/stop"), false);
 });

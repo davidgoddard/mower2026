@@ -267,7 +267,7 @@ async function main() {
 
     console.log(`Spinning in place at ${SPIN_POWER.toFixed(2)} output until at least 360 degrees of heading change is collected.`);
 
-    sensorController.beginMotorOperation();
+    sensorController.beginMotionSession();
     await sensorController.setMotorWheelOutputs(-SPIN_POWER, SPIN_POWER);
     collectingSamples = true;
     console.log("Spin underway. Collecting GNSS samples.");
@@ -284,7 +284,7 @@ async function main() {
     }
 
     await sensorController.stopMotors();
-    await sensorController.endMotorOperation();
+    sensorController.endMotionSession();
 
     const { centerX, centerY, radius } = fitCircle(samples);
     const bodyFrameOffset = computeBodyFrameOffset(samples, centerX, centerY);
@@ -322,7 +322,7 @@ async function main() {
     }
 
     try {
-      await sensorController.endMotorOperation();
+      sensorController.endMotionSession();
     } catch {
       // Ignore shutdown errors and continue closing hardware.
     }

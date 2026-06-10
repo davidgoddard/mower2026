@@ -11,7 +11,7 @@
     "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
     "test": "node --test test/*.test.js",
     "start": "./scripts/mower-launch.sh",
-    "test:controller": "node ./test/hidGameController.js",
+    "test:controller": "node ./external-hardware/manual-tests/controller_inspector.js",
     "lint": "npm run typecheck",
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
     "clean": "rm -rf dist"

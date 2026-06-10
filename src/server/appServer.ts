@@ -124,6 +124,20 @@ function getTurnAlignmentThresholdDeg(config: PathFollowingConfig | null): numbe
     ?? DEFAULT_PATH_FOLLOWING_PARAMETERS.turnAlignmentThresholdDeg;
 }
 
+const STOP_ACTION_PATHS = new Set([
+  "/api/stop",
+  "/api/turn/stop",
+  "/api/drive/stop",
+  "/api/path/stop",
+  "/api/segment/stop",
+  "/api/mowing/stop",
+  "/api/dead-reckoning/stop",
+]);
+
+export function shouldClearSystemStopForPost(pathname: string): boolean {
+  return !STOP_ACTION_PATHS.has(pathname);
+}
+
 export function routeServerRequest(
   method: string,
   pathname: string,
@@ -619,6 +633,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     // Handle POST endpoints
     if (method === "POST") {
       try {
+        if (shouldClearSystemStopForPost(requestUrl.pathname)) {
+          systemStop.clearStop(`post:${requestUrl.pathname}`);
+        }
+
         const body = await readRequestBody(request);
 
         if (requestUrl.pathname === "/api/stop") {

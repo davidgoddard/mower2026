@@ -64,13 +64,13 @@ export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
  * Manual drive needs a much snappier feel than autonomous motion while still
  * staying on the normal motor command path.
  */
-export const MANUAL_DRIVE_RAMP_UP_TIME_MS = 120;
+export const MANUAL_DRIVE_RAMP_UP_TIME_MS = 500;
 
 /**
  * Manual drive motor ramp-down time in milliseconds.
  * Stick release should settle quickly without relying on a hard disable.
  */
-export const MANUAL_DRIVE_RAMP_DOWN_TIME_MS = 120;
+export const MANUAL_DRIVE_RAMP_DOWN_TIME_MS = 700;
 
 /**
  * Maximum pose-update emission rate in milliseconds.

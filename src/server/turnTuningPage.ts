@@ -1018,7 +1018,8 @@ ${getAppDialogScript()}
     let stopRequestPending = false;
 
     function isTurnRunActive(turnState, validationState) {
-      if ((turnState?.status ?? 'idle') !== 'idle') {
+      const turnStatus = turnState?.status ?? 'idle';
+      if (turnStatus !== 'idle' && turnStatus !== 'stopped') {
         return true;
       }
       return Boolean(validationState?.running);
