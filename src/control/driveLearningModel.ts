@@ -184,7 +184,13 @@ export class DriveLearningModel {
         -DRIVE_SHORT_MAX_FRACTION_STEP,
         DRIVE_SHORT_MAX_FRACTION_STEP,
       );
-      const clampedFraction = Math.max(0.05, Math.min(0.95, currentFraction + adjustment));
+      // Allow the full [0, 1] range. The previous floor of 0.05 prevented
+      // the learner from settling at "no brake distance — brake at the
+      // target" which is the natural answer for short drives where the
+      // mower has never reached cruise speed and so has very little to
+      // ramp down through. The arrival-tolerance check inside the line
+      // controller picks up at fraction = 0 anyway.
+      const clampedFraction = Math.max(0, Math.min(1, currentFraction + adjustment));
       const cteGainBefore = this.getCteGainForDirection(direction);
       this.updateCteGain(direction, maxCteValue, avgCteValue);
       const cteGainAfter = this.getCteGainForDirection(direction);

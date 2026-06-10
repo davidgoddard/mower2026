@@ -172,6 +172,12 @@ export class PoseFusion extends EventEmitter {
   private lastGnssRejectionReason: string | null = null;
   private lastGnssRejectionAtMs: number | null = null;
   private lastGnssRejectionLogAtMs: Map<string, number> = new Map();
+  // Stationary heading-rebase log throttle. The override path fires on
+  // every GNSS sample (~20 Hz) while the mower is parked but the
+  // validator hasn't yet promoted the heading to TRUSTED. Logging each
+  // sample drowns the disk and can starve the Pi.  Limit to one log per
+  // second per stationary window.
+  private lastStationaryOverrideLogAtMs: number | null = null;
   /**
    * Distance between the most recent accepted GNSS sample and the fused
    * position at that moment.  Diagnostic only — no longer used for gating.
@@ -642,16 +648,22 @@ export class PoseFusion extends EventEmitter {
       this.applyGnssHeadingRebase(event.heading, event.timestampMillis);
       this.isUsingGnssHeading = true;
     } else if (canStationaryOverrideRebase) {
-      this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
-        disagreementDeg: headingDisagreementDeg,
-        maxOverrideDisagreementDeg: STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG,
-        leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
-        rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
-      });
+      // Throttle to one log per second; this branch fires per GNSS sample
+      // (~20 Hz) while parked.
+      if (this.lastStationaryOverrideLogAtMs === null || nowMs - this.lastStationaryOverrideLogAtMs >= 1000) {
+        this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
+          disagreementDeg: headingDisagreementDeg,
+          maxOverrideDisagreementDeg: STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG,
+          leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
+          rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
+        });
+        this.lastStationaryOverrideLogAtMs = nowMs;
+      }
       this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
       this.isUsingGnssHeading = true;
     } else {
       this.isUsingGnssHeading = false;
+      this.lastStationaryOverrideLogAtMs = null;
     }
 
     this.emitPoseUpdate(true);
