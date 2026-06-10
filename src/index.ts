@@ -17,6 +17,9 @@ export {
 
 export { SessionLogger } from "./logging/index.js";
 
+export { systemStop } from "./control/systemStop.js";
+export type { SystemStopState } from "./control/systemStop.js";
+
 // Export all constants for external use
 export * from "./constants.js";
 export { routeServerRequest, startMowerServer, resolveServerPort, shouldClearSystemStopForPost } from "./server/appServer.js";

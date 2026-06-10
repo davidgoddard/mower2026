@@ -14,6 +14,7 @@ import {
   headingDifference,
   unwrapRelativeAngle,
   unwrapInternalHeading,
+  systemStop,
 } from "../../dist/index.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +254,20 @@ async function main() {
     sensorController.on("gnssPositionUpdate", onGnssPositionUpdate);
     await sensorController.start();
 
+    // Clear any system-stop latch left over from a previous session and
+    // issue a fresh zero-output command. The ESP32 latches the last
+    // command it accepted, so a stale disable from an earlier run will
+    // otherwise keep the H-bridges off even though the script believes
+    // it is sending a spin command.
+    if (systemStop.isStopped()) {
+      const previousState = systemStop.snapshot();
+      systemStop.clearStop("rotation-center-calibration-start");
+      console.log(
+        `Cleared a latched system stop before starting (was set by ${previousState.source ?? "unknown"}: ${previousState.reason ?? "unknown"}).`,
+      );
+    }
+    await sensorController.setMotorWheelOutputs(0, 0);
+
     console.log("Waiting for a reliable GNSS fix before starting the spin.");
     const waitStarted = Date.now();
     while (!fixReady) {
@@ -267,10 +282,22 @@ async function main() {
 
     console.log(`Spinning in place at ${SPIN_POWER.toFixed(2)} output until at least 360 degrees of heading change is collected.`);
 
+    // If anything raised a stop between the initial clear and the spin,
+    // surface it explicitly rather than silently sending a spin command
+    // that the gateway will mark as enableDrive=false.
+    if (systemStop.isStopped()) {
+      const stale = systemStop.snapshot();
+      throw new Error(
+        `system stop is latched (source=${stale.source ?? "?"}, reason=${stale.reason ?? "?"}); aborting before spin command`,
+      );
+    }
+
     sensorController.beginMotionSession();
     await sensorController.setMotorWheelOutputs(-SPIN_POWER, SPIN_POWER);
     collectingSamples = true;
-    console.log("Spin underway. Collecting GNSS samples.");
+    console.log(
+      `Spin underway (commanded left=${(-SPIN_POWER).toFixed(2)}, right=${SPIN_POWER.toFixed(2)}, enableDrive=true). Collecting GNSS samples.`,
+    );
 
     const spinStarted = Date.now();
     while (Math.abs(headingChangeDeg) < 360) {
