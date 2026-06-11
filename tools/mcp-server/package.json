@@ -1,0 +1,17 @@
+{
+  "name": "mower-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server exposing mower build/test/sync/log tools to Claude Code",
+  "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  }
+}

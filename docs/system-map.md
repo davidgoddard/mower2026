@@ -436,3 +436,9 @@ This document maps problem domains to candidate files removing the need for Code
 - `tsconfig.json`: TypeScript compiler and project type-check settings.
 - `src/index.ts`: main module exports including heading type system for external consumers.
 - `test/index.test.js`: basic runtime module tests including heading normalization.
+
+## Remote Tooling — On-Mower MCP Server
+- `docs/mcp-server.md`: usage guide and operator/workstation setup. **Required reading**; see [CLAUDE.md](../CLAUDE.md).
+- `tools/mcp-server/server.js`: HTTP MCP server that runs on the mower. Exposes four tools to Claude Code on the dev workstation: `getLatestLogs(n)`, `build` (`npm run build`), `test` (`npm run test`), `sync` (`git fetch --all --prune` + `git pull --ff-only`). Bearer-token auth, stateless streamable-HTTP transport, per-request server/transport pair.
+- `tools/mcp-server/package.json`: isolated dependency manifest for the server (`@modelcontextprotocol/sdk`, `zod`); kept separate from runtime dependencies so the mower app's `node_modules` is not affected.
+- `systemd/mower-mcp.service.template`: systemd unit template; reads `MOWER_MCP_TOKEN` from `/etc/mower-mcp.env` and runs the server as the `mower` user on port 8765 by default.

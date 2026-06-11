@@ -1,0 +1,24 @@
+[Unit]
+Description=Mower MCP server (Claude Code remote tooling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__MOWER_USER__
+Group=__MOWER_GROUP__
+WorkingDirectory=__MOWER_REPO_DIR__/tools/mcp-server
+Environment=HOME=/home/__MOWER_USER__
+Environment=MOWER_REPO_ROOT=__MOWER_REPO_DIR__
+Environment=MOWER_LOG_DIR=__MOWER_REPO_DIR__/logs
+Environment=MOWER_MCP_HOST=0.0.0.0
+Environment=MOWER_MCP_PORT=8765
+EnvironmentFile=/etc/mower-mcp.env
+ExecStart=/usr/bin/node __MOWER_REPO_DIR__/tools/mcp-server/server.js
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
