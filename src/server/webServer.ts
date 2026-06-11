@@ -85,13 +85,17 @@ function proxyRequest(
     headers: cloneHeaders(request.headers, `${options.controlHost}:${options.controlPort}`),
   };
 
-  const upstreamRequest = createProxyRequest(requestOptions, (upstreamResponse: {
-    statusCode?: number | null;
-    headers: Record<string, string>;
-    pipe: (destination: any) => void;
-  }) => {
-    response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
-    upstreamResponse.pipe(response as any);
+  const upstreamRequest = createProxyRequest(requestOptions, (upstreamResponse: IncomingMessage) => {
+    // `IncomingHttpHeaders` allows `string | string[] | undefined`, but
+    // `response.writeHead` wants `OutgoingHttpHeaders`-shaped values. Coerce
+    // arrays into a comma-joined string and drop undefined entries.
+    const flatHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(upstreamResponse.headers)) {
+      if (value === undefined) continue;
+      flatHeaders[key] = Array.isArray(value) ? value.join(", ") : value;
+    }
+    response.writeHead(upstreamResponse.statusCode ?? 502, flatHeaders);
+    upstreamResponse.pipe(response);
   });
 
   upstreamRequest.on("error", (error: Error) => {
@@ -107,7 +111,7 @@ function proxyRequest(
     }));
   });
 
-  request.pipe(upstreamRequest as any);
+  request.pipe(upstreamRequest);
 }
 
 export async function startMowerWebServer(options: StartMowerWebServerOptions): Promise<RunningMowerWebServer> {
@@ -146,7 +150,9 @@ export async function startMowerWebServer(options: StartMowerWebServerOptions): 
   });
 
   const boundAddress = server.address();
-  const boundPort = typeof boundAddress?.port === "number" ? boundAddress.port : port;
+  const boundPort = boundAddress !== null && typeof boundAddress === "object"
+    ? boundAddress.port
+    : port;
 
   return {
     host,

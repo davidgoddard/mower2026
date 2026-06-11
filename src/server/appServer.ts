@@ -1726,7 +1726,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
   state = "running";
   const boundAddress = server.address();
-  const boundPort = typeof boundAddress?.port === "number" ? boundAddress.port : port;
+  const boundPort = boundAddress !== null && typeof boundAddress === "object"
+    ? boundAddress.port
+    : port;
 
   try {
     motorCalibration = new MotorCalibration({ logger });
