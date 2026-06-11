@@ -49,15 +49,13 @@ import {
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
   DRIVE_LONG_SAMPLE_DISTANCES_METERS,
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
+  DRIVE_SHORT_TARGET_Y_ERROR_METERS,
   DRIVE_SEGMENT_MIN_DISTANCE_METERS,
   DRIVE_SEGMENT_MAX_DISTANCE_METERS,
   DRIVE_SEGMENT_STEP_METERS,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
-
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
+import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 
 export interface DriveControllerOptions {
   sensorController: SensorController;
@@ -251,10 +249,7 @@ export class DriveController {
    */
   async stopCurrentDrive(): Promise<void> {
     this.stopRequested = true;
-    const stopCurrentTurn = (this.turnController as any).stopCurrentTurn;
-    if (typeof stopCurrentTurn === "function") {
-      await stopCurrentTurn.call(this.turnController);
-    }
+    await this.turnController.stopCurrentTurn();
     await this.lineDriveController.stopCurrentDrive();
   }
 
@@ -273,22 +268,9 @@ export class DriveController {
   }
 
   /**
-   * Drive forward to an arbitrary target. Used by line-context retry recovery
-   * to retry the original target after reversing out of a grass jam.
-   */
-  async driveToTarget(target: { xMeters: number; yMeters: number }): Promise<void> {
-    systemStop.clearStop("drive-retry-forward");
-    await this.executeDrive({
-      targetPosition: createPosition(target.xMeters, target.yMeters),
-      driveDirectionSign: 1,
-      learningEnabled: false,
-    });
-  }
-
-  /**
-   * Drive in reverse for a fixed duration. Used by line-context retry recovery
-   * (and as the path-context fallback when no recent targets are available) to
-   * back the mower out of a grass jam before retrying.
+   * Drive in reverse for a fixed duration. Used by the path-context retry
+   * fallback when no recent targets are available, to back the mower out of a
+   * grass jam before the boundary follow restarts.
    */
   async reverseForDuration(durationMs: number): Promise<void> {
     systemStop.clearStop("drive-retry-reverse");
@@ -471,7 +453,7 @@ export class DriveController {
     maxDistanceMeters?: number;
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
-    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_Y_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const startDistanceMeters = options?.startDistanceMeters;
     const maxDistanceMeters = options?.maxDistanceMeters;
@@ -550,7 +532,7 @@ export class DriveController {
     progressReporter?: SegmentTrainingProgressReporter;
   }): Promise<SegmentTrainingResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
-    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_Y_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const externalProgressReporter = options?.progressReporter;
     const results: SegmentTrainingResult[] = [];
@@ -906,20 +888,8 @@ export class DriveController {
     );
   }
 
-  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    let remainingMs = delayMs;
-
-    while (remainingMs > 0) {
-      if (this.stopRequested || systemStop.isStopped()) {
-        return false;
-      }
-
-      const chunkMs = Math.min(50, remainingMs);
-      await this.sleep(chunkMs);
-      remainingMs -= chunkMs;
-    }
-
-    return true;
+  private sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    return sleepWithStopChecks(delayMs, () => this.stopRequested, this.sleep);
   }
 
   private addToHistory(result: DriveResult): void {

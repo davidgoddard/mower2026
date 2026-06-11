@@ -9,7 +9,7 @@ import {
   WHEEL_BASE_METERS_MAX_PLAUSIBLE,
   WHEEL_BASE_METERS_MIN_PLAUSIBLE,
 } from "../constants.js";
-import { readJsonFile, writeJsonFile } from "./jsonFileStore.js";
+import { quarantineCorruptFile, readJsonFile, writeJsonFile } from "./jsonFileStore.js";
 
 export interface PoseCalibrationParameters {
   version: number;
@@ -78,9 +78,11 @@ export class PoseCalibration {
           using: "defaults",
         });
       } else {
+        const quarantined = await quarantineCorruptFile(this.parametersPath, new Date().toISOString());
         this.logger.warn("pose.calibration.load_failed", {
           path: this.parametersPath,
           error: error instanceof Error ? error.message : String(error),
+          quarantinedTo: quarantined,
           using: "defaults",
         });
       }
@@ -91,9 +93,10 @@ export class PoseCalibration {
   }
 
   async saveParameters(): Promise<void> {
-    this.parameters.updatedAt = new Date().toISOString();
+    const updated: PoseCalibrationParameters = { ...this.parameters, updatedAt: new Date().toISOString() };
     try {
-      await writeJsonFile(this.parametersPath, this.parameters);
+      await writeJsonFile(this.parametersPath, updated);
+      this.parameters = updated;
     } catch (error) {
       this.logger.error("pose.calibration.save_failed", {
         path: this.parametersPath,
@@ -150,23 +153,6 @@ export class PoseCalibration {
     this.parameters.wheelbaseMeters = wheelbaseMeters;
     // shared scalar = average
     this.parameters.encoderMetersPerTick = (leftMetersPerTick + rightMetersPerTick) / 2;
-  }
-
-  /** Phase-4: store calibration measured during the forward straight phase. */
-  setForwardWheelCalibration(leftMetersPerTick: number, rightMetersPerTick: number): void {
-    this.parameters.forwardLeftEncoderMetersPerTick = leftMetersPerTick;
-    this.parameters.forwardRightEncoderMetersPerTick = rightMetersPerTick;
-    // Mirror into the symmetric fields so callers that don't yet know
-    // about per-direction values see the most recent forward calibration.
-    this.parameters.leftEncoderMetersPerTick = leftMetersPerTick;
-    this.parameters.rightEncoderMetersPerTick = rightMetersPerTick;
-    this.parameters.encoderMetersPerTick = (leftMetersPerTick + rightMetersPerTick) / 2;
-  }
-
-  /** Phase-4: store calibration measured during the reverse straight phase. */
-  setReverseWheelCalibration(leftMetersPerTick: number, rightMetersPerTick: number): void {
-    this.parameters.reverseLeftEncoderMetersPerTick = leftMetersPerTick;
-    this.parameters.reverseRightEncoderMetersPerTick = rightMetersPerTick;
   }
 
   getForwardLeftEncoderMetersPerTick(): number {

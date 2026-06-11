@@ -1015,7 +1015,6 @@ ${getAppDialogScript()}
     let turnStateSnapshot = { status: 'idle' };
     let realPoseValidationSnapshot = null;
     let pendingTurnActionId = null;
-    let stopRequestPending = false;
 
     function isTurnRunActive(turnState, validationState) {
       const turnStatus = turnState?.status ?? 'idle';

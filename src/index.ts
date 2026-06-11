@@ -26,7 +26,7 @@ export { routeServerRequest, startMowerServer, resolveServerPort, shouldClearSys
 export { startMowerWebServer } from "./server/webServer.js";
 export { PrimitivesStore } from "./server/primitivesStore.js";
 export { getSegmentTestingPageHtml } from "./server/segmentTestingPage.js";
-export { I2cBusController } from "./i2c/i2cBusController.js";
+export { I2cBusController, I2cTaskReplacedError } from "./i2c/i2cBusController.js";
 export { I2C_PRIORITY } from "./i2c/priorities.js";
 export { Bmi160ImuSensor } from "./imu/bmi160ImuSensor.js";
 export { SensorController } from "./sensing/sensorController.js";

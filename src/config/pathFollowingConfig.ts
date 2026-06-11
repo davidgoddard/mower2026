@@ -1,7 +1,7 @@
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { PATH_FOLLOWING_PARAMETERS_PATH } from "../constants.js";
-import { readJsonFile, writeJsonFile } from "./jsonFileStore.js";
+import { quarantineCorruptFile, readJsonFile, writeJsonFile } from "./jsonFileStore.js";
 
 export interface PathFollowingParameters {
   version: number;
@@ -103,9 +103,11 @@ export class PathFollowingConfig {
           using: "defaults",
         });
       } else {
+        const quarantined = await quarantineCorruptFile(this.parametersPath, new Date().toISOString());
         this.logger.warn("path_following.config.load_failed", {
           path: this.parametersPath,
           error: error instanceof Error ? error.message : String(error),
+          quarantinedTo: quarantined,
           using: "defaults",
         });
       }
@@ -116,9 +118,10 @@ export class PathFollowingConfig {
   }
 
   async saveParameters(): Promise<void> {
-    this.parameters.updatedAt = new Date().toISOString();
+    const updated: PathFollowingParameters = { ...this.parameters, updatedAt: new Date().toISOString() };
     try {
-      await writeJsonFile(this.parametersPath, this.parameters);
+      await writeJsonFile(this.parametersPath, updated);
+      this.parameters = updated;
     } catch (error) {
       this.logger.error("path_following.config.save_failed", {
         path: this.parametersPath,

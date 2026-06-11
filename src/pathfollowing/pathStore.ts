@@ -2,10 +2,13 @@
  * Path Store - Persistent storage for recorded paths
  */
 
-import { readFile, writeFile, readdir, unlink, access, mkdir } from "node:fs/promises";
+import { readFile, readdir, unlink, access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { IPathStore, PathPoint, StoredPath } from "./pathFollowerApi.js";
 import { LoggerScope } from "../logging/types.js";
+import { writeJsonFile } from "../config/jsonFileStore.js";
+
+const SANITIZED_NAME_MAX_LEN = 64;
 
 export interface PathStoreOptions {
   storageDirectory: string;
@@ -30,13 +33,17 @@ export class PathStore implements IPathStore {
   }
 
   async savePath(name: string, points: PathPoint[]): Promise<void> {
+    // Defensive copy: caller may continue to mutate the passed array (the
+    // recorder appends new points after stop), and the cached value would
+    // otherwise alias their state.
+    const snapshotPoints = points.slice();
     const path: StoredPath = {
       name,
-      points,
+      points: snapshotPoints,
       createdAt: Date.now(),
       metadata: {
-        totalDistance: this.calculateTotalDistance(points),
-        pointCount: points.length,
+        totalDistance: this.calculateTotalDistance(snapshotPoints),
+        pointCount: snapshotPoints.length,
       },
     };
 
@@ -45,16 +52,16 @@ export class PathStore implements IPathStore {
     // Update cache
     this.pathCache.set(name, path);
 
-    // Persist to disk
+    // Persist to disk via atomic write (tmp file + rename)
     const filename = this.getFilename(name);
     const filepath = join(this.storageDirectory, filename);
 
     try {
-      await writeFile(filepath, JSON.stringify(path, null, 2), "utf-8");
+      await writeJsonFile(filepath, path);
 
       this.logger.info("path_store.saved", {
         name,
-        pointCount: points.length,
+        pointCount: snapshotPoints.length,
         totalDistance: path.metadata.totalDistance,
         filepath,
       });
@@ -161,8 +168,9 @@ export class PathStore implements IPathStore {
   }
 
   private getFilename(name: string): string {
-    // Sanitize name for filesystem
-    const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+    // Sanitize name for filesystem and cap length so an absurdly long name
+    // cannot generate an oversized filename.
+    const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, SANITIZED_NAME_MAX_LEN);
     return `${sanitized}${this.filenameSuffix}`;
   }
 

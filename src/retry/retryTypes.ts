@@ -7,7 +7,11 @@ import { PathPoint } from "../pathfollowing/pathFollowerApi.js";
 
 export type ObstructionType = "high_current" | "wheel_slip" | "stall";
 
-export type OperationContext = "line" | "path" | "turn";
+/**
+ * Active operation context. Only path-context retry is implemented today;
+ * line and turn obstructions are not currently routed through the retry path.
+ */
+export type OperationContext = "path";
 
 export interface ObstructionEvent {
   type: ObstructionType;
@@ -25,29 +29,13 @@ export interface Checkpoint {
   timestamp: number;
   pose: Pose;
   context: OperationContext;
-  metadata: CheckpointMetadata;
-}
-
-export type CheckpointMetadata = LineMetadata | PathMetadata | TurnMetadata;
-
-export interface LineMetadata {
-  type: "line";
-  targetPosition: { xMeters: number; yMeters: number };
-  lineStart: { xMeters: number; yMeters: number };
-  lineEnd: { xMeters: number; yMeters: number };
+  metadata: PathMetadata;
 }
 
 export interface PathMetadata {
   type: "path";
   /** Recorded boundary points the segmented executor was following at the time of the obstruction. */
   waypoints: PathPoint[];
-}
-
-export interface TurnMetadata {
-  type: "turn";
-  targetHeading: number;
-  turnDirection: number; // +1 or -1
-  startHeading: number;
 }
 
 export interface RecoveryResult {

@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { HidGameController } from "../controller/hidGameController.js";
 import { ManualDriveCoordinator } from "../control/manualDriveCoordinator.js";
 import { TurnController } from "../control/turnController.js";
@@ -81,10 +81,10 @@ interface RouteResponse {
   logNotFound: boolean;
 }
 
-function readRequestBody(request: any): Promise<string> {
+function readRequestBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
-    const chunks: any[] = [];
-    request.on("data", (chunk: any) => chunks.push(chunk));
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       const buffer = Buffer.concat(chunks);
       resolve(buffer.toString("utf-8"));
@@ -106,12 +106,51 @@ function encodeJson(payload: unknown): string {
   return JSON.stringify(payload);
 }
 
+/**
+ * Validation-class error: a bad/missing/empty input from the operator. Maps
+ * to HTTP 400 by the global POST error handler. Anything else thrown from a
+ * route handler is treated as a server-side fault and returned as 500 with a
+ * generic message — internal exception text is logged but not echoed.
+ */
+class BadRequestError extends Error {
+  constructor(public readonly code: string, message?: string) {
+    super(message ?? code);
+    this.name = "BadRequestError";
+  }
+}
+
 function describeDriveFailure(result: DriveResult): string {
   if (result.status === "stopped" && result.errorMessage === "Drive stopped by user request") {
     return "user_stopped";
   }
 
   return result.errorMessage ?? result.status;
+}
+
+/**
+ * Write the path-action approach failure outcome with a status code that
+ * matches the failure source: "stopped" is an operator-driven outcome (200);
+ * any other non-success status is a server-side failure (500).
+ */
+function writeApproachOutcome(
+  response: { writeHead: (status: number, headers?: Record<string, string>) => void; end: (body?: string) => void },
+  mode: string,
+  pathName: string,
+  status: string,
+  approachResult: Record<string, unknown>,
+  failureReason?: string,
+): void {
+  const reason = failureReason ?? (status === "stopped" ? "user_stopped" : "error");
+  const statusCode = status === "stopped" ? 200 : 500;
+  response.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(encodeJson({
+    mode,
+    pathName,
+    completed: false,
+    reason,
+    phase: "approach",
+    approachResult,
+  }));
 }
 
 function getMissingRouteDependencyNames(dependencies: ReadonlyArray<readonly [string, unknown]>): string[] {
@@ -443,7 +482,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     await Promise.allSettled(stopOperations);
   }
 
-  const server = createServer(async (request: any, response: any) => {
+  const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
     const method = request.method ?? "GET";
     const baseUrl = `http://${request.headers?.host ?? "localhost"}`;
     const requestUrl = new URL(request.url ?? "/", baseUrl);
@@ -729,7 +768,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
           if (pathRecorder.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -757,7 +796,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
 
           await pathStore.deletePath(pathName);
@@ -770,7 +809,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
           if (pathRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -797,7 +836,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
 
           await areaPerimeterStore.deletePath(pathName);
@@ -905,7 +944,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
           if (pathRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -920,7 +959,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
           const path = await pathStore.loadPath(pathName);
           if (path.points.length === 0) {
-            throw new Error("path_empty");
+            throw new BadRequestError("path_empty");
           }
 
           systemStop.clearStop("api-path-drive");
@@ -928,7 +967,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const approachPlan = buildVerificationApproachPlan(path.points, currentPose, pathFollowingParameters);
           if (approachPlan === null) {
-            throw new Error("path_too_short_for_drive");
+            throw new BadRequestError("path_too_short_for_drive");
           }
 
           let approachResult: Record<string, unknown>;
@@ -946,15 +985,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             };
 
             if (turnResult.status !== "success") {
-              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-              response.end(encodeJson({
-                mode: "drive",
-                pathName,
-                completed: false,
-                reason: turnResult.status === "stopped" ? "user_stopped" : "error",
-                phase: "approach",
-                approachResult,
-              }));
+              writeApproachOutcome(response, "drive", pathName, turnResult.status, approachResult);
               return;
             }
           } else {
@@ -971,15 +1002,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             };
 
             if (driveResult.status !== "success") {
-              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-              response.end(encodeJson({
-                mode: "drive",
-                pathName,
-                completed: false,
-                reason: describeDriveFailure(driveResult),
-                phase: "approach",
-                approachResult,
-              }));
+              writeApproachOutcome(response, "drive", pathName, driveResult.status, approachResult, describeDriveFailure(driveResult));
               return;
             }
 
@@ -998,15 +1021,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
               };
 
               if (turnResult.status !== "success") {
-                response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-                response.end(encodeJson({
-                  mode: "drive",
-                  pathName,
-                  completed: false,
-                  reason: turnResult.status === "stopped" ? "user_stopped" : "error",
-                  phase: "approach",
-                  approachResult,
-                }));
+                writeApproachOutcome(response, "drive", pathName, turnResult.status, approachResult);
                 return;
               }
             }
@@ -1019,7 +1034,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             pathFollowingParameters,
           );
           if (drivePoints.length < 2) {
-            throw new Error("path_too_short_for_drive");
+            throw new BadRequestError("path_too_short_for_drive");
           }
 
           const followResult = await runSegmentedPerimeterFollow(drivePoints);
@@ -1051,7 +1066,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
           if (pathRecorder?.isRecording() || areaPerimeterRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -1061,19 +1076,19 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
           const path = await areaPerimeterStore.loadPath(pathName);
           if (path.points.length === 0) {
-            throw new Error("path_empty");
+            throw new BadRequestError("path_empty");
           }
 
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const currentPose = poseFusion.getCurrentPose();
           const joinPlan = buildPerimeterJoinPlan(path.points, currentPose, pathFollowingParameters);
           if (joinPlan === null) {
-            throw new Error("path_too_short_for_drive");
+            throw new BadRequestError("path_too_short_for_drive");
           }
 
           const drivePoints = buildPerimeterPathPointsFromPlan(path.points, joinPlan, pathFollowingParameters);
           if (drivePoints.length < 2) {
-            throw new Error("path_too_short_for_drive");
+            throw new BadRequestError("path_too_short_for_drive");
           }
 
           systemStop.clearStop("api-area-perimeter-drive");
@@ -1109,7 +1124,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
           if (pathRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -1124,7 +1139,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
           const path = await pathStore.loadPath(pathName);
           if (path.points.length === 0) {
-            throw new Error("path_empty");
+            throw new BadRequestError("path_empty");
           }
 
           systemStop.clearStop("api-path-verify");
@@ -1132,7 +1147,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const approachPlan = buildVerificationApproachPlan(path.points, currentPose, pathFollowingParameters);
           if (approachPlan === null) {
-            throw new Error("path_too_short_for_verification");
+            throw new BadRequestError("path_too_short_for_verification");
           }
 
           let approachResult: Record<string, unknown>;
@@ -1150,15 +1165,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             };
 
             if (turnResult.status !== "success") {
-              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-              response.end(encodeJson({
-                mode: "verify",
-                pathName,
-                completed: false,
-                reason: turnResult.status === "stopped" ? "user_stopped" : "error",
-                phase: "approach",
-                approachResult,
-              }));
+              writeApproachOutcome(response, "verify", pathName, turnResult.status, approachResult);
               return;
             }
           } else {
@@ -1175,15 +1182,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             };
 
             if (driveResult.status !== "success") {
-              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-              response.end(encodeJson({
-                mode: "verify",
-                pathName,
-                completed: false,
-                reason: describeDriveFailure(driveResult),
-                phase: "approach",
-                approachResult,
-              }));
+              writeApproachOutcome(response, "verify", pathName, driveResult.status, approachResult, describeDriveFailure(driveResult));
               return;
             }
 
@@ -1202,15 +1201,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
               };
 
               if (turnResult.status !== "success") {
-                response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-                response.end(encodeJson({
-                  mode: "verify",
-                  pathName,
-                  completed: false,
-                  reason: turnResult.status === "stopped" ? "user_stopped" : "error",
-                  phase: "approach",
-                  approachResult,
-                }));
+                writeApproachOutcome(response, "verify", pathName, turnResult.status, approachResult);
                 return;
               }
             }
@@ -1223,7 +1214,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             pathFollowingParameters,
           );
           if (verificationPoints.length < 2) {
-            throw new Error("path_too_short_for_verification");
+            throw new BadRequestError("path_too_short_for_verification");
           }
 
           const result = await runSegmentedPerimeterFollow(verificationPoints);
@@ -1256,7 +1247,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
           if (pathName.length === 0) {
-            throw new Error("path_name_required");
+            throw new BadRequestError("path_name_required");
           }
           if (pathRecorder?.isRecording() || areaPerimeterRecorder?.isRecording()) {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -1266,7 +1257,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
           const path = await areaPerimeterStore.loadPath(pathName);
           if (path.points.length === 0) {
-            throw new Error("path_empty");
+            throw new BadRequestError("path_empty");
           }
 
           systemStop.clearStop("api-area-perimeter-verify");
@@ -1274,7 +1265,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const joinPlan = buildPerimeterJoinPlan(path.points, currentPose, pathFollowingParameters);
           if (joinPlan === null) {
-            throw new Error("path_too_short_for_verification");
+            throw new BadRequestError("path_too_short_for_verification");
           }
 
           let approachResult: Record<string, unknown> = {
@@ -1296,15 +1287,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             };
 
             if (driveResult.status !== "success") {
-              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-              response.end(encodeJson({
-                mode: "area_perimeter_verify",
-                pathName,
-                completed: false,
-                reason: describeDriveFailure(driveResult),
-                phase: "approach",
-                approachResult,
-              }));
+              writeApproachOutcome(response, "area_perimeter_verify", pathName, driveResult.status, approachResult, describeDriveFailure(driveResult));
               return;
             }
           }
@@ -1324,22 +1307,14 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             };
 
             if (turnResult.status !== "success") {
-              response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-              response.end(encodeJson({
-                mode: "area_perimeter_verify",
-                pathName,
-                completed: false,
-                reason: turnResult.status === "stopped" ? "user_stopped" : "error",
-                phase: "approach",
-                approachResult,
-              }));
+              writeApproachOutcome(response, "area_perimeter_verify", pathName, turnResult.status, approachResult);
               return;
             }
           }
 
           const perimeterPoints = buildPerimeterPathPointsFromPlan(path.points, joinPlan, pathFollowingParameters);
           if (perimeterPoints.length < 2) {
-            throw new Error("path_too_short_for_verification");
+            throw new BadRequestError("path_too_short_for_verification");
           }
 
           const result = await runSegmentedPerimeterFollow(perimeterPoints);
@@ -1361,10 +1336,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const headingDeg = Number(data.headingDeg);
           const stripSpacingMeters = data.stripSpacingMeters === undefined ? undefined : Number(data.stripSpacingMeters);
           if (areaName.length === 0) {
-            throw new Error("area_name_required");
+            throw new BadRequestError("area_name_required");
           }
           if (!Number.isFinite(headingDeg)) {
-            throw new Error("heading_required");
+            throw new BadRequestError("heading_required");
           }
           if (mowingExecutor && mowingStatus.phase !== "idle" && mowingStatus.phase !== "complete" && mowingStatus.phase !== "stopped" && mowingStatus.phase !== "error") {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
@@ -1393,7 +1368,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             obstacles: obstaclePointsArray,
           });
           if (!initialEntryPlan) {
-            throw new Error("no_line_of_sight_area_entry");
+            throw new BadRequestError("no_line_of_sight_area_entry");
           }
           const plan = buildMowingPlan(area.points, {
             headingDeg,
@@ -1405,7 +1380,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           });
 
           if (plan.strips.length === 0) {
-            throw new Error("no_strips_generated");
+            throw new BadRequestError("no_strips_generated");
           }
 
           systemStop.clearStop("api-mowing-start");
@@ -1473,10 +1448,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const headingDeg = Number(data.headingDeg);
           const stripSpacingMeters = data.stripSpacingMeters === undefined ? undefined : Number(data.stripSpacingMeters);
           if (areaName.length === 0) {
-            throw new Error("area_name_required");
+            throw new BadRequestError("area_name_required");
           }
           if (!Number.isFinite(headingDeg)) {
-            throw new Error("heading_required");
+            throw new BadRequestError("heading_required");
           }
 
           const area = await areaPerimeterStore.loadPath(areaName);
@@ -1509,16 +1484,23 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Segment test run
+        // Segment test run — fire-and-forget; the page polls /api/segment/status
         if (requestUrl.pathname === "/api/segment/start" && segmentTestRunner) {
+          if (segmentTestRunner.getState().running) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "segment_test_already_running" }));
+            return;
+          }
           const data = body.trim().length > 0 ? JSON.parse(body) : {};
           systemStop.clearStop("api-segment-start");
-          const results = await segmentTestRunner.run({
+          segmentTestRunner.run({
             waypointCount: data.waypointCount,
             testRunCount: data.testRunCount,
+          }).catch((err) => {
+            logger.warn("segment_test.run_error", { error: err instanceof Error ? err.message : String(err) });
           });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-          response.end(encodeJson(results));
+          response.end(encodeJson({ started: true }));
           return;
         }
 
@@ -1532,6 +1514,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
         // Start dead-reckoning calibration
         if (requestUrl.pathname === "/api/dead-reckoning/start" && deadReckoningCalibrator) {
+          if (deadReckoningCalibrator.getState().running) {
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "dead_reckoning_already_running" }));
+            return;
+          }
           const data = body.trim().length > 0 ? JSON.parse(body) : {};
           const lineDistanceMeters = typeof data.lineDistanceMeters === "number" ? data.lineDistanceMeters : undefined;
           systemStop.clearStop("dead-reckoning-run");
@@ -1600,11 +1587,14 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        // Drive test pattern
+        // Drive test pattern — fire-and-forget; the page polls /api/drive/status
         if (requestUrl.pathname === "/api/drive/test-pattern" && driveController) {
-          const results = await driveController.runTestPattern();
+          systemStop.clearStop("api-drive-test-pattern");
+          driveController.runTestPattern().catch((err) => {
+            logger.warn("drive.test_pattern.run_error", { error: err instanceof Error ? err.message : String(err) });
+          });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-          response.end(encodeJson(results));
+          response.end(encodeJson({ started: true }));
           return;
         }
 
@@ -1662,9 +1652,29 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
       } catch (error) {
+        if (error instanceof BadRequestError) {
+          response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: error.code }));
+          return;
+        }
+        if (error instanceof SyntaxError) {
+          requestLogger.warn("http.invalid_json_body", {
+            method,
+            path: requestUrl.pathname,
+            error: error.message,
+          });
+          response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: "invalid_json_body" }));
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
-        response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        response.end(encodeJson({ error: message }));
+        requestLogger.error("http.internal_error", {
+          method,
+          path: requestUrl.pathname,
+          error: message,
+        });
+        response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson({ error: "internal_error" }));
         return;
       }
     }
@@ -1927,23 +1937,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       {
         motorController: {
           stop: () => sensorController.stopMotors(),
-          setWheelSpeeds: (left, right) => sensorController.setMotorWheelOutputs(left, right),
         },
         driveController: {
-          reverseForDuration: (durationMs) => driveController!.reverseForDuration(durationMs),
-          driveToTarget: (target) => driveController!.driveToTarget(target),
           driveSegment: (target, sign) => driveController!.driveSegment(target, sign),
-        },
-        turnController: {
-          // RetryManager wants `turn(angle)`; TurnController exposes
-          // `executeTurn({ targetAngle, direction })`. Adapt at the boundary.
-          turn: async (angleDeg: number) => {
-            await turnController!.executeTurn({
-              targetAngle: createRelativeAngle(angleDeg),
-              direction: angleDeg >= 0 ? "ccw" : "cw",
-              learningEnabled: false,
-            });
-          },
+          reverseForDuration: (durationMs) => driveController!.reverseForDuration(durationMs),
         },
         // Re-run the same boundary follow after the retry's reverse retreat.
         // The segmented executor re-anchors to the nearest target on entry.
@@ -1957,7 +1954,6 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           });
         },
         getCurrentPose: () => poseFusion!.getCurrentPose(),
-        getCurrentHeading: () => unwrapInternalHeading(poseFusion!.getCurrentPose().heading),
       },
     );
 

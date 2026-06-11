@@ -65,6 +65,7 @@ import {
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
   DRIVE_LONG_SAMPLE_DISTANCES_METERS,
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
+  DRIVE_SHORT_TARGET_Y_ERROR_METERS,
   DRIVE_ARRIVAL_TOLERANCE_METERS,
   DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
   DRIVE_STEERING_PIVOT_OUTPUT_PERCENT,
@@ -73,7 +74,7 @@ import {
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
-import { defaultSleep } from "./sleep.js";
+import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 
 export interface DriveLineRequest extends DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
@@ -150,13 +151,7 @@ export class DriveLineController {
   private driveStartTime = 0;
   private driveResolve: ((result: DriveResult) => void) | null = null;
   private cteSamples: Meters[] = [];
-  private totalEncoderTicks = 0;
   private driveDirectionSign: 1 | -1 = 1;
-  // Drive heartbeat — the per-drive diagnostic record.  Captures every
-  // contributor to fused pose at ~5 Hz so the next failure can be diagnosed
-  // from the log alone.
-  private lastHeartbeatMs = 0;
-  private static readonly HEARTBEAT_INTERVAL_MS = 200;
 
   // Phase-1 instrumentation: per-run state populated when a drive starts
   // and consumed when the drive completes/aborts.  Null between drives.
@@ -495,32 +490,43 @@ export class DriveLineController {
     }
   }
 
-  executeLineDrive(request: DriveLineRequest): Promise<DriveResult> {
-    return new Promise<DriveResult>((resolve) => {
-      this.driveResolve = resolve;
-      this.startDriveAsync(request).catch((error) => {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        this.logger.error("drive.line.error", { error: errorMessage });
-        const r = this.driveResolve;
-        this.driveResolve = null;
-        r?.({
-          startPosition: this.driveStartPosition ?? createPosition(0, 0),
-          targetPosition: request.targetPosition,
-          finalPosition: this.driveStartPosition ?? createPosition(0, 0),
-          errorX: createMeters(0),
-          errorY: createMeters(0),
-          maxCteMeters: createMeters(0),
-          avgCteMeters: createMeters(0),
-          durationMs: this.nowMillis() - this.driveStartTime,
-          brakeDistanceUsed: createMeters(0),
-          status: "error",
-          errorMessage,
-          timestamp: new Date().toISOString(),
-          learnApplied: false,
-          learnSkipReason: "drive_error",
-        });
-      });
+  async executeLineDrive(request: DriveLineRequest): Promise<DriveResult> {
+    if (this.status !== "idle") {
+      throw new Error("drive_line_already_active");
+    }
+
+    let resolveResult!: (result: DriveResult) => void;
+    const resultPromise = new Promise<DriveResult>((resolve) => {
+      resolveResult = resolve;
     });
+    this.driveResolve = resolveResult;
+
+    try {
+      await this.startDriveAsync(request);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error("drive.line.error", { error: errorMessage });
+      const pending = this.driveResolve;
+      this.driveResolve = null;
+      pending?.({
+        startPosition: this.driveStartPosition ?? createPosition(0, 0),
+        targetPosition: request.targetPosition,
+        finalPosition: this.driveStartPosition ?? createPosition(0, 0),
+        errorX: createMeters(0),
+        errorY: createMeters(0),
+        maxCteMeters: createMeters(0),
+        avgCteMeters: createMeters(0),
+        durationMs: this.nowMillis() - this.driveStartTime,
+        brakeDistanceUsed: createMeters(0),
+        status: "error",
+        errorMessage,
+        timestamp: new Date().toISOString(),
+        learnApplied: false,
+        learnSkipReason: "drive_error",
+      });
+    }
+
+    return resultPromise;
   }
 
   private async startDriveAsync(request: DriveLineRequest): Promise<void> {
@@ -532,7 +538,6 @@ export class DriveLineController {
       this.driveDirectionSign = request.driveDirectionSign ?? 1;
       this.driveStartTime = this.nowMillis();
       this.cteSamples = [];
-      this.totalEncoderTicks = 0;
       this.brakeDecisionPoseQuality = "unknown";
 
       const startPose = this.poseFusion.getCurrentPose();
@@ -571,30 +576,22 @@ export class DriveLineController {
         startHeading: unwrapInternalHeading(this.driveStartHeading),
         driveDirectionSign: this.driveDirectionSign,
       });
-      this.lastHeartbeatMs = 0;
 
       this.driveLineStart = this.driveStartPosition;
       this.driveLineEnd = request.targetPosition;
 
+      // Set status before subscribing so a pose event that arrives during the
+      // synchronous subscription path doesn't get rejected by the status guard.
+      this.status = "driving";
+      this.beginRunInstrumentation();
+
       this.poseFusion.on("poseUpdate", this.onPoseUpdate);
       subscribed = true;
 
-      this.beginRunInstrumentation();
-
-      this.status = "driving";
       const initialRemainingAlongTrackDistance = unwrapMeters(
         distanceBetween(this.driveLineStart, this.driveLineEnd),
       );
       await this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
-
-      this.logger.info("drive.line.driving", {
-        startPosition: {
-          x: unwrapMeters(this.driveStartPosition.xMeters),
-          y: unwrapMeters(this.driveStartPosition.yMeters),
-        },
-        heading: unwrapInternalHeading(this.driveStartHeading),
-        driveDirectionSign: this.driveDirectionSign,
-      });
     } catch (error) {
       if (subscribed) {
         this.poseFusion.off("poseUpdate", this.onPoseUpdate);
@@ -623,7 +620,7 @@ export class DriveLineController {
     pauseBeforeDriveMs?: number;
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
-    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_Y_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const maxDistanceMeters = this.normalizeShortTrainingMaxDistanceMeters(options?.maxDistanceMeters ?? DRIVE_SHORT_BUCKET_MAX_METERS);
     const startDistanceMeters = this.normalizeShortTrainingStartDistanceMeters(options?.startDistanceMeters, maxDistanceMeters);
@@ -1132,7 +1129,6 @@ export class DriveLineController {
     const cte = crossTrackError(currentPosition, this.driveLineStart, this.driveLineEnd);
     this.cteSamples.push(cte);
 
-    this.emitHeartbeatIfDue(pose, cte);
     {
       const targetDistanceForHb = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
       const projectedAlongTrackForHb = this.projectAlongTrackDistance(currentPosition);
@@ -1311,16 +1307,6 @@ export class DriveLineController {
     const dy = unwrapMeters(this.driveLineEnd.yMeters) - unwrapMeters(this.driveLineStart.yMeters);
 
     return createInternalHeading((Math.atan2(dy, dx) * 180) / Math.PI);
-  }
-
-  /**
-   * Heartbeat hook left in place for future diagnostic re-enable.  The
-   * 5 Hz log volume previously emitted here was enough to make ssh
-   * unresponsive on the Pi, so the body is now empty.
-   */
-  private emitHeartbeatIfDue(pose: Pose, cte: Meters): void {
-    void pose;
-    void cte;
   }
 
   private projectAlongTrackDistance(position: Position): number {
@@ -1714,20 +1700,8 @@ export class DriveLineController {
     this.totalErrorYMeters += Math.abs(unwrapMeters(result.errorY));
   }
 
-  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    let remainingMs = delayMs;
-
-    while (remainingMs > 0) {
-      if (this.stopRequested || systemStop.isStopped()) {
-        return false;
-      }
-
-      const chunkMs = Math.min(50, remainingMs);
-      await this.sleep(chunkMs);
-      remainingMs -= chunkMs;
-    }
-
-    return true;
+  private sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    return sleepWithStopChecks(delayMs, () => this.stopRequested, this.sleep);
   }
 
   private getBrakeDistanceForCurrentDrive(): Meters {

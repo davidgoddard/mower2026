@@ -8,8 +8,17 @@ interface BaseTask {
   reject: (error: Error) => void;
 }
 
-function replacementError(taskKey: string): Error {
-  return new Error(`i2c task replaced: ${taskKey}`);
+/**
+ * Thrown when a queued I2C task is preempted by a newer task with the same key.
+ * Callers that view this as a normal "newer command supersedes older command"
+ * outcome (e.g. duplicate motor commands) should swallow it via `instanceof
+ * I2cTaskReplacedError`. The `key` field names the replaced task.
+ */
+export class I2cTaskReplacedError extends Error {
+  constructor(public readonly key: string) {
+    super(`i2c task replaced: ${key}`);
+    this.name = "I2cTaskReplacedError";
+  }
 }
 
 export class I2cBusController {
@@ -71,7 +80,7 @@ export class I2cBusController {
     return new Promise<void>((resolve, reject) => {
       const existing = this.queuedByKey.get(taskLike.key);
       if (existing) {
-        existing.reject(replacementError(taskLike.key));
+        existing.reject(new I2cTaskReplacedError(taskLike.key));
       }
 
       const task: BaseTask = {
@@ -94,23 +103,25 @@ export class I2cBusController {
   }
 
   private async processLoop(): Promise<void> {
-    while (this.queuedByKey.size > 0 && !this.closed) {
-      const nextTask = this.pickNextTask();
-      if (!nextTask) {
-        break;
-      }
+    try {
+      while (this.queuedByKey.size > 0 && !this.closed) {
+        const nextTask = this.pickNextTask();
+        if (!nextTask) {
+          break;
+        }
 
-      this.queuedByKey.delete(nextTask.key);
+        this.queuedByKey.delete(nextTask.key);
 
-      try {
-        await nextTask.execute();
-      } catch (error) {
-        const wrapped = error instanceof Error ? error : new Error(String(error));
-        nextTask.reject(wrapped);
+        try {
+          await nextTask.execute();
+        } catch (error) {
+          const wrapped = error instanceof Error ? error : new Error(String(error));
+          nextTask.reject(wrapped);
+        }
       }
+    } finally {
+      this.processing = false;
     }
-
-    this.processing = false;
   }
 
   private pickNextTask(): BaseTask | null {

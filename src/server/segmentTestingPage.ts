@@ -738,7 +738,6 @@ ${getAppDialogScript()}
 
       let segmentStateSnapshot = { phase: "idle", running: false };
       let startHandshakePending = false;
-      let stopRequestPending = false;
 
       function isSegmentRunActive(state) {
         if (state?.running) {

@@ -1,10 +1,6 @@
 export type GnssFixType = "none" | "single" | "float" | "fixed";
 
 export interface GnssDebugAges {
-  readonly receiverLineAgeMillis?: number;
-  readonly pvtslnaAgeMillis?: number;
-  readonly uniheadingAgeMillis?: number;
-  readonly rtcmAgeMillis?: number;
   readonly logConfigMask?: number;
 }
 

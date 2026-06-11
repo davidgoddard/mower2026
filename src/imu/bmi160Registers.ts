@@ -1,16 +1,11 @@
-import { I2C_ADDRESS_BMI160_DEFAULT } from "../constants.js";
-
 export const BMI160 = {
-  defaultAddress: I2C_ADDRESS_BMI160_DEFAULT,
   expectedChipId: 0xd1,
   registers: {
     chipId: 0x00,
+    // Burst reads start at gyroXLsb / accXLsb and walk forward, so the
+    // intermediate Y/Z LSB registers are not exposed here.
     gyroXLsb: 0x0c,
-    gyroYLsb: 0x0e,
     accXLsb: 0x12,
-    accYLsb: 0x14,
-    accZLsb: 0x16,
-    gyroZLsb: 0x10,
     accRange: 0x41,
     gyroRange: 0x43,
     command: 0x7e,

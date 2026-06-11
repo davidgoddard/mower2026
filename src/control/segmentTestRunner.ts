@@ -23,6 +23,7 @@ import {
   unwrapRelativeAngle,
 } from "../geometry/headingTypes.js";
 import { systemStop } from "./systemStop.js";
+import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 import { DRIVE_FULL_SPEED_COMMAND_DEFAULT } from "../constants.js";
 
 export type SegmentTestPhase =
@@ -81,9 +82,6 @@ export interface SegmentTestRunnerOptions {
   sleep?: (delayMs: number) => Promise<void>;
 }
 
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
 
 export class SegmentTestRunner {
   private static readonly DEFAULT_WAYPOINT_COUNT = 7;
@@ -448,20 +446,8 @@ export class SegmentTestRunner {
     return eligibleWaypoints[randomIndex] ?? null;
   }
 
-  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    let remainingMs = delayMs;
-
-    while (remainingMs > 0) {
-      if (this.shouldStop()) {
-        return false;
-      }
-
-      const chunkMs = Math.min(50, remainingMs);
-      await this.sleep(chunkMs);
-      remainingMs -= chunkMs;
-    }
-
-    return true;
+  private sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    return sleepWithStopChecks(delayMs, () => this.stopRequested, this.sleep);
   }
 
   private shouldStop(): boolean {

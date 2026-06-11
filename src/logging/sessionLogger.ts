@@ -152,14 +152,14 @@ export class SessionLogger implements LoggerScope {
   readonly sessionLogPath: string;
   private readonly app: string;
   private readonly defaultBinding: ScopeBinding;
-  private readonly worker: any;
+  private readonly worker: Worker;
   private readonly minLevelPriority: number;
   private readonly requests = new Map<number, () => void>();
   private nextRequestId = 1;
   private stopped = false;
 
   private constructor(
-    worker: any,
+    worker: Worker,
     app: string,
     sessionLogPath: string,
     minLevel: LogLevel,

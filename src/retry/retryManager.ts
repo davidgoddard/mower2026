@@ -1,14 +1,17 @@
 /**
- * Retry Manager - Event-driven recovery system for obstructions.
+ * Retry Manager - Event-driven recovery system for obstructions during a
+ * perimeter follow.
  *
- * High-current events trigger a context-specific retry (the mower may yet cut
- * through long/thick grass with another run-up). Wheel-slip and stall events
- * are treated as the mower being stuck and abort the session immediately.
+ * High-current events trigger the path-context retry: walk the recent-target
+ * trail backward by reverse-driving each completed target until a configured
+ * retreat distance is reached, then restart the boundary follow from the new
+ * pose. Wheel-slip and stall events mean the mower is physically stuck and
+ * abort the session immediately.
  */
 
 import { EventEmitter } from "node:events";
 import { CheckpointStore } from "./checkpointStore.js";
-import { ObstructionEvent, RecoveryResult, OperationContext, Checkpoint, PathMetadata, LineMetadata, TurnMetadata } from "./retryTypes.js";
+import { ObstructionEvent, RecoveryResult, OperationContext, Checkpoint } from "./retryTypes.js";
 import { LoggerScope } from "../logging/types.js";
 import { Pose, unwrapMeters } from "../geometry/positionTypes.js";
 import { PathPoint, RecentTargetSink } from "../pathfollowing/index.js";
@@ -16,7 +19,6 @@ import { PathPoint, RecentTargetSink } from "../pathfollowing/index.js";
 export interface RetryManagerOptions {
   maxRetries?: number;
   reverseDurationMs?: number;
-  escapeAngleDegrees?: number;
   /**
    * Reverse-travel distance the path-context retry tries to accumulate by
    * retracing recent targets backward before restarting the boundary follow.
@@ -31,29 +33,27 @@ export interface RetryManagerOptions {
 export interface RetryManagerDependencies {
   motorController: {
     stop(): Promise<void>;
-    setWheelSpeeds(left: number, right: number): Promise<void>;
   };
-  driveController?: {
-    reverseForDuration(durationMs: number): Promise<void>;
-    driveToTarget(target: { xMeters: number; yMeters: number }): Promise<void>;
+  driveController: {
     /**
      * Drive a single segment in either direction. Used by the path-context
      * recovery to retrace recently completed targets in reverse before
      * restarting the boundary follow.
      */
     driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<void>;
+    /**
+     * Reverse for a fixed duration. Used as the path-context fallback when no
+     * recent targets are available (e.g. obstruction on the very first segment).
+     */
+    reverseForDuration(durationMs: number): Promise<void>;
   };
   /**
    * Restart a perimeter follow from the current pose using the recorded
    * boundary points. The segmented executor re-anchors to its nearest target
    * automatically, so this is "drive the same boundary again from here".
    */
-  pathRestart?: (waypoints: PathPoint[]) => Promise<void>;
-  turnController?: {
-    turn(angle: number): Promise<void>;
-  };
+  pathRestart: (waypoints: PathPoint[]) => Promise<void>;
   getCurrentPose(): Pose;
-  getCurrentHeading(): number;
 }
 
 const DEFAULT_PATH_RETRY_REVERSE_DISTANCE_METERS = 0.5;
@@ -63,7 +63,6 @@ const RECENT_TARGET_TRAIL_LIMIT = 64;
 export class RetryManager extends EventEmitter implements RecentTargetSink {
   private readonly maxRetries: number;
   private readonly reverseDurationMs: number;
-  private readonly escapeAngleDegrees: number;
   private readonly pathRetryReverseDistanceMeters: number;
   private readonly logger: LoggerScope;
   private readonly checkpointStore: CheckpointStore;
@@ -83,7 +82,6 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     super();
     this.maxRetries = options.maxRetries ?? 3;
     this.reverseDurationMs = options.reverseDurationMs ?? 2000;
-    this.escapeAngleDegrees = options.escapeAngleDegrees ?? 45;
     this.pathRetryReverseDistanceMeters = options.pathRetryReverseDistanceMeters ?? DEFAULT_PATH_RETRY_REVERSE_DISTANCE_METERS;
     this.logger = options.logger;
     this.checkpointStore = options.checkpointStore;
@@ -164,7 +162,7 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
         return { success: false, attemptNumber: attempts, error: "max_retries_exceeded" };
       }
 
-      const checkpoint = this.checkpointStore.getRecoveryCheckpoint(event.context, 1);
+      const checkpoint = this.checkpointStore.getRecoveryCheckpoint();
       if (!checkpoint) {
         this.logger.error("retry.no_checkpoint_found", { context: event.context });
         await this.abortSession("no_checkpoint");
@@ -192,17 +190,7 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     await this.sleep(500);
 
     try {
-      switch (event.context) {
-        case "line":
-          await this.recoverFromLine(checkpoint.metadata as LineMetadata);
-          break;
-        case "path":
-          await this.recoverFromPath(checkpoint.metadata as PathMetadata);
-          break;
-        case "turn":
-          await this.recoverFromTurn(checkpoint.metadata as TurnMetadata);
-          break;
-      }
+      await this.recoverFromPath(checkpoint.metadata.waypoints);
 
       this.logger.info("retry.recovery_completed", { context: event.context, attemptNumber: attempts + 1 });
       this.emit("recovery_completed", { context: event.context, attemptNumber: attempts + 1 });
@@ -221,30 +209,7 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     }
   }
 
-  private async recoverFromLine(metadata: LineMetadata): Promise<void> {
-    if (!this.deps.driveController) {
-      throw new Error("DriveController not available");
-    }
-
-    this.logger.info("retry.line_recovery.reversing", { durationMs: this.reverseDurationMs });
-    await this.deps.driveController.reverseForDuration(this.reverseDurationMs);
-    await this.sleep(500);
-
-    this.logger.info("retry.line_recovery.retrying_forward", { targetPosition: metadata.targetPosition });
-    await this.deps.driveController.driveToTarget(metadata.targetPosition);
-  }
-
-  private async recoverFromPath(metadata: PathMetadata): Promise<void> {
-    if (!this.deps.driveController) {
-      throw new Error("DriveController not available");
-    }
-    if (!this.deps.driveController.driveSegment) {
-      throw new Error("driveController.driveSegment not available");
-    }
-    if (!this.deps.pathRestart) {
-      throw new Error("pathRestart callback not available");
-    }
-
+  private async recoverFromPath(waypoints: PathPoint[]): Promise<void> {
     // Walk the recent-target trail backward, reverse-driving each completed
     // target in turn until we have travelled at least the configured retreat
     // distance. The executor's nearest-target re-anchor will pick up forward
@@ -267,7 +232,7 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
       const dy = previousTarget.yMeters - originY;
       const legDistance = Math.hypot(dx, dy);
 
-      this.logger.info("retry.path_recovery.reverse_leg", {
+      this.logger.debug("retry.path_recovery.reverse_leg", {
         legIndex: legsDriven + 1,
         target: { x: previousTarget.xMeters, y: previousTarget.yMeters },
         legDistanceMeters: legDistance,
@@ -288,8 +253,8 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
 
     if (legsDriven === 0) {
       // No recent targets recorded (e.g. obstruction on the very first segment).
-      // Fall back to a duration-based reverse so the mower at least clears the jam
-      // before retrying.
+      // Fall back to a duration-based reverse so the mower at least clears the
+      // jam before the boundary follow restarts.
       this.logger.warn("retry.path_recovery.no_recent_targets", {
         durationMs: this.reverseDurationMs,
       });
@@ -299,32 +264,11 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     await this.sleep(500);
 
     this.logger.info("retry.path_recovery.restarting_follow", {
-      waypointCount: metadata.waypoints.length,
+      waypointCount: waypoints.length,
       reverseLegsDriven: legsDriven,
       reverseDistanceMeters: accumulatedDistance,
     });
-    await this.deps.pathRestart(metadata.waypoints);
-  }
-
-  private async recoverFromTurn(metadata: TurnMetadata): Promise<void> {
-    if (!this.deps.turnController) {
-      throw new Error("TurnController not available");
-    }
-
-    const escapeTurn = -metadata.turnDirection * this.escapeAngleDegrees;
-    this.logger.info("retry.turn_recovery.escaping", { escapeTurnDegrees: escapeTurn });
-    await this.deps.turnController.turn(escapeTurn);
-    await this.sleep(this.reverseDurationMs);
-    await this.sleep(500);
-
-    const currentHeading = this.deps.getCurrentHeading();
-    const remainingAngle = this.normalizeAngle(metadata.targetHeading - currentHeading);
-    this.logger.info("retry.turn_recovery.retrying_turn", {
-      currentHeading,
-      targetHeading: metadata.targetHeading,
-      remainingAngle,
-    });
-    await this.deps.turnController.turn(remainingAngle);
+    await this.deps.pathRestart(waypoints);
   }
 
   private async abortSession(reason: string): Promise<void> {
@@ -351,11 +295,5 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private normalizeAngle(angle: number): number {
-    while (angle > 180) angle -= 360;
-    while (angle < -180) angle += 360;
-    return angle;
   }
 }

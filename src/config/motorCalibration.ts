@@ -1,7 +1,7 @@
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
 import { MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS, MOTOR_CALIBRATION_PATH } from "../constants.js";
-import { readJsonFile, writeJsonFile } from "./jsonFileStore.js";
+import { quarantineCorruptFile, readJsonFile, writeJsonFile } from "./jsonFileStore.js";
 
 export interface MotorCalibrationParameters {
   version: number;
@@ -49,9 +49,11 @@ export class MotorCalibration {
           using: "defaults",
         });
       } else {
+        const quarantined = await quarantineCorruptFile(this.parametersPath, new Date().toISOString());
         this.logger.warn("motor.calibration.load_failed", {
           path: this.parametersPath,
           error: error instanceof Error ? error.message : String(error),
+          quarantinedTo: quarantined,
           using: "defaults",
         });
       }
@@ -62,9 +64,10 @@ export class MotorCalibration {
   }
 
   async saveParameters(): Promise<void> {
-    this.parameters.updatedAt = new Date().toISOString();
+    const updated: MotorCalibrationParameters = { ...this.parameters, updatedAt: new Date().toISOString() };
     try {
-      await writeJsonFile(this.parametersPath, this.parameters);
+      await writeJsonFile(this.parametersPath, updated);
+      this.parameters = updated;
     } catch (error) {
       this.logger.error("motor.calibration.save_failed", {
         path: this.parametersPath,

@@ -32,7 +32,7 @@ import {
 } from "../constants.js";
 import { SENSOR_EVENTS, ImuHeadingUpdateEvent } from "../sensing/sensorEvents.js";
 import { systemStop } from "./systemStop.js";
-import { defaultSleep } from "./sleep.js";
+import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 
 export interface TurnControllerOptions {
   sensorController: SensorController;
@@ -338,14 +338,6 @@ export class TurnController {
 
       // 6. BRAKING - Command motors to zero or halt, depending on turn size
       this.status = "braking";
-      this.logger.info("turn.braking", {
-        requestedAngle: unwrapRelativeAngle(request.targetAngle),
-        brakeDistanceUsed: unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0)),
-        mode: this.turnIsSmallAngle ? "small_crawl_halt" : "large_zero_speed",
-        leftWheelOutputPercent: 0,
-        rightWheelOutputPercent: 0,
-        driveEnabled: !this.turnIsSmallAngle,
-      });
       if (this.turnIsSmallAngle) {
         await this.sensorController.requestNeutralMotorOutputs();
       } else {
@@ -353,9 +345,6 @@ export class TurnController {
 
         // 7. Wait for motor ramp-down (2x ramp-down time per spec)
         const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
-        this.logger.info("turn.ramp_down_wait", {
-          durationMs: 2 * rampDownTime,
-        });
         const rampDownCompleted = await this.sleepWithStopChecks(2 * rampDownTime);
         if (!rampDownCompleted || this.stopRequested || this.tuningStopRequested) {
           await this.finishStoppedTurn(request, "Turn stopped during ramp-down");
@@ -365,9 +354,6 @@ export class TurnController {
 
       // 8. SETTLING - Additional settle for stability
       this.status = "settling";
-      this.logger.info("turn.settling_wait", {
-        durationMs: this.settleTimeMs,
-      });
       const settleCompleted = await this.sleepWithStopChecks(this.settleTimeMs);
       if (!settleCompleted || this.stopRequested || this.tuningStopRequested) {
         await this.finishStoppedTurn(request, "Turn stopped during settle");
@@ -381,18 +367,15 @@ export class TurnController {
       const errorAngle = createRelativeAngle(
         unwrapRelativeAngle(achievedAngle) - unwrapRelativeAngle(request.targetAngle)
       );
-      this.logger.info("turn.final_measurement", {
-        startHeading: unwrapInternalHeading(this.turnStartHeading),
-        finalHeading: unwrapInternalHeading(finalHeading),
-        achievedAngle: unwrapRelativeAngle(achievedAngle),
-        requestedAngle: unwrapRelativeAngle(request.targetAngle),
-        errorAngle: unwrapRelativeAngle(errorAngle),
-      });
 
       this.logger.info("turn.completed", {
         requestedAngle: unwrapRelativeAngle(request.targetAngle),
         achievedAngle: unwrapRelativeAngle(achievedAngle),
         errorAngle: unwrapRelativeAngle(errorAngle),
+        startHeading: unwrapInternalHeading(this.turnStartHeading),
+        finalHeading: unwrapInternalHeading(finalHeading),
+        brakeDistanceUsed: unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0)),
+        mode: this.turnIsSmallAngle ? "small_crawl_halt" : "large_zero_speed",
         durationMs: this.nowMillis() - this.turnStartTime,
       });
 
@@ -717,20 +700,12 @@ export class TurnController {
   /**
    * Sleep in short chunks so stop requests can interrupt long waits.
    */
-  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    let remainingMs = delayMs;
-
-    while (remainingMs > 0) {
-      if (this.stopRequested || this.tuningStopRequested || systemStop.isStopped()) {
-        return false;
-      }
-
-      const chunkMs = Math.min(50, remainingMs);
-      await this.sleep(chunkMs);
-      remainingMs -= chunkMs;
-    }
-
-    return true;
+  private sleepWithStopChecks(delayMs: number): Promise<boolean> {
+    return sleepWithStopChecks(
+      delayMs,
+      () => this.stopRequested || this.tuningStopRequested,
+      this.sleep,
+    );
   }
 
   /**

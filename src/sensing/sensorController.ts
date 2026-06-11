@@ -76,6 +76,12 @@ interface SensorControllerOptions {
   geometryCalibration?: GeometryCalibration;
   pollIntervalMs?: number;
   nowMillis?: () => number;
+  /**
+   * Monotonic millisecond clock used for time-delta integration (IMU yaw `dt`).
+   * Defaults to `performance.now()`, which is unaffected by NTP wallclock steps.
+   * Tests can inject a mock; production should leave this unset.
+   */
+  monotonicMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
   maxLoopCount?: number;
 }
@@ -146,6 +152,7 @@ export class SensorController extends EventEmitter {
   private readonly gnssPollIntervalMs: number;
   private readonly motorPollIntervalMs: number;
   private readonly nowMillis: () => number;
+  private readonly monotonicMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly maxLoopCount: number | null;
 
@@ -168,7 +175,12 @@ export class SensorController extends EventEmitter {
   private stallDetectionLatched = false;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
-  private previousImuSampleMillis: number | null = null;
+  /**
+   * Monotonic wallclock-independent millisecond timestamp of the previous IMU
+   * sample. Used purely for `dt` integration; `imuHeading` updates remain
+   * keyed off `sample.timestampMillis` for downstream events.
+   */
+  private previousImuMonotonicMillis: number | null = null;
   private readonly imuDiagnosticSamples: Array<ImuDiagnosticSample | null> = new Array(IMU_DIAGNOSTIC_MAX_SAMPLES).fill(null);
   private imuDiagnosticNextIndex = 0;
   private imuDiagnosticSampleCount = 0;
@@ -205,6 +217,11 @@ export class SensorController extends EventEmitter {
     this.gnssPollIntervalMs = Math.max(this.pollIntervalMs, SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS);
     this.motorPollIntervalMs = Math.max(this.pollIntervalMs, SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS);
     this.nowMillis = options.nowMillis ?? (() => Date.now());
+    // Tests injecting `nowMillis` get deterministic dt by reusing it; production
+    // (no injection) uses `performance.now()` which is monotonic and immune to
+    // NTP wallclock steps.
+    this.monotonicMillis = options.monotonicMillis
+      ?? (options.nowMillis !== undefined ? options.nowMillis : (() => performance.now()));
     this.sleep = options.sleep ?? defaultSleep;
     this.maxLoopCount = options.maxLoopCount ?? null;
   }
@@ -326,7 +343,10 @@ export class SensorController extends EventEmitter {
 
   setHeading(heading: InternalHeading, timestampMillis: number | null = null): void {
     this.imuHeading = heading;
-    this.previousImuSampleMillis = timestampMillis ?? this.nowMillis();
+    // Reset the integration anchor. When the caller provides a timestamp it
+    // names the moment the new heading was sampled — the next IMU integration
+    // window starts there. Otherwise anchor on the current monotonic clock.
+    this.previousImuMonotonicMillis = timestampMillis ?? this.monotonicMillis();
     const currentImu = this.primitivesStore.snapshot().imu;
     this.primitivesStore.update({
       imu: {
@@ -864,9 +884,10 @@ export class SensorController extends EventEmitter {
         yMetersPerSecondSquared: 0,
         zMetersPerSecondSquared: 0,
       };
-      const sampleDeltaMs = this.previousImuSampleMillis === null
+      const monotonicNowMs = this.monotonicMillis();
+      const sampleDeltaMs = this.previousImuMonotonicMillis === null
         ? null
-        : Math.max(0, sample.timestampMillis - this.previousImuSampleMillis);
+        : Math.max(0, monotonicNowMs - this.previousImuMonotonicMillis);
       const headingBeforeDeg = unwrapInternalHeading(this.imuHeading);
       // Gravity terms cancel inside atan2 ratios so we work directly in m/s².
       const ax = acceleration.xMetersPerSecondSquared;
@@ -903,7 +924,7 @@ export class SensorController extends EventEmitter {
         tiltCompensatedYawRateDegPerSec: biasCorrectedYawRateDegPerSec,
         yawDeltaDeg,
       });
-      this.previousImuSampleMillis = sample.timestampMillis;
+      this.previousImuMonotonicMillis = monotonicNowMs;
 
       this.primitivesStore.update({
         imu: {

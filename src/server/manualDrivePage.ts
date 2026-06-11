@@ -1207,10 +1207,21 @@ ${getAppDialogScript()}
         );
     }
 
+    // Track which path names have already produced a "skipped" warning so the
+    // 10s poll doesn't spam DevTools every cycle with the same diagnostic.
+    const skippedPathWarnings = new Set();
+    function warnSkippedPath(name, message, detail) {
+      if (skippedPathWarnings.has(name)) {
+        return;
+      }
+      skippedPathWarnings.add(name);
+      console.warn(message, detail);
+    }
+
     async function loadStoredPathDetail(pathInfo, endpointBase) {
       const pathName = pathInfo?.name;
       if (typeof pathName !== 'string' || pathName.length === 0) {
-        console.warn('Skipping stored path with missing name:', pathInfo);
+        warnSkippedPath('__missing_name__', 'Skipping stored path with missing name:', pathInfo);
         return null;
       }
 
@@ -1219,7 +1230,7 @@ ${getAppDialogScript()}
         const path = await pathResponse.json().catch(() => null);
 
         if (!pathResponse.ok || !hasDrawablePathPoints(path)) {
-          console.warn('Skipping stored path with invalid details:', {
+          warnSkippedPath(pathName, 'Skipping stored path with invalid details:', {
             name: pathName,
             status: pathResponse.status,
             path,
@@ -1229,7 +1240,7 @@ ${getAppDialogScript()}
 
         return path;
       } catch (error) {
-        console.warn('Skipping stored path after detail load failure:', pathName, error);
+        warnSkippedPath(pathName, 'Skipping stored path after detail load failure:', { pathName, error });
         return null;
       }
     }

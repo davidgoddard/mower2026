@@ -5,6 +5,9 @@
 
 import { SensorHardwareGateway } from "./sensorHardwareGateway.js";
 import type { MotorCommandOptions } from "./sensorHardwareGateway.js";
+import type { ImuSample } from "../imu/types.js";
+import type { GnssSample } from "../gnss/gnssProtocol.js";
+import type { MotorFeedbackSample } from "../motors/motorProtocol.js";
 
 export class StubSensorGateway implements SensorHardwareGateway {
   private readonly error = new Error("Stub sensor gateway - no hardware available");
@@ -19,15 +22,15 @@ export class StubSensorGateway implements SensorHardwareGateway {
     return Promise.resolve();
   }
 
-  async readImu(): Promise<any> {
+  async readImu(): Promise<ImuSample> {
     throw this.error;
   }
 
-  async readGnss(): Promise<any> {
+  async readGnss(): Promise<GnssSample> {
     throw this.error;
   }
 
-  async readMotorFeedback(): Promise<any> {
+  async readMotorFeedback(): Promise<MotorFeedbackSample> {
     throw this.error;
   }
 

@@ -504,7 +504,6 @@ ${getAppDialogScript()}
       const driveResultRows = [];
       let driveStateSnapshot = { status: "idle" };
       let startHandshakePending = false;
-      let stopRequestPending = false;
 
       function driveResultKey(item) {
         const start = item.startPosition ?? {};

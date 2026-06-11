@@ -134,7 +134,6 @@ export class PoseFusion extends EventEmitter {
   private readonly sensorController: SensorController;
   private readonly poseCalibration: PoseCalibration | null;
   private readonly gnssValidator: GnssValidator;
-  private lastValidation: GnssValidationResult | null = null;
 
   private running = false;
 
@@ -238,12 +237,11 @@ export class PoseFusion extends EventEmitter {
   }
 
   getCurrentPose(): Pose {
-    const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
     return createPose(
       unwrapMeters(this.currentPosition.xMeters),
       unwrapMeters(this.currentPosition.yMeters),
       this.currentHeading,
-      this.currentQualityWithStalenessCheck(nowMs),
+      this.currentQuality,
     );
   }
 
@@ -257,13 +255,19 @@ export class PoseFusion extends EventEmitter {
     this.emit("poseUpdate", this.getCurrentPose());
   }
 
-  private currentQualityWithStalenessCheck(nowMs: number): "gnss" | "dead-reckoning" | "unknown" {
+  /**
+   * Demote `currentQuality` to "dead-reckoning" when the last accepted GNSS
+   * fix has aged past the staleness threshold. Called once per motor-feedback
+   * event so quality is refreshed at the motor poll cadence — readers
+   * (`getCurrentPose`/`getPrimitiveState`/`getDiagnosticSnapshot`) stay free of
+   * side effects.
+   */
+  private tickQualityStalenessCheck(nowMs: number): void {
     if (
       this.currentQuality === "gnss" &&
       this.lastGnssSyncTimeMs !== null &&
       nowMs - this.lastGnssSyncTimeMs > GNSS_STALE_TIMEOUT_MS
     ) {
-      // Demote internally too so the outage flag is set for the next good fix
       this.currentQuality = "dead-reckoning";
       if (this.gnssQualityLostTimeMs === null) {
         this.gnssQualityLostTimeMs = this.lastGnssSyncTimeMs + GNSS_STALE_TIMEOUT_MS;
@@ -272,9 +276,7 @@ export class PoseFusion extends EventEmitter {
           threshold: GNSS_STALE_TIMEOUT_MS,
         });
       }
-      return "dead-reckoning";
     }
-    return this.currentQuality;
   }
 
   getPrimitiveState(): PoseFusionPrimitiveState {
@@ -302,7 +304,7 @@ export class PoseFusion extends EventEmitter {
       xMeters: fusedX,
       yMeters: fusedY,
       headingDeg: fusedHeadingDeg,
-      quality: this.currentQualityWithStalenessCheck(nowMs),
+      quality: this.currentQuality,
       usingGnssHeading: this.isUsingGnssHeading,
       wheelSlipSuspected: this.wheelSlipSuspected,
       gnssPositionAgeMs,
@@ -364,7 +366,7 @@ export class PoseFusion extends EventEmitter {
         x: fusedX,
         y: fusedY,
         headingDeg: fusedHeadingDeg,
-        quality: this.currentQualityWithStalenessCheck(nowMs),
+        quality: this.currentQuality,
         usingGnssHeading: this.isUsingGnssHeading,
       },
       encoder: {
@@ -501,6 +503,10 @@ export class PoseFusion extends EventEmitter {
   private onMotorFeedbackUpdate(event: MotorFeedbackUpdateEvent): void {
     if (!this.running) return;
 
+    // Drive the GNSS staleness check from the motor poll cadence so getters
+    // stay side-effect free.
+    this.tickQualityStalenessCheck(this.sensorController.getCurrentTimeMillis?.() ?? Date.now());
+
     this.lastMotorFeedback = {
       leftEncoderDelta: event.leftEncoderDelta,
       rightEncoderDelta: event.rightEncoderDelta,
@@ -602,7 +608,6 @@ export class PoseFusion extends EventEmitter {
     this.lastGnssEvent = event;
 
     const validation = this.gnssValidator.validate(event, this.currentHeading);
-    this.lastValidation = validation;
     const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
 
     if (validation.position === "TRUSTED") {
@@ -734,8 +739,10 @@ export class PoseFusion extends EventEmitter {
   }
 
   private applyGnssHeadingRebase(gnssHeading: InternalHeading, timestampMillis: number): void {
-    const rebaseTimestampMillis = this.sensorController.getCurrentTimeMillis?.() ?? timestampMillis;
-    this.sensorController.setHeading(gnssHeading, rebaseTimestampMillis);
+    void timestampMillis;
+    // Pass null so the controller anchors integration on its monotonic clock —
+    // immune to NTP wallclock steps mid-session.
+    this.sensorController.setHeading(gnssHeading, null);
     this.currentHeading = gnssHeading;
 
     // Re-anchor encoder-only track to the freshly rebased heading and current

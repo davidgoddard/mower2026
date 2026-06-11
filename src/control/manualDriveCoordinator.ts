@@ -312,21 +312,6 @@ export class ManualDriveCoordinator {
     });
   }
 
-  private async sleepWithStopChecks(delayMs: number): Promise<boolean> {
-    const endTime = Date.now() + delayMs;
-
-    while (Date.now() < endTime) {
-      if (systemStop.isStopped() || !this.running) {
-        return false;
-      }
-
-      const remaining = endTime - Date.now();
-      await this.sleep(Math.min(50, Math.max(0, remaining)));
-    }
-
-    return true;
-  }
-
   private async disableManualDrive(): Promise<void> {
     const wasArmed = this.manualDriveEnabled;
     this.manualDriveEnabled = false;

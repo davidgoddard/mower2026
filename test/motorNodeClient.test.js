@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MotorNodeClient, I2C_PRIORITY } from '../dist/index.js';
+import { MotorNodeClient, I2C_PRIORITY, I2cTaskReplacedError } from '../dist/index.js';
 import { systemStop } from '../dist/control/systemStop.js';
 
 test.beforeEach(() => {
@@ -179,7 +179,7 @@ test('MotorNodeClient treats same-key motor write replacement as benign coalesci
       writes.push(request);
       if (firstCall) {
         firstCall = false;
-        throw new Error(`i2c task replaced: ${request.key}`);
+        throw new I2cTaskReplacedError(request.key);
       }
     },
     async queueRead() {

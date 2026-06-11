@@ -77,7 +77,7 @@ export class TurnLearningModel {
         smallAngleThresholdDeg: this.parameters.smallAngleThresholdDeg,
       });
     } catch (error) {
-      if ((error as any)?.code === "ENOENT") {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
         this.logger.info("turn.learning.no_file", {
           path: this.parametersPath,
           using: "defaults",

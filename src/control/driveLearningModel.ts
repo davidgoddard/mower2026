@@ -175,7 +175,7 @@ export class DriveLearningModel {
   getBrakeDistanceForDrive(startPosition: Position, targetPosition: Position, directionSign?: 1 | -1): Meters {
     const driveDistance = unwrapMeters(distanceBetween(startPosition, targetPosition));
     if (driveDistance > this.parameters.longDriveMinDistanceMeters) {
-      return this.parameters.longDriveBrakeDistanceMeters as Meters;
+      return createMeters(this.parameters.longDriveBrakeDistanceMeters);
     }
 
     return createMeters(this.getShortDriveBrakeDistance(startPosition, targetPosition, directionSign));
@@ -244,7 +244,7 @@ export class DriveLearningModel {
     if (data.coastDistanceMeasuredMeters !== undefined) {
       const reason = this.coastLearningValidityReason(data);
       if (reason !== null) {
-        this.logger.warn("drive.learning.coast_skipped", {
+        this.logger.warn("drive.learning.coast_rejected", {
           reason,
           direction,
           driveDistance,
@@ -254,7 +254,8 @@ export class DriveLearningModel {
       } else {
         const coastValue = data.coastDistanceMeasuredMeters;
         if (this.isCoastDistanceOutlier(direction, coastValue)) {
-          this.logger.warn("drive.learning.coast_outlier_rejected", {
+          this.logger.warn("drive.learning.coast_rejected", {
+            reason: "outlier",
             direction,
             driveDistance,
             coastDistanceMeasuredMeters: coastValue,

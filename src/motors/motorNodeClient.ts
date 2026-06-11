@@ -1,5 +1,5 @@
 import { decodeFrame, encodeFrame, frameLengthForPayload } from "../bus/frameCodec.js";
-import { I2cBusController } from "../i2c/i2cBusController.js";
+import { I2cBusController, I2cTaskReplacedError } from "../i2c/i2cBusController.js";
 import { I2C_PRIORITY } from "../i2c/priorities.js";
 import { MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS, MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS } from "../constants.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
@@ -38,9 +38,6 @@ function clampNormalizedTarget(target: number): number {
   return Math.max(-1, Math.min(1, target));
 }
 
-function isReplacedTaskError(error: unknown, key: string): boolean {
-  return error instanceof Error && error.message === `i2c task replaced: ${key}`;
-}
 
 export class MotorNodeClient {
   private sequence = 0;
@@ -173,7 +170,7 @@ export class MotorNodeClient {
         payload: frame,
       });
     } catch (error) {
-      if (isReplacedTaskError(error, key)) {
+      if (error instanceof I2cTaskReplacedError && error.key === key) {
         return;
       }
       throw error;
