@@ -18,6 +18,18 @@ import { PoseFusion } from "../sensing/poseFusion.js";
 import { DriveLearningModel } from "./driveLearningModel.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
 import {
+  RunRecord,
+  RunRecordHeartbeatSample,
+  RunRecordPose,
+  RunRecordWriter,
+} from "./runRecord.js";
+import {
+  SENSOR_EVENTS,
+  ImuHeadingUpdateEvent,
+  MotorFeedbackUpdateEvent,
+  ObstructionDetectedEvent,
+} from "../sensing/sensorEvents.js";
+import {
   Position,
   Pose,
   Meters,
@@ -78,7 +90,33 @@ export interface DriveLineControllerOptions {
   settleTimeMs?: number;
   nowMillis?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
+  /**
+   * Optional Phase-1 instrumentation sink.  When supplied, the controller
+   * writes a RunRecord per drive to `<logDir>/run-records/<date>.jsonl`.
+   * Drives never fail if the writer fails — instrumentation is best-effort.
+   */
+  runRecordWriter?: RunRecordWriter;
 }
+
+interface RunInstrumentation {
+  readonly runId: string;
+  readonly anchor: RunRecordPose | null;
+  brakeTrigger: (RunRecordPose & {
+    remainingAlongTrackMeters: number;
+    reason: "arrival_tolerance" | "brake_distance" | "none";
+  }) | null;
+  peakTickRate: number;
+  pitchAtAnchorDeg: number | null;
+  obstructionSeen: boolean;
+  wheelSlipSeen: boolean;
+  gnssDemotedDuringRun: boolean;
+  lastHeartbeatTickMs: number;
+  heartbeat: RunRecordHeartbeatSample[];
+  paramsSnapshot: { coastDistanceUsedMeters: number; cteGainUsed: number; shortBucketUsed: boolean };
+}
+
+const RUN_RECORD_HEARTBEAT_INTERVAL_MS = 500; // 2 Hz
+const RUN_RECORD_HEARTBEAT_MAX_SAMPLES = 200;
 
 export class DriveLineController {
   private readonly logger: LoggerScope;
@@ -90,6 +128,7 @@ export class DriveLineController {
   private readonly settleTimeMs: number;
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly runRecordWriter: RunRecordWriter | null;
 
   private status: DriveStatus = "idle";
   private currentDrive: DriveLineRequest | null = null;
@@ -119,6 +158,13 @@ export class DriveLineController {
   private lastHeartbeatMs = 0;
   private static readonly HEARTBEAT_INTERVAL_MS = 200;
 
+  // Phase-1 instrumentation: per-run state populated when a drive starts
+  // and consumed when the drive completes/aborts.  Null between drives.
+  private runInstrumentation: RunInstrumentation | null = null;
+  private boundOnMotorFeedback: ((event: MotorFeedbackUpdateEvent) => void) | null = null;
+  private boundOnObstructionDetected: ((event: ObstructionDetectedEvent) => void) | null = null;
+  private boundOnImuHeading: ((event: ImuHeadingUpdateEvent) => void) | null = null;
+
   constructor(options: DriveLineControllerOptions) {
     this.logger = options.logger.child({ context: "control", source: "DriveLineController" });
     this.sensorController = options.sensorController;
@@ -129,8 +175,324 @@ export class DriveLineController {
     this.settleTimeMs = options.settleTimeMs ?? DRIVE_SETTLE_TIME_MS;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
+    this.runRecordWriter = options.runRecordWriter ?? null;
 
     this.onPoseUpdate = this.onPoseUpdate.bind(this);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase-1 instrumentation helpers (no behaviour change).
+  // ---------------------------------------------------------------------------
+
+  private generateRunId(nowMs: number): string {
+    return `run-${nowMs.toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+  }
+
+  private safeGetPrimitiveState(): { usingGnssHeading: boolean; gnssPositionAgeMs: number | null; wheelSlipSuspected: boolean } {
+    const pf = this.poseFusion as unknown as {
+      getPrimitiveState?: () => { usingGnssHeading?: boolean; gnssPositionAgeMs?: number | null; wheelSlipSuspected?: boolean };
+    };
+    if (typeof pf.getPrimitiveState !== "function") {
+      return { usingGnssHeading: false, gnssPositionAgeMs: null, wheelSlipSuspected: false };
+    }
+    const p = pf.getPrimitiveState() ?? {};
+    return {
+      usingGnssHeading: p.usingGnssHeading ?? false,
+      gnssPositionAgeMs: p.gnssPositionAgeMs ?? null,
+      wheelSlipSuspected: p.wheelSlipSuspected ?? false,
+    };
+  }
+
+  private capturePoseSnapshot(): RunRecordPose {
+    const pose = this.poseFusion.getCurrentPose();
+    const primitive = this.safeGetPrimitiveState();
+    const nowMs = this.nowMillis();
+    return {
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+      headingDeg: unwrapInternalHeading(pose.heading),
+      quality: pose.quality,
+      usingGnssHeading: primitive.usingGnssHeading,
+      gnssAgeMs: primitive.gnssPositionAgeMs,
+      tMs: nowMs,
+    };
+  }
+
+  private beginRunInstrumentation(): void {
+    const params = this.learningModel.getParameters();
+    const cteGainUsed = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
+    const brakeDistanceMeters = unwrapMeters(this.getBrakeDistanceForCurrentDrive());
+    const isShort =
+      this.driveStartPosition !== null &&
+      this.driveTargetPosition !== null &&
+      unwrapMeters(distanceBetween(this.driveStartPosition, this.driveTargetPosition)) <=
+        params.longDriveMinDistanceMeters;
+
+    const anchor = this.capturePoseSnapshot();
+
+    this.runInstrumentation = {
+      runId: this.generateRunId(this.nowMillis()),
+      anchor,
+      brakeTrigger: null,
+      peakTickRate: 0,
+      pitchAtAnchorDeg: null,
+      obstructionSeen: false,
+      wheelSlipSeen: false,
+      gnssDemotedDuringRun: false,
+      lastHeartbeatTickMs: 0,
+      heartbeat: [],
+      paramsSnapshot: {
+        coastDistanceUsedMeters: brakeDistanceMeters,
+        cteGainUsed,
+        shortBucketUsed: isShort,
+      },
+    };
+
+    this.boundOnMotorFeedback = (event: MotorFeedbackUpdateEvent) => {
+      if (this.runInstrumentation === null) return;
+      const tickRate = Math.abs(event.leftEncoderDelta) + Math.abs(event.rightEncoderDelta);
+      if (tickRate > this.runInstrumentation.peakTickRate) {
+        this.runInstrumentation.peakTickRate = tickRate;
+      }
+      if (this.runInstrumentation.heartbeat.length > 0) {
+        this.applyEncoderDeltasToLatestHeartbeat(event.leftEncoderDelta, event.rightEncoderDelta);
+      }
+    };
+    this.boundOnObstructionDetected = (event: ObstructionDetectedEvent) => {
+      if (this.runInstrumentation === null) return;
+      this.runInstrumentation.obstructionSeen = true;
+      this.logger.warn("drive.line.run_obstruction", { type: event.type });
+    };
+    this.boundOnImuHeading = (event: ImuHeadingUpdateEvent) => {
+      if (this.runInstrumentation === null) return;
+      // Latest pitch wins; we keep updating until the run ends so settled
+      // pitch could also be sampled from this if needed.
+      if (this.runInstrumentation.pitchAtAnchorDeg === null) {
+        this.runInstrumentation.pitchAtAnchorDeg = event.pitchDeg;
+      }
+    };
+    // Defensive: real `SensorController` extends EventEmitter, but lightweight
+    // test doubles in driveController.test.js do not. Skip subscription rather
+    // than crash if `on` is missing.
+    const sc = this.sensorController as unknown as {
+      on?: (event: string, listener: (...args: unknown[]) => void) => void;
+    };
+    if (typeof sc.on === "function") {
+      this.sensorController.on(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.boundOnMotorFeedback);
+      this.sensorController.on(SENSOR_EVENTS.OBSTRUCTION_DETECTED, this.boundOnObstructionDetected);
+      this.sensorController.on(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.boundOnImuHeading);
+    } else {
+      this.boundOnMotorFeedback = null;
+      this.boundOnObstructionDetected = null;
+      this.boundOnImuHeading = null;
+    }
+  }
+
+  private applyEncoderDeltasToLatestHeartbeat(left: number, right: number): void {
+    if (this.runInstrumentation === null) return;
+    const samples = this.runInstrumentation.heartbeat;
+    if (samples.length === 0) return;
+    const last = samples[samples.length - 1];
+    if (last.leftEncoderDelta !== null && last.rightEncoderDelta !== null) return;
+    samples[samples.length - 1] = {
+      ...last,
+      leftEncoderDelta: last.leftEncoderDelta ?? left,
+      rightEncoderDelta: last.rightEncoderDelta ?? right,
+    };
+  }
+
+  private endRunInstrumentationListeners(): void {
+    const sc = this.sensorController as unknown as {
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+    };
+    const hasOff = typeof sc.off === "function";
+    if (this.boundOnMotorFeedback !== null) {
+      if (hasOff) this.sensorController.off(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.boundOnMotorFeedback);
+      this.boundOnMotorFeedback = null;
+    }
+    if (this.boundOnObstructionDetected !== null) {
+      if (hasOff) this.sensorController.off(SENSOR_EVENTS.OBSTRUCTION_DETECTED, this.boundOnObstructionDetected);
+      this.boundOnObstructionDetected = null;
+    }
+    if (this.boundOnImuHeading !== null) {
+      if (hasOff) this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.boundOnImuHeading);
+      this.boundOnImuHeading = null;
+    }
+  }
+
+  private recordRunHeartbeatIfDue(
+    pose: Pose,
+    cteMeters: number,
+    remainingAlongTrackMeters: number,
+  ): void {
+    if (this.runInstrumentation === null) return;
+    const nowMs = this.nowMillis();
+    if (
+      this.runInstrumentation.lastHeartbeatTickMs !== 0 &&
+      nowMs - this.runInstrumentation.lastHeartbeatTickMs < RUN_RECORD_HEARTBEAT_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.runInstrumentation.lastHeartbeatTickMs = nowMs;
+
+    if (pose.quality !== "gnss" && this.runInstrumentation.anchor?.quality === "gnss") {
+      this.runInstrumentation.gnssDemotedDuringRun = true;
+    }
+
+    const primitive = this.safeGetPrimitiveState();
+    if (primitive.wheelSlipSuspected) {
+      this.runInstrumentation.wheelSlipSeen = true;
+    }
+
+    if (this.runInstrumentation.heartbeat.length >= RUN_RECORD_HEARTBEAT_MAX_SAMPLES) return;
+
+    this.runInstrumentation.heartbeat.push({
+      tMs: nowMs,
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+      headingDeg: unwrapInternalHeading(pose.heading),
+      quality: pose.quality,
+      leftEncoderDelta: null,
+      rightEncoderDelta: null,
+      remainingAlongTrackMeters,
+      cteMeters,
+    });
+  }
+
+  private captureBrakeTriggerSnapshot(
+    pose: Pose,
+    remainingAlongTrackMeters: number,
+    reason: "arrival_tolerance" | "brake_distance",
+  ): void {
+    if (this.runInstrumentation === null) return;
+    const primitive = this.safeGetPrimitiveState();
+    this.runInstrumentation.brakeTrigger = {
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+      headingDeg: unwrapInternalHeading(pose.heading),
+      quality: pose.quality,
+      usingGnssHeading: primitive.usingGnssHeading,
+      gnssAgeMs: primitive.gnssPositionAgeMs,
+      tMs: this.nowMillis(),
+      remainingAlongTrackMeters,
+      reason,
+    };
+  }
+
+  private async emitRunRecord(args: {
+    settledPose: RunRecordPose | null;
+    finalPosition: Position;
+    errorXMeters: number;
+    errorYMeters: number;
+    avgCteMeters: number;
+    maxCteMeters: number;
+    durationMs: number;
+    status: "success" | "error" | "stopped";
+    statusMessage?: string | null;
+    learnApplied: boolean;
+    learnSkipReason?: string | null;
+  }): Promise<void> {
+    if (this.runInstrumentation === null) return;
+    const inst = this.runInstrumentation;
+    if (inst.anchor === null || this.driveTargetPosition === null) return;
+
+    let coastDistanceMeasuredMeters = 0;
+    if (inst.brakeTrigger !== null && this.driveLineStart !== null && this.driveLineEnd !== null) {
+      const brakePos = createPosition(inst.brakeTrigger.xMeters, inst.brakeTrigger.yMeters);
+      const brakeAlong = this.projectAlongTrackDistance(brakePos);
+      const finalAlong = this.projectAlongTrackDistance(args.finalPosition);
+      coastDistanceMeasuredMeters = finalAlong - brakeAlong;
+    }
+
+    const direction = this.driveDirectionSign > 0 ? "forward" : "reverse";
+    const settled: RunRecordPose = args.settledPose ?? {
+      xMeters: unwrapMeters(args.finalPosition.xMeters),
+      yMeters: unwrapMeters(args.finalPosition.yMeters),
+      headingDeg: 0,
+      quality: "unknown",
+      usingGnssHeading: false,
+      gnssAgeMs: null,
+      tMs: this.nowMillis(),
+    };
+
+    const record: RunRecord = {
+      runId: inst.runId,
+      startedAt: new Date(inst.anchor.tMs).toISOString(),
+      directionSign: this.driveDirectionSign,
+      direction,
+      plannedDistanceMeters: this.driveLineStart !== null && this.driveLineEnd !== null
+        ? unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd))
+        : 0,
+      fullPowerCommand: this.fullSpeedCommand,
+      calibrationFingerprintAtRun: null,
+      params: inst.paramsSnapshot,
+      anchor: inst.anchor,
+      lineEnd: {
+        xMeters: unwrapMeters(this.driveTargetPosition.xMeters),
+        yMeters: unwrapMeters(this.driveTargetPosition.yMeters),
+      },
+      brakeTrigger: inst.brakeTrigger ?? {
+        xMeters: 0,
+        yMeters: 0,
+        headingDeg: 0,
+        quality: "unknown",
+        usingGnssHeading: false,
+        gnssAgeMs: null,
+        tMs: 0,
+        remainingAlongTrackMeters: 0,
+        reason: "none",
+      },
+      settled,
+      errorXMeters: args.errorXMeters,
+      errorYMeters: args.errorYMeters,
+      avgCteMeters: args.avgCteMeters,
+      maxCteMeters: args.maxCteMeters,
+      coastDistanceMeasuredMeters,
+      peakTickRate: inst.peakTickRate,
+      pitchAtAnchorDeg: inst.pitchAtAnchorDeg,
+      durationMs: args.durationMs,
+      status: args.status,
+      statusMessage: args.statusMessage ?? null,
+      events: {
+        obstruction: inst.obstructionSeen,
+        wheelSlip: inst.wheelSlipSeen,
+        gnssDemoted: inst.gnssDemotedDuringRun,
+      },
+      heartbeat: inst.heartbeat,
+      learning: {
+        applied: args.learnApplied,
+        skipReason: args.learnSkipReason ?? null,
+        outlier: false,
+      },
+    };
+
+    if (inst.gnssDemotedDuringRun) {
+      this.logger.warn("drive.line.gnss_quality_lost_during_run", {
+        runId: inst.runId,
+        anchorQuality: inst.anchor.quality,
+        settledQuality: settled.quality,
+      });
+    }
+
+    this.logger.info("drive.line.run_record", {
+      runId: record.runId,
+      direction: record.direction,
+      plannedDistanceMeters: record.plannedDistanceMeters,
+      coastDistanceUsedMeters: record.params.coastDistanceUsedMeters,
+      coastDistanceMeasuredMeters: record.coastDistanceMeasuredMeters,
+      peakTickRate: record.peakTickRate,
+      brakeTriggerPoseAgeMs: record.brakeTrigger.gnssAgeMs,
+      anchorQuality: record.anchor.quality,
+      brakeQuality: record.brakeTrigger.quality,
+      settledQuality: record.settled.quality,
+      events: record.events,
+      status: record.status,
+      learning: record.learning,
+    });
+
+    if (this.runRecordWriter !== null) {
+      await this.runRecordWriter.append(record);
+    }
   }
 
   executeLineDrive(request: DriveLineRequest): Promise<DriveResult> {
@@ -217,6 +579,8 @@ export class DriveLineController {
       this.poseFusion.on("poseUpdate", this.onPoseUpdate);
       subscribed = true;
 
+      this.beginRunInstrumentation();
+
       this.status = "driving";
       const initialRemainingAlongTrackDistance = unwrapMeters(
         distanceBetween(this.driveLineStart, this.driveLineEnd),
@@ -235,6 +599,8 @@ export class DriveLineController {
       if (subscribed) {
         this.poseFusion.off("poseUpdate", this.onPoseUpdate);
       }
+      this.endRunInstrumentationListeners();
+      this.runInstrumentation = null;
       try {
         await this.sensorController.stopMotors();
       } catch (stopError) {
@@ -249,6 +615,7 @@ export class DriveLineController {
 
   async runShortDistanceTraining(options?: {
     targetXErrorMeters?: number;
+    targetYErrorMeters?: number;
     includeReverseLegs?: boolean;
     startDistanceMeters?: number;
     maxDistanceMeters?: number;
@@ -256,6 +623,7 @@ export class DriveLineController {
     pauseBeforeDriveMs?: number;
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const maxDistanceMeters = this.normalizeShortTrainingMaxDistanceMeters(options?.maxDistanceMeters ?? DRIVE_SHORT_BUCKET_MAX_METERS);
     const startDistanceMeters = this.normalizeShortTrainingStartDistanceMeters(options?.startDistanceMeters, maxDistanceMeters);
@@ -471,22 +839,30 @@ export class DriveLineController {
           this.shortTrainingResults = [...results];
 
           const absErrorX = Math.abs(unwrapMeters(result.errorX));
-          const legSucceeded = absErrorX <= targetXErrorMeters;
+          const absErrorY = Math.abs(unwrapMeters(result.errorY));
+          // Pass criterion: both axes within bound. Acceptance is the same
+          // for short and long drives — long drives have more time to
+          // correct, so the same bound applies.  See feedback memory
+          // [[feedback-drive-acceptance]] / [[feedback-tuner-retry]].
+          const legSucceeded = absErrorX <= targetXErrorMeters && absErrorY <= targetYErrorMeters;
           pairSucceeded = pairSucceeded && legSucceeded;
           this.logger.info("drive.line.short_training.result", {
             distanceMeters,
             directionSign,
             pairAttempt,
             errorX: unwrapMeters(result.errorX),
+            errorY: unwrapMeters(result.errorY),
             absErrorX,
+            absErrorY,
             targetXErrorMeters,
+            targetYErrorMeters,
             status: result.status,
             legSucceeded,
             pairSucceeded,
           });
           reportProgress(
             "leg_result",
-            `Distance ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} leg ${result.status}${Number.isFinite(absErrorX) ? `, error ${Math.round(absErrorX * 100)} cm` : ""}.`,
+            `Distance ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} leg ${result.status}${Number.isFinite(absErrorX) && Number.isFinite(absErrorY) ? `, X ${Math.round(absErrorX * 100)} cm Y ${Math.round(absErrorY * 100)} cm` : ""}.`,
             {
               distanceMeters,
               pairAttempt,
@@ -671,6 +1047,22 @@ export class DriveLineController {
       this.currentDrive = null;
       this.stopRequested = false;
       this.logger.warn("drive.line.stopped", { durationMs: this.nowMillis() - this.driveStartTime });
+      const durationMs = this.nowMillis() - this.driveStartTime;
+      await this.emitRunRecord({
+        settledPose: null,
+        finalPosition: pose.position,
+        errorXMeters: 0,
+        errorYMeters: 0,
+        avgCteMeters: 0,
+        maxCteMeters: 0,
+        durationMs,
+        status: "stopped",
+        statusMessage: "Drive stopped by user request",
+        learnApplied: false,
+        learnSkipReason: "drive_stopped",
+      });
+      this.endRunInstrumentationListeners();
+      this.runInstrumentation = null;
       this.driveResolve?.({
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
@@ -679,7 +1071,7 @@ export class DriveLineController {
         errorY: createMeters(0),
         maxCteMeters: createMeters(0),
         avgCteMeters: createMeters(0),
-        durationMs: this.nowMillis() - this.driveStartTime,
+        durationMs,
         brakeDistanceUsed: this.getBrakeDistanceForCurrentDrive(),
         status: "stopped",
         errorMessage: "Drive stopped by user request",
@@ -699,6 +1091,22 @@ export class DriveLineController {
       this.status = "stopped";
       this.currentDrive = null;
       this.logger.warn("drive.line.stopped", { durationMs: this.nowMillis() - this.driveStartTime, reason: "system_stop" });
+      const durationMs = this.nowMillis() - this.driveStartTime;
+      await this.emitRunRecord({
+        settledPose: null,
+        finalPosition: pose.position,
+        errorXMeters: 0,
+        errorYMeters: 0,
+        avgCteMeters: 0,
+        maxCteMeters: 0,
+        durationMs,
+        status: "stopped",
+        statusMessage: "Drive stopped by system stop",
+        learnApplied: false,
+        learnSkipReason: "drive_stopped",
+      });
+      this.endRunInstrumentationListeners();
+      this.runInstrumentation = null;
       this.driveResolve?.({
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
@@ -707,7 +1115,7 @@ export class DriveLineController {
         errorY: createMeters(0),
         maxCteMeters: createMeters(0),
         avgCteMeters: createMeters(0),
-        durationMs: this.nowMillis() - this.driveStartTime,
+        durationMs,
         brakeDistanceUsed: this.getBrakeDistanceForCurrentDrive(),
         status: "stopped",
         errorMessage: "Drive stopped by system stop",
@@ -725,6 +1133,12 @@ export class DriveLineController {
     this.cteSamples.push(cte);
 
     this.emitHeartbeatIfDue(pose, cte);
+    {
+      const targetDistanceForHb = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
+      const projectedAlongTrackForHb = this.projectAlongTrackDistance(currentPosition);
+      const remainingForHb = Math.max(0, targetDistanceForHb - projectedAlongTrackForHb);
+      this.recordRunHeartbeatIfDue(pose, unwrapMeters(cte), remainingForHb);
+    }
 
     const maxCrossTrackErrorMeters = this.currentDrive?.maxCrossTrackErrorMeters;
     if (
@@ -745,6 +1159,7 @@ export class DriveLineController {
     // enough distance left before the target to make it worthwhile.
     if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
       this.brakeDecisionPoseQuality = pose.quality;
+      this.captureBrakeTriggerSnapshot(pose, remainingAlongTrackDistance, "arrival_tolerance");
       this.logger.info("drive.line.brake_trigger", {
         reason: "arrival_tolerance",
         elapsedMs: this.nowMillis() - this.driveStartTime,
@@ -768,6 +1183,7 @@ export class DriveLineController {
       remainingAlongTrackDistance <= unwrapMeters(brakeDistance)
     ) {
       this.brakeDecisionPoseQuality = pose.quality;
+      this.captureBrakeTriggerSnapshot(pose, remainingAlongTrackDistance, "brake_distance");
       this.logger.info("drive.line.brake_trigger", {
         reason: "brake_distance",
         elapsedMs: this.nowMillis() - this.driveStartTime,
@@ -1048,19 +1464,33 @@ export class DriveLineController {
         driveDirectionSign: this.driveDirectionSign,
       });
 
+      const settledPrimitive = this.safeGetPrimitiveState();
+      const settledPose: RunRecordPose = {
+        xMeters: unwrapMeters(finalPosition.xMeters),
+        yMeters: unwrapMeters(finalPosition.yMeters),
+        headingDeg: unwrapInternalHeading(finalPose.heading),
+        quality: finalPose.quality,
+        usingGnssHeading: settledPrimitive.usingGnssHeading,
+        gnssAgeMs: settledPrimitive.gnssPositionAgeMs,
+        tMs: this.nowMillis(),
+      };
+      const inst = this.runInstrumentation;
+      const coastDistanceMeasuredMeters = inst?.brakeTrigger !== null && inst?.brakeTrigger !== undefined
+        ? this.projectAlongTrackDistance(finalPosition) -
+          this.projectAlongTrackDistance(createPosition(inst.brakeTrigger.xMeters, inst.brakeTrigger.yMeters))
+        : 0;
+      const peakTickRate = inst?.peakTickRate ?? 0;
+      const brakeTriggerPoseAgeMs = inst?.brakeTrigger?.gnssAgeMs ?? null;
+
       let learnApplied = false;
       let learnSkipReason: string | undefined;
       if (this.currentDrive?.learningEnabled === false) {
         learnSkipReason = "learning_disabled";
       } else {
-        // Only feed a drive into the learner when every pose sample that
-        // shaped the drive was GNSS-quality: the start anchor (defines the
-        // line geometry and so the CTE), the brake-decision pose (defines
-        // when braking actually fired), and the final pose (defines the
-        // measured X/Y error). A dead-reckoning sample for any of the three
-        // would teach the learner to compensate for encoder drift rather
-        // than for the brake-time-vs-overshoot relationship we want it to
-        // model.
+        // Pose-quality gate covers anchor / brake-decision / settled.  All
+        // three must be GNSS-quality, otherwise the brake timing taught to
+        // the learner would compensate for encoder drift rather than the
+        // physical coast distance.
         const learningPoseQualityOk =
           this.driveStartPoseQuality === "gnss" &&
           this.brakeDecisionPoseQuality === "gnss" &&
@@ -1077,6 +1507,14 @@ export class DriveLineController {
             maxCte,
             avgCte,
             brakeDistanceUsed: brakeDistance,
+            coastDistanceMeasuredMeters,
+            peakTickRate,
+            brakeTriggerPoseAgeMs,
+            events: inst === null ? undefined : {
+              obstruction: inst.obstructionSeen,
+              wheelSlip: inst.wheelSlipSeen,
+              gnssDemoted: inst.gnssDemotedDuringRun,
+            },
           });
           learnApplied = true;
         } else {
@@ -1089,30 +1527,14 @@ export class DriveLineController {
           });
         }
 
-        // Only calibrate when both poses are GNSS-quality and the drive was
-        // substantially straight (avg CTE < 3 cm), so encoder ticks reflect
-        // path length ≈ displacement and we don't underestimate metersPerTick.
-        const avgCteForCalibration = unwrapMeters(avgCte);
-        if (
-          this.driveStartPoseQuality === "gnss" &&
-          finalPose.quality === "gnss" &&
-          Math.abs(avgCteForCalibration) < 0.03
-        ) {
-          const actualDistance = distanceBetween(this.driveStartPosition, finalPosition);
-          if (this.totalEncoderTicks > 0) {
-            const measuredMetersPerTick = unwrapMeters(actualDistance) / this.totalEncoderTicks;
-            const currentCalibration = this.poseFusion.getEncoderCalibration();
-            const newCalibration = 0.9 * currentCalibration + 0.1 * measuredMetersPerTick;
-            await this.poseFusion.setEncoderCalibration(newCalibration);
-            this.logger.info("drive.line.encoder_calibrated", {
-              actualDistance: unwrapMeters(actualDistance),
-              encoderTicks: this.totalEncoderTicks,
-              avgCteMeters: avgCteForCalibration,
-              newCalibration,
-            });
-          }
-        }
+        // Encoder calibration intentionally not updated from line drives.
+        // Per the Phase-3 design, encoder calibration is owned by the
+        // dead-reckoning workflow only — the prior opportunistic update
+        // here could quietly overwrite a clean per-wheel calibration with
+        // a worse shared scalar.  Phase 4 introduces the proper
+        // arc-aware, per-direction calibration path.
       }
+      const durationMs = this.nowMillis() - this.driveStartTime;
 
       this.status = "idle";
       this.currentDrive = null;
@@ -1124,7 +1546,7 @@ export class DriveLineController {
         errorY,
         maxCteMeters: maxCte,
         avgCteMeters: avgCte,
-        durationMs: this.nowMillis() - this.driveStartTime,
+        durationMs,
         brakeDistanceUsed: brakeDistance,
         status: "success",
         timestamp: new Date().toISOString(),
@@ -1133,7 +1555,25 @@ export class DriveLineController {
         startPoseQuality: this.driveStartPoseQuality,
         brakeDecisionPoseQuality: this.brakeDecisionPoseQuality,
         finalPoseQuality: finalPose.quality,
+        coastDistanceMeasuredMeters: createMeters(coastDistanceMeasuredMeters),
+        peakTickRate,
+        brakeTriggerPoseAgeMs,
       };
+
+      await this.emitRunRecord({
+        settledPose,
+        finalPosition,
+        errorXMeters: unwrapMeters(errorX),
+        errorYMeters: unwrapMeters(errorY),
+        avgCteMeters: unwrapMeters(avgCte),
+        maxCteMeters: unwrapMeters(maxCte),
+        durationMs,
+        status: "success",
+        learnApplied,
+        learnSkipReason,
+      });
+      this.endRunInstrumentationListeners();
+      this.runInstrumentation = null;
 
       this.addToHistory(result);
       this.driveResolve?.(result);
@@ -1149,6 +1589,23 @@ export class DriveLineController {
         // Best-effort ramp during a completion error.
       }
 
+      const durationMs = this.nowMillis() - this.driveStartTime;
+      await this.emitRunRecord({
+        settledPose: null,
+        finalPosition: this.driveStartPosition ?? createPosition(0, 0),
+        errorXMeters: 0,
+        errorYMeters: 0,
+        avgCteMeters: 0,
+        maxCteMeters: 0,
+        durationMs,
+        status: "error",
+        statusMessage: errorMessage,
+        learnApplied: false,
+        learnSkipReason: "drive_error",
+      });
+      this.endRunInstrumentationListeners();
+      this.runInstrumentation = null;
+
       this.driveResolve?.({
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
@@ -1157,7 +1614,7 @@ export class DriveLineController {
         errorY: createMeters(0),
         maxCteMeters: createMeters(0),
         avgCteMeters: createMeters(0),
-        durationMs: this.nowMillis() - this.driveStartTime,
+        durationMs,
         brakeDistanceUsed: this.getBrakeDistanceForCurrentDrive(),
         status: "error",
         errorMessage,
@@ -1189,6 +1646,23 @@ export class DriveLineController {
       reason: errorMessage,
       currentDrive: stoppedDrive,
     });
+    const durationMs = this.nowMillis() - this.driveStartTime;
+    await this.emitRunRecord({
+      settledPose: null,
+      finalPosition,
+      errorXMeters: 0,
+      errorYMeters: 0,
+      avgCteMeters: 0,
+      maxCteMeters: 0,
+      durationMs,
+      status: "stopped",
+      statusMessage: errorMessage,
+      learnApplied: false,
+      learnSkipReason: "drive_stopped",
+    });
+    this.endRunInstrumentationListeners();
+    this.runInstrumentation = null;
+
     this.driveResolve?.({
       startPosition: this.driveStartPosition ?? createPosition(0, 0),
       targetPosition: stoppedDrive.targetPosition,
@@ -1197,7 +1671,7 @@ export class DriveLineController {
       errorY: createMeters(0),
       maxCteMeters: createMeters(0),
       avgCteMeters: createMeters(0),
-      durationMs: this.nowMillis() - this.driveStartTime,
+      durationMs,
       brakeDistanceUsed: this.getBrakeDistanceForCurrentDrive(),
       status: "stopped",
       errorMessage,

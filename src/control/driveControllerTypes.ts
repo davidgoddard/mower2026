@@ -54,6 +54,25 @@ export interface DriveResult {
   readonly startPoseQuality?: DrivePoseQuality;
   readonly brakeDecisionPoseQuality?: DrivePoseQuality;
   readonly finalPoseQuality?: DrivePoseQuality;
+  /**
+   * Phase-1 instrumentation. Distance the mower coasted from the moment the
+   * controller fired `requestNeutralMotorOutputs()` to the settled pose,
+   * projected along the drive line.  Direction-aware: positive means the
+   * mower kept moving toward the target after brake; negative means it
+   * slid back (rare).  Drives the coast-distance learner that replaces
+   * the legacy bucket-fraction model.
+   */
+  readonly coastDistanceMeasuredMeters?: Meters;
+  /**
+   * Peak left+right encoder ticks per motor-feedback sample observed
+   * during the drive.  Cruise-reached evidence in tick units — never m/s.
+   */
+  readonly peakTickRate?: number;
+  /**
+   * Milliseconds since the last accepted GNSS sample at the moment the
+   * brake-trigger fired.  Phase-3 will reject runs above 100 ms here.
+   */
+  readonly brakeTriggerPoseAgeMs?: number | null;
 }
 
 export type SegmentTrainingPhase =

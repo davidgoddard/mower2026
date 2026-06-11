@@ -369,6 +369,10 @@ ${getSensorWidgetScriptTag()}
         </aside>
 
         <main class="main-column">
+          <section id="gnssGate" class="panel" style="display:none; background:#fff7ed; border-color:#fdba74;">
+            <strong>GNSS not trusted.</strong>
+            <span id="gnssGateDetail">Waiting for fixed-quality GNSS — learning is disabled until pose quality is gnss.</span>
+          </section>
           <section class="panel">
             <div class="controls">
               <div class="field">
@@ -430,6 +434,24 @@ ${getAppDialogHtml()}
     <script>
 ${getAppDialogScript()}
 
+      function updateGnssGate(primitivesPayload) {
+        const poseFusion = primitivesPayload?.primitives?.poseFusion ?? {};
+        const gate = document.getElementById('gnssGate');
+        const detail = document.getElementById('gnssGateDetail');
+        if (!gate || !detail) return;
+        const quality = poseFusion.quality ?? 'unknown';
+        if (quality === 'gnss') {
+          gate.style.display = 'none';
+          return;
+        }
+        gate.style.display = '';
+        const ageMs = poseFusion.gnssPositionAgeMs;
+        const ageText = (typeof ageMs === 'number' && Number.isFinite(ageMs))
+          ? (ageMs > 1000 ? (ageMs / 1000).toFixed(1) + 's' : Math.round(ageMs) + ' ms')
+          : 'never';
+        detail.textContent = 'Pose quality is ' + quality + ' (last accepted GNSS ' + ageText + ' ago). Learning is gated and the tuner will refuse to step distances until GNSS is trusted again.';
+      }
+
       function updateSidebar(primitivesPayload) {
         const primitives = primitivesPayload?.primitives ?? {};
         const imu = primitives.imu ?? {};
@@ -464,9 +486,10 @@ ${getAppDialogScript()}
       }
 
       function statusClass(value) {
+        // Acceptance bound is 3 cm on both X and Y; 6 cm warns, beyond is bad.
         const abs = Math.abs(value);
-        if (abs <= 0.04) return "good";
-        if (abs <= 0.12) return "warn";
+        if (abs <= 0.03) return "good";
+        if (abs <= 0.06) return "warn";
         return "bad";
       }
 
@@ -579,6 +602,7 @@ ${getAppDialogScript()}
           const data = payload.status;
           const history = Array.isArray(data.history) ? data.history : [];
           updateSidebar(payload.primitives);
+          updateGnssGate(payload.primitives);
 
           const driveState = data.state ?? {};
           driveStateSnapshot = driveState;
@@ -658,7 +682,8 @@ ${getAppDialogScript()}
           await postAction("train-short", {
             startDistanceMeters: startAtMeters,
             maxDistanceMeters: endAtMeters,
-            targetXErrorMeters: 0.04,
+            targetXErrorMeters: 0.03,
+            targetYErrorMeters: 0.03,
             includeReverseLegs: true,
           });
           await update();

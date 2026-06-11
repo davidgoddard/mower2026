@@ -17,7 +17,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/config/jsonFileStore.ts`: shared JSON persistence helper for config files.
 - `src/config/motorCalibration.ts`: motor ramp calibration and persistence.
 - `src/config/imuCalibration.ts`: IMU yaw scale calibration and persistence.
-- `src/config/poseCalibration.ts`: encoder calibration persistence.
+- `src/config/poseCalibration.ts`: encoder calibration persistence (per-direction left/right m/tick are optional Phase-4 fields; pose fusion picks forward vs reverse per encoder-delta sign when both are present, otherwise falls back to the symmetric values).
 - `src/config/geometryCalibration.ts`: body-frame GNSS-to-vehicle reference offset persistence.
 - `src/config/pathFollowingConfig.ts`: path tracing/following safety parameters for closed-loop detection, approach standoff, turn-only threshold, segmented-drive simplification (chord tolerance, max vertex turn angle, max/min segment length, max CTE), and path-retry reverse distance.
 - `config/motor-calibration.json`: persisted motor calibration values.
@@ -162,11 +162,18 @@ This document maps problem domains to candidate files removing the need for Code
   - holds full forward (or full reverse) wheel power and applies a proportional left/right wheel trim from the cross-track error to keep the mower on the line; the only deviations from full power are this trim and an in-place pivot when heading error exceeds the rotate-to-heading threshold and the mower is not yet inside the final approach window
   - reverse travel uses the same geometric controller with the correct body-heading reference
   - hard arrival stop plus shared full-speed brake distance learning for drives beyond 1m
+  - per-run RunRecord instrumentation: anchor / brake-trigger / settled pose snapshots, 2 Hz heartbeat, peak encoder tick-rate, obstruction/slip/GNSS-demoted events surfaced to the learner; emits `drive.line.run_record` and writes `<MOWER_LOG_DIR>/run-records/<date>.jsonl`
+  - encoder calibration is NOT updated opportunistically from line drives; calibration is owned by the dead-reckoning workflow
   - short-drive stop-trigger learning uses exact buckets at 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, and 100cm
   - straight-line training runs those short buckets plus longer shared-brake sample distances at 2m, 3m, and 4m
   - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
   - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
   - self-contained stop handling and learning updates for the line-following phase
+- `src/control/runRecord.ts`: per-line-drive RunRecord schema and JSONL writer (Phase-1 instrumentation)
+  - one record per drive: anchor / brake-trigger / settled poses, coast distance measured, peak encoder tick-rate, events seen during run, heartbeat samples
+  - written to `<MOWER_LOG_DIR>/run-records/<YYYY-MM-DD>.jsonl`; best-effort, never throws into the controller
+  - emitted alongside the existing `drive.line.run_record` log event by `DriveLineController`
+- `test/runRecord.test.js`: unit tests for the JSONL writer (date routing, append ordering, basic schema fidelity)
 - `src/control/driveLearningModel.ts`: drive parameter learning and persistence
   - long-drive brake distance learning from final X error
   - short-drive brake fractions bucketed at the exact short distances from 5cm through 100cm; all longer plateau drives reuse the shared long-drive brake distance

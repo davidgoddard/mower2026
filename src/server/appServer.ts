@@ -6,6 +6,7 @@ import { TurnLearningModel } from "../control/turnLearningModel.js";
 import { TurnValidationRunner } from "../control/turnValidationRunner.js";
 import { DriveController } from "../control/driveController.js";
 import { DriveLineController } from "../control/driveLineController.js";
+import { RunRecordWriter } from "../control/runRecord.js";
 import type { DriveResult } from "../control/driveControllerTypes.js";
 import { DriveLearningModel } from "../control/driveLearningModel.js";
 import { SegmentTestRunner } from "../control/segmentTestRunner.js";
@@ -1613,6 +1614,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           systemStop.clearStop("api-drive-train-short");
           const results = await driveController.runShortDistanceTraining({
             targetXErrorMeters: data.targetXErrorMeters,
+            targetYErrorMeters: data.targetYErrorMeters,
             includeReverseLegs: data.includeReverseLegs ?? true,
             startDistanceMeters: data.startDistanceMeters,
             maxDistanceMeters: data.maxDistanceMeters,
@@ -1627,7 +1629,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           systemStop.clearStop("api-drive-train-segment");
           const results = await driveController.runSegmentTraining({
-            targetXErrorMeters: data.targetXErrorMeters ?? 0.04,
+            targetXErrorMeters: data.targetXErrorMeters,
+            targetYErrorMeters: data.targetYErrorMeters,
             includeReverseLegs: data.includeReverseLegs ?? true,
           });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1898,6 +1901,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger,
       learningModel: driveLearningModel,
       motorCalibration: motorCalibration!,
+      runRecordWriter: new RunRecordWriter({ logger }),
     });
 
     driveController = new DriveController({

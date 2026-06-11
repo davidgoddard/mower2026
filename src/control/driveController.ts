@@ -465,11 +465,13 @@ export class DriveController {
    */
   async runShortDistanceTraining(options?: {
     targetXErrorMeters?: number;
+    targetYErrorMeters?: number;
     includeReverseLegs?: boolean;
     startDistanceMeters?: number;
     maxDistanceMeters?: number;
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const startDistanceMeters = options?.startDistanceMeters;
     const maxDistanceMeters = options?.maxDistanceMeters;
@@ -497,6 +499,7 @@ export class DriveController {
       this.status = "learning";
       const results = await this.lineDriveController.runShortDistanceTraining({
         targetXErrorMeters,
+        targetYErrorMeters,
         includeReverseLegs,
         startDistanceMeters,
         maxDistanceMeters,
@@ -542,10 +545,12 @@ export class DriveController {
    */
   async runSegmentTraining(options?: {
     targetXErrorMeters?: number;
+    targetYErrorMeters?: number;
     includeReverseLegs?: boolean;
     progressReporter?: SegmentTrainingProgressReporter;
   }): Promise<SegmentTrainingResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
     const externalProgressReporter = options?.progressReporter;
     const results: SegmentTrainingResult[] = [];
@@ -734,7 +739,13 @@ export class DriveController {
           }
 
           const absErrorX = Math.abs(unwrapMeters(result.errorX));
-          const segmentSucceeded = result.status === "success" && absErrorX <= targetXErrorMeters;
+          const absErrorY = Math.abs(unwrapMeters(result.errorY));
+          // Pass criterion: both axes within bound. Long drives have more
+          // time to correct so the same 3 cm bound applies as for short.
+          // See feedback memory [[feedback-drive-acceptance]].
+          const segmentSucceeded = result.status === "success" &&
+            absErrorX <= targetXErrorMeters &&
+            absErrorY <= targetYErrorMeters;
           pairSucceeded = pairSucceeded && segmentSucceeded;
           this.logger.info("drive.segment_training.result", {
             distanceMeters,
@@ -742,15 +753,18 @@ export class DriveController {
             pairAttempt,
             segmentAttempt,
             errorX: unwrapMeters(result.errorX),
+            errorY: unwrapMeters(result.errorY),
             absErrorX,
+            absErrorY,
             targetXErrorMeters,
+            targetYErrorMeters,
             status: result.status,
             segmentSucceeded,
             pairSucceeded,
           });
           reportProgress(
             "segment_result",
-            `Segment ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} segment ${result.status}${Number.isFinite(absErrorX) ? `, error ${Math.round(absErrorX * 100)} cm` : ""}.`,
+            `Segment ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} segment ${result.status}${Number.isFinite(absErrorX) && Number.isFinite(absErrorY) ? `, X ${Math.round(absErrorX * 100)} cm Y ${Math.round(absErrorY * 100)} cm` : ""}.`,
             {
               distanceMeters,
               pairAttempt,

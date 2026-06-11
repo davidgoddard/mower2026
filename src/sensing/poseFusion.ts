@@ -473,6 +473,27 @@ export class PoseFusion extends EventEmitter {
     });
   }
 
+  /**
+   * Phase-4 helper: select forward or reverse per-wheel m/tick based on the
+   * sign of the summed encoder deltas. Falls back to the symmetric values
+   * when per-direction calibration is absent (v1 file or never measured).
+   */
+  private selectEncoderCalibration(directionSign: 1 | -1): { leftMpt: number; rightMpt: number } {
+    if (this.poseCalibration === null) {
+      return { leftMpt: this.leftEncoderMetersPerTick, rightMpt: this.rightEncoderMetersPerTick };
+    }
+    if (directionSign > 0) {
+      return {
+        leftMpt: this.poseCalibration.getForwardLeftEncoderMetersPerTick(),
+        rightMpt: this.poseCalibration.getForwardRightEncoderMetersPerTick(),
+      };
+    }
+    return {
+      leftMpt: this.poseCalibration.getReverseLeftEncoderMetersPerTick(),
+      rightMpt: this.poseCalibration.getReverseRightEncoderMetersPerTick(),
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Motor feedback — DR position update (always active)
   // ---------------------------------------------------------------------------
@@ -485,8 +506,15 @@ export class PoseFusion extends EventEmitter {
       rightEncoderDelta: event.rightEncoderDelta,
     };
 
-    const dLeft  = event.leftEncoderDelta  * this.leftEncoderMetersPerTick;
-    const dRight = event.rightEncoderDelta * this.rightEncoderMetersPerTick;
+    // Phase-4: pick per-direction encoder calibration when both forward and
+    // reverse values are present in pose-calibration.json.  Sign of the
+    // summed deltas decides which set applies for this sample.  When the
+    // calibration is symmetric (the common case until a reverse straight
+    // phase has run), the symmetric values are used.
+    const directionSign = (event.leftEncoderDelta + event.rightEncoderDelta) >= 0 ? 1 : -1;
+    const { leftMpt, rightMpt } = this.selectEncoderCalibration(directionSign);
+    const dLeft  = event.leftEncoderDelta  * leftMpt;
+    const dRight = event.rightEncoderDelta * rightMpt;
     const avgDist = (dLeft + dRight) / 2;
 
     if (Math.abs(avgDist) < 0.00005) return;  // sub-0.05 mm — ignore noise

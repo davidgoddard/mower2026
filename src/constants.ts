@@ -582,9 +582,27 @@ export const DRIVE_LONG_SAMPLE_DISTANCES_METERS = [2.0, 3.0, 4.0] as const;
 export const DRIVE_SHORT_BUCKET_MAX_METERS = 4.0;
 
 /**
- * Target absolute X error for short-drive learning runs (meters)
+ * Acceptance bound for line-drive arrival error (meters), applied to BOTH the
+ * along-track (X) and cross-track (Y) error.  The tuner repeats the
+ * forward+reverse pair at every distance until both legs are within this
+ * bound on both axes.  Same bound for short and long drives — see the
+ * project-wide drive-acceptance feedback memory.
  */
-export const DRIVE_SHORT_TARGET_X_ERROR_METERS = 0.04;
+export const DRIVE_ACCEPTANCE_ERROR_METERS = 0.03;
+
+/**
+ * Backwards-compatible alias used by the existing API surface for the
+ * short-distance training endpoint (`targetXErrorMeters`).  Removing the
+ * old constant would force a wider rename; aliasing keeps the diff small.
+ */
+export const DRIVE_SHORT_TARGET_X_ERROR_METERS = DRIVE_ACCEPTANCE_ERROR_METERS;
+
+/**
+ * Acceptance bound for cross-track Y error at arrival (meters).  Mirror of
+ * `DRIVE_ACCEPTANCE_ERROR_METERS` exposed under a Y-specific name so the API
+ * surface for the short-training endpoint can carry it as `targetYErrorMeters`.
+ */
+export const DRIVE_SHORT_TARGET_Y_ERROR_METERS = DRIVE_ACCEPTANCE_ERROR_METERS;
 
 /**
  * Minimum distance covered by segment-drive learning (meters)

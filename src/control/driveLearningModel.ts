@@ -58,7 +58,34 @@ export interface DriveUpdateData {
   maxCte: Meters;
   avgCte: Meters;
   brakeDistanceUsed: Meters;
+  /**
+   * Phase-3 instrumentation: the actual along-track distance the mower
+   * coasted from the moment the controller fired `requestNeutralMotorOutputs()`
+   * to the settled pose.  When supplied the learner uses this directly as
+   * the new physical coast-distance target (replacing the old
+   * "fraction × bucketDistance" interpretation).  Optional for back-compat
+   * with callers that only know the legacy errorX-based shape.
+   */
+  coastDistanceMeasuredMeters?: number;
+  /** Peak left+right encoder ticks per feedback sample during the run. */
+  peakTickRate?: number;
+  /** Per-run events that disqualify a run from coast-distance learning. */
+  events?: {
+    readonly obstruction: boolean;
+    readonly wheelSlip: boolean;
+    readonly gnssDemoted: boolean;
+  };
+  /** Milliseconds since the last accepted GNSS sample at brake-trigger. */
+  brakeTriggerPoseAgeMs?: number | null;
 }
+
+/** Brake-trigger pose-freshness limit for a run to be considered valid. */
+export const COAST_LEARNING_MAX_BRAKE_TRIGGER_POSE_AGE_MS = 100;
+/** Outlier rejection: a coast measurement more than this far from the recent median is dropped. */
+export const COAST_LEARNING_OUTLIER_FRACTION = 0.6;
+/** Plausible per-direction coast-distance band (metres). */
+export const COAST_LEARNING_MIN_METERS = 0.0;
+export const COAST_LEARNING_MAX_METERS = 5.0;
 
 export interface DriveLearningModelOptions {
   logger: SessionLogger;
@@ -72,6 +99,16 @@ export class DriveLearningModel {
   private readonly parametersPath: string;
   private readonly legacyParametersPath: string;
   private parameters: DriveParameters;
+
+  /**
+   * Phase-5 in-memory ring buffer of recent coast-distance measurements,
+   * keyed by direction.  Used for outlier rejection only — not persisted
+   * across runs.  20 samples per direction is enough to compute a stable
+   * median while reacting within a single training pair sweep.
+   */
+  private readonly recentCoastDistancesForward: number[] = [];
+  private readonly recentCoastDistancesReverse: number[] = [];
+  private static readonly RECENT_COAST_BUFFER_SIZE = 20;
 
   constructor(options: DriveLearningModelOptions) {
     this.logger = options.logger.child({ context: "control", source: "DriveLearningModel" });
@@ -161,6 +198,35 @@ export class DriveLearningModel {
     this.logger.info("drive.learning.reset_to_defaults", {});
   }
 
+  /**
+   * Validity gate for coast-distance learning (Phase-3).  Returns the
+   * disqualification reason as a string, or `null` if the run is good.
+   * The legacy errorX-driven path is still applied even when this gate
+   * fails — the gate only affects the new coast-distance update.
+   */
+  private coastLearningValidityReason(data: DriveUpdateData): string | null {
+    if (data.events?.obstruction) return "obstruction";
+    if (data.events?.wheelSlip) return "wheel_slip";
+    if (data.events?.gnssDemoted) return "gnss_demoted";
+    if (
+      data.brakeTriggerPoseAgeMs !== null &&
+      data.brakeTriggerPoseAgeMs !== undefined &&
+      data.brakeTriggerPoseAgeMs > COAST_LEARNING_MAX_BRAKE_TRIGGER_POSE_AGE_MS
+    ) {
+      return "brake_trigger_pose_stale";
+    }
+    if (
+      data.coastDistanceMeasuredMeters !== undefined &&
+      (
+        data.coastDistanceMeasuredMeters < COAST_LEARNING_MIN_METERS ||
+        data.coastDistanceMeasuredMeters > COAST_LEARNING_MAX_METERS
+      )
+    ) {
+      return "coast_distance_implausible";
+    }
+    return null;
+  }
+
   async updateFromDrive(data: DriveUpdateData): Promise<void> {
     const errorXValue = unwrapMeters(data.errorX);
     const maxCteValue = Math.abs(unwrapMeters(data.maxCte));
@@ -168,6 +234,46 @@ export class DriveLearningModel {
     const direction: 1 | -1 = data.driveDirectionSign ?? this.getShortDriveDirectionSign(data.startPosition, data.targetPosition);
 
     const driveDistance = unwrapMeters(distanceBetween(data.startPosition, data.targetPosition));
+
+    // New coast-distance route — only used when the line controller
+    // supplied an actual coastDistanceMeasured AND the per-run validity
+    // gates pass.  When the route fires it OWNS the brake update; we still
+    // run the CTE-gain update afterwards.  When the route does not fire
+    // we fall through to the legacy errorX-driven update so existing
+    // behaviour and tests are preserved.
+    if (data.coastDistanceMeasuredMeters !== undefined) {
+      const reason = this.coastLearningValidityReason(data);
+      if (reason !== null) {
+        this.logger.warn("drive.learning.coast_skipped", {
+          reason,
+          direction,
+          driveDistance,
+          coastDistanceMeasuredMeters: data.coastDistanceMeasuredMeters,
+          brakeTriggerPoseAgeMs: data.brakeTriggerPoseAgeMs ?? null,
+        });
+      } else {
+        const coastValue = data.coastDistanceMeasuredMeters;
+        if (this.isCoastDistanceOutlier(direction, coastValue)) {
+          this.logger.warn("drive.learning.coast_outlier_rejected", {
+            direction,
+            driveDistance,
+            coastDistanceMeasuredMeters: coastValue,
+            recentMedian: this.coastMedian(direction),
+            sampleCount: this.recentCoastBuffer(direction).length,
+          });
+        } else {
+          this.recordCoastSample(direction, coastValue);
+          this.applyCoastDistanceUpdate(direction, driveDistance, coastValue);
+          // CTE-gain update still runs from peak/avg CTE — those metrics
+          // are independent of brake timing.
+          this.updateCteGain(direction, maxCteValue, avgCteValue);
+          this.parameters.updatedAt = new Date().toISOString();
+          await this.saveParameters();
+          return;
+        }
+      }
+    }
+
     if (driveDistance <= this.parameters.longDriveMinDistanceMeters) {
       const bucketDistanceMeters = this.getShortDriveBucketDistance(driveDistance);
       const bucketIndex = this.getShortDriveBucketIndex(driveDistance);
@@ -239,6 +345,105 @@ export class DriveLearningModel {
     });
 
     await this.saveParameters();
+  }
+
+  /** Phase-5 ring buffer accessors. */
+  private recentCoastBuffer(direction: 1 | -1): number[] {
+    return direction > 0 ? this.recentCoastDistancesForward : this.recentCoastDistancesReverse;
+  }
+
+  private recordCoastSample(direction: 1 | -1, coastDistance: number): void {
+    const buffer = this.recentCoastBuffer(direction);
+    buffer.push(coastDistance);
+    if (buffer.length > DriveLearningModel.RECENT_COAST_BUFFER_SIZE) {
+      buffer.shift();
+    }
+  }
+
+  private coastMedian(direction: 1 | -1): number | null {
+    const buffer = this.recentCoastBuffer(direction);
+    if (buffer.length === 0) return null;
+    const sorted = [...buffer].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  }
+
+  /**
+   * Phase-5 outlier check: a candidate coast distance is rejected when we
+   * already have at least 4 prior samples in this direction AND the
+   * candidate differs from the median by more than the configured
+   * fraction of the median (or 5 cm absolute, whichever is larger — small
+   * medians otherwise reject every sample).  Below 4 samples we accept
+   * everything so the buffer can warm up.
+   */
+  private isCoastDistanceOutlier(direction: 1 | -1, coastValue: number): boolean {
+    const buffer = this.recentCoastBuffer(direction);
+    if (buffer.length < 4) return false;
+    const median = this.coastMedian(direction);
+    if (median === null) return false;
+    const tolerance = Math.max(median * COAST_LEARNING_OUTLIER_FRACTION, 0.05);
+    return Math.abs(coastValue - median) > tolerance;
+  }
+
+  /**
+   * Phase-3 coast-distance update.  `coastDistanceMeasured` is the
+   * physical distance the mower coasted from "zero-power requested" to
+   * "settled".  We move the persisted target toward this measurement
+   * with an EMA proportional to the gap.  Long regime updates the
+   * single per-direction-pair scalar (the legacy
+   * `longDriveBrakeDistanceMeters` field continues to hold the long
+   * coast distance — keying it per direction is Phase 5 territory).
+   * Short regime writes the bucket fraction so that
+   * `bucketDistance * fraction == coastDistanceMeasured`.
+   */
+  private applyCoastDistanceUpdate(
+    direction: 1 | -1,
+    driveDistance: number,
+    coastDistanceMeasured: number,
+  ): void {
+    const isShort = driveDistance <= this.parameters.longDriveMinDistanceMeters;
+    if (isShort) {
+      const bucketDistance = this.getShortDriveBucketDistance(driveDistance);
+      const bucketIndex = this.getShortDriveBucketIndex(driveDistance);
+      const targetFraction = this.clamp(coastDistanceMeasured / Math.max(bucketDistance, 1e-3), 0, 1);
+      const currentFraction = direction > 0
+        ? this.parameters.shortDriveBrakeFractionsPositive[bucketIndex]
+        : this.parameters.shortDriveBrakeFractionsNegative[bucketIndex];
+      const alpha = 0.3;
+      const newFraction = this.clamp(currentFraction + alpha * (targetFraction - currentFraction), 0, 1);
+
+      if (direction > 0) {
+        this.parameters.shortDriveBrakeFractionsPositive[bucketIndex] = newFraction;
+        this.parameters.shortDriveSampleCountsPositive[bucketIndex] += 1;
+      } else {
+        this.parameters.shortDriveBrakeFractionsNegative[bucketIndex] = newFraction;
+        this.parameters.shortDriveSampleCountsNegative[bucketIndex] += 1;
+      }
+
+      this.logger.info("drive.learning.coast_updated_short", {
+        direction,
+        bucketDistanceMeters: bucketDistance,
+        coastDistanceMeasuredMeters: coastDistanceMeasured,
+        currentFraction,
+        targetFraction,
+        newFraction,
+      });
+      return;
+    }
+
+    const before = this.parameters.longDriveBrakeDistanceMeters;
+    const alpha = 0.3;
+    const next = this.clamp(
+      before + alpha * (coastDistanceMeasured - before),
+      0.1,
+      5.0,
+    );
+    this.parameters.longDriveBrakeDistanceMeters = next;
+    this.logger.info("drive.learning.coast_updated_long", {
+      direction,
+      coastDistanceMeasuredMeters: coastDistanceMeasured,
+      brakeDistance: { before, after: next },
+    });
   }
 
   private updateBrakeDistance(errorXValue: number): void {

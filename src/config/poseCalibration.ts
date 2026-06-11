@@ -18,6 +18,16 @@ export interface PoseCalibrationParameters {
   leftEncoderMetersPerTick: number;
   rightEncoderMetersPerTick: number;
   wheelbaseMeters: number;
+  /**
+   * Optional per-direction overrides (Phase-4).  When present, pose fusion
+   * picks the appropriate set based on the sign of the encoder deltas.
+   * When absent (v1 file or freshly defaulted), the symmetric values
+   * above are used for both directions.
+   */
+  forwardLeftEncoderMetersPerTick?: number;
+  forwardRightEncoderMetersPerTick?: number;
+  reverseLeftEncoderMetersPerTick?: number;
+  reverseRightEncoderMetersPerTick?: number;
   updatedAt: string;
 }
 
@@ -32,6 +42,10 @@ interface LegacyPoseCalibrationParameters {
   leftEncoderMetersPerTick?: unknown;
   rightEncoderMetersPerTick?: unknown;
   wheelbaseMeters?: unknown;
+  forwardLeftEncoderMetersPerTick?: unknown;
+  forwardRightEncoderMetersPerTick?: unknown;
+  reverseLeftEncoderMetersPerTick?: unknown;
+  reverseRightEncoderMetersPerTick?: unknown;
   updatedAt?: unknown;
 }
 
@@ -138,6 +152,39 @@ export class PoseCalibration {
     this.parameters.encoderMetersPerTick = (leftMetersPerTick + rightMetersPerTick) / 2;
   }
 
+  /** Phase-4: store calibration measured during the forward straight phase. */
+  setForwardWheelCalibration(leftMetersPerTick: number, rightMetersPerTick: number): void {
+    this.parameters.forwardLeftEncoderMetersPerTick = leftMetersPerTick;
+    this.parameters.forwardRightEncoderMetersPerTick = rightMetersPerTick;
+    // Mirror into the symmetric fields so callers that don't yet know
+    // about per-direction values see the most recent forward calibration.
+    this.parameters.leftEncoderMetersPerTick = leftMetersPerTick;
+    this.parameters.rightEncoderMetersPerTick = rightMetersPerTick;
+    this.parameters.encoderMetersPerTick = (leftMetersPerTick + rightMetersPerTick) / 2;
+  }
+
+  /** Phase-4: store calibration measured during the reverse straight phase. */
+  setReverseWheelCalibration(leftMetersPerTick: number, rightMetersPerTick: number): void {
+    this.parameters.reverseLeftEncoderMetersPerTick = leftMetersPerTick;
+    this.parameters.reverseRightEncoderMetersPerTick = rightMetersPerTick;
+  }
+
+  getForwardLeftEncoderMetersPerTick(): number {
+    return this.parameters.forwardLeftEncoderMetersPerTick ?? this.parameters.leftEncoderMetersPerTick;
+  }
+
+  getForwardRightEncoderMetersPerTick(): number {
+    return this.parameters.forwardRightEncoderMetersPerTick ?? this.parameters.rightEncoderMetersPerTick;
+  }
+
+  getReverseLeftEncoderMetersPerTick(): number {
+    return this.parameters.reverseLeftEncoderMetersPerTick ?? this.parameters.leftEncoderMetersPerTick;
+  }
+
+  getReverseRightEncoderMetersPerTick(): number {
+    return this.parameters.reverseRightEncoderMetersPerTick ?? this.parameters.rightEncoderMetersPerTick;
+  }
+
   getParameters(): PoseCalibrationParameters {
     return { ...this.parameters };
   }
@@ -172,14 +219,38 @@ export class PoseCalibration {
     const wheelbase = this.clampWheelbase(
       this.readNumber(legacy.wheelbaseMeters, WHEEL_BASE_METERS_DEFAULT),
     );
+    const fwdL = this.optionalPerTick(legacy.forwardLeftEncoderMetersPerTick, "forwardLeftEncoderMetersPerTick");
+    const fwdR = this.optionalPerTick(legacy.forwardRightEncoderMetersPerTick, "forwardRightEncoderMetersPerTick");
+    const revL = this.optionalPerTick(legacy.reverseLeftEncoderMetersPerTick, "reverseLeftEncoderMetersPerTick");
+    const revR = this.optionalPerTick(legacy.reverseRightEncoderMetersPerTick, "reverseRightEncoderMetersPerTick");
+
     return {
       version: this.readNumber(legacy.version, 1),
       encoderMetersPerTick: shared,
       leftEncoderMetersPerTick: left,
       rightEncoderMetersPerTick: right,
       wheelbaseMeters: wheelbase,
+      forwardLeftEncoderMetersPerTick: fwdL,
+      forwardRightEncoderMetersPerTick: fwdR,
+      reverseLeftEncoderMetersPerTick: revL,
+      reverseRightEncoderMetersPerTick: revR,
       updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
     };
+  }
+
+  private optionalPerTick(raw: unknown, fieldName: string): number | undefined {
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+    if (raw >= ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE && raw <= ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE) {
+      return raw;
+    }
+    this.logger.warn("pose.calibration.implausible_value", {
+      field: fieldName,
+      value: raw,
+      min: ENCODER_METERS_PER_TICK_MIN_PLAUSIBLE,
+      max: ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE,
+      using: "fallback (per-direction omitted)",
+    });
+    return undefined;
   }
 
   private clampPerTick(value: number, fallback: number, fieldName: string): number {
