@@ -10,11 +10,12 @@ import {
   DRIVE_CTE_GAIN_DEFAULT,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
-  DRIVE_SHORT_MAX_DISTANCE_STEP_METERS,
   DRIVE_TARGET_CTE_METERS,
   DRIVE_LEARNING_PARAMETERS_PATH,
 } from "../constants.js";
 import { readJsonFile, writeJsonFile } from "../config/jsonFileStore.js";
+
+const DRIVE_LEARNING_RATE = 0.7;
 
 export interface DriveShortDriveBucket {
   bucketDistanceMeters: number;
@@ -147,7 +148,7 @@ export class DriveLearningModel {
 
       // Negative errorX = stopped short = braked too early = decrease brake distance.
       // Positive errorX = overshot = braked too late = increase brake distance.
-      const adjustment = this.clamp(errorXValue, -DRIVE_SHORT_MAX_DISTANCE_STEP_METERS, DRIVE_SHORT_MAX_DISTANCE_STEP_METERS);
+      const adjustment = errorXValue * DRIVE_LEARNING_RATE;
       const newBrake = this.clamp(currentBrake + adjustment, 0, driveDistance);
 
       const cteGainBefore = this.getCteGainForDirection(direction);
@@ -181,7 +182,7 @@ export class DriveLearningModel {
 
     // Long drive: same direct errorX adjustment on the single shared scalar.
     const before = this.parameters.longDriveBrakeDistanceMeters;
-    const adjustment = this.clamp(errorXValue, -DRIVE_SHORT_MAX_DISTANCE_STEP_METERS, DRIVE_SHORT_MAX_DISTANCE_STEP_METERS);
+    const adjustment = errorXValue * DRIVE_LEARNING_RATE;
     this.parameters.longDriveBrakeDistanceMeters = this.clamp(before + adjustment, 0.05, 5.0);
 
     const cteGainBefore = this.getCteGainForDirection(direction);
