@@ -592,7 +592,7 @@ export class DriveLineController {
       const initialRemainingAlongTrackDistance = unwrapMeters(
         distanceBetween(this.driveLineStart, this.driveLineEnd),
       );
-      await this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
+      this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
     } catch (error) {
       if (subscribed) {
         this.poseFusion.off("poseUpdate", this.onPoseUpdate);
@@ -1149,10 +1149,7 @@ export class DriveLineController {
     const targetDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
     const projectedAlongTrackDistance = this.projectAlongTrackDistance(currentPosition);
     const remainingAlongTrackDistance = Math.max(0, targetDistance - projectedAlongTrackDistance);
-    await this.applyStraightLineControl(pose, remainingAlongTrackDistance);
 
-    // Arrival is the hard stop condition. Braking only helps if there is still
-    // enough distance left before the target to make it worthwhile.
     if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
       this.brakeDecisionPoseQuality = pose.quality;
       this.captureBrakeTriggerSnapshot(pose, remainingAlongTrackDistance, "arrival_tolerance");
@@ -1195,6 +1192,7 @@ export class DriveLineController {
       return;
     }
 
+    this.applyStraightLineControl(pose, remainingAlongTrackDistance);
   }
 
   private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number {
@@ -1231,24 +1229,21 @@ export class DriveLineController {
     ];
   }
 
-  private async applyStraightLineControl(
+  private applyStraightLineControl(
     pose: Pose,
     remainingAlongTrackDistance: number,
-  ): Promise<void> {
+  ): void {
     if (this.driveLineStart === null || this.driveLineEnd === null) {
-      await this.sensorController.setMotorWheelOutputs(0, 0);
+      void this.sensorController.setMotorWheelOutputs(0, 0);
       return;
     }
 
     const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
     if (totalDistance <= 1e-6) {
-      await this.sensorController.setMotorWheelOutputs(0, 0);
+      void this.sensorController.setMotorWheelOutputs(0, 0);
       return;
     }
 
-    // The "control heading" is the body heading projected forward along the
-    // commanded travel direction — the rear of the mower for reverse drives.
-    // Steering decisions compare it to the line heading.
     const lineHeading = this.getDriveLineHeading();
     const controlHeading = this.driveDirectionSign > 0
       ? pose.heading
@@ -1256,25 +1251,16 @@ export class DriveLineController {
     const headingDiff = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading));
     const headingErrorDeg = Math.abs(headingDiff);
 
-    // Large heading errors are recovered by an in-place pivot rather than by
-    // trying to steer through them under power.  Skipped in the final
-    // approach window so we never pivot right next to the target.
     if (
       headingErrorDeg >= DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG &&
       remainingAlongTrackDistance > DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS
     ) {
       const turnSign = headingDiff >= 0 ? 1 : -1;
       const { leftCommand, rightCommand } = this.calculatePivotCommands(turnSign, false);
-      await this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
+      void this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
       return;
     }
 
-    // Cross-track error is positive when the mower is to the right of the
-    // line (looking from start to end).  We bias the right wheel "forward"
-    // and the left wheel "back" by the same amount to rotate the body
-    // counterclockwise, pulling it back onto the line.  The same asymmetry
-    // applies in reverse — the base command flips sign, the trim direction
-    // does not.
     const cte = unwrapMeters(crossTrackError(pose.position, this.driveLineStart, this.driveLineEnd));
     const cteGain = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
     const trim = this.clamp(
@@ -1292,7 +1278,7 @@ export class DriveLineController {
       trim,
     );
 
-    await this.sensorController.setMotorWheelOutputs(
+    void this.sensorController.setMotorWheelOutputs(
       normalizedCommands.leftCommand,
       normalizedCommands.rightCommand,
     );
