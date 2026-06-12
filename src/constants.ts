@@ -400,23 +400,10 @@ export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.45;
 export const TURN_LEARNING_RATE = 0.3;
 
 /**
- * Adaptive learning-rate floor for short-drive brake-fraction updates.
- * Used when the X error is small relative to the bucket distance.
- */
-export const DRIVE_SHORT_MIN_LEARNING_RATE = 0.03;
-
-/**
- * Adaptive learning-rate ceiling for short-drive brake-fraction updates.
- * Used when the X error is large relative to the bucket distance so a
- * 10cm miss adapts faster than a 4cm miss.
- */
-export const DRIVE_SHORT_MAX_LEARNING_RATE = 0.12;
-
-/**
- * Per-update clamp on the absolute change to a short-drive brake fraction.
+ * Per-update clamp on the absolute change to a short-drive brake distance (meters).
  * Prevents a single very poor run from re-tuning the bucket too aggressively.
  */
-export const DRIVE_SHORT_MAX_FRACTION_STEP = 0.08;
+export const DRIVE_SHORT_MAX_DISTANCE_STEP_METERS = 0.05;
 
 /**
  * Maximum number of turn results to keep in history
@@ -566,7 +553,7 @@ export const DRIVE_SHORT_BUCKET_STEP_METERS = 0.05;
 export const DRIVE_SHORT_BUCKET_DISTANCES_METERS = [
   0.05, 0.10, 0.15, 0.20, 0.25, 0.30,
   0.35, 0.40, 0.45, 0.50, 0.55, 0.60,
-  0.70, 0.80, 0.90, 1.00,
+  0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00,
 ] as const;
 
 /**

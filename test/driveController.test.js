@@ -1770,11 +1770,11 @@ describe("DriveLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 3);
+    assert.equal(params.version, 4);
     assert.equal(params.longDriveBrakeDistanceMeters, 2.0);
     assert.equal(params.forwardCteGain, 0.3);
     assert.equal(params.reverseCteGain, 0.3);
-    assert.equal(params.shortDriveBuckets?.length, 21);
+    assert.equal(params.shortDriveBuckets?.length, 20);
   });
 
   it("updates brake distance from error", async () => {
@@ -1969,7 +1969,7 @@ describe("DriveLearningModel", () => {
       await smallModel.loadParameters();
       const smallBefore = smallModel.getParameters().shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(smallBefore);
-      const smallStart = smallBefore.brakeFractionPositive;
+      const smallStart = smallBefore.brakeDistancePositiveMeters;
 
       await smallModel.updateFromDrive({
         startPosition: createPosition(0, 0),
@@ -1984,7 +1984,7 @@ describe("DriveLearningModel", () => {
 
       const smallAfter = smallModel.getParameters().shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(smallAfter);
-      const smallDelta = Math.abs(smallAfter.brakeFractionPositive - smallStart);
+      const smallDelta = Math.abs(smallAfter.brakeDistancePositiveMeters - smallStart);
 
       const largeModel = new DriveLearningModel({
         logger: mockLogger,
@@ -1993,7 +1993,7 @@ describe("DriveLearningModel", () => {
       await largeModel.loadParameters();
       const largeBefore = largeModel.getParameters().shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(largeBefore);
-      const largeStart = largeBefore.brakeFractionPositive;
+      const largeStart = largeBefore.brakeDistancePositiveMeters;
 
       await largeModel.updateFromDrive({
         startPosition: createPosition(0, 0),
@@ -2008,7 +2008,7 @@ describe("DriveLearningModel", () => {
 
       const largeAfter = largeModel.getParameters().shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(largeAfter);
-      const largeDelta = Math.abs(largeAfter.brakeFractionPositive - largeStart);
+      const largeDelta = Math.abs(largeAfter.brakeDistancePositiveMeters - largeStart);
 
       assert.equal(largeDelta > smallDelta, true);
     } finally {
@@ -2032,7 +2032,7 @@ describe("DriveLearningModel", () => {
       const before = model.getParameters();
       const bucket = before.shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(bucket);
-      const startFraction = bucket.brakeFractionPositive;
+      const startBrake = bucket.brakeDistancePositiveMeters;
 
       await model.updateFromDrive({
         startPosition: createPosition(0, 0),
@@ -2049,7 +2049,8 @@ describe("DriveLearningModel", () => {
       const updatedBucket = after.shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(updatedBucket);
       assert.equal(updatedBucket.sampleCountPositive, bucket.sampleCountPositive + 1);
-      assert.equal(updatedBucket.brakeFractionPositive < startFraction, true);
+      // Undershoot (negative errorX) → brake distance decreases
+      assert.equal(updatedBucket.brakeDistancePositiveMeters < startBrake, true);
       assert.equal(after.forwardCteGain < before.forwardCteGain, true);
       assert.equal(after.reverseCteGain, before.reverseCteGain);
 
@@ -2062,7 +2063,7 @@ describe("DriveLearningModel", () => {
       const persistedBucket = persisted.shortDriveBuckets?.find((entry) => entry.bucketDistanceMeters === 0.30);
       assert.ok(persistedBucket);
       assert.equal(persistedBucket.sampleCountPositive, updatedBucket.sampleCountPositive);
-      assert.equal(persistedBucket.brakeFractionPositive, updatedBucket.brakeFractionPositive);
+      assert.equal(persistedBucket.brakeDistancePositiveMeters, updatedBucket.brakeDistancePositiveMeters);
       assert.equal(persisted.forwardCteGain, after.forwardCteGain);
       assert.equal(persisted.reverseCteGain, after.reverseCteGain);
     } finally {
@@ -2103,6 +2104,7 @@ describe("DriveLearningModel", () => {
       assert.ok(updatedBucket);
       assert.equal(updatedBucket.sampleCountNegative, bucket.sampleCountNegative + 1);
       assert.equal(updatedBucket.sampleCountPositive, bucket.sampleCountPositive);
+      assert.equal(updatedBucket.brakeDistanceNegativeMeters < bucket.brakeDistanceNegativeMeters, true);
       assert.equal(after.reverseCteGain < before.reverseCteGain, true);
       assert.equal(after.forwardCteGain, before.forwardCteGain);
     } finally {

@@ -73,6 +73,7 @@ import {
   DRIVE_STEERING_MAX_TRIM_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
+
 import { systemStop } from "./systemStop.js";
 import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 
@@ -1040,7 +1041,6 @@ export class DriveLineController {
         this.logger.warn("drive.line.stop_failed", { error: message });
       }
       this.status = "stopped";
-      const stoppedDrive = this.currentDrive;
       this.currentDrive = null;
       this.stopRequested = false;
       this.logger.warn("drive.line.stopped", { durationMs: this.nowMillis() - this.driveStartTime });
@@ -1493,14 +1493,6 @@ export class DriveLineController {
             maxCte,
             avgCte,
             brakeDistanceUsed: brakeDistance,
-            coastDistanceMeasuredMeters,
-            peakTickRate,
-            brakeTriggerPoseAgeMs,
-            events: inst === null ? undefined : {
-              obstruction: inst.obstructionSeen,
-              wheelSlip: inst.wheelSlipSeen,
-              gnssDemoted: inst.gnssDemotedDuringRun,
-            },
           });
           learnApplied = true;
         } else {
