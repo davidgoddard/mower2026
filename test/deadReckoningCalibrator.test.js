@@ -18,7 +18,7 @@ function createMockLogger() {
   return logger;
 }
 
-test("DeadReckoningCalibrator rejects pivot geometry with excessive DR endpoint error", () => {
+test("DeadReckoningCalibrator accepts pure pivot geometry when signed wheel travel cancels translation", () => {
   const calibrator = new DeadReckoningCalibrator({
     sensorController: {},
     poseFusion: {},
@@ -81,12 +81,12 @@ test("DeadReckoningCalibrator rejects pivot geometry with excessive DR endpoint 
     leftSignedTicks: 1000,
     rightSignedTicks: -1000,
     arcSamples: [
-      { timestampMillis: 3000, imuHeadingDeg: 0, leftTicksTotal: 0, rightTicksTotal: 0, inSteadyState: true },
-      { timestampMillis: 4000, imuHeadingDeg: 180, leftTicksTotal: 1000, rightTicksTotal: 1000, inSteadyState: true },
+      { timestampMillis: 3000, imuHeadingDeg: 0, leftTicksTotal: 0, rightTicksTotal: 0, leftSignedTicksTotal: 0, rightSignedTicksTotal: 0, inSteadyState: true },
+      { timestampMillis: 4000, imuHeadingDeg: 180, leftTicksTotal: 1000, rightTicksTotal: 1000, leftSignedTicksTotal: 1000, rightSignedTicksTotal: -1000, inSteadyState: true },
     ],
     steadyStateSamples: [
-      { timestampMillis: 3000, imuHeadingDeg: 0, leftTicksTotal: 0, rightTicksTotal: 0, inSteadyState: true },
-      { timestampMillis: 4000, imuHeadingDeg: 180, leftTicksTotal: 1000, rightTicksTotal: 1000, inSteadyState: true },
+      { timestampMillis: 3000, imuHeadingDeg: 0, leftTicksTotal: 0, rightTicksTotal: 0, leftSignedTicksTotal: 0, rightSignedTicksTotal: 0, inSteadyState: true },
+      { timestampMillis: 4000, imuHeadingDeg: 180, leftTicksTotal: 1000, rightTicksTotal: 1000, leftSignedTicksTotal: 1000, rightSignedTicksTotal: -1000, inSteadyState: true },
     ],
     derivedEncoderMetersPerTick: null,
     arcTrackingRmsErrorFraction: null,
@@ -95,12 +95,10 @@ test("DeadReckoningCalibrator rejects pivot geometry with excessive DR endpoint 
 
   const analysed = calibrator.analysePivotPhase(pivotPhase, "cw", straightPhase, warnings);
 
-  assert.equal(analysed.arcGeometry, null);
+  assert.notEqual(analysed.arcGeometry, null);
   assert.equal(analysed.arcTrackingRmsErrorFraction, 0);
-  assert.equal(
-    warnings.some((warning) => warning.includes("DR endpoint error too large")),
-    true,
-  );
+  assert.equal(analysed.arcGeometry.drEndpointErrorMeters, 0);
+  assert.equal(warnings.length, 0);
 });
 
 test("DeadReckoningCalibrator uses live GNSS diagnostics when the local anchor buffer is empty", () => {

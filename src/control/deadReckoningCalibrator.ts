@@ -67,6 +67,8 @@ export interface ArcSample {
   readonly imuHeadingDeg: number;
   readonly leftTicksTotal: number;
   readonly rightTicksTotal: number;
+  readonly leftSignedTicksTotal: number;
+  readonly rightSignedTicksTotal: number;
   readonly inSteadyState: boolean;
 }
 
@@ -683,13 +685,13 @@ export class DeadReckoningCalibrator {
     const first = steady[0];
     let x = phase.startAnchor.xMeters;
     let y = phase.startAnchor.yMeters;
-    let prevLeft  = first.leftTicksTotal;
-    let prevRight = first.rightTicksTotal;
+    let prevLeft  = first.leftSignedTicksTotal;
+    let prevRight = first.rightSignedTicksTotal;
 
     for (let i = 1; i < steady.length; i++) {
       const s = steady[i];
-      const dLeft  = (s.leftTicksTotal  - prevLeft)  * leftMetersPerTick;
-      const dRight = (s.rightTicksTotal - prevRight) * rightMetersPerTick;
+      const dLeft  = (s.leftSignedTicksTotal  - prevLeft)  * leftMetersPerTick;
+      const dRight = (s.rightSignedTicksTotal - prevRight) * rightMetersPerTick;
       const dDist  = (dLeft + dRight) / 2;
 
       // IMU heading at this sample owns direction
@@ -697,8 +699,8 @@ export class DeadReckoningCalibrator {
       x += dDist * Math.cos(headingRad);
       y += dDist * Math.sin(headingRad);
 
-      prevLeft  = s.leftTicksTotal;
-      prevRight = s.rightTicksTotal;
+      prevLeft  = s.leftSignedTicksTotal;
+      prevRight = s.rightSignedTicksTotal;
     }
 
     const ex = phase.endAnchor.xMeters - x;
@@ -824,6 +826,8 @@ export class DeadReckoningCalibrator {
       imuHeadingDeg: unwrapInternalHeading(event.heading),
       leftTicksTotal: this.leftTicksAccum,
       rightTicksTotal: this.rightTicksAccum,
+      leftSignedTicksTotal: this.leftTicksSignedAccum,
+      rightSignedTicksTotal: this.rightTicksSignedAccum,
       inSteadyState: inSteady,
     });
   }
