@@ -448,6 +448,19 @@ bool tryParseFloatStrict(const String &value, float &out) {
   return true;
 }
 
+bool tryParseDoubleStrict(const String &value, double &out) {
+  if (value.length() == 0) {
+    return false;
+  }
+  char *end = nullptr;
+  const double parsed = strtod(value.c_str(), &end);
+  if (end == value.c_str() || (end != nullptr && *end != '\0')) {
+    return false;
+  }
+  out = parsed;
+  return true;
+}
+
 CompactFixType mapPositionType(const String &type) {
   if (type == "RTKFIXED" || type == "NARROW_INT" || type == "L1_INT" || type == "WIDE_INT") {
     return FIX_FIXED;
@@ -1345,8 +1358,8 @@ void parsePvtslna(const char *line) {
   String headingField = fieldAt(payload.c_str(), 22);
   String pitchField = fieldAt(payload.c_str(), 23);
 
-  float latitudeDegrees = 0.0f;
-  float longitudeDegrees = 0.0f;
+  double latitudeDegrees = 0.0;
+  double longitudeDegrees = 0.0;
   float latStd = 0.0f;
   float lonStd = 0.0f;
   int32_t satellitesInUse = 0;
@@ -1354,8 +1367,8 @@ void parsePvtslna(const char *line) {
   float headingDegrees = 0.0f;
 
   const bool hasCoreNumbers =
-    tryParseFloatStrict(latField, latitudeDegrees) &&
-    tryParseFloatStrict(lonField, longitudeDegrees) &&
+    tryParseDoubleStrict(latField, latitudeDegrees) &&
+    tryParseDoubleStrict(lonField, longitudeDegrees) &&
     tryParseFloatStrict(latStdField, latStd) &&
     tryParseFloatStrict(lonStdField, lonStd) &&
     tryParseInt32Strict(solnSatsField, satellitesInUse);
@@ -1369,8 +1382,8 @@ void parsePvtslna(const char *line) {
   g_latestPvtsln.fixType = mapPositionType(bestposType);
   g_headingLedState = mapHeadingLedState(headingTypeField);
   g_positionLedState = mapPositionLedState(bestposType);
-  g_latestPvtsln.latitudeDegrees = static_cast<double>(latitudeDegrees);
-  g_latestPvtsln.longitudeDegrees = static_cast<double>(longitudeDegrees);
+  g_latestPvtsln.latitudeDegrees = latitudeDegrees;
+  g_latestPvtsln.longitudeDegrees = longitudeDegrees;
   g_latestPvtsln.positionAccuracyMeters = conservativeHorizontalAccuracy(latStd, lonStd);
   g_latestPvtsln.satellitesInUse = static_cast<uint8_t>(satellitesInUse);
 
