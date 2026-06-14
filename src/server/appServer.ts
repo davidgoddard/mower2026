@@ -1521,9 +1521,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
           const data = body.trim().length > 0 ? JSON.parse(body) : {};
           const lineDistanceMeters = typeof data.lineDistanceMeters === "number" ? data.lineDistanceMeters : undefined;
+          const arcSweepDegrees = typeof data.arcSweepDegrees === "number" ? data.arcSweepDegrees : undefined;
           systemStop.clearStop("dead-reckoning-run");
           // Fire-and-forget — the status endpoint is polled separately
-          deadReckoningCalibrator.run({ lineDistanceMeters }).catch((err) => {
+          deadReckoningCalibrator.run({ lineDistanceMeters, arcSweepDegrees }).catch((err) => {
             logger.warn("dead_reckoning.run_error", { error: err instanceof Error ? err.message : String(err) });
           });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1603,6 +1604,38 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const data = JSON.parse(body);
           systemStop.clearStop("api-drive-train-short");
           const results = await driveController.runShortDistanceTraining({
+            targetXErrorMeters: data.targetXErrorMeters,
+            targetYErrorMeters: data.targetYErrorMeters,
+            includeReverseLegs: data.includeReverseLegs ?? true,
+            startDistanceMeters: data.startDistanceMeters,
+            maxDistanceMeters: data.maxDistanceMeters,
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/drive/train-long-bias" && driveController) {
+          const data = JSON.parse(body);
+          systemStop.clearStop("api-drive-train-long-bias");
+          const results = await driveController.runLongHeadingTraining({
+            stage: "bias",
+            targetXErrorMeters: data.targetXErrorMeters,
+            targetYErrorMeters: data.targetYErrorMeters,
+            includeReverseLegs: data.includeReverseLegs ?? true,
+            startDistanceMeters: data.startDistanceMeters,
+            maxDistanceMeters: data.maxDistanceMeters,
+          });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(results));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/drive/train-long-gain" && driveController) {
+          const data = JSON.parse(body);
+          systemStop.clearStop("api-drive-train-long-gain");
+          const results = await driveController.runLongHeadingTraining({
+            stage: "gain",
             targetXErrorMeters: data.targetXErrorMeters,
             targetYErrorMeters: data.targetYErrorMeters,
             includeReverseLegs: data.includeReverseLegs ?? true,

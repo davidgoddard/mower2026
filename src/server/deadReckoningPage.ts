@@ -8,7 +8,7 @@ export function getDeadReckoningPageHtml(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Dead-Reckoning Calibration - Mower Control</title>
+    <title>Dead-Reckoning Arc Calibration - Mower Control</title>
     <style>
 ${getSensorWidgetLayoutStyles()}
 ${getAppDialogStyles()}
@@ -534,7 +534,7 @@ ${getSensorWidgetScriptTag()}
   <body>
     <div class="header">
       <div class="header-content">
-        <h1>Dead-Reckoning Calibration</h1>
+        <h1>Dead-Reckoning Arc Calibration</h1>
         <a class="back-link" href="/">← Back to Dashboard</a>
       </div>
     </div>
@@ -564,14 +564,18 @@ ${getSensorWidgetScriptTag()}
               <label for="lineDistanceMeters">Straight distance</label>
               <input id="lineDistanceMeters" type="number" min="0.5" max="20" step="0.5" value="5" inputmode="decimal" />
             </div>
+            <div class="field">
+              <label for="arcSweepDegrees">Arc sweep</label>
+              <input id="arcSweepDegrees" type="number" min="20" max="90" step="5" value="45" inputmode="decimal" />
+            </div>
           </div>
 
           <!-- Phase progress indicator -->
           <div class="phase-bar">
             <div class="phase-step" id="phaseWait">Wait fix</div>
             <div class="phase-step" id="phaseStraight">1 – Straight</div>
-            <div class="phase-step" id="phaseArcRight">2 – CW</div>
-            <div class="phase-step" id="phaseArcLeft">3 – CCW</div>
+            <div class="phase-step" id="phaseArcRight">2 – Arc CW</div>
+            <div class="phase-step" id="phaseArcLeft">3 – Arc CCW</div>
             <div class="phase-step" id="phaseAnalyse">Analyse</div>
           </div>
 
@@ -665,7 +669,7 @@ ${getSensorWidgetScriptTag()}
             <div class="suggestion-value" id="suggestedRight">—</div>
           </div>
           <div>
-            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Wheelbase</div>
+            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Moving wheelbase</div>
             <div class="suggestion-value" id="suggestedWheelbase">—</div>
           </div>
           <div>
@@ -688,15 +692,15 @@ ${getSensorWidgetScriptTag()}
       <section class="panel" id="canvasSection" style="display:none">
         <h2>Arc Encoder Tracking</h2>
         <p style="font-size:0.8rem;color:var(--text-secondary);margin:0 0 0.5rem">
-          Pivot diagnostics. Retained for continuity, not used in the final wheelbase calculation.
+          Gentle forward-arc diagnostics. Used to derive the moving-turn wheelbase for line-tracing dead reckoning.
         </p>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
           <div>
-            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Pivot CW</div>
+            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Arc CW</div>
             <div class="canvas-wrap"><canvas id="canvasArcRight" width="400" height="400"></canvas></div>
           </div>
           <div>
-            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Pivot CCW</div>
+            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Arc CCW</div>
             <div class="canvas-wrap"><canvas id="canvasArcLeft" width="400" height="400"></canvas></div>
           </div>
         </div>
@@ -783,8 +787,8 @@ ${getAppDialogScript()}
       const PHASE_IDS = {
         'waiting-for-fix': 'phaseWait',
         'straight':        'phaseStraight',
-        'pivot-cw':        'phaseArcRight',
-        'pivot-ccw':       'phaseArcLeft',
+        'arc-cw':          'phaseArcRight',
+        'arc-ccw':         'phaseArcLeft',
         'analysing':       'phaseAnalyse',
         'done':            'phaseAnalyse',
         'stopped':         null,
@@ -792,7 +796,7 @@ ${getAppDialogScript()}
         'idle':            null,
       };
 
-      const PHASE_ORDER = ['waiting-for-fix', 'straight', 'pivot-cw', 'pivot-ccw', 'analysing'];
+      const PHASE_ORDER = ['waiting-for-fix', 'straight', 'arc-cw', 'arc-ccw', 'analysing'];
 
       function updatePhaseBar(phase) {
         const activeIdx = PHASE_ORDER.indexOf(phase);
@@ -870,7 +874,7 @@ ${getAppDialogScript()}
                 <div class="phase-metric-value">\${fmt(geo.rightMetersPerTick, 6, '')}</div>
               </div>
               <div class="phase-metric">
-                <div class="phase-metric-label">Wheelbase</div>
+                <div class="phase-metric-label">Moving Wheelbase</div>
                 <div class="phase-metric-value">\${fmt(geo.wheelbaseMeters, 4, ' m')}</div>
               </div>
               <div class="phase-metric">
@@ -905,8 +909,8 @@ ${getAppDialogScript()}
 
         container.innerHTML =
           renderPhaseResult('Straight', 'badge-straight', 'straight', result.straightPhase) +
-          renderPhaseResult('Pivot CW', 'badge-arc-right', 'pivot-cw', result.arcRightPhase) +
-          renderPhaseResult('Pivot CCW',  'badge-arc-left',  'pivot-ccw',  result.arcLeftPhase);
+          renderPhaseResult('Arc CW', 'badge-arc-right', 'arc-cw', result.arcRightPhase) +
+          renderPhaseResult('Arc CCW',  'badge-arc-left',  'arc-ccw',  result.arcLeftPhase);
       }
 
       // -----------------------------------------------------------------------
@@ -1090,7 +1094,9 @@ ${getAppDialogScript()}
           document.getElementById('startBtn').disabled = running || moveRunning;
           document.getElementById('stopBtn').disabled = false;
           const lineDistanceInput = document.getElementById('lineDistanceMeters');
+          const arcSweepInput = document.getElementById('arcSweepDegrees');
           if (lineDistanceInput) lineDistanceInput.disabled = running;
+          if (arcSweepInput) arcSweepInput.disabled = running;
 
           // Disable test-move pad while calibration is running
           updateMoveButtonsEnabled();
@@ -1118,23 +1124,34 @@ ${getAppDialogScript()}
       // -----------------------------------------------------------------------
       document.getElementById('startBtn').addEventListener('click', async () => {
         const lineDistanceInput = document.getElementById('lineDistanceMeters');
+        const arcSweepInput = document.getElementById('arcSweepDegrees');
         document.getElementById('startBtn').disabled = true;
         lineDistanceInput.disabled = true;
+        arcSweepInput.disabled = true;
         document.getElementById('phaseResults').innerHTML = '';
         document.getElementById('suggestionBanner').classList.remove('visible');
         document.getElementById('canvasSection').style.display = 'none';
         try {
           const lineDistanceMeters = Number(lineDistanceInput.value);
+          const arcSweepDegrees = Number(arcSweepInput.value);
           if (!Number.isFinite(lineDistanceMeters) || lineDistanceMeters <= 0) {
             document.getElementById('startBtn').disabled = false;
             lineDistanceInput.disabled = false;
+            arcSweepInput.disabled = false;
             await appAlert('Please enter a valid straight distance in metres.');
+            return;
+          }
+          if (!Number.isFinite(arcSweepDegrees) || arcSweepDegrees < 20 || arcSweepDegrees > 90) {
+            document.getElementById('startBtn').disabled = false;
+            lineDistanceInput.disabled = false;
+            arcSweepInput.disabled = false;
+            await appAlert('Please enter a valid arc sweep between 20° and 90°.');
             return;
           }
           const res = await fetch('/api/dead-reckoning/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lineDistanceMeters }),
+            body: JSON.stringify({ lineDistanceMeters, arcSweepDegrees }),
           });
           if (!res.ok) {
             const err = await res.json();
@@ -1144,6 +1161,7 @@ ${getAppDialogScript()}
         } catch (err) {
           document.getElementById('startBtn').disabled = false;
           lineDistanceInput.disabled = false;
+          arcSweepInput.disabled = false;
           await appAlert('Network error: ' + err.message);
         }
       });

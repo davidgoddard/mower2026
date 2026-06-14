@@ -18,7 +18,7 @@ function createMockLogger() {
   return logger;
 }
 
-test("DeadReckoningCalibrator accepts pure pivot geometry when signed wheel travel cancels translation", () => {
+test("DeadReckoningCalibrator accepts forward arc geometry when both wheels move forward", () => {
   const calibrator = new DeadReckoningCalibrator({
     sensorController: {},
     poseFusion: {},
@@ -57,7 +57,7 @@ test("DeadReckoningCalibrator accepts pure pivot geometry when signed wheel trav
     arcGeometry: null,
   };
 
-  const pivotPhase = {
+  const arcPhase = {
     startAnchor: {
       xMeters: 0,
       yMeters: 0,
@@ -67,37 +67,39 @@ test("DeadReckoningCalibrator accepts pure pivot geometry when signed wheel trav
       timestampMillis: 2000,
     },
     endAnchor: {
-      xMeters: 0,
-      yMeters: 0,
-      headingDeg: 180,
+      xMeters: 1.5909902576697321,
+      yMeters: 3.840990257669732,
+      headingDeg: 90,
       positionAccuracyMeters: 0.02,
       fixType: "fixed",
       timestampMillis: 4000,
     },
-    gnssDistanceMeters: 0,
-    gnssHeadingChangeDeg: 180,
+    gnssDistanceMeters: 4.15745789630079,
+    gnssHeadingChangeDeg: 90,
     leftTotalTicks: 1000,
-    rightTotalTicks: 1000,
+    rightTotalTicks: 800,
     leftSignedTicks: 1000,
-    rightSignedTicks: -1000,
+    rightSignedTicks: 800,
     arcSamples: [
       { timestampMillis: 3000, imuHeadingDeg: 0, leftTicksTotal: 0, rightTicksTotal: 0, leftSignedTicksTotal: 0, rightSignedTicksTotal: 0, inSteadyState: true },
-      { timestampMillis: 4000, imuHeadingDeg: 180, leftTicksTotal: 1000, rightTicksTotal: 1000, leftSignedTicksTotal: 1000, rightSignedTicksTotal: -1000, inSteadyState: true },
+      { timestampMillis: 3500, imuHeadingDeg: 45, leftTicksTotal: 500, rightTicksTotal: 400, leftSignedTicksTotal: 500, rightSignedTicksTotal: 400, inSteadyState: true },
+      { timestampMillis: 4000, imuHeadingDeg: 90, leftTicksTotal: 1000, rightTicksTotal: 800, leftSignedTicksTotal: 1000, rightSignedTicksTotal: 800, inSteadyState: true },
     ],
     steadyStateSamples: [
       { timestampMillis: 3000, imuHeadingDeg: 0, leftTicksTotal: 0, rightTicksTotal: 0, leftSignedTicksTotal: 0, rightSignedTicksTotal: 0, inSteadyState: true },
-      { timestampMillis: 4000, imuHeadingDeg: 180, leftTicksTotal: 1000, rightTicksTotal: 1000, leftSignedTicksTotal: 1000, rightSignedTicksTotal: -1000, inSteadyState: true },
+      { timestampMillis: 3500, imuHeadingDeg: 45, leftTicksTotal: 500, rightTicksTotal: 400, leftSignedTicksTotal: 500, rightSignedTicksTotal: 400, inSteadyState: true },
+      { timestampMillis: 4000, imuHeadingDeg: 90, leftTicksTotal: 1000, rightTicksTotal: 800, leftSignedTicksTotal: 1000, rightSignedTicksTotal: 800, inSteadyState: true },
     ],
     derivedEncoderMetersPerTick: null,
     arcTrackingRmsErrorFraction: null,
     arcGeometry: null,
   };
 
-  const analysed = calibrator.analysePivotPhase(pivotPhase, "cw", straightPhase, warnings);
+  const analysed = calibrator.analyseArcPhase(arcPhase, "cw", straightPhase, warnings);
 
   assert.notEqual(analysed.arcGeometry, null);
-  assert.equal(analysed.arcTrackingRmsErrorFraction, 0);
-  assert.equal(analysed.arcGeometry.drEndpointErrorMeters, 0);
+  assert.ok(Math.abs(analysed.arcTrackingRmsErrorFraction) < 1e-9);
+  assert.ok(Math.abs(analysed.arcGeometry.drEndpointErrorMeters) < 1e-9);
   assert.equal(warnings.length, 0);
 });
 

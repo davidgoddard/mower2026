@@ -10,6 +10,12 @@ export interface DriveRequest {
   readonly maxCrossTrackErrorMeters?: number;
   readonly alwaysTurnToFaceTarget?: boolean; // When true, always pivot to face the target regardless of heading error magnitude
   /**
+   * Optional explicit learning-class override. Training flows should set this
+   * from the intended bucket/sample type so a nominal 100 cm run never flips
+   * between short and long learning due to floating-point distance noise.
+   */
+  readonly learningDistanceClass?: "short" | "long";
+  /**
    * Direction of travel along the segment.
    *  +1 (default) = forward; the mower turns to face the target then drives toward it.
    *  -1           = reverse; the mower turns so its rear points along the line then drives backward to the target.
@@ -17,6 +23,12 @@ export interface DriveRequest {
    * spinning the mower around mid-jam.
    */
   readonly driveDirectionSign?: 1 | -1;
+  /**
+   * Optional long-run heading learner mode. Short-distance training leaves
+   * this unset; dedicated long-run tuning stages use it to update only the
+   * requested long-run heading parameter family.
+   */
+  readonly longHeadingLearningMode?: "standard" | "bias-only" | "gain-only";
 }
 
 export type DrivePoseQuality = "gnss" | "dead-reckoning" | "unknown";
@@ -122,7 +134,7 @@ export type DriveTrainingPhase =
   | "completed";
 
 export interface DriveTrainingProgress {
-  readonly mode: "short-distance";
+  readonly mode: "short-distance" | "long-heading-bias" | "long-heading-gain";
   readonly phase: DriveTrainingPhase;
   readonly distanceMeters: number;
   readonly pairAttempt: number;

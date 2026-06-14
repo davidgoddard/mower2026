@@ -20,6 +20,7 @@ import {
   TurnResult,
   TurnControllerState,
   TurnStatus,
+  TurnDirection,
 } from "./turnControllerTypes.js";
 import {
   DRIVE_FULL_SPEED_COMMAND_DEFAULT,
@@ -207,9 +208,7 @@ export class TurnController {
       const scaledMaxWheelOutputPercent = this.maxWheelOutputPercent * wheelScale;
       this.status = "turning";
       this.armHeadingUpdateWatchdog(request);
-      const wheelOutputPercent = this.turnIsSmallAngle
-        ? scaledMaxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR
-        : scaledMaxWheelOutputPercent;
+      const wheelOutputPercent = scaledMaxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR;
       const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelOutputPercent);
       await this.sensorController.setMotorWheelOutputs(initialSpeeds.left, initialSpeeds.right);
     } catch (error) {
@@ -363,7 +362,14 @@ export class TurnController {
       // 9. MEASURING - Read final heading
       this.status = "measuring";
       const finalHeading = this.sensorController.getHeading();
+      const startHeadingDeg = unwrapInternalHeading(this.turnStartHeading);
+      const finalHeadingDeg = unwrapInternalHeading(finalHeading);
       const achievedAngle = headingDifference(this.turnStartHeading, finalHeading);
+      const achievedAngleUnwrappedDeg = this.getDirectionAwareAchievedAngleDeg(
+        startHeadingDeg,
+        finalHeadingDeg,
+        request.direction,
+      );
       const errorAngle = createRelativeAngle(
         unwrapRelativeAngle(achievedAngle) - unwrapRelativeAngle(request.targetAngle)
       );
@@ -372,8 +378,9 @@ export class TurnController {
         requestedAngle: unwrapRelativeAngle(request.targetAngle),
         achievedAngle: unwrapRelativeAngle(achievedAngle),
         errorAngle: unwrapRelativeAngle(errorAngle),
-        startHeading: unwrapInternalHeading(this.turnStartHeading),
-        finalHeading: unwrapInternalHeading(finalHeading),
+        startHeading: startHeadingDeg,
+        finalHeading: finalHeadingDeg,
+        achievedAngleUnwrappedDeg,
         brakeDistanceUsed: unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0)),
         mode: this.turnIsSmallAngle ? "small_crawl_halt" : "large_zero_speed",
         durationMs: this.nowMillis() - this.turnStartTime,
@@ -385,6 +392,7 @@ export class TurnController {
         await this.learningModel.updateFromTurn({
           requestedAngle: request.targetAngle,
           achievedAngle,
+          achievedAngleUnwrappedDeg,
           errorAngle,
           brakeDistanceUsed,
           direction: request.direction,
@@ -744,8 +752,29 @@ export class TurnController {
       : { left: wheelOutputPercent, right: -wheelOutputPercent };
   }
 
+  private getDirectionAwareAchievedAngleDeg(
+    startHeadingDeg: number,
+    finalHeadingDeg: number,
+    direction: TurnDirection,
+  ): number {
+    const normalize360 = (angleDeg: number): number => {
+      const wrapped = angleDeg % 360;
+      return wrapped < 0 ? wrapped + 360 : wrapped;
+    };
+
+    if (direction === "ccw") {
+      return normalize360(finalHeadingDeg - startHeadingDeg);
+    }
+
+    return normalize360(startHeadingDeg - finalHeadingDeg);
+  }
+
   private getLargeTrainingAngles(): number[] {
-    return [70, -70, 80, -80, 90, -90, 120, -120, 150, -150, 180, -180];
+    const angles: number[] = [];
+    for (let angleDeg = 70; angleDeg <= 180; angleDeg += 10) {
+      angles.push(angleDeg, -angleDeg);
+    }
+    return angles;
   }
 
   private getSmallTrainingAngles(): number[] {

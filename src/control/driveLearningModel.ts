@@ -9,6 +9,7 @@ import {
   DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
   DRIVE_CTE_GAIN_DEFAULT,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
+  DRIVE_LONG_STEERING_HEADING_GAIN_PER_DEG,
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
   DRIVE_TARGET_CTE_METERS,
   DRIVE_LEARNING_PARAMETERS_PATH,
@@ -29,7 +30,12 @@ export interface DriveShortDriveBucket {
 
 export interface DriveParameters {
   version: number;
-  longDriveBrakeDistanceMeters: number;
+  longDriveBrakeDistanceForwardMeters: number;
+  longDriveBrakeDistanceReverseMeters: number;
+  longHeadingBiasForwardPercent: number;
+  longHeadingBiasReversePercent: number;
+  longHeadingGainForwardPerDeg: number;
+  longHeadingGainReversePerDeg: number;
   forwardCteGain: number;
   reverseCteGain: number;
   longDriveMinDistanceMeters: number;
@@ -48,11 +54,13 @@ export interface DriveUpdateData {
   targetPosition: Position;
   finalPosition: Position;
   driveDirectionSign?: 1 | -1;
+  learningDistanceClass?: "short" | "long";
   errorX: Meters;
   errorY: Meters;
   maxCte: Meters;
   avgCte: Meters;
   brakeDistanceUsed: Meters;
+  longHeadingLearningMode?: "standard" | "bias-only" | "gain-only";
 }
 
 export interface DriveLearningModelOptions {
@@ -62,6 +70,10 @@ export interface DriveLearningModelOptions {
 
 export class DriveLearningModel {
   private static readonly MAX_CTE_GAIN = 1.5;
+  private static readonly DEFAULT_LONG_HEADING_GAIN_PER_DEG = DRIVE_LONG_STEERING_HEADING_GAIN_PER_DEG;
+  private static readonly MAX_LONG_HEADING_GAIN_PER_DEG = 0.03;
+  private static readonly MAX_LONG_HEADING_BIAS_PERCENT = 0.2;
+  private static readonly LONG_HEADING_BIAS_LEARNING_RATE = 0.5;
 
   private readonly logger: LoggerScope;
   private readonly parametersPath: string;
@@ -108,16 +120,37 @@ export class DriveLearningModel {
     }
   }
 
-  getBrakeDistanceForDrive(startPosition: Position, targetPosition: Position, directionSign?: 1 | -1): Meters {
+  getBrakeDistanceForDrive(
+    startPosition: Position,
+    targetPosition: Position,
+    directionSign?: 1 | -1,
+    learningDistanceClass?: "short" | "long",
+  ): Meters {
     const driveDistance = unwrapMeters(distanceBetween(startPosition, targetPosition));
-    if (driveDistance > this.parameters.longDriveMinDistanceMeters) {
-      return createMeters(this.parameters.longDriveBrakeDistanceMeters);
+    const direction: 1 | -1 = directionSign ?? 1;
+    const distanceClass = learningDistanceClass ?? this.classifyDistance(driveDistance);
+    if (distanceClass === "long") {
+      return createMeters(direction > 0
+        ? this.parameters.longDriveBrakeDistanceForwardMeters
+        : this.parameters.longDriveBrakeDistanceReverseMeters);
     }
-    return createMeters(this.getShortDriveBrakeDistance(driveDistance, directionSign ?? 1));
+    return createMeters(this.getShortDriveBrakeDistance(driveDistance, direction));
   }
 
   getCteGainForDirection(directionSign: 1 | -1): number {
     return directionSign > 0 ? this.parameters.forwardCteGain : this.parameters.reverseCteGain;
+  }
+
+  getLongHeadingBiasForDirection(directionSign: 1 | -1): number {
+    return directionSign > 0
+      ? this.parameters.longHeadingBiasForwardPercent
+      : this.parameters.longHeadingBiasReversePercent;
+  }
+
+  getLongHeadingGainForDirection(directionSign: 1 | -1): number {
+    return directionSign > 0
+      ? this.parameters.longHeadingGainForwardPerDeg
+      : this.parameters.longHeadingGainReversePerDeg;
   }
 
   getParameters(): DriveParameters {
@@ -135,12 +168,14 @@ export class DriveLearningModel {
 
   async updateFromDrive(data: DriveUpdateData): Promise<void> {
     const errorXValue = unwrapMeters(data.errorX);
+    const errorYValue = unwrapMeters(data.errorY);
     const maxCteValue = Math.abs(unwrapMeters(data.maxCte));
     const avgCteValue = Math.abs(unwrapMeters(data.avgCte));
     const direction: 1 | -1 = data.driveDirectionSign ?? this.inferDirectionSign(data.startPosition, data.targetPosition);
     const driveDistance = unwrapMeters(distanceBetween(data.startPosition, data.targetPosition));
+    const distanceClass = data.learningDistanceClass ?? this.classifyDistance(driveDistance);
 
-    if (driveDistance <= this.parameters.longDriveMinDistanceMeters) {
+    if (distanceClass === "short") {
       const bucketIndex = this.getBucketIndex(driveDistance);
       const currentBrake = direction > 0
         ? this.parameters.shortDriveBrakeDistancesPositive[bucketIndex]
@@ -180,10 +215,72 @@ export class DriveLearningModel {
       return;
     }
 
-    // Long drive: same direct errorX adjustment on the single shared scalar.
-    const before = this.parameters.longDriveBrakeDistanceMeters;
+    const longHeadingLearningMode = data.longHeadingLearningMode ?? "standard";
+    if (longHeadingLearningMode === "bias-only") {
+      const before = this.getLongHeadingBiasForDirection(direction);
+      const adjustment = errorYValue * DriveLearningModel.LONG_HEADING_BIAS_LEARNING_RATE;
+      const after = this.clamp(
+        before + adjustment,
+        -DriveLearningModel.MAX_LONG_HEADING_BIAS_PERCENT,
+        DriveLearningModel.MAX_LONG_HEADING_BIAS_PERCENT,
+      );
+      if (direction > 0) {
+        this.parameters.longHeadingBiasForwardPercent = after;
+      } else {
+        this.parameters.longHeadingBiasReversePercent = after;
+      }
+      this.logger.info("drive.learning.updated_long_heading_bias", {
+        direction,
+        errorYMeters: errorYValue,
+        biasPercent: { before, after },
+      });
+      await this.saveParameters();
+      return;
+    }
+
+    if (longHeadingLearningMode === "gain-only") {
+      const before = this.getLongHeadingGainForDirection(direction);
+      const lateralSeverity = Math.max(Math.abs(errorYValue), maxCteValue, avgCteValue);
+      let gain = before;
+      if (lateralSeverity > DRIVE_TARGET_CTE_METERS * 1.2) {
+        gain *= 1.08;
+      } else if (lateralSeverity > DRIVE_TARGET_CTE_METERS * 0.7) {
+        gain *= 1.03;
+      } else if (lateralSeverity < DRIVE_TARGET_CTE_METERS * 0.35) {
+        gain *= 0.997;
+      }
+      const after = this.clamp(
+        gain,
+        0,
+        DriveLearningModel.MAX_LONG_HEADING_GAIN_PER_DEG,
+      );
+      if (direction > 0) {
+        this.parameters.longHeadingGainForwardPerDeg = after;
+      } else {
+        this.parameters.longHeadingGainReversePerDeg = after;
+      }
+      this.logger.info("drive.learning.updated_long_heading_gain", {
+        direction,
+        errorYMeters: errorYValue,
+        maxCte: maxCteValue,
+        avgCte: avgCteValue,
+        headingGainPerDeg: { before, after },
+      });
+      await this.saveParameters();
+      return;
+    }
+
+    // Long drive: same direct errorX adjustment on the direction-specific scalar.
+    const before = direction > 0
+      ? this.parameters.longDriveBrakeDistanceForwardMeters
+      : this.parameters.longDriveBrakeDistanceReverseMeters;
     const adjustment = errorXValue * DRIVE_LEARNING_RATE;
-    this.parameters.longDriveBrakeDistanceMeters = this.clamp(before + adjustment, 0.05, 5.0);
+    const after = this.clamp(before + adjustment, 0.05, 5.0);
+    if (direction > 0) {
+      this.parameters.longDriveBrakeDistanceForwardMeters = after;
+    } else {
+      this.parameters.longDriveBrakeDistanceReverseMeters = after;
+    }
 
     const cteGainBefore = this.getCteGainForDirection(direction);
     this.updateCteGain(direction, maxCteValue, avgCteValue);
@@ -192,7 +289,7 @@ export class DriveLearningModel {
     this.logger.info("drive.learning.updated", {
       errorXMeters: errorXValue,
       maxCte: maxCteValue,
-      brakeDistance: { before, after: this.parameters.longDriveBrakeDistanceMeters },
+      brakeDistance: { before, after },
       cteGain: { before: cteGainBefore, after: cteGainAfter },
       direction,
     });
@@ -234,6 +331,10 @@ export class DriveLearningModel {
     return Math.max(min, Math.min(max, value));
   }
 
+  private classifyDistance(driveDistance: number): "short" | "long" {
+    return driveDistance > this.parameters.longDriveMinDistanceMeters ? "long" : "short";
+  }
+
   private getShortDriveBrakeDistance(driveDistance: number, direction: 1 | -1): number {
     const bucketIndex = this.getBucketIndex(driveDistance);
     return direction > 0
@@ -269,8 +370,13 @@ export class DriveLearningModel {
     const distances = [...DRIVE_SHORT_BUCKET_DISTANCES_METERS];
     const count = distances.length;
     return {
-      version: 4,
-      longDriveBrakeDistanceMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+      version: 6,
+      longDriveBrakeDistanceForwardMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+      longDriveBrakeDistanceReverseMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+      longHeadingBiasForwardPercent: 0,
+      longHeadingBiasReversePercent: 0,
+      longHeadingGainForwardPerDeg: DriveLearningModel.DEFAULT_LONG_HEADING_GAIN_PER_DEG,
+      longHeadingGainReversePerDeg: DriveLearningModel.DEFAULT_LONG_HEADING_GAIN_PER_DEG,
       forwardCteGain: DRIVE_CTE_GAIN_DEFAULT,
       reverseCteGain: DRIVE_CTE_GAIN_DEFAULT,
       longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
@@ -304,10 +410,46 @@ export class DriveLearningModel {
     );
 
     return {
-      version: 4,
-      longDriveBrakeDistanceMeters: this.readNumber(
-        (raw as Record<string, unknown>).longDriveBrakeDistanceMeters,
-        DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+      version: 6,
+      longDriveBrakeDistanceForwardMeters: this.readNumber(
+        (raw as Record<string, unknown>).longDriveBrakeDistanceForwardMeters,
+        this.readNumber(
+          (raw as Record<string, unknown>).longDriveBrakeDistanceMeters,
+          DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+        ),
+      ),
+      longDriveBrakeDistanceReverseMeters: this.readNumber(
+        (raw as Record<string, unknown>).longDriveBrakeDistanceReverseMeters,
+        this.readNumber(
+          (raw as Record<string, unknown>).longDriveBrakeDistanceMeters,
+          DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+        ),
+      ),
+      longHeadingBiasForwardPercent: this.clamp(
+        this.readNumber((raw as Record<string, unknown>).longHeadingBiasForwardPercent, 0),
+        -DriveLearningModel.MAX_LONG_HEADING_BIAS_PERCENT,
+        DriveLearningModel.MAX_LONG_HEADING_BIAS_PERCENT,
+      ),
+      longHeadingBiasReversePercent: this.clamp(
+        this.readNumber((raw as Record<string, unknown>).longHeadingBiasReversePercent, 0),
+        -DriveLearningModel.MAX_LONG_HEADING_BIAS_PERCENT,
+        DriveLearningModel.MAX_LONG_HEADING_BIAS_PERCENT,
+      ),
+      longHeadingGainForwardPerDeg: this.clamp(
+        this.readNumber(
+          (raw as Record<string, unknown>).longHeadingGainForwardPerDeg,
+          DriveLearningModel.DEFAULT_LONG_HEADING_GAIN_PER_DEG,
+        ),
+        0,
+        DriveLearningModel.MAX_LONG_HEADING_GAIN_PER_DEG,
+      ),
+      longHeadingGainReversePerDeg: this.clamp(
+        this.readNumber(
+          (raw as Record<string, unknown>).longHeadingGainReversePerDeg,
+          DriveLearningModel.DEFAULT_LONG_HEADING_GAIN_PER_DEG,
+        ),
+        0,
+        DriveLearningModel.MAX_LONG_HEADING_GAIN_PER_DEG,
       ),
       forwardCteGain: this.clamp(
         this.readNumber((raw as Record<string, unknown>).forwardCteGain, DRIVE_CTE_GAIN_DEFAULT),

@@ -179,7 +179,7 @@ ${getAppDialogStyles()}
 
       .controls {
         display: grid;
-        grid-template-columns: minmax(180px, 240px) auto;
+        grid-template-columns: minmax(180px, 240px) minmax(220px, 280px) auto;
         gap: 1rem;
         align-items: end;
       }
@@ -196,7 +196,8 @@ ${getAppDialogStyles()}
         color: var(--text-secondary);
       }
 
-      input[type="number"] {
+      input[type="number"],
+      select {
         padding: 0.7rem 0.8rem;
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
@@ -258,6 +259,35 @@ ${getAppDialogStyles()}
         border: 1px solid var(--border-color);
         border-radius: 0.65rem;
         background: #fff;
+      }
+
+      .parameter-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+
+      .parameter-item {
+        padding: 0.85rem;
+        border: 1px solid var(--border-color);
+        border-radius: 0.65rem;
+        background: #fff;
+      }
+
+      .parameter-name {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .parameter-value {
+        margin-top: 0.3rem;
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        font-variant-numeric: tabular-nums;
       }
 
       .stat-label {
@@ -377,7 +407,15 @@ ${getSensorWidgetScriptTag()}
             <div class="controls">
               <div class="field">
                 <label for="startDistanceCm">Distance (cm)</label>
-                <input id="startDistanceCm" type="number" min="50" step="5" value="50" />
+                <input id="startDistanceCm" type="number" min="10" step="5" value="10" />
+              </div>
+              <div class="field">
+                <label for="driveTuningStage">Stage</label>
+                <select id="driveTuningStage">
+                  <option value="short">short distances</option>
+                  <option value="long-bias">long heading bias</option>
+                  <option value="long-gain">long heading gain</option>
+                </select>
               </div>
               <div class="buttons">
                 <button id="startDriveTuning" class="primary">start tuning</button>
@@ -423,6 +461,44 @@ ${getSensorWidgetScriptTag()}
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </section>
+
+          <section class="results">
+            <h2>Parameters</h2>
+            <div class="parameter-grid">
+              <div class="parameter-item">
+                <div class="parameter-name">Long Brake Forward</div>
+                <div class="parameter-value" id="paramLongBrakeForward">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">Long Brake Reverse</div>
+                <div class="parameter-value" id="paramLongBrakeReverse">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">Heading Bias Forward</div>
+                <div class="parameter-value" id="paramLongBiasForward">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">Heading Bias Reverse</div>
+                <div class="parameter-value" id="paramLongBiasReverse">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">Heading Gain Forward</div>
+                <div class="parameter-value" id="paramLongGainForward">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">Heading Gain Reverse</div>
+                <div class="parameter-value" id="paramLongGainReverse">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">CTE Gain Forward</div>
+                <div class="parameter-value" id="paramCteForward">-</div>
+              </div>
+              <div class="parameter-item">
+                <div class="parameter-name">CTE Gain Reverse</div>
+                <div class="parameter-value" id="paramCteReverse">-</div>
+              </div>
             </div>
           </section>
         </main>
@@ -483,6 +559,19 @@ ${getAppDialogScript()}
 
       function formatCm(meters) {
         return \`\${(meters * 100).toFixed(1)} cm\`;
+      }
+
+      function formatPercent(value) {
+        return \`\${(value * 100).toFixed(1)}%\`;
+      }
+
+      function formatPerDeg(value) {
+        return value.toFixed(4) + " /deg";
+      }
+
+      function setText(id, text) {
+        const element = document.getElementById(id);
+        if (element) element.textContent = text;
       }
 
       function statusClass(value) {
@@ -600,6 +689,7 @@ ${getAppDialogScript()}
           const payload = await fetchStatus();
           const data = payload.status;
           const history = Array.isArray(data.history) ? data.history : [];
+          const parameters = data.parameters ?? {};
           updateSidebar(payload.primitives);
           updateGnssGate(payload.primitives);
 
@@ -617,6 +707,14 @@ ${getAppDialogScript()}
           document.getElementById("driveCurrentTarget").textContent = driveState.currentDrive
             ? "(" + formatCm(driveState.currentDrive.targetPosition.xMeters ?? 0) + ", " + formatCm(driveState.currentDrive.targetPosition.yMeters ?? 0) + ")"
             : "-";
+          setText("paramLongBrakeForward", typeof parameters.longDriveBrakeDistanceForwardMeters === "number" ? formatCm(parameters.longDriveBrakeDistanceForwardMeters) : "-");
+          setText("paramLongBrakeReverse", typeof parameters.longDriveBrakeDistanceReverseMeters === "number" ? formatCm(parameters.longDriveBrakeDistanceReverseMeters) : "-");
+          setText("paramLongBiasForward", typeof parameters.longHeadingBiasForwardPercent === "number" ? formatPercent(parameters.longHeadingBiasForwardPercent) : "-");
+          setText("paramLongBiasReverse", typeof parameters.longHeadingBiasReversePercent === "number" ? formatPercent(parameters.longHeadingBiasReversePercent) : "-");
+          setText("paramLongGainForward", typeof parameters.longHeadingGainForwardPerDeg === "number" ? formatPerDeg(parameters.longHeadingGainForwardPerDeg) : "-");
+          setText("paramLongGainReverse", typeof parameters.longHeadingGainReversePerDeg === "number" ? formatPerDeg(parameters.longHeadingGainReversePerDeg) : "-");
+          setText("paramCteForward", typeof parameters.forwardCteGain === "number" ? parameters.forwardCteGain.toFixed(3) : "-");
+          setText("paramCteReverse", typeof parameters.reverseCteGain === "number" ? parameters.reverseCteGain.toFixed(3) : "-");
 
           const rows = driveResultRows.slice(-maxDriveResultRows).reverse();
           const tbody = document.getElementById("driveResultsTableBody");
@@ -667,18 +765,28 @@ ${getAppDialogScript()}
 
       document.getElementById("startDriveTuning").addEventListener("click", async () => {
         const startDistanceCm = Number(document.getElementById("startDistanceCm").value);
-        const requestedDistanceMeters = Number.isFinite(startDistanceCm) ? Math.max(0.5, startDistanceCm / 100) : 0.5;
+        const stage = document.getElementById("driveTuningStage").value;
+        const isLongStage = stage === "long-bias" || stage === "long-gain";
+        const requestedDistanceMeters = Number.isFinite(startDistanceCm)
+          ? Math.max(isLongStage ? 2.0 : 0.10, startDistanceCm / 100)
+          : (isLongStage ? 2.0 : 0.10);
         const startAtMeters = requestedDistanceMeters;
         const endAtMeters = requestedDistanceMeters < 4 ? 4 : requestedDistanceMeters;
         const startAtCm = Math.round(startAtMeters * 100).toString();
         const endAtCm = Math.round(endAtMeters * 100).toString();
+        const stageLabel = stage === "short"
+          ? "short-distance"
+          : (stage === "long-bias" ? "long heading bias" : "long heading gain");
         document.getElementById("driveSummary").textContent = startAtCm === endAtCm
-          ? "Starting short-distance training at " + startAtCm + " cm..."
-          : "Starting short-distance training from " + startAtCm + " cm to " + endAtCm + " cm...";
+          ? "Starting " + stageLabel + " training at " + startAtCm + " cm..."
+          : "Starting " + stageLabel + " training from " + startAtCm + " cm to " + endAtCm + " cm...";
         startHandshakePending = true;
         syncDriveButtons();
         try {
-          await postAction("train-short", {
+          const action = stage === "short"
+            ? "train-short"
+            : (stage === "long-bias" ? "train-long-bias" : "train-long-gain");
+          await postAction(action, {
             startDistanceMeters: startAtMeters,
             maxDistanceMeters: endAtMeters,
             targetXErrorMeters: 0.03,
@@ -691,6 +799,23 @@ ${getAppDialogScript()}
         } finally {
           startHandshakePending = false;
           syncDriveButtons();
+        }
+      });
+
+      document.getElementById("driveTuningStage").addEventListener("change", () => {
+        const stage = document.getElementById("driveTuningStage").value;
+        const distanceInput = document.getElementById("startDistanceCm");
+        const currentDistanceCm = Number(distanceInput.value);
+        if (stage === "long-bias" || stage === "long-gain") {
+          distanceInput.min = "200";
+          if (!Number.isFinite(currentDistanceCm) || currentDistanceCm < 200) {
+            distanceInput.value = "200";
+          }
+          return;
+        }
+        distanceInput.min = "10";
+        if (!Number.isFinite(currentDistanceCm) || currentDistanceCm < 10) {
+          distanceInput.value = "10";
         }
       });
 

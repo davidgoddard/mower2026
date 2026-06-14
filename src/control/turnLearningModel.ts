@@ -2,8 +2,7 @@
  * Turn learning model with parameter persistence
  */
 
-import { mkdir } from "node:fs/promises";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
@@ -30,6 +29,17 @@ const SMALL_TURN_BUCKET_MAX_DEG = 60;
 const SMALL_TURN_BUCKET_COUNT = SMALL_TURN_BUCKET_MAX_DEG / SMALL_TURN_BUCKET_STEP_DEG;
 const SMALL_TURN_FRACTION_MIN = 0.05;
 const SMALL_TURN_FRACTION_MAX = 0.95;
+
+const LARGE_TURN_BUCKET_STEP_DEG = 10;
+const LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG = 25;
+const LARGE_TURN_MIN_BRAKE_DISTANCE_DEG = 5;
+const LARGE_TURN_MAX_BRAKE_DISTANCE_DEG = 90;
+const LARGE_TURN_MIN_ANGLE_DEG =
+  Math.floor(TURN_SMALL_ANGLE_THRESHOLD_DEG / LARGE_TURN_BUCKET_STEP_DEG) * LARGE_TURN_BUCKET_STEP_DEG
+  + LARGE_TURN_BUCKET_STEP_DEG;
+const LARGE_TURN_MAX_ANGLE_DEG = 180;
+const LARGE_TURN_BUCKET_COUNT =
+  ((LARGE_TURN_MAX_ANGLE_DEG - LARGE_TURN_MIN_ANGLE_DEG) / LARGE_TURN_BUCKET_STEP_DEG) + 1;
 
 export interface TurnLearningModelOptions {
   logger: SessionLogger;
@@ -75,6 +85,7 @@ export class TurnLearningModel {
       this.logger.info("turn.learning.loaded", {
         version: this.parameters.version,
         smallAngleThresholdDeg: this.parameters.smallAngleThresholdDeg,
+        largeTurnBucketStepDeg: this.parameters.largeTurnBucketStepDeg,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -108,26 +119,11 @@ export class TurnLearningModel {
     }
   }
 
-  /**
-   * Update learning based on a completed turn.
-   *
-   * Large turns learn the remaining brake distance.
-   * Small turns learn the brake fraction used to decide when to halt.
-   *
-   * NOTE on the sign convention: small-turn and large-turn updates use
-   * opposite error-sign conventions on purpose. For small turns the
-   * adjusted parameter is a brake-fraction (0..1) where smaller fractions
-   * mean "brake earlier", so an overshoot (achieved > requested) reduces
-   * the fraction via a positive `requestedAbs - achievedAbs` error driving
-   * `currentFraction + adjustment` down. For large turns the adjusted
-   * parameter is a brake-distance in degrees where bigger distances mean
-   * "brake earlier", so an overshoot (achieved > requested) increases the
-   * distance via a positive `achievedAbs - requestedAbs` error. Each
-   * branch is internally self-consistent: do not unify the signs.
-   */
   async updateFromTurn(result: TurnLearningInput): Promise<void> {
     const requestedAbs = Math.abs(unwrapRelativeAngle(result.requestedAngle));
-    const achievedAbs = Math.abs(unwrapRelativeAngle(result.achievedAngle));
+    const achievedAbs = result.achievedAngleUnwrappedDeg !== undefined
+      ? Math.abs(result.achievedAngleUnwrappedDeg)
+      : Math.abs(unwrapRelativeAngle(result.achievedAngle));
 
     if (requestedAbs <= this.parameters.smallAngleThresholdDeg) {
       const bucketAngleDeg = this.getSmallTurnBucketAngle(requestedAbs);
@@ -135,7 +131,10 @@ export class TurnLearningModel {
       const currentFraction = this.getSmallTurnBrakeFraction(result.direction, requestedAbs);
       const normalizedError = (requestedAbs - achievedAbs) / Math.max(1, requestedAbs);
       const adjustment = normalizedError * this.learningRate;
-      const clampedFraction = Math.max(SMALL_TURN_FRACTION_MIN, Math.min(SMALL_TURN_FRACTION_MAX, currentFraction + adjustment));
+      const clampedFraction = Math.max(
+        SMALL_TURN_FRACTION_MIN,
+        Math.min(SMALL_TURN_FRACTION_MAX, currentFraction + adjustment),
+      );
 
       if (result.direction === "ccw") {
         this.parameters.smallTurnBrakeFractionsCcw[bucketIndex] = clampedFraction;
@@ -163,27 +162,30 @@ export class TurnLearningModel {
       return;
     }
 
-    const currentBrakeDistance = result.direction === "ccw"
-      ? this.parameters.largeTurnBrakeCcwDeg
-      : this.parameters.largeTurnBrakeCwDeg;
-
+    const bucketAngleDeg = this.getLargeTurnBucketAngle(requestedAbs);
+    const bucketIndex = this.getLargeTurnBucketIndex(requestedAbs);
+    const currentBrakeDistance = this.getLargeTurnBrakeDistance(result.direction, requestedAbs);
     const errorDeg = achievedAbs - requestedAbs;
     const adjustment = errorDeg * this.learningRate;
-    const clampedBrakeDistance = Math.max(5, Math.min(90, currentBrakeDistance + adjustment));
+    const clampedBrakeDistance = Math.max(
+      LARGE_TURN_MIN_BRAKE_DISTANCE_DEG,
+      Math.min(LARGE_TURN_MAX_BRAKE_DISTANCE_DEG, currentBrakeDistance + adjustment),
+    );
 
     if (result.direction === "ccw") {
-      this.parameters.largeTurnBrakeCcwDeg = clampedBrakeDistance;
-      this.parameters.largeTurnSampleCountCcw += 1;
-      this.parameters.lastLargeErrorCcwDeg = errorDeg;
+      this.parameters.largeTurnBrakeDistancesCcwDeg[bucketIndex] = clampedBrakeDistance;
+      this.parameters.largeTurnSampleCountsCcw[bucketIndex] += 1;
+      this.parameters.largeTurnLastErrorsCcwDeg[bucketIndex] = errorDeg;
     } else {
-      this.parameters.largeTurnBrakeCwDeg = clampedBrakeDistance;
-      this.parameters.largeTurnSampleCountCw += 1;
-      this.parameters.lastLargeErrorCwDeg = errorDeg;
+      this.parameters.largeTurnBrakeDistancesCwDeg[bucketIndex] = clampedBrakeDistance;
+      this.parameters.largeTurnSampleCountsCw[bucketIndex] += 1;
+      this.parameters.largeTurnLastErrorsCwDeg[bucketIndex] = errorDeg;
     }
 
     this.parameters.lastUpdated = new Date().toISOString();
     this.logger.info("turn.learning.updated_large", {
       direction: result.direction,
+      bucketAngleDeg,
       requestedAngleDeg: requestedAbs,
       achievedAngleDeg: achievedAbs,
       errorDeg,
@@ -193,16 +195,18 @@ export class TurnLearningModel {
     await this.saveParameters();
   }
 
-  getBrakeDistance(direction: TurnDirection): RelativeAngle {
-    const brakeDistanceDeg = direction === "ccw"
-      ? this.parameters.largeTurnBrakeCcwDeg
-      : this.parameters.largeTurnBrakeCwDeg;
+  getBrakeDistance(direction: TurnDirection, requestedAngleDeg: number): RelativeAngle {
+    const brakeDistanceDeg = requestedAngleDeg <= this.parameters.smallAngleThresholdDeg
+      ? this.getLegacyLargeDirectionDefault(direction)
+      : this.getLargeTurnBrakeDistance(direction, requestedAngleDeg);
     return createRelativeAngle(brakeDistanceDeg);
   }
 
   getBrakeAngle(requestedAngleDeg: number, direction: TurnDirection): RelativeAngle {
     const requested = Math.abs(requestedAngleDeg);
-    const brakeDistance = unwrapRelativeAngle(this.getBrakeDistance(direction));
+    const brakeDistance = requested <= this.parameters.smallAngleThresholdDeg
+      ? this.getLegacyLargeDirectionDefault(direction)
+      : this.getLargeTurnBrakeDistance(direction, requested);
     return createRelativeAngle(Math.max(1, Math.min(requested, brakeDistance)));
   }
 
@@ -219,11 +223,21 @@ export class TurnLearningModel {
 
   getParameters(): TurnLearningParameters {
     const parameters: TurnLearningBin[] = [];
-    for (let requestedAngleDeg = 10; requestedAngleDeg <= 180; requestedAngleDeg += 10) {
+    for (let requestedAngleDeg = LARGE_TURN_MIN_ANGLE_DEG; requestedAngleDeg <= LARGE_TURN_MAX_ANGLE_DEG; requestedAngleDeg += LARGE_TURN_BUCKET_STEP_DEG) {
+      const index = this.getLargeTurnBucketIndex(requestedAngleDeg);
       parameters.push({
         requestedAngleDeg,
-        brakeDistanceDeg: unwrapRelativeAngle(this.getBrakeDistance("ccw")),
+        brakeDistanceDeg: this.parameters.largeTurnBrakeDistancesCcwDeg[index],
         direction: "ccw",
+        sampleCount: this.parameters.largeTurnSampleCountsCcw[index],
+        lastErrorDeg: this.parameters.largeTurnLastErrorsCcwDeg[index],
+      });
+      parameters.push({
+        requestedAngleDeg,
+        brakeDistanceDeg: this.parameters.largeTurnBrakeDistancesCwDeg[index],
+        direction: "cw",
+        sampleCount: this.parameters.largeTurnSampleCountsCw[index],
+        lastErrorDeg: this.parameters.largeTurnLastErrorsCwDeg[index],
       });
     }
 
@@ -239,6 +253,7 @@ export class TurnLearningModel {
     await this.saveParameters();
     this.logger.info("turn.learning.reset", {
       smallAngleThresholdDeg: this.parameters.smallAngleThresholdDeg,
+      largeTurnBucketStepDeg: this.parameters.largeTurnBucketStepDeg,
     });
   }
 
@@ -247,24 +262,40 @@ export class TurnLearningModel {
       return this.createDefaultParameters();
     }
 
-    if (this.isNumericArray(raw.smallTurnBrakeFractionsCcw) && this.isNumericArray(raw.smallTurnBrakeFractionsCw)) {
+    if (
+      this.isNumericArray(raw.smallTurnBrakeFractionsCcw)
+      && this.isNumericArray(raw.smallTurnBrakeFractionsCw)
+      && this.isNumericArray(raw.largeTurnBrakeDistancesCcwDeg)
+      && this.isNumericArray(raw.largeTurnBrakeDistancesCwDeg)
+    ) {
       return {
-        version: 1,
+        version: this.readNumber(raw.version, 2),
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
         smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
         smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
-        largeTurnBrakeCcwDeg: this.readNumber(raw.largeTurnBrakeCcwDeg, 15),
-        largeTurnBrakeCwDeg: this.readNumber(raw.largeTurnBrakeCwDeg, 15),
-        largeTurnSampleCountCcw: this.readNumber(raw.largeTurnSampleCountCcw, 0),
-        largeTurnSampleCountCw: this.readNumber(raw.largeTurnSampleCountCw, 0),
-        lastLargeErrorCcwDeg: this.readNumber(raw.lastLargeErrorCcwDeg, 0),
-        lastLargeErrorCwDeg: this.readNumber(raw.lastLargeErrorCwDeg, 0),
-        smallTurnBrakeFractionsCcw: this.normalizeNumericArray(raw.smallTurnBrakeFractionsCcw, 0.5),
-        smallTurnBrakeFractionsCw: this.normalizeNumericArray(raw.smallTurnBrakeFractionsCw, 0.5),
-        smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, 0),
-        smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, 0),
-        smallTurnLastErrorCcwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCcwDeg, 0),
-        smallTurnLastErrorCwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCwDeg, 0),
+        largeTurnBucketStepDeg: LARGE_TURN_BUCKET_STEP_DEG,
+        largeTurnMinAngleDeg: LARGE_TURN_MIN_ANGLE_DEG,
+        largeTurnMaxAngleDeg: LARGE_TURN_MAX_ANGLE_DEG,
+        largeTurnBrakeDistancesCcwDeg: this.normalizeNumericArray(
+          raw.largeTurnBrakeDistancesCcwDeg,
+          LARGE_TURN_BUCKET_COUNT,
+          LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG,
+        ),
+        largeTurnBrakeDistancesCwDeg: this.normalizeNumericArray(
+          raw.largeTurnBrakeDistancesCwDeg,
+          LARGE_TURN_BUCKET_COUNT,
+          LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG,
+        ),
+        largeTurnSampleCountsCcw: this.normalizeNumericArray(raw.largeTurnSampleCountsCcw, LARGE_TURN_BUCKET_COUNT, 0),
+        largeTurnSampleCountsCw: this.normalizeNumericArray(raw.largeTurnSampleCountsCw, LARGE_TURN_BUCKET_COUNT, 0),
+        largeTurnLastErrorsCcwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCcwDeg, LARGE_TURN_BUCKET_COUNT, 0),
+        largeTurnLastErrorsCwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCwDeg, LARGE_TURN_BUCKET_COUNT, 0),
+        smallTurnBrakeFractionsCcw: this.normalizeNumericArray(raw.smallTurnBrakeFractionsCcw, SMALL_TURN_BUCKET_COUNT, 0.5),
+        smallTurnBrakeFractionsCw: this.normalizeNumericArray(raw.smallTurnBrakeFractionsCw, SMALL_TURN_BUCKET_COUNT, 0.5),
+        smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, 0),
+        smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, 0),
+        smallTurnLastErrorCcwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCcwDeg, SMALL_TURN_BUCKET_COUNT, 0),
+        smallTurnLastErrorCwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCwDeg, SMALL_TURN_BUCKET_COUNT, 0),
         lastUpdated: typeof raw.lastUpdated === "string" ? raw.lastUpdated : new Date().toISOString(),
       };
     }
@@ -281,16 +312,32 @@ export class TurnLearningModel {
 
     if (typeof raw.largeTurnBrakeCcwDeg === "number" && typeof raw.largeTurnBrakeCwDeg === "number") {
       const legacy = raw as LegacyTurnLearningParametersV2;
-      return this.createDefaultParameters({
-        largeTurnBrakeCcwDeg: this.readNumber(legacy.largeTurnBrakeCcwDeg, 15),
-        largeTurnBrakeCwDeg: this.readNumber(legacy.largeTurnBrakeCwDeg, 15),
-        largeTurnSampleCountCcw: this.readNumber(legacy.largeTurnSampleCountCcw, 0),
-        largeTurnSampleCountCw: this.readNumber(legacy.largeTurnSampleCountCw, 0),
-        lastLargeErrorCcwDeg: this.readNumber(legacy.lastErrorCcwDeg, 0),
-        lastLargeErrorCwDeg: this.readNumber(legacy.lastErrorCwDeg, 0),
-        smallTurnBrakeFractionCcw: this.readNumber(legacy.smallTurnBrakeFractionCcw, 0.5),
-        smallTurnBrakeFractionCw: this.readNumber(legacy.smallTurnBrakeFractionCw, 0.5),
-      });
+      return {
+        version: 2,
+        smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
+        smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
+        smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
+        largeTurnBucketStepDeg: LARGE_TURN_BUCKET_STEP_DEG,
+        largeTurnMinAngleDeg: LARGE_TURN_MIN_ANGLE_DEG,
+        largeTurnMaxAngleDeg: LARGE_TURN_MAX_ANGLE_DEG,
+        largeTurnBrakeDistancesCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
+        largeTurnBrakeDistancesCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
+        largeTurnSampleCountsCcw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+        largeTurnSampleCountsCw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+        largeTurnLastErrorsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+        largeTurnLastErrorsCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+        smallTurnBrakeFractionsCcw: this.isNumericArray(raw.smallTurnBrakeFractionsCcw)
+          ? this.normalizeNumericArray(raw.smallTurnBrakeFractionsCcw, SMALL_TURN_BUCKET_COUNT, 0.5)
+          : this.createNumericArray(SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnBrakeFractionCcw, 0.5)),
+        smallTurnBrakeFractionsCw: this.isNumericArray(raw.smallTurnBrakeFractionsCw)
+          ? this.normalizeNumericArray(raw.smallTurnBrakeFractionsCw, SMALL_TURN_BUCKET_COUNT, 0.5)
+          : this.createNumericArray(SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnBrakeFractionCw, 0.5)),
+        smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnSampleCountCcw, 0)),
+        smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnSampleCountCw, 0)),
+        smallTurnLastErrorCcwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCcwDeg, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.lastSmallErrorCcwDeg, 0)),
+        smallTurnLastErrorCwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCwDeg, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.lastSmallErrorCwDeg, 0)),
+        lastUpdated: typeof raw.lastUpdated === "string" ? raw.lastUpdated : new Date().toISOString(),
+      };
     }
 
     return this.createDefaultParameters();
@@ -298,12 +345,6 @@ export class TurnLearningModel {
 
   private createDefaultParameters(
     overrides: Partial<{
-      largeTurnBrakeCcwDeg: number;
-      largeTurnBrakeCwDeg: number;
-      largeTurnSampleCountCcw: number;
-      largeTurnSampleCountCw: number;
-      lastLargeErrorCcwDeg: number;
-      lastLargeErrorCwDeg: number;
       smallTurnBrakeFractionCcw: number;
       smallTurnBrakeFractionCw: number;
       smallTurnSampleCountCcw: number;
@@ -321,16 +362,19 @@ export class TurnLearningModel {
     const smallTurnLastErrorCwDeg = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.lastSmallErrorCwDeg ?? 0);
 
     return {
-      version: 1,
+      version: 2,
       smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
       smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
       smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
-      largeTurnBrakeCcwDeg: overrides.largeTurnBrakeCcwDeg ?? 15,
-      largeTurnBrakeCwDeg: overrides.largeTurnBrakeCwDeg ?? 15,
-      largeTurnSampleCountCcw: overrides.largeTurnSampleCountCcw ?? 0,
-      largeTurnSampleCountCw: overrides.largeTurnSampleCountCw ?? 0,
-      lastLargeErrorCcwDeg: overrides.lastLargeErrorCcwDeg ?? 0,
-      lastLargeErrorCwDeg: overrides.lastLargeErrorCwDeg ?? 0,
+      largeTurnBucketStepDeg: LARGE_TURN_BUCKET_STEP_DEG,
+      largeTurnMinAngleDeg: LARGE_TURN_MIN_ANGLE_DEG,
+      largeTurnMaxAngleDeg: LARGE_TURN_MAX_ANGLE_DEG,
+      largeTurnBrakeDistancesCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
+      largeTurnBrakeDistancesCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
+      largeTurnSampleCountsCcw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+      largeTurnSampleCountsCw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+      largeTurnLastErrorsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
+      largeTurnLastErrorsCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
       smallTurnBrakeFractionsCcw,
       smallTurnBrakeFractionsCw,
       smallTurnSampleCountsCcw,
@@ -353,13 +397,13 @@ export class TurnLearningModel {
     return Array.from({ length }, () => value);
   }
 
-  private normalizeNumericArray(value: unknown, fallback: number): number[] {
+  private normalizeNumericArray(value: unknown, expectedLength: number, fallback: number): number[] {
     if (!Array.isArray(value)) {
-      return this.createNumericArray(SMALL_TURN_BUCKET_COUNT, fallback);
+      return this.createNumericArray(expectedLength, fallback);
     }
 
-    const items = value.slice(0, SMALL_TURN_BUCKET_COUNT).map((item) => this.readNumber(item, fallback));
-    while (items.length < SMALL_TURN_BUCKET_COUNT) {
+    const items = value.slice(0, expectedLength).map((item) => this.readNumber(item, fallback));
+    while (items.length < expectedLength) {
       items.push(fallback);
     }
     return items;
@@ -377,6 +421,30 @@ export class TurnLearningModel {
 
   private getSmallTurnBucketIndex(requestedAngleDeg: number): number {
     return (this.getSmallTurnBucketAngle(requestedAngleDeg) / SMALL_TURN_BUCKET_STEP_DEG) - 1;
+  }
+
+  private getLargeTurnBucketAngle(requestedAngleDeg: number): number {
+    const clamped = Math.max(LARGE_TURN_MIN_ANGLE_DEG, Math.min(LARGE_TURN_MAX_ANGLE_DEG, Math.abs(requestedAngleDeg)));
+    const bucket = Math.round(clamped / LARGE_TURN_BUCKET_STEP_DEG) * LARGE_TURN_BUCKET_STEP_DEG;
+    return Math.max(LARGE_TURN_MIN_ANGLE_DEG, Math.min(LARGE_TURN_MAX_ANGLE_DEG, bucket));
+  }
+
+  private getLargeTurnBucketIndex(requestedAngleDeg: number): number {
+    return ((this.getLargeTurnBucketAngle(requestedAngleDeg) - LARGE_TURN_MIN_ANGLE_DEG) / LARGE_TURN_BUCKET_STEP_DEG);
+  }
+
+  private getLargeTurnBrakeDistance(direction: TurnDirection, requestedAngleDeg: number): number {
+    const bucketIndex = this.getLargeTurnBucketIndex(requestedAngleDeg);
+    return direction === "ccw"
+      ? this.parameters.largeTurnBrakeDistancesCcwDeg[bucketIndex]
+      : this.parameters.largeTurnBrakeDistancesCwDeg[bucketIndex];
+  }
+
+  private getLegacyLargeDirectionDefault(direction: TurnDirection): number {
+    const bucketIndex = this.getLargeTurnBucketIndex(LARGE_TURN_MIN_ANGLE_DEG);
+    return direction === "ccw"
+      ? this.parameters.largeTurnBrakeDistancesCcwDeg[bucketIndex]
+      : this.parameters.largeTurnBrakeDistancesCwDeg[bucketIndex];
   }
 
   private getSmallTurnBuckets(): TurnLearningBucket[] {

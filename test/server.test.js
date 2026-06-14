@@ -193,8 +193,10 @@ test('tuning pages expose the simplified drive training controls', () => {
 
   const deadReckoningPage = getDeadReckoningPageHtml();
   assert.equal(deadReckoningPage.includes('id="lineDistanceMeters"'), true);
+  assert.equal(deadReckoningPage.includes('id="arcSweepDegrees"'), true);
   assert.equal(deadReckoningPage.includes('Straight distance'), true);
-  assert.equal(deadReckoningPage.includes('body: JSON.stringify({ lineDistanceMeters })'), true);
+  assert.equal(deadReckoningPage.includes('Arc sweep'), true);
+  assert.equal(deadReckoningPage.includes('body: JSON.stringify({ lineDistanceMeters, arcSweepDegrees })'), true);
 
   const pathPage = renderPathTracingPage();
   assert.equal(pathPage, manualPage);

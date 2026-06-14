@@ -71,6 +71,7 @@ import {
   DRIVE_STEERING_PIVOT_OUTPUT_PERCENT,
   DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS,
   DRIVE_STEERING_MAX_TRIM_PERCENT,
+  DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 
@@ -619,6 +620,10 @@ export class DriveLineController {
     maxDistanceMeters?: number;
     progressReporter?: DriveTrainingProgressReporter;
     pauseBeforeDriveMs?: number;
+    distancePlan?: readonly number[];
+    progressMode?: DriveTrainingProgress["mode"];
+    runLabel?: string;
+    longHeadingLearningMode?: "standard" | "bias-only" | "gain-only";
   }): Promise<DriveResult[]> {
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_Y_ERROR_METERS;
@@ -630,7 +635,14 @@ export class DriveLineController {
       ? Math.max(0, requestedPauseBeforeDriveMs ?? 0)
       : 2000;
     const progressReporter = options?.progressReporter;
-    const distancePlan = this.buildStraightLineTrainingDistances(startDistanceMeters, maxDistanceMeters);
+    const distancePlan = options?.distancePlan
+      ? [...options.distancePlan]
+      : this.buildStraightLineTrainingDistances(startDistanceMeters, maxDistanceMeters);
+    const firstDistanceMeters = distancePlan[0] ?? startDistanceMeters;
+    const lastDistanceMeters = distancePlan[distancePlan.length - 1] ?? maxDistanceMeters;
+    const progressMode = options?.progressMode ?? "short-distance";
+    const runLabel = options?.runLabel ?? "straight-line";
+    const longHeadingLearningMode = options?.longHeadingLearningMode ?? "standard";
     const results: DriveResult[] = [];
     const totalPlannedDrives = distancePlan.length * (includeReverseLegs ? 2 : 1);
     this.stopRequested = false;
@@ -643,7 +655,7 @@ export class DriveLineController {
       details: Partial<DriveTrainingProgress> = {},
     ): void => {
       progressReporter?.({
-        mode: "short-distance",
+        mode: progressMode,
         phase,
         distanceMeters: details.distanceMeters ?? 0,
         pairAttempt: details.pairAttempt ?? 0,
@@ -665,14 +677,17 @@ export class DriveLineController {
       defaultMaxDistanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
       startDistanceMeters,
       requestedMaxDistanceMeters: maxDistanceMeters,
+      distancePlan,
+      progressMode,
+      runLabel,
       targetXErrorMeters,
       includeReverseLegs,
     });
     reportProgress(
       "started",
-      `Starting straight-line training from ${Math.round(startDistanceMeters * 100)} cm to ${Math.round(maxDistanceMeters * 100)} cm.`,
+      `Starting ${runLabel} training from ${Math.round(firstDistanceMeters * 100)} cm to ${Math.round(lastDistanceMeters * 100)} cm.`,
       {
-        distanceMeters: startDistanceMeters,
+        distanceMeters: firstDistanceMeters,
       },
     );
     this.sensorController.beginMotionSession();
@@ -831,6 +846,10 @@ export class DriveLineController {
             targetPosition,
             learningEnabled: true,
             driveDirectionSign: directionSign,
+            learningDistanceClass: DRIVE_LONG_SAMPLE_DISTANCES_METERS.includes(distanceMeters as typeof DRIVE_LONG_SAMPLE_DISTANCES_METERS[number])
+              ? "long"
+              : "short",
+            longHeadingLearningMode,
             maxCrossTrackErrorMeters: distanceMeters,
           });
           results.push(result);
@@ -948,7 +967,7 @@ export class DriveLineController {
         "completed",
         `Straight-line training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
         {
-          distanceMeters: DRIVE_SHORT_BUCKET_MAX_METERS,
+          distanceMeters: lastDistanceMeters,
           completedDrives: results.length,
         },
       );
@@ -970,6 +989,9 @@ export class DriveLineController {
     // stall detection) raises systemStop separately and disables drive
     // there.
     await this.sensorController.stopMotors();
+    if (this.status === "stopped") {
+      this.status = "idle";
+    }
   }
 
   getState(): DriveControllerState {
@@ -1077,6 +1099,7 @@ export class DriveLineController {
         learnSkipReason: "drive_stopped",
       });
       this.driveResolve = null;
+      this.status = "idle";
       return;
     }
 
@@ -1122,6 +1145,7 @@ export class DriveLineController {
       });
       this.stopRequested = false;
       this.driveResolve = null;
+      this.status = "idle";
       return;
     }
 
@@ -1263,8 +1287,13 @@ export class DriveLineController {
 
     const cte = unwrapMeters(crossTrackError(pose.position, this.driveLineStart, this.driveLineEnd));
     const cteGain = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
+    const cteTrim = cte * cteGain;
+    const headingTrim = totalDistance > DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS
+      ? this.learningModel.getLongHeadingBiasForDirection(this.driveDirectionSign)
+        + (headingDiff * this.learningModel.getLongHeadingGainForDirection(this.driveDirectionSign))
+      : 0;
     const trim = this.clamp(
-      cte * cteGain,
+      cteTrim + headingTrim,
       -DRIVE_STEERING_MAX_TRIM_PERCENT,
       DRIVE_STEERING_MAX_TRIM_PERCENT,
     );
@@ -1474,6 +1503,8 @@ export class DriveLineController {
             targetPosition: this.driveTargetPosition,
             finalPosition,
             driveDirectionSign: this.driveDirectionSign,
+            learningDistanceClass: this.currentDrive?.learningDistanceClass,
+            longHeadingLearningMode: this.currentDrive?.longHeadingLearningMode,
             errorX,
             errorY,
             maxCte,
@@ -1644,6 +1675,7 @@ export class DriveLineController {
       learnSkipReason: "drive_stopped",
     });
     this.driveResolve = null;
+    this.status = "idle";
   }
 
   private calculateMaxCte(): Meters {
@@ -1684,13 +1716,19 @@ export class DriveLineController {
 
   private getBrakeDistanceForCurrentDrive(): Meters {
     if (this.driveStartPosition === null || this.driveTargetPosition === null) {
-      return createMeters(this.learningModel.getParameters().longDriveBrakeDistanceMeters ?? 0);
+      const parameters = this.learningModel.getParameters();
+      return createMeters(
+        this.driveDirectionSign > 0
+          ? parameters.longDriveBrakeDistanceForwardMeters
+          : parameters.longDriveBrakeDistanceReverseMeters,
+      );
     }
 
     return this.learningModel.getBrakeDistanceForDrive(
       this.driveStartPosition,
       this.driveTargetPosition,
       this.driveDirectionSign,
+      this.currentDrive?.learningDistanceClass,
     );
   }
 

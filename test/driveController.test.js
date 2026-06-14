@@ -163,24 +163,29 @@ describe("DriveController", () => {
     return {
       getBrakeDistanceForDrive: mock.fn(() => createMeters(2.0)),
       getCteGainForDirection: () => 0.3,
+      getLongHeadingBiasForDirection: () => 0,
+      getLongHeadingGainForDirection: () => 0.01,
       getMotorRampDownTime: () => 700,
       updateFromDrive: mock.fn(async () => {}),
       saveParameters: mock.fn(async () => {}),
       loadParameters: mock.fn(async () => {}),
       getParameters: mock.fn(() => ({
-        version: 3,
-        longDriveBrakeDistanceMeters: 2.0,
+        version: 6,
+        longDriveBrakeDistanceForwardMeters: 2.0,
+        longDriveBrakeDistanceReverseMeters: 2.0,
+        longHeadingBiasForwardPercent: 0,
+        longHeadingBiasReversePercent: 0,
+        longHeadingGainForwardPerDeg: 0.01,
+        longHeadingGainReversePerDeg: 0.01,
         forwardCteGain: 0.3,
         reverseCteGain: 0.3,
         longDriveMinDistanceMeters: 1.0,
-        shortDriveBucketStepMeters: 0.05,
-        shortDriveMaxDistanceMeters: 4.0,
-        shortDriveBrakeFractionsPositive: Array(21).fill(0.5),
-        shortDriveBrakeFractionsNegative: Array(21).fill(0.5),
-        shortDriveSampleCountsPositive: Array(21).fill(0),
-        shortDriveSampleCountsNegative: Array(21).fill(0),
-        shortDriveLastErrorPositiveMeters: Array(21).fill(0),
-        shortDriveLastErrorNegativeMeters: Array(21).fill(0),
+        shortDriveBrakeDistancesPositive: Array(20).fill(0.2),
+        shortDriveBrakeDistancesNegative: Array(20).fill(0.2),
+        shortDriveSampleCountsPositive: Array(20).fill(0),
+        shortDriveSampleCountsNegative: Array(20).fill(0),
+        shortDriveLastErrorPositiveMeters: Array(20).fill(0),
+        shortDriveLastErrorNegativeMeters: Array(20).fill(0),
       })),
       resetToDefaults: mock.fn(async () => {}),
     };
@@ -860,20 +865,25 @@ describe("DriveLineController", () => {
     return {
       getBrakeDistanceForDrive: mock.fn(() => createMeters(0.15)),
       getCteGainForDirection: () => 0.3,
+      getLongHeadingBiasForDirection: () => 0,
+      getLongHeadingGainForDirection: () => 0.01,
       getParameters: mock.fn(() => ({
-        version: 3,
-        longDriveBrakeDistanceMeters: 2.0,
+        version: 6,
+        longDriveBrakeDistanceForwardMeters: 2.0,
+        longDriveBrakeDistanceReverseMeters: 2.0,
+        longHeadingBiasForwardPercent: 0,
+        longHeadingBiasReversePercent: 0,
+        longHeadingGainForwardPerDeg: 0.01,
+        longHeadingGainReversePerDeg: 0.01,
         forwardCteGain: 0.3,
         reverseCteGain: 0.3,
         longDriveMinDistanceMeters: 1.0,
-        shortDriveBucketStepMeters: 0.05,
-        shortDriveMaxDistanceMeters: 4.0,
-        shortDriveBrakeFractionsPositive: Array(21).fill(0.5),
-        shortDriveBrakeFractionsNegative: Array(21).fill(0.5),
-        shortDriveSampleCountsPositive: Array(21).fill(0),
-        shortDriveSampleCountsNegative: Array(21).fill(0),
-        shortDriveLastErrorPositiveMeters: Array(21).fill(0),
-        shortDriveLastErrorNegativeMeters: Array(21).fill(0),
+        shortDriveBrakeDistancesPositive: Array(20).fill(0.2),
+        shortDriveBrakeDistancesNegative: Array(20).fill(0.2),
+        shortDriveSampleCountsPositive: Array(20).fill(0),
+        shortDriveSampleCountsNegative: Array(20).fill(0),
+        shortDriveLastErrorPositiveMeters: Array(20).fill(0),
+        shortDriveLastErrorNegativeMeters: Array(20).fill(0),
       })),
       updateFromDrive: mock.fn(async () => {}),
     };
@@ -1556,6 +1566,90 @@ describe("DriveLineController", () => {
     await drivePromise;
   });
 
+  it("adds heading-based steering trim on longer runs even when cross-track error is zero", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
+    const mockLearning = createMockLearningModel();
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const drivePromise = controller.executeLineDrive({
+      targetPosition: createPosition(5, 0),
+      learningEnabled: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    mockPose.setPose({
+      position: createPosition(1, 0),
+      heading: createInternalHeading(10),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const commanded = mockSensor.setMotorWheelOutputs.mock.calls.at(-1)?.arguments ?? [];
+
+    assert.ok(commanded.length >= 2);
+    assert.ok(Math.abs(Number(commanded[0]) - Number(commanded[1])) > 1e-9);
+
+    await controller.stopCurrentDrive();
+    mockPose.setPose({
+      position: createPosition(5, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    await drivePromise;
+  });
+
+  it("keeps the existing cte-only steering on 1m runs", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
+    const mockLearning = createMockLearningModel();
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const drivePromise = controller.executeLineDrive({
+      targetPosition: createPosition(1, 0),
+      learningEnabled: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    mockPose.setPose({
+      position: createPosition(0.25, 0),
+      heading: createInternalHeading(10),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const commanded = mockSensor.setMotorWheelOutputs.mock.calls.at(-1)?.arguments ?? [];
+
+    assert.ok(commanded.length >= 2);
+    assert.equal(Math.abs(Number(commanded[0]) - Number(commanded[1])) < 1e-9, true);
+
+    await controller.stopCurrentDrive();
+    mockPose.setPose({
+      position: createPosition(1, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    await drivePromise;
+  });
+
   it("re-samples pose and heading for each short-drive leg", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
@@ -1770,8 +1864,9 @@ describe("DriveLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 4);
-    assert.equal(params.longDriveBrakeDistanceMeters, 2.0);
+    assert.equal(params.version, 5);
+    assert.equal(params.longDriveBrakeDistanceForwardMeters, 2.0);
+    assert.equal(params.longDriveBrakeDistanceReverseMeters, 2.0);
     assert.equal(params.forwardCteGain, 0.3);
     assert.equal(params.reverseCteGain, 0.3);
     assert.equal(params.shortDriveBuckets?.length, 20);
@@ -1926,7 +2021,8 @@ describe("DriveLearningModel", () => {
       });
 
       const after = model.getParameters();
-      assert.equal(after.longDriveBrakeDistanceMeters > before.longDriveBrakeDistanceMeters, true);
+      assert.equal(after.longDriveBrakeDistanceForwardMeters > before.longDriveBrakeDistanceForwardMeters, true);
+      assert.equal(after.longDriveBrakeDistanceReverseMeters, before.longDriveBrakeDistanceReverseMeters);
       assert.equal(after.forwardCteGain > before.forwardCteGain, true);
       assert.equal(after.reverseCteGain, before.reverseCteGain);
     } finally {
@@ -1934,7 +2030,7 @@ describe("DriveLearningModel", () => {
     }
   });
 
-  it("uses the shared long-drive brake distance beyond the 1 m short buckets", async () => {
+  it("uses explicit short/long classification to avoid 1 m boundary flips", async () => {
     const mockLogger = createMockLogger();
     const model = new DriveLearningModel({
       logger: mockLogger,
@@ -1945,13 +2041,81 @@ describe("DriveLearningModel", () => {
     const shortBucketBrake = model.getBrakeDistanceForDrive(
       createPosition(0, 0),
       createPosition(1.0, 0),
+      1,
+      "short",
     );
     const longDriveBrake = model.getBrakeDistanceForDrive(
       createPosition(0, 0),
-      createPosition(2.4, 0),
+      createPosition(1.0, 0),
+      1,
+      "long",
     );
 
     assert.notEqual(longDriveBrake, shortBucketBrake);
+  });
+
+  it("learns long forward and reverse brake distances independently", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-long-dir-"));
+    const parametersPath = join(dir, "drive-learning.json");
+
+    try {
+      const model = new DriveLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+
+      await model.loadParameters();
+      const before = model.getParameters();
+
+      await model.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(2, 0),
+        finalPosition: createPosition(2.2, 0),
+        driveDirectionSign: 1,
+        learningDistanceClass: "long",
+        errorX: createMeters(0.2),
+        errorY: createMeters(0),
+        maxCte: createMeters(0.02),
+        avgCte: createMeters(0.01),
+        brakeDistanceUsed: createMeters(0.2),
+      });
+
+      const afterForward = model.getParameters();
+      assert.equal(
+        afterForward.longDriveBrakeDistanceForwardMeters > before.longDriveBrakeDistanceForwardMeters,
+        true,
+      );
+      assert.equal(
+        afterForward.longDriveBrakeDistanceReverseMeters,
+        before.longDriveBrakeDistanceReverseMeters,
+      );
+
+      await model.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(-2, 0),
+        finalPosition: createPosition(-1.8, 0),
+        driveDirectionSign: -1,
+        learningDistanceClass: "long",
+        errorX: createMeters(-0.2),
+        errorY: createMeters(0),
+        maxCte: createMeters(0.02),
+        avgCte: createMeters(0.01),
+        brakeDistanceUsed: createMeters(0.2),
+      });
+
+      const afterReverse = model.getParameters();
+      assert.equal(
+        afterReverse.longDriveBrakeDistanceReverseMeters < afterForward.longDriveBrakeDistanceReverseMeters,
+        true,
+      );
+      assert.equal(
+        afterReverse.longDriveBrakeDistanceForwardMeters,
+        afterForward.longDriveBrakeDistanceForwardMeters,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("learns faster from larger short-drive errors than smaller ones", async () => {
@@ -2107,6 +2271,80 @@ describe("DriveLearningModel", () => {
       assert.equal(updatedBucket.brakeDistanceNegativeMeters < bucket.brakeDistanceNegativeMeters, true);
       assert.equal(after.reverseCteGain < before.reverseCteGain, true);
       assert.equal(after.forwardCteGain, before.forwardCteGain);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("can train only the long heading bias without changing long brake distance", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-long-bias-"));
+    const parametersPath = join(dir, "drive-learning.json");
+
+    try {
+      const model = new DriveLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+
+      await model.loadParameters();
+      const before = model.getParameters();
+
+      await model.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(2, 0),
+        finalPosition: createPosition(2, 0.08),
+        driveDirectionSign: 1,
+        learningDistanceClass: "long",
+        longHeadingLearningMode: "bias-only",
+        errorX: createMeters(0),
+        errorY: createMeters(0.08),
+        maxCte: createMeters(0.04),
+        avgCte: createMeters(0.02),
+        brakeDistanceUsed: createMeters(0.2),
+      });
+
+      const after = model.getParameters();
+      assert.equal(after.longDriveBrakeDistanceForwardMeters, before.longDriveBrakeDistanceForwardMeters);
+      assert.equal(after.longHeadingBiasForwardPercent > before.longHeadingBiasForwardPercent, true);
+      assert.equal(after.longHeadingGainForwardPerDeg, before.longHeadingGainForwardPerDeg);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("can train only the long heading gain without changing long brake distance", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-long-gain-"));
+    const parametersPath = join(dir, "drive-learning.json");
+
+    try {
+      const model = new DriveLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+
+      await model.loadParameters();
+      const before = model.getParameters();
+
+      await model.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(2, 0),
+        finalPosition: createPosition(2, 0.08),
+        driveDirectionSign: 1,
+        learningDistanceClass: "long",
+        longHeadingLearningMode: "gain-only",
+        errorX: createMeters(0),
+        errorY: createMeters(0.08),
+        maxCte: createMeters(0.04),
+        avgCte: createMeters(0.02),
+        brakeDistanceUsed: createMeters(0.2),
+      });
+
+      const after = model.getParameters();
+      assert.equal(after.longDriveBrakeDistanceForwardMeters, before.longDriveBrakeDistanceForwardMeters);
+      assert.equal(after.longHeadingGainForwardPerDeg > before.longHeadingGainForwardPerDeg, true);
+      assert.equal(after.longHeadingBiasForwardPercent, before.longHeadingBiasForwardPercent);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

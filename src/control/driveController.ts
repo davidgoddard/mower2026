@@ -443,7 +443,7 @@ export class DriveController {
   }
 
   /**
-   * Run short-drive training across 5cm buckets up to 1m in both X directions.
+   * Run short-drive training across 10cm buckets up to 1m in both X directions.
    */
   async runShortDistanceTraining(options?: {
     targetXErrorMeters?: number;
@@ -514,6 +514,94 @@ export class DriveController {
         };
       }
       this.logger.info("drive.short_training.completed", { totalDrives: results.length });
+      return results;
+    } finally {
+      this.sensorController.endMotionSession();
+    }
+  }
+
+  async runLongHeadingTraining(options: {
+    stage: "bias" | "gain";
+    targetXErrorMeters?: number;
+    targetYErrorMeters?: number;
+    includeReverseLegs?: boolean;
+    startDistanceMeters?: number;
+    maxDistanceMeters?: number;
+  }): Promise<DriveResult[]> {
+    const targetXErrorMeters = options.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
+    const targetYErrorMeters = options.targetYErrorMeters ?? DRIVE_SHORT_TARGET_Y_ERROR_METERS;
+    const includeReverseLegs = options.includeReverseLegs ?? true;
+    const startDistanceMeters = options.startDistanceMeters ?? DRIVE_LONG_SAMPLE_DISTANCES_METERS[0];
+    const maxDistanceMeters = options.maxDistanceMeters ?? (DRIVE_LONG_SAMPLE_DISTANCES_METERS.at(-1) ?? DRIVE_LONG_SAMPLE_DISTANCES_METERS[0]);
+    const distancePlan = [...DRIVE_LONG_SAMPLE_DISTANCES_METERS].filter(
+      (distance) => distance >= startDistanceMeters - 1e-9 && distance <= maxDistanceMeters + 1e-9,
+    );
+    const effectiveDistancePlan = distancePlan.length > 0 ? distancePlan : [DRIVE_LONG_SAMPLE_DISTANCES_METERS[0]];
+    const finalDistanceMeters = effectiveDistancePlan[effectiveDistancePlan.length - 1] ?? DRIVE_LONG_SAMPLE_DISTANCES_METERS[0];
+
+    this.shortTrainingProgress = null;
+    this.shortTrainingProgressFeed = [];
+    this.shortTrainingResults = [];
+    this.segmentTrainingProgress = null;
+    this.segmentTrainingProgressFeed = [];
+    this.segmentTrainingResults = [];
+    this.stopRequested = false;
+    const progressReporter: DriveTrainingProgressReporter = (progress) => {
+      this.shortTrainingProgress = progress;
+      this.shortTrainingProgressFeed = [progress, ...this.shortTrainingProgressFeed].slice(0, 12);
+    };
+
+    this.logger.info("drive.long_heading_training.started", {
+      stage: options.stage,
+      distancePlan: effectiveDistancePlan,
+      targetXErrorMeters,
+      targetYErrorMeters,
+      includeReverseLegs,
+    });
+
+    this.sensorController.beginMotionSession();
+    try {
+      this.status = "learning";
+      const results = await this.lineDriveController.runShortDistanceTraining({
+        targetXErrorMeters,
+        targetYErrorMeters,
+        includeReverseLegs,
+        progressReporter,
+        distancePlan: effectiveDistancePlan,
+        progressMode: options.stage === "bias" ? "long-heading-bias" : "long-heading-gain",
+        runLabel: options.stage === "bias" ? "long heading bias" : "long heading gain",
+        longHeadingLearningMode: options.stage === "bias" ? "bias-only" : "gain-only",
+      });
+
+      for (const result of results) {
+        this.shortTrainingResults.push(result);
+        if (result.status === "success") {
+          this.addToHistory(result);
+        }
+      }
+
+      this.stopRequested = false;
+      this.status = "idle";
+      if (!this.shortTrainingProgress) {
+        this.shortTrainingProgress = {
+          mode: options.stage === "bias" ? "long-heading-bias" : "long-heading-gain",
+          phase: "completed",
+          distanceMeters: finalDistanceMeters,
+          pairAttempt: 0,
+          legAttempt: 0,
+          directionSign: null,
+          targetXErrorMeters,
+          completedDrives: results.length,
+          totalPlannedDrives: effectiveDistancePlan.length * (includeReverseLegs ? 2 : 1),
+          message: `Long heading ${options.stage} training complete. Ran ${results.length} learning drive${results.length === 1 ? "" : "s"}.`,
+          timestamp: new Date().toISOString(),
+          resultStatus: "success",
+        };
+      }
+      this.logger.info("drive.long_heading_training.completed", {
+        stage: options.stage,
+        totalDrives: results.length,
+      });
       return results;
     } finally {
       this.sensorController.endMotionSession();

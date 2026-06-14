@@ -281,14 +281,15 @@ The segment controller is responsible only for:
 ```typescript
 export interface DriveParameters {
   version: number;
-  longDriveBrakeDistanceMeters: number;
+  longDriveBrakeDistanceForwardMeters: number;
+  longDriveBrakeDistanceReverseMeters: number;
   forwardCteGain: number;
   reverseCteGain: number;
   longDriveMinDistanceMeters: number;
   shortDriveBucketStepMeters: number;
   shortDriveMaxDistanceMeters: number;
-  shortDriveBrakeFractionsPositive: number[];
-  shortDriveBrakeFractionsNegative: number[];
+  shortDriveBrakeDistancesPositive: number[];
+  shortDriveBrakeDistancesNegative: number[];
   shortDriveSampleCountsPositive: number[];
   shortDriveSampleCountsNegative: number[];
   shortDriveLastErrorPositiveMeters: number[];
@@ -306,27 +307,26 @@ updateFromDrive(result: DriveUpdateData): void {
   
   const driveDistance = unwrapMeters(distanceBetween(result.startPosition, result.targetPosition));
   if (driveDistance <= this.parameters.shortDriveMaxDistanceMeters) {
-    // Bucketed short-drive learning: 5cm buckets from 5cm to 1m
-    // plus one additional 1.05m bucket for longer straight runs.
-    // Separate positive/negative variants are used for field X direction.
+    // Bucketed short-drive learning: exact 10cm to 1m training distances.
+    // Separate positive/negative variants are used for forward/reverse motion.
     return;
   }
 
-  // Long-drive learning keeps a single brake distance for full-speed runs
+  // Long-drive learning keeps separate forward/reverse brake distances
   const alpha = 0.1;
   const adjustment = errorXValue * alpha;
-  this.parameters.longDriveBrakeDistanceMeters += adjustment;
-  this.parameters.longDriveBrakeDistanceMeters = Math.max(0.1, Math.min(5.0, this.parameters.longDriveBrakeDistanceMeters));
+  this.parameters.longDriveBrakeDistanceForwardMeters += adjustment;
+  this.parameters.longDriveBrakeDistanceForwardMeters = Math.max(0.1, Math.min(5.0, this.parameters.longDriveBrakeDistanceForwardMeters));
 
   this.logger.info("drive.learning.brake_distance_updated", {
     errorX: errorXValue,
     adjustment,
-    newBrakeDistance: this.parameters.longDriveBrakeDistanceMeters,
+    newBrakeDistance: this.parameters.longDriveBrakeDistanceForwardMeters,
   });
 }
 ```
 
-Short-drive buckets are keyed by 5cm distance bands from 5cm to 1m plus one additional 1.05m bucket for longer straight runs, and split into positive and negative X-direction variants using the sign of the target X displacement relative to the start pose.
+Short-drive buckets are keyed by the exact 10cm through 100cm training distances and stay on the short-drive path because the training request explicitly marks them as short rather than relying on floating-point geometry at runtime.
 
 The short-distance tuning sequence should sample the mower's current pose and heading immediately before each leg, pause briefly so the operator can see progress, clear any stale stop latch at the start of a new run, and then drive straight forward or straight back from that live heading.  If either leg in a forward/reverse pair misses the target tolerance, the whole pair is retried from a fresh pose sample so the mower keeps learning from the current local frame.
 
@@ -381,14 +381,15 @@ async loadParameters(): Promise<void> {
     // Use defaults
     this.parameters = {
       version: 1,
-      longDriveBrakeDistanceMeters: 2.0,
+      longDriveBrakeDistanceForwardMeters: 2.0,
+      longDriveBrakeDistanceReverseMeters: 2.0,
       forwardCteGain: 0.3,
       reverseCteGain: 0.3,
       longDriveMinDistanceMeters: 1.0,
       shortDriveBucketStepMeters: 0.05,
       shortDriveMaxDistanceMeters: 1.0,
-      shortDriveBrakeFractionsPositive: Array(20).fill(0.5),
-      shortDriveBrakeFractionsNegative: Array(20).fill(0.5),
+      shortDriveBrakeDistancesPositive: Array(20).fill(0.5),
+      shortDriveBrakeDistancesNegative: Array(20).fill(0.5),
       shortDriveSampleCountsPositive: Array(20).fill(0),
       shortDriveSampleCountsNegative: Array(20).fill(0),
       shortDriveLastErrorPositiveMeters: Array(20).fill(0),

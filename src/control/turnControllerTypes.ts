@@ -46,6 +46,7 @@ export interface TurnControllerState {
 export interface TurnLearningInput {
   readonly requestedAngle: RelativeAngle;
   readonly achievedAngle: RelativeAngle;
+  readonly achievedAngleUnwrappedDeg?: number;
   readonly errorAngle: RelativeAngle;
   readonly brakeDistanceUsed: RelativeAngle;
   readonly direction: TurnDirection;
@@ -55,6 +56,8 @@ export interface TurnLearningBin {
   requestedAngleDeg: number;
   brakeDistanceDeg: number;
   direction: TurnDirection;
+  sampleCount?: number;
+  lastErrorDeg?: number;
 }
 
 export interface TurnLearningBucket {
@@ -72,12 +75,15 @@ export interface TurnLearningParameters {
   smallAngleThresholdDeg: number;
   smallTurnBucketStepDeg: number;
   smallTurnMaxAngleDeg: number;
-  largeTurnBrakeCcwDeg: number;
-  largeTurnBrakeCwDeg: number;
-  largeTurnSampleCountCcw: number;
-  largeTurnSampleCountCw: number;
-  lastLargeErrorCcwDeg: number;
-  lastLargeErrorCwDeg: number;
+  largeTurnBucketStepDeg: number;
+  largeTurnMinAngleDeg: number;
+  largeTurnMaxAngleDeg: number;
+  largeTurnBrakeDistancesCcwDeg: number[];
+  largeTurnBrakeDistancesCwDeg: number[];
+  largeTurnSampleCountsCcw: number[];
+  largeTurnSampleCountsCw: number[];
+  largeTurnLastErrorsCcwDeg: number[];
+  largeTurnLastErrorsCwDeg: number[];
   smallTurnBrakeFractionsCcw: number[];
   smallTurnBrakeFractionsCw: number[];
   smallTurnSampleCountsCcw: number[];

@@ -482,7 +482,7 @@ export const DRIVE_FULL_SPEED_COMMAND_DEFAULT = 1.0;
 /**
  * Default brake distance for full-speed drives (meters)
  */
-export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 2.0;
+export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 0.2;
 
 /**
  * Default CTE correction proportional gain
@@ -536,6 +536,13 @@ export const DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
 export const DRIVE_STEERING_MAX_TRIM_PERCENT = 0.35;
 
 /**
+ * Additional proportional steering trim applied per degree of heading error
+ * on longer straight drives. Short drives keep the existing CTE-only trim so
+ * the already-working <=1m behavior is preserved.
+ */
+export const DRIVE_LONG_STEERING_HEADING_GAIN_PER_DEG = 0.01;
+
+/**
  * Upper bound for the dedicated short-distance stop-trigger buckets (meters).
  */
 export const DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS = 1.0;
@@ -551,14 +558,14 @@ export const DRIVE_SHORT_BUCKET_STEP_METERS = 0.05;
  * shared full-speed plateau before braking.
  */
 export const DRIVE_SHORT_BUCKET_DISTANCES_METERS = [
-  0.05, 0.10, 0.15, 0.20, 0.25, 0.30,
+  0.10, 0.15, 0.20, 0.25, 0.30,
   0.35, 0.40, 0.45, 0.50, 0.55, 0.60,
   0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00,
 ] as const;
 
 /**
  * Longer straight-drive sample distances (meters) used to keep exercising the
- * shared full-speed brake distance under real conditions without introducing
+ * forward/reverse full-speed brake distances under real conditions without introducing
  * extra long-distance buckets.
  */
 export const DRIVE_LONG_SAMPLE_DISTANCES_METERS = [2.0, 3.0, 4.0] as const;
@@ -594,7 +601,7 @@ export const DRIVE_SHORT_TARGET_Y_ERROR_METERS = DRIVE_ACCEPTANCE_ERROR_METERS;
 /**
  * Minimum distance covered by segment-drive learning (meters)
  */
-export const DRIVE_SEGMENT_MIN_DISTANCE_METERS = 1.05;
+export const DRIVE_SEGMENT_MIN_DISTANCE_METERS = 0.3;
 
 /**
  * Maximum distance covered by segment-drive learning (meters)
@@ -631,7 +638,6 @@ export const ENCODER_METERS_PER_TICK_MAX_PLAUSIBLE = 1e-2;
 
 /**
  * Target CTE for tuning (meters)
- * 5cm - learning algorithm tries to achieve this
+ * 4cm - learning algorithm tries to achieve this
  */
-export const DRIVE_TARGET_CTE_METERS = 0.05;
-
+export const DRIVE_TARGET_CTE_METERS = 0.04;

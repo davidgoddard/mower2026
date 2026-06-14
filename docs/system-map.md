@@ -52,6 +52,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/manualDrivePage.ts`: Drive & Paths UI with a lighter custom popup overlay for alerts.
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
 - `src/server/driveTuningPage.ts`: drive tuning UI uses the shared popup overlay for alerts.
+  - staged tuning flow: short-distance brake/CTE learning, long heading-bias tuning, and long heading-gain tuning
 - `src/server/segmentTestingPage.ts`: segment testing UI uses the shared popup overlay for alerts.
 
 ## Stop State
@@ -114,7 +115,8 @@ This document maps problem domains to candidate files removing the need for Code
   - records IMU-achieved angle versus real pose change for tuning-page inspection
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
-  - adaptive brake angle updates based on turn error
+  - small-angle learning uses 3° brake-fraction buckets up to the configured small-angle threshold
+  - large-angle learning uses independent 10° brake-distance buckets per direction above the small-angle threshold, initialized to 25°
   - JSON persistence at `config/turn-learning-parameters.json`
 - `src/control/turnControllerTypes.ts`: turn controller type definitions
 - `src/server/turnTuningPage.ts`: modern responsive web UI for turn tuning
@@ -161,11 +163,11 @@ This document maps problem domains to candidate files removing the need for Code
   - executes straight-line drives from current position to target position
   - holds full forward (or full reverse) wheel power and applies a proportional left/right wheel trim from the cross-track error to keep the mower on the line; the only deviations from full power are this trim and an in-place pivot when heading error exceeds the rotate-to-heading threshold and the mower is not yet inside the final approach window
   - reverse travel uses the same geometric controller with the correct body-heading reference
-  - hard arrival stop plus shared full-speed brake distance learning for drives beyond 1m
+  - hard arrival stop plus separate forward/reverse full-speed brake distance learning for longer sample drives
   - per-run RunRecord instrumentation: anchor / brake-trigger / settled pose snapshots, 2 Hz heartbeat, peak encoder tick-rate, obstruction/slip/GNSS-demoted events surfaced to the learner; emits `drive.line.run_record` and writes `<MOWER_LOG_DIR>/run-records/<date>.jsonl`
   - encoder calibration is NOT updated opportunistically from line drives; calibration is owned by the dead-reckoning workflow
   - short-drive stop-trigger learning uses exact buckets at 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, and 100cm
-  - straight-line training runs those short buckets plus longer shared-brake sample distances at 2m, 3m, and 4m
+  - straight-line training runs those short buckets plus longer sample drives at 2m, 3m, and 4m, with the short/long distinction taken from the intended training distance rather than raw floating-point geometry
   - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
   - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
   - self-contained stop handling and learning updates for the line-following phase
@@ -175,8 +177,8 @@ This document maps problem domains to candidate files removing the need for Code
   - emitted alongside the existing `drive.line.run_record` log event by `DriveLineController`
 - `test/runRecord.test.js`: unit tests for the JSONL writer (date routing, append ordering, basic schema fidelity)
 - `src/control/driveLearningModel.ts`: drive parameter learning and persistence
-  - long-drive brake distance learning from final X error
-  - short-drive brake fractions bucketed at the exact short distances from 5cm through 100cm; all longer plateau drives reuse the shared long-drive brake distance
+  - long-drive brake distance learning from final X error with separate forward/reverse values
+  - short-drive brake distances bucketed at the exact short distances from 10cm through 100cm; all longer plateau drives use the long forward/reverse brake distances
   - direction-specific CTE gain adaptation from peak CTE and average CTE remains persisted for compatibility with the tuning UI and historical learning data
   - JSON persistence at `config/drive-learning-params.json`
 - Drive sequence: settle → get pose → turn to target → settle → delegate line drive with CTE correction and arrival braking → measure errors → update learning
@@ -396,7 +398,7 @@ This document maps problem domains to candidate files removing the need for Code
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
 - `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
-- `src/server/deadReckoningPage.ts`: dead-reckoning calibration page — three-phase calibration procedure UI (straight line, arc right, arc left); live IMU, GNSS, and motor-odometry widgets in a scaled row across the top; controls panel and a 45°-step test-moves panel side-by-side beneath; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
+- `src/server/deadReckoningPage.ts`: dead-reckoning arc-calibration page — three-phase calibration procedure UI (straight line, forward CW arc, forward CCW arc); live IMU, GNSS, and motor-odometry widgets in a scaled row across the top; controls panel and a 45°-step test-moves panel side-by-side beneath; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
   - Test-moves panel: 8 directional buttons (1 m at 45° increments) drive the mower to `current GNSS pose + Δ` via `POST /api/drive/execute` with learning disabled, snapshot pose before and after each move, and tabulate GNSS-measured Δx/Δy/Δheading vs encoder-DR Δx/Δy/Δheading plus their differences for direct comparison of motor-encoder dead-reckoning fidelity.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
 - `src/server/sensorWidgets.js`: **WEB COMPONENT DEFINITIONS** — pure static JS served at `GET /sensor-widgets.js` (cached 1 hour).
@@ -423,10 +425,10 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Dead-Reckoning Calibration
 - `src/control/deadReckoningCalibrator.ts`: three-phase dead-reckoning calibration procedure
-  - Phase 1 (straight line): drives ~3 s forward; divides GNSS chord by average encoder ticks to derive a first-pass `encoderMetersPerTick`; per-wheel values derived from left/right tick ratio and chord
-  - Phase 2 (pivot CW): performs a controlled in-place 180° pivot, derives wheelbase from signed wheel travel and IMU heading change, and rejects the phase when DR endpoint error indicates excessive slip
-  - Phase 3 (pivot CCW): mirror of phase 2
-  - outputs suggested per-wheel m/tick, wheelbase, and DR endpoint error for operator review before applying
+  - Phase 1 (straight line): line-drives forward to derive first-pass left/right `metersPerTick` from GNSS chord and encoder totals
+  - Phase 2 (arc CW): drives a gentle constant-speed forward clockwise arc until the IMU reaches the requested sweep, derives effective moving-turn wheelbase from left/right travelled distance difference and IMU heading change, and rejects the phase when DR endpoint error indicates excessive mismatch
+  - Phase 3 (arc CCW): mirror of phase 2
+  - outputs suggested per-wheel m/tick, moving wheelbase, and DR endpoint error for operator review before applying
   - settle diagnostics: logs `dead_reckoning.pose_not_settled` with the live blocker reason plus pose-fusion diagnostics whenever the 2-second settle dwell is interrupted, logs `dead_reckoning.pose_settled_anchor_rejected` when the pose is settled but the raw GNSS anchor is unusable, and logs the final fused/gnss snapshot on timeout
   - integrates with `systemStop` for safe abort during any phase
   - API: `run()`, `requestStop()`, `getState()`

@@ -58,13 +58,13 @@ The system shall:
         - settle
         - get current pose
         - compute new control parameters based on the CTE and X/Y errors
-- short drives up to 1 metre shall use positive and negative stop-trigger learning buckets at 5,10,15,20,25,30,35,40,45,50,55,60,70,80,90 and 100cm, and longer plateau drives shall reuse one shared full-speed brake distance while still retrying each training distance as a forward/reverse pair until both legs are below 4cm absolute X error
+- short drives up to 1 metre shall use positive and negative stop-trigger learning buckets at 5,10,15,20,25,30,35,40,45,50,55,60,70,80,90 and 100cm, and longer plateau drives shall use separate forward and reverse full-speed brake distances while still retrying each training distance as a forward/reverse pair until both legs are below 4cm absolute X error
 - short-drive tuning runs shall be able to alternate forward and reverse legs, taking a fresh pose/heading sample for each leg so the mower can train without walking far away from the test area
 - short-drive tuning runs shall clear any stale stop latch at the start of a new user-requested run so a fresh Start action actually starts motion
 - drive learning shall use a larger learning step for larger distance errors so a 10cm miss adapts faster than a 4cm miss
 - drive learning shall maintain separate CTE gains for forward and reverse motion so reverse steering can learn independently from forward steering
 - the drive tuning page shall let the operator choose a starting distance, defaulting to 50cm, so already-learned shorter buckets can be skipped during a session
-- the drive tuning page shall train the fixed short-bucket distances through 100cm and then longer shared-brake sample distances at 200, 300 and 400cm
+- the drive tuning page shall train the fixed short-bucket distances through 100cm and then longer forward/reverse-brake sample distances at 200, 300 and 400cm
 - the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, average CTE, maximum CTE, X error, and Y error
 - derive mowing patterns that avoid obstacles and ensure the least number of strips are mowed filling the mowing area with strips that are spaced at 3/4 of the cutting width.
 
@@ -472,7 +472,7 @@ The learning algorithm should:
 
 For short drives where full speed is not reached, the system shall:
 - use dedicated stop-trigger buckets at 5,10,15,20,25,30,35,40,45,50,55,60,70,80,90 and 100cm
-- use one shared full-speed brake distance for longer plateau drives, while still sampling straight-line training at 200, 300 and 400cm
+- use separate forward and reverse full-speed brake distances for longer plateau drives, while still sampling straight-line training at 200, 300 and 400cm
 - maintain separate positive and negative variants of the short-drive buckets
 - continue short-drive learning runs until the absolute X error is below 4cm, retrying forward/reverse pairs together when either leg misses the target
 - sample the current pose and heading immediately before each leg starts so the mower drives from its current local frame

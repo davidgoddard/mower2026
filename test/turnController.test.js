@@ -383,9 +383,11 @@ describe("TurnLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 1);
+    assert.equal(params.version, 2);
     assert.equal(params.parameters.length > 0, true);
-    assert.equal(params.parameters[0].requestedAngleDeg, 10);
+    assert.equal(params.parameters[0].requestedAngleDeg, 70);
+    assert.equal(params.parameters[0].direction, "ccw");
+    assert.equal(params.parameters[0].brakeDistanceDeg, 25);
   });
 
   it("returns brake angle for requested turn", () => {
@@ -401,19 +403,30 @@ describe("TurnLearningModel", () => {
     assert.equal(brakeValue < 90, true);
   });
 
-  it("maps angles to nearest bin", () => {
+  it("maps large angles to nearest 10° bin", async () => {
     const mockLogger = createMockLogger();
     const model = new TurnLearningModel({
       logger: mockLogger,
+      parametersPath: "/tmp/nonexistent-test-turn-bins.json",
+    });
+    await model.loadParameters();
+
+    await model.updateFromTurn({
+      requestedAngle: createRelativeAngle(90),
+      achievedAngle: createRelativeAngle(100),
+      errorAngle: createRelativeAngle(10),
+      brakeDistanceUsed: createRelativeAngle(25),
+      direction: "ccw",
     });
 
-    // 91 and 90 degrees should both map to 90 degree bin
+    const brake89 = model.getBrakeAngle(89, "ccw");
     const brake91 = model.getBrakeAngle(91, "ccw");
-    const brake90 = model.getBrakeAngle(90, "ccw");
+    const brake120 = model.getBrakeAngle(120, "ccw");
 
-    // Should get identical brake angles since they map to same bin
-    const diff = Math.abs(unwrapRelativeAngle(brake91) - unwrapRelativeAngle(brake90));
-    assert.equal(diff < 0.01, true, `Expected diff < 0.01 but got ${diff}`);
+    const sameBucketDiff = Math.abs(unwrapRelativeAngle(brake89) - unwrapRelativeAngle(brake91));
+    const differentBucketDiff = Math.abs(unwrapRelativeAngle(brake91) - unwrapRelativeAngle(brake120));
+    assert.equal(sameBucketDiff < 0.01, true, `Expected same-bucket diff < 0.01 but got ${sameBucketDiff}`);
+    assert.equal(differentBucketDiff > 0.01, true, `Expected different-bucket diff > 0.01 but got ${differentBucketDiff}`);
   });
 
   it("learns the small-angle brake fraction and persists it", async () => {
@@ -457,6 +470,92 @@ describe("TurnLearningModel", () => {
       assert.ok(persistedBucket);
       assert.equal(persistedBucket.sampleCountCcw, updatedBucket.sampleCountCcw);
       assert.equal(persistedBucket.brakeFractionCcw, updatedBucket.brakeFractionCcw);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("learns a large-angle brake bucket and persists it", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-large-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const model = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+
+      await model.loadParameters();
+      const before = model.getParameters();
+      const startBucket = before.parameters.find((entry) => entry.requestedAngleDeg === 120 && entry.direction === "ccw");
+      const untouchedBucket = before.parameters.find((entry) => entry.requestedAngleDeg === 90 && entry.direction === "ccw");
+      assert.ok(startBucket);
+      assert.ok(untouchedBucket);
+      assert.equal(startBucket.brakeDistanceDeg, 25);
+
+      await model.updateFromTurn({
+        requestedAngle: createRelativeAngle(121),
+        achievedAngle: createRelativeAngle(131),
+        errorAngle: createRelativeAngle(10),
+        brakeDistanceUsed: createRelativeAngle(25),
+        direction: "ccw",
+      });
+
+      const after = model.getParameters();
+      const updatedBucket = after.parameters.find((entry) => entry.requestedAngleDeg === 120 && entry.direction === "ccw");
+      const unchangedBucket = after.parameters.find((entry) => entry.requestedAngleDeg === 90 && entry.direction === "ccw");
+      assert.ok(updatedBucket);
+      assert.ok(unchangedBucket);
+      assert.equal(updatedBucket.sampleCount, (startBucket.sampleCount ?? 0) + 1);
+      assert.equal(updatedBucket.brakeDistanceDeg > startBucket.brakeDistanceDeg, true);
+      assert.equal(unchangedBucket.brakeDistanceDeg, untouchedBucket.brakeDistanceDeg);
+
+      const reloaded = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+      await reloaded.loadParameters();
+      const persisted = reloaded.getParameters();
+      const persistedBucket = persisted.parameters.find((entry) => entry.requestedAngleDeg === 120 && entry.direction === "ccw");
+      assert.ok(persistedBucket);
+      assert.equal(persistedBucket.sampleCount, updatedBucket.sampleCount);
+      assert.equal(persistedBucket.brakeDistanceDeg, updatedBucket.brakeDistanceDeg);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats wrapped 180° overshoot as overshoot when an unwrapped learning angle is provided", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-wrap-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const model = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+
+      await model.loadParameters();
+      const before = model.getParameters();
+      const startBucket = before.parameters.find((entry) => entry.requestedAngleDeg === 180 && entry.direction === "ccw");
+      assert.ok(startBucket);
+      assert.equal(startBucket.brakeDistanceDeg, 25);
+
+      await model.updateFromTurn({
+        requestedAngle: createRelativeAngle(180),
+        achievedAngle: createRelativeAngle(-175),
+        achievedAngleUnwrappedDeg: 185,
+        errorAngle: createRelativeAngle(5),
+        brakeDistanceUsed: createRelativeAngle(25),
+        direction: "ccw",
+      });
+
+      const after = model.getParameters();
+      const updatedBucket = after.parameters.find((entry) => entry.requestedAngleDeg === 180 && entry.direction === "ccw");
+      assert.ok(updatedBucket);
+      assert.equal(updatedBucket.brakeDistanceDeg > startBucket.brakeDistanceDeg, true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
