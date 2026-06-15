@@ -55,6 +55,8 @@ export interface TurnLearningInput {
 export interface TurnLearningBin {
   requestedAngleDeg: number;
   brakeDistanceDeg: number;
+  /** Residual bias added to the rate-based brake prediction (degrees). */
+  biasOffsetDeg: number;
   direction: TurnDirection;
   sampleCount?: number;
   lastErrorDeg?: number;
@@ -80,6 +82,10 @@ export interface TurnLearningParameters {
   largeTurnMaxAngleDeg: number;
   largeTurnBrakeDistancesCcwDeg: number[];
   largeTurnBrakeDistancesCwDeg: number[];
+  /** Per-bucket residual bias for rate-based brake prediction (CCW). */
+  largeTurnBiasOffsetsCcwDeg: number[];
+  /** Per-bucket residual bias for rate-based brake prediction (CW). */
+  largeTurnBiasOffsetsCwDeg: number[];
   largeTurnSampleCountsCcw: number[];
   largeTurnSampleCountsCw: number[];
   largeTurnLastErrorsCcwDeg: number[];

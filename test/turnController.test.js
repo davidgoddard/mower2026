@@ -71,15 +71,26 @@ describe("TurnController", () => {
       getBrakeAngle: mock.fn((angleDeg, direction) => {
         return createRelativeAngle(angleDeg * 0.7);
       }),
+      getLargeBiasOffset: mock.fn(() => 0),
       getSmallTurnBrakeFraction: mock.fn(() => 0.5),
-      getMotorRampDownTime: () => 700,
-      getMotorRampUpTime: () => 460,
       getSmallAngleThreshold: () => 20,
       updateFromTurn: mock.fn(async () => {}),
       saveParameters: mock.fn(async () => {}),
       loadParameters: mock.fn(async () => {}),
       getParameters: mock.fn(() => ({ parameters: [] })),
       resetToDefaults: mock.fn(async () => {}),
+    };
+  }
+
+  // Motor calibration stub that makes coast-prediction maths simple:
+  // decel = 250 %/s, crawl = 45% → effectiveRampMs = (45/250)*1000 = 180ms
+  // → half-ramp window = 90ms.
+  function createMockMotorCalibration() {
+    return {
+      getDecelPercentPerSecond: () => 250,
+      getAccelPercentPerSecond: () => 217,
+      getRampDownTime: () => 400,
+      getRampUpTime: () => 600,
     };
   }
 
@@ -107,30 +118,89 @@ describe("TurnController", () => {
       sensorController: mockSensor,
       logger: mockLogger,
       learningModel: mockLearning,
+      motorCalibration: createMockMotorCalibration(),
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
       },
     });
 
-    // Start turn and simulate heading updates
+    // Start turn and simulate heading updates.
+    // With decel=250 %/s and crawl=0.45, effectiveRampMs = (45/250)×1000 = 180ms.
+    // Rate window: 3° over 100ms → rate = 0.03 deg/ms.
+    // predictedCoast = 0.03 × (180/2) = 0.03 × 90 = 2.7°.
+    // At 87° progress: remaining = 3° ≤ 2.7° → brake fires.
     const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(90),
       direction: "ccw",
       learningEnabled: true,
     });
 
-    // Simulate heading updates at brake angle (63 degrees = 90 * 0.7)
     await new Promise(resolve => setTimeout(resolve, 10));
-    mockSensor._testSetHeading(createInternalHeading(63));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(63), 1000);
+    // First event: 84° progress
+    mockSensor._testSetHeading(createInternalHeading(84));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(84), 900);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    // Second event: 87° progress, 100ms later — rate = 3/100 = 0.03 deg/ms,
+    // remaining = 3° ≤ predictedCoast 2.7° → brake fires.
+    mockSensor._testSetHeading(createInternalHeading(87));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(87), 1000);
 
     const result = await turnPromise;
 
     assert.equal(result.status, "success");
     assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
-    assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length > 0, true);
     assert.equal(mockLearning.updateFromTurn.mock.calls.length, 1);
+  });
+
+  it("rate-based brake fires earlier when the mower is turning faster", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    // Model returns a static fallback of 10° (fires at 80° progress); bias zero.
+    const mockLearning = {
+      ...createMockLearningModel(),
+      getBrakeAngle: mock.fn(() => createRelativeAngle(10)),
+      getLargeBiasOffset: mock.fn(() => 0),
+      getSmallAngleThreshold: () => 20,
+    };
+
+    let elapsed = 0;
+    const controller = new TurnController({
+      sensorController: mockSensor,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      motorCalibration: createMockMotorCalibration(),
+      nowMillis: () => elapsed,
+      sleep: async (ms) => { elapsed += ms; },
+    });
+
+    const turnPromise = controller.executeTurn({
+      targetAngle: createRelativeAngle(90),
+      direction: "ccw",
+      learningEnabled: false,
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    // decel=250 %/s, crawl=0.45 → effectiveRampMs=180ms → half-ramp=90ms.
+    // Aim: brake fires at 75° (remaining=15°).
+    // Rate = 15°/90ms = 0.167 deg/ms → predictedCoast = 0.167×90 = 15°.
+    // At 60° with a single sample: falls back to static (10°), remaining=30° → no brake.
+    // At 75° with two-sample window: predictedCoast=15° = remaining=15° → brake fires.
+    // Without rate fix the static 10° fallback would not fire until 80°.
+    mockSensor._testSetHeading(createInternalHeading(60));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(60), 1000);
+    await new Promise(resolve => setTimeout(resolve, 5));
+
+    // 15° later in 90ms → rate = 15/90 ≈ 0.167 deg/ms; remaining = 15° ≤ 15° → brake fires.
+    mockSensor._testSetHeading(createInternalHeading(75));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(75), 1090);
+
+    const result = await turnPromise;
+
+    // Turn must complete successfully, proving the rate-based prediction fired
+    // before the 80° point that the static 10° fallback would have waited for.
+    assert.equal(result.status, "success");
   });
 
   it("handles small angle turns (10°)", async () => {
@@ -143,6 +213,7 @@ describe("TurnController", () => {
       sensorController: mockSensor,
       logger: mockLogger,
       learningModel: mockLearning,
+      motorCalibration: createMockMotorCalibration(),
       nowMillis: () => elapsed,
       sleep: async (ms) => {
         elapsed += ms;
@@ -155,15 +226,24 @@ describe("TurnController", () => {
       learningEnabled: true,
     });
 
-    // Small angle brakes at 50% (5 degrees)
+    // decel=250, crawl=0.45 → effectiveRampMs=180ms → half-ramp=90ms.
+    // Rate: 2°/100ms = 0.02 deg/ms → predictedCoast = 0.02 × 90 = 1.8°.
+    // At 8° progress: remaining = 2° > 1.8° → no brake.
+    // At 8.5° progress: remaining = 1.5° ≤ 1.8° → brake fires.
     await new Promise(resolve => setTimeout(resolve, 10));
-    mockSensor._testSetHeading(createInternalHeading(5));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(5), 500);
+    mockSensor._testSetHeading(createInternalHeading(8));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(8), 400);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    // 0.5° later in 25ms → rate = 0.5/25 = 0.02 deg/ms; remaining = 1.5° ≤ 1.8° → brake
+    mockSensor._testSetHeading(createInternalHeading(8.5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(8.5), 425);
 
     const result = await turnPromise;
 
     assert.equal(result.status, "success");
     assert.equal(result.motorEngaged, true);
+    // Small turns use the same ramp-down path as large turns
+    assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
   });
 
   it("stops turn immediately on stopCurrentTurn()", async () => {

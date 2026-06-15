@@ -1,12 +1,14 @@
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
-import { MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS, MOTOR_CALIBRATION_PATH } from "../constants.js";
+import { MOTOR_DECEL_PERCENT_PER_SECOND, MOTOR_ACCEL_PERCENT_PER_SECOND, MOTOR_CALIBRATION_PATH } from "../constants.js";
 import { quarantineCorruptFile, readJsonFile, writeJsonFile } from "./jsonFileStore.js";
 
 export interface MotorCalibrationParameters {
   version: number;
-  motorRampDownTimeMs: number;
-  motorRampUpTimeMs: number;
+  /** Motor deceleration rate in %/s (firmware step per tick = value × 10ms / 1000). */
+  motorDecelPercentPerSecond: number;
+  /** Motor acceleration rate in %/s. */
+  motorAccelPercentPerSecond: number;
   updatedAt: string;
 }
 
@@ -17,8 +19,11 @@ export interface MotorCalibrationOptions {
 
 interface LegacyMotorCalibrationParameters {
   version?: unknown;
+  /** Legacy ms-based fields from files written before the refactor. */
   motorRampDownTimeMs?: unknown;
   motorRampUpTimeMs?: unknown;
+  motorDecelPercentPerSecond?: unknown;
+  motorAccelPercentPerSecond?: unknown;
   updatedAt?: unknown;
 }
 
@@ -39,8 +44,8 @@ export class MotorCalibration {
       this.parameters = this.normalizeParameters(raw);
       this.logger.info("motor.calibration.loaded", {
         path: this.parametersPath,
-        motorRampDownTimeMs: this.parameters.motorRampDownTimeMs,
-        motorRampUpTimeMs: this.parameters.motorRampUpTimeMs,
+        motorDecelPercentPerSecond: this.parameters.motorDecelPercentPerSecond,
+        motorAccelPercentPerSecond: this.parameters.motorAccelPercentPerSecond,
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -76,12 +81,24 @@ export class MotorCalibration {
     }
   }
 
-  getRampDownTime(): number {
-    return this.parameters.motorRampDownTimeMs;
+  /** Deceleration rate in %/s. The firmware subtracts `value × elapsedMs / 1000` per tick. */
+  getDecelPercentPerSecond(): number {
+    return this.parameters.motorDecelPercentPerSecond;
   }
 
+  /** Acceleration rate in %/s. */
+  getAccelPercentPerSecond(): number {
+    return this.parameters.motorAccelPercentPerSecond;
+  }
+
+  /** Backward-compatible: effective ms to ramp from 100 % to 0 % at the calibrated rate. */
+  getRampDownTime(): number {
+    return Math.round(100_000 / this.parameters.motorDecelPercentPerSecond);
+  }
+
+  /** Backward-compatible: effective ms to ramp from 0 % to 100 % at the calibrated rate. */
   getRampUpTime(): number {
-    return this.parameters.motorRampUpTimeMs;
+    return Math.round(100_000 / this.parameters.motorAccelPercentPerSecond);
   }
 
   getParameters(): MotorCalibrationParameters {
@@ -92,8 +109,8 @@ export class MotorCalibration {
     this.parameters = this.createDefaultParameters();
     await this.saveParameters();
     this.logger.info("motor.calibration.reset", {
-      motorRampDownTimeMs: this.parameters.motorRampDownTimeMs,
-      motorRampUpTimeMs: this.parameters.motorRampUpTimeMs,
+      motorDecelPercentPerSecond: this.parameters.motorDecelPercentPerSecond,
+      motorAccelPercentPerSecond: this.parameters.motorAccelPercentPerSecond,
     });
   }
 
@@ -103,19 +120,40 @@ export class MotorCalibration {
     }
 
     const legacy = raw as LegacyMotorCalibrationParameters;
-    return {
-      version: this.readNumber(legacy.version, 1),
-      motorRampDownTimeMs: this.readNumber(legacy.motorRampDownTimeMs, MOTOR_RAMP_DOWN_TIME_MS),
-      motorRampUpTimeMs: this.readNumber(legacy.motorRampUpTimeMs, MOTOR_RAMP_UP_TIME_MS),
-      updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
-    };
+
+    // New format: %/s fields present directly.
+    if (typeof legacy.motorDecelPercentPerSecond === "number" && Number.isFinite(legacy.motorDecelPercentPerSecond)) {
+      return {
+        version: this.readNumber(legacy.version, 2),
+        motorDecelPercentPerSecond: this.readNumber(legacy.motorDecelPercentPerSecond, MOTOR_DECEL_PERCENT_PER_SECOND),
+        motorAccelPercentPerSecond: this.readNumber(legacy.motorAccelPercentPerSecond, MOTOR_ACCEL_PERCENT_PER_SECOND),
+        updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
+      };
+    }
+
+    // Legacy format: ms fields — convert on load.
+    if (typeof legacy.motorRampDownTimeMs === "number" && Number.isFinite(legacy.motorRampDownTimeMs) && legacy.motorRampDownTimeMs > 0) {
+      const decel = Math.round(100_000 / legacy.motorRampDownTimeMs);
+      const accelMs = typeof legacy.motorRampUpTimeMs === "number" && Number.isFinite(legacy.motorRampUpTimeMs) && (legacy.motorRampUpTimeMs as number) > 0
+        ? legacy.motorRampUpTimeMs as number
+        : Math.round(100_000 / MOTOR_ACCEL_PERCENT_PER_SECOND);
+      const accel = Math.round(100_000 / accelMs);
+      return {
+        version: this.readNumber(legacy.version, 2),
+        motorDecelPercentPerSecond: decel,
+        motorAccelPercentPerSecond: accel,
+        updatedAt: typeof legacy.updatedAt === "string" ? legacy.updatedAt : new Date().toISOString(),
+      };
+    }
+
+    return this.createDefaultParameters();
   }
 
   private createDefaultParameters(): MotorCalibrationParameters {
     return {
-      version: 1,
-      motorRampDownTimeMs: MOTOR_RAMP_DOWN_TIME_MS,
-      motorRampUpTimeMs: MOTOR_RAMP_UP_TIME_MS,
+      version: 2,
+      motorDecelPercentPerSecond: MOTOR_DECEL_PERCENT_PER_SECOND,
+      motorAccelPercentPerSecond: MOTOR_ACCEL_PERCENT_PER_SECOND,
       updatedAt: new Date().toISOString(),
     };
   }

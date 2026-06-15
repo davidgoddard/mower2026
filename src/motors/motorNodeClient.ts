@@ -1,7 +1,7 @@
 import { decodeFrame, encodeFrame, frameLengthForPayload } from "../bus/frameCodec.js";
 import { I2cBusController, I2cTaskReplacedError } from "../i2c/i2cBusController.js";
 import { I2C_PRIORITY } from "../i2c/priorities.js";
-import { MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS, MOTOR_RAMP_DOWN_TIME_MS, MOTOR_RAMP_UP_TIME_MS } from "../constants.js";
+import { MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS, MOTOR_DECEL_PERCENT_PER_SECOND, MOTOR_ACCEL_PERCENT_PER_SECOND } from "../constants.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 import { decodeMotorFeedbackSample, encodeWheelSpeedCommand, motorFeedbackSampleLength } from "./motorCodec.js";
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
@@ -18,26 +18,37 @@ interface MotorNodeClientOptions {
 }
 
 interface WheelSpeedCommandOptions {
-  rampUpTimeMs?: number;
+  /** Override deceleration rate in %/s (replaces the calibrated default). */
+  decelPercentPerSecond?: number;
+  /** Override acceleration rate in %/s (replaces the calibrated default). */
+  accelPercentPerSecond?: number;
+  /** Legacy override: ramp-down time in ms — converted to %/s internally. */
   rampDownTimeMs?: number;
+  /** Legacy override: ramp-up time in ms — converted to %/s internally. */
+  rampUpTimeMs?: number;
 }
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-function rampSecondsFromMillis(rampMillis: number): number {
-  return Math.max(0.001, rampMillis / 1000);
-}
-
-function ratePerSecondFromRampMillis(rampMillis: number): number {
-  return 1 / rampSecondsFromMillis(rampMillis);
-}
-
 function clampNormalizedTarget(target: number): number {
   return Math.max(-1, Math.min(1, target));
 }
 
+/**
+ * Convert a deceleration/acceleration rate in %/s to the wire field value
+ * expected by the ESP32 motor codec.
+ *
+ * The on-wire field is `1 / rampSeconds` (a frequency, in Hz), scaled by 1000
+ * for uint16 encoding.  The firmware computes `rampMs = (1 / wireValue) × 1000`,
+ * which is equivalent to `rampMs = 100_000 / decelPercentPerSecond`.
+ *
+ * Example: 250 %/s → rampSeconds = 100/250 = 0.4 s → wireValue = 1/0.4 = 2.5.
+ */
+function wireRateFromDecelPercentPerSecond(decelPercentPerSecond: number): number {
+  return decelPercentPerSecond / 100;
+}
 
 export class MotorNodeClient {
   private sequence = 0;
@@ -74,16 +85,27 @@ export class MotorNodeClient {
     // H-bridges off. The dedicated {@link stop} method (and the systemStop
     // re-assert in the sensor loop) are the only paths that send
     // enableDrive=false.
-    const rampUpTimeMs = options.rampUpTimeMs ?? this.motorCalibration?.getRampUpTime() ?? MOTOR_RAMP_UP_TIME_MS;
-    const rampDownTimeMs = options.rampDownTimeMs ?? this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
+
+    // Resolve deceleration rate: explicit %/s > legacy ms > calibrated > constant default.
+    const decelPercentPerSecond = options.decelPercentPerSecond
+      ?? (options.rampDownTimeMs != null ? 100_000 / options.rampDownTimeMs : undefined)
+      ?? this.motorCalibration?.getDecelPercentPerSecond()
+      ?? MOTOR_DECEL_PERCENT_PER_SECOND;
+
+    const accelPercentPerSecond = options.accelPercentPerSecond
+      ?? (options.rampUpTimeMs != null ? 100_000 / options.rampUpTimeMs : undefined)
+      ?? this.motorCalibration?.getAccelPercentPerSecond()
+      ?? MOTOR_ACCEL_PERCENT_PER_SECOND;
+
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
       leftWheelTargetPercent: clampNormalizedTarget(leftWheelTargetPercent),
       rightWheelTargetPercent: clampNormalizedTarget(rightWheelTargetPercent),
       enableDrive: true,
       commandTimeoutMillis: this.commandTimeoutMillis,
-      maxAccelerationPercentPerSecond: ratePerSecondFromRampMillis(rampUpTimeMs),
-      maxDecelerationPercentPerSecond: ratePerSecondFromRampMillis(rampDownTimeMs),
+      // Wire field is 1/rampSeconds, not %/s — convert before sending.
+      maxAccelerationPercentPerSecond: wireRateFromDecelPercentPerSecond(accelPercentPerSecond),
+      maxDecelerationPercentPerSecond: wireRateFromDecelPercentPerSecond(decelPercentPerSecond),
     };
 
     if (this.isDuplicateCommand(command)) {
@@ -102,6 +124,10 @@ export class MotorNodeClient {
       enableDrive: false,
       commandTimeoutMillis: this.commandTimeoutMillis,
     };
+
+    if (this.isDuplicateCommand(command)) {
+      return;
+    }
 
     await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
     this.lastSentCommand = command;

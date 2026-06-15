@@ -367,19 +367,42 @@ export const TURN_SETTLE_TIME_MS = 1000;
 export const TURN_TRAINING_INTER_TURN_PAUSE_MS = 1000;
 
 /**
- * Motor ramp-down time from hardware spec (milliseconds).
- * Time for motors to decelerate from full speed to zero. Must match the
- * ESP32 motor controller firmware default (`DEFAULT_RAMP_DOWN_MS` in
- * external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino).
+ * ESP32 motor control loop period (milliseconds).
+ * The firmware runs at 100 Hz; each tick is 10 ms.
  */
-export const MOTOR_RAMP_DOWN_TIME_MS = 700;
+export const MOTOR_CONTROL_TICK_MS = 10;
 
 /**
- * Motor ramp-up time from hardware spec (milliseconds).
- * Time for motors to accelerate from zero to full speed. Must match the
- * ESP32 motor controller firmware default (`DEFAULT_RAMP_UP_MS`).
+ * Default motor deceleration rate (%/s).
+ *
+ * The ESP32 subtracts `decelPercentPerSecond × (elapsedMs / 1000)` from the
+ * applied PWM each 10 ms tick.  250 %/s = 2.5 % per tick, so a 100 % →0 %
+ * ramp takes 100/2.5 = 40 ticks = 400 ms.
+ *
+ * Calibrated value lives in `motorDecelPercentPerSecond` in
+ * `config/motor-calibration.json`; this constant is the fall-back default and
+ * must match `DEFAULT_DECEL_PERCENT_PER_SECOND` in the ESP32 firmware.
  */
-export const MOTOR_RAMP_UP_TIME_MS = 460;
+export const MOTOR_DECEL_PERCENT_PER_SECOND = 250;
+
+/**
+ * Default motor acceleration rate (%/s).
+ *
+ * Equivalent to the old 460 ms full-range ramp: 100/0.46 ≈ 217 %/s.
+ */
+export const MOTOR_ACCEL_PERCENT_PER_SECOND = 217;
+
+/**
+ * Backward-compatible alias: milliseconds for a full 0→100 % ramp at the
+ * default deceleration rate.  Used only by callers that still think in ms.
+ */
+export const MOTOR_RAMP_DOWN_TIME_MS = Math.round(100_000 / MOTOR_DECEL_PERCENT_PER_SECOND);
+
+/**
+ * Backward-compatible alias: milliseconds for a full 0→100 % ramp at the
+ * default acceleration rate.
+ */
+export const MOTOR_RAMP_UP_TIME_MS = Math.round(100_000 / MOTOR_ACCEL_PERCENT_PER_SECOND);
 
 /**
  * Small angle threshold - below this, use special handling (degrees)
@@ -418,6 +441,22 @@ export const TURN_HISTORY_MAX_SIZE = 100;
  * (worst-case 180° at low GNSS-rebase wheel speed) cannot trip it.
  */
 export const TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS = 30_000;
+
+/**
+ * Rolling window duration (milliseconds) for the live angular-rate estimator
+ * used during large-angle turns.
+ *
+ * IMU events that arrive within this window are kept to compute a rolling
+ * average yaw rate. The rate is then multiplied by half the motor ramp-down
+ * time to predict how far the mower will coast after the brake command, so
+ * the brake trigger fires at the right moment regardless of the current
+ * session's battery voltage or motor temperature.
+ *
+ * 200 ms at the 50 Hz sensor loop gives ~10 samples — enough to smooth
+ * single-sample jitter without being too slow to react if the mower
+ * accelerates during the first part of the turn.
+ */
+export const TURN_RATE_WINDOW_MS = 200;
 
 /**
  * Turn learning parameters file path (relative to project root)

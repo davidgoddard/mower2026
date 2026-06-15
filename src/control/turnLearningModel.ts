@@ -32,6 +32,9 @@ const SMALL_TURN_FRACTION_MAX = 0.95;
 
 const LARGE_TURN_BUCKET_STEP_DEG = 10;
 const LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG = 25;
+const LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG = 0;
+const LARGE_TURN_MIN_BIAS_OFFSET_DEG = -15;
+const LARGE_TURN_MAX_BIAS_OFFSET_DEG = 15;
 const LARGE_TURN_MIN_BRAKE_DISTANCE_DEG = 5;
 const LARGE_TURN_MAX_BRAKE_DISTANCE_DEG = 90;
 const LARGE_TURN_MIN_ANGLE_DEG =
@@ -172,12 +175,26 @@ export class TurnLearningModel {
       Math.min(LARGE_TURN_MAX_BRAKE_DISTANCE_DEG, currentBrakeDistance + adjustment),
     );
 
+    // Update bias offset: the error after rate-based prediction is the
+    // residual the bias corrects. Positive error (overshot) → increase bias so
+    // brake fires earlier next time; negative error (undershot) → decrease.
+    const currentBias = result.direction === "ccw"
+      ? this.parameters.largeTurnBiasOffsetsCcwDeg[bucketIndex]
+      : this.parameters.largeTurnBiasOffsetsCwDeg[bucketIndex];
+    const biasAdjustment = errorDeg * this.learningRate;
+    const clampedBias = Math.max(
+      LARGE_TURN_MIN_BIAS_OFFSET_DEG,
+      Math.min(LARGE_TURN_MAX_BIAS_OFFSET_DEG, currentBias + biasAdjustment),
+    );
+
     if (result.direction === "ccw") {
       this.parameters.largeTurnBrakeDistancesCcwDeg[bucketIndex] = clampedBrakeDistance;
+      this.parameters.largeTurnBiasOffsetsCcwDeg[bucketIndex] = clampedBias;
       this.parameters.largeTurnSampleCountsCcw[bucketIndex] += 1;
       this.parameters.largeTurnLastErrorsCcwDeg[bucketIndex] = errorDeg;
     } else {
       this.parameters.largeTurnBrakeDistancesCwDeg[bucketIndex] = clampedBrakeDistance;
+      this.parameters.largeTurnBiasOffsetsCwDeg[bucketIndex] = clampedBias;
       this.parameters.largeTurnSampleCountsCw[bucketIndex] += 1;
       this.parameters.largeTurnLastErrorsCwDeg[bucketIndex] = errorDeg;
     }
@@ -191,6 +208,8 @@ export class TurnLearningModel {
       errorDeg,
       adjustment,
       newBrakeDistanceDeg: clampedBrakeDistance,
+      biasAdjustment,
+      newBiasOffsetDeg: clampedBias,
     });
     await this.saveParameters();
   }
@@ -208,6 +227,27 @@ export class TurnLearningModel {
       ? this.getLegacyLargeDirectionDefault(direction)
       : this.getLargeTurnBrakeDistance(direction, requested);
     return createRelativeAngle(Math.max(1, Math.min(requested, brakeDistance)));
+  }
+
+  /**
+   * Return the persisted residual bias offset (degrees) for the large-turn
+   * rate-based brake prediction for the given direction and angle.
+   *
+   * The controller computes its brake trigger as:
+   *   remaining <= liveRate × (rampDownTime / 2) + biasOffset
+   *
+   * A positive bias means the mower historically coasts further than the rate
+   * prediction alone; a negative bias means it stops short.
+   */
+  getLargeBiasOffset(requestedAngleDeg: number, direction: TurnDirection): number {
+    const requested = Math.abs(requestedAngleDeg);
+    if (requested <= this.parameters.smallAngleThresholdDeg) {
+      return LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG;
+    }
+    const bucketIndex = this.getLargeTurnBucketIndex(requested);
+    return direction === "ccw"
+      ? this.parameters.largeTurnBiasOffsetsCcwDeg[bucketIndex]
+      : this.parameters.largeTurnBiasOffsetsCwDeg[bucketIndex];
   }
 
   getSmallTurnBrakeFraction(direction: TurnDirection, requestedAngleDeg: number): number {
@@ -228,6 +268,7 @@ export class TurnLearningModel {
       parameters.push({
         requestedAngleDeg,
         brakeDistanceDeg: this.parameters.largeTurnBrakeDistancesCcwDeg[index],
+        biasOffsetDeg: this.parameters.largeTurnBiasOffsetsCcwDeg[index],
         direction: "ccw",
         sampleCount: this.parameters.largeTurnSampleCountsCcw[index],
         lastErrorDeg: this.parameters.largeTurnLastErrorsCcwDeg[index],
@@ -235,6 +276,7 @@ export class TurnLearningModel {
       parameters.push({
         requestedAngleDeg,
         brakeDistanceDeg: this.parameters.largeTurnBrakeDistancesCwDeg[index],
+        biasOffsetDeg: this.parameters.largeTurnBiasOffsetsCwDeg[index],
         direction: "cw",
         sampleCount: this.parameters.largeTurnSampleCountsCw[index],
         lastErrorDeg: this.parameters.largeTurnLastErrorsCwDeg[index],
@@ -286,6 +328,16 @@ export class TurnLearningModel {
           LARGE_TURN_BUCKET_COUNT,
           LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG,
         ),
+        largeTurnBiasOffsetsCcwDeg: this.normalizeNumericArray(
+          raw.largeTurnBiasOffsetsCcwDeg,
+          LARGE_TURN_BUCKET_COUNT,
+          LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG,
+        ),
+        largeTurnBiasOffsetsCwDeg: this.normalizeNumericArray(
+          raw.largeTurnBiasOffsetsCwDeg,
+          LARGE_TURN_BUCKET_COUNT,
+          LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG,
+        ),
         largeTurnSampleCountsCcw: this.normalizeNumericArray(raw.largeTurnSampleCountsCcw, LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnSampleCountsCw: this.normalizeNumericArray(raw.largeTurnSampleCountsCw, LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCcwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCcwDeg, LARGE_TURN_BUCKET_COUNT, 0),
@@ -322,6 +374,8 @@ export class TurnLearningModel {
         largeTurnMaxAngleDeg: LARGE_TURN_MAX_ANGLE_DEG,
         largeTurnBrakeDistancesCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
         largeTurnBrakeDistancesCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
+        largeTurnBiasOffsetsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG),
+        largeTurnBiasOffsetsCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG),
         largeTurnSampleCountsCcw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnSampleCountsCw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
@@ -371,6 +425,8 @@ export class TurnLearningModel {
       largeTurnMaxAngleDeg: LARGE_TURN_MAX_ANGLE_DEG,
       largeTurnBrakeDistancesCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
       largeTurnBrakeDistancesCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG),
+      largeTurnBiasOffsetsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG),
+      largeTurnBiasOffsetsCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, LARGE_TURN_DEFAULT_BIAS_OFFSET_DEG),
       largeTurnSampleCountsCcw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
       largeTurnSampleCountsCw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
       largeTurnLastErrorsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),

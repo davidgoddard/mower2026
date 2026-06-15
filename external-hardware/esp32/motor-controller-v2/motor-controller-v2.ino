@@ -63,8 +63,12 @@ static const int PWM_MAX_DUTY = 255;
 // ===== Control / reporting =====
 static const uint32_t CONTROL_PERIOD_MS = 10;      // 100 Hz
 static const uint32_t FEEDBACK_PERIOD_MS = 50;     // 20 Hz
-static const uint32_t DEFAULT_RAMP_UP_MS = 460;
-static const uint32_t DEFAULT_RAMP_DOWN_MS = 700;
+// Decel / accel rates in %/s.  At 100 Hz (10 ms ticks):
+//   stepPerTick = rate × elapsedMs / 1000 = rate × 0.010
+// DEFAULT_DECEL_PERCENT_PER_SECOND = 250  →  2.5 %/tick  →  40-tick (400 ms) full stop.
+// DEFAULT_ACCEL_PERCENT_PER_SECOND = 167  →  1.67 %/tick →  60-tick (600 ms) full spin-up.
+static const float DEFAULT_DECEL_PERCENT_PER_SECOND = 250.0f;
+static const float DEFAULT_ACCEL_PERCENT_PER_SECOND = 167.0f;
 static const float DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT = 0.025f;
 static const float CURRENT_SENSOR_SUPPLY_VOLTS = 3.3f;
 static const float CURRENT_SENSOR_VOLTS_PER_AMP = 0.185f;  // ACS712ELC-05B typical sensitivity
@@ -359,7 +363,7 @@ void forceMotorStop(MotorState &motor) {
   applyMotorHardware(motor);
 }
 
-void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t rampUpMs, uint32_t rampDownMs) {
+void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, float accelRatePercentPerSecond, float decelRatePercentPerSecond) {
   // The Pi owns control. This ESP32 only ramps the requested duty toward the
   // latest accepted target and handles safe direction reversals through zero.
   motor.rampedTargetPercent = motor.targetPercent;
@@ -375,8 +379,8 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
   int targetSign = motor.requestedPwmPercent >= 0 ? 1 : -1;
   int targetMagnitude = abs(motor.requestedPwmPercent);
   int currentMagnitude = abs(motor.appliedPwmPercent);
-  uint32_t activeRampMs = (targetMagnitude > currentMagnitude) ? rampUpMs : rampDownMs;
-  int maxStep = max(1, static_cast<int>((100.0f * static_cast<float>(elapsedMs)) / static_cast<float>(max<uint32_t>(1, activeRampMs))));
+  float activeRate = (targetMagnitude > currentMagnitude) ? accelRatePercentPerSecond : decelRatePercentPerSecond;
+  int maxStep = stepFromRate(activeRate, elapsedMs);
 
   if (motor.appliedPwmPercent != 0 && motor.currentDirectionSign != targetSign && targetMagnitude > 0) {
     int reduced = currentMagnitude - maxStep;
@@ -421,12 +425,11 @@ void stepMotorTowardRequested(MotorState &motor, uint32_t elapsedMs, uint32_t ra
   applyMotorHardware(motor);
 }
 
-uint32_t rampMillisFromRate(float percentPerSecond, uint32_t fallbackRampMs) {
-  if (percentPerSecond <= 0.0f) {
-    return fallbackRampMs;
-  }
-  float rampMillis = (1.0f / percentPerSecond) * 1000.0f;
-  return max<uint32_t>(1, static_cast<uint32_t>(rampMillis));
+// Returns the per-tick step size (% units) for a given rate and elapsed time.
+// rate is in %/s; elapsedMs is in ms.
+// Example: rate=250, elapsed=10 → step=2.5 → truncates to 2 per tick.
+inline int stepFromRate(float ratePercentPerSecond, uint32_t elapsedMs) {
+  return max(1, static_cast<int>(ratePercentPerSecond * static_cast<float>(elapsedMs) / 1000.0f));
 }
 
 // ===== Control / feedback =====
@@ -515,15 +518,16 @@ void runControlStep(uint32_t nowMillis) {
   }
   lastStepMillis = nowMillis;
 
-  uint32_t rampUpMs = g_latestCommand.hasAccelLimit
-    ? rampMillisFromRate(g_latestCommand.maxAccelerationPercentPerSecond, DEFAULT_RAMP_UP_MS)
-    : DEFAULT_RAMP_UP_MS;
-  uint32_t rampDownMs = g_latestCommand.hasDecelLimit
-    ? rampMillisFromRate(g_latestCommand.maxDecelerationPercentPerSecond, DEFAULT_RAMP_DOWN_MS)
-    : DEFAULT_RAMP_DOWN_MS;
+  // Wire field is 1/rampSeconds; convert to %/s: rate = wireValue × 100.
+  float accelRate = g_latestCommand.hasAccelLimit
+    ? g_latestCommand.maxAccelerationPercentPerSecond * 100.0f
+    : DEFAULT_ACCEL_PERCENT_PER_SECOND;
+  float decelRate = g_latestCommand.hasDecelLimit
+    ? g_latestCommand.maxDecelerationPercentPerSecond * 100.0f
+    : DEFAULT_DECEL_PERCENT_PER_SECOND;
 
-  stepMotorTowardRequested(g_leftMotor, elapsedMs, rampUpMs, rampDownMs);
-  stepMotorTowardRequested(g_rightMotor, elapsedMs, rampUpMs, rampDownMs);
+  stepMotorTowardRequested(g_leftMotor, elapsedMs, accelRate, decelRate);
+  stepMotorTowardRequested(g_rightMotor, elapsedMs, accelRate, decelRate);
 }
 
 // ===== I2C =====

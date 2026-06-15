@@ -25,6 +25,10 @@ export const SENSOR_WIDGETS_JS: string = `
     if (v === null || v === undefined || isNaN(v)) return '\\u2014';
     return Number(v).toFixed(3) + ' m';
   }
+  function fmtCentimetres(v) {
+    if (v === null || v === undefined || isNaN(v)) return '\\u2014';
+    return (Number(v) * 100).toFixed(1) + ' cm';
+  }
 
   function fmtDegrees(v) {
     if (v === null || v === undefined || isNaN(v)) return '\\u2014';
@@ -395,7 +399,7 @@ export const SENSOR_WIDGETS_JS: string = `
         if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtMeters(Number(value)) : '\\u2014';
       } else if (name === 'position-accuracy-meters') {
         const el = r.querySelector('[data-part="accuracy-value"]');
-        if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtMeters(Number(value)) : '\\u2014';
+        if (el) el.textContent = (value !== null && value !== '' && !isNaN(Number(value))) ? fmtCentimetres(Number(value)) : '\\u2014';
       } else if (name === 'fix-type') {
         const el = r.querySelector('[data-part="fix-value"]');
         if (el) { el.textContent = value || '\\u2014'; el.className = 'fix-pill ' + gnssFixClass(value); }
