@@ -27,8 +27,10 @@ import {
 const SMALL_TURN_BUCKET_STEP_DEG = 3;
 const SMALL_TURN_BUCKET_MAX_DEG = 60;
 const SMALL_TURN_BUCKET_COUNT = SMALL_TURN_BUCKET_MAX_DEG / SMALL_TURN_BUCKET_STEP_DEG;
-const SMALL_TURN_FRACTION_MIN = 0.05;
-const SMALL_TURN_FRACTION_MAX = 0.95;
+const SMALL_TURN_BUCKET_TRAINING_TOLERANCE_DEG = 0.1;
+const SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG = 45;
+const SMALL_TURN_MIN_BRAKE_TIME_MS = 60;
+const SMALL_TURN_MAX_BRAKE_TIME_MS = 2400;
 
 const LARGE_TURN_BUCKET_STEP_DEG = 10;
 const LARGE_TURN_DEFAULT_BRAKE_DISTANCE_DEG = 25;
@@ -130,21 +132,35 @@ export class TurnLearningModel {
 
     if (requestedAbs <= this.parameters.smallAngleThresholdDeg) {
       const bucketAngleDeg = this.getSmallTurnBucketAngle(requestedAbs);
+      if (!this.isNearSmallTurnBucket(requestedAbs, bucketAngleDeg)) {
+        this.logger.info("turn.learning.skipped_small_non_bucket", {
+          direction: result.direction,
+          requestedAngleDeg: requestedAbs,
+          nearestBucketAngleDeg: bucketAngleDeg,
+          toleranceDeg: SMALL_TURN_BUCKET_TRAINING_TOLERANCE_DEG,
+          achievedAngleDeg: achievedAbs,
+        });
+        return;
+      }
       const bucketIndex = this.getSmallTurnBucketIndex(requestedAbs);
-      const currentFraction = this.getSmallTurnBrakeFraction(result.direction, requestedAbs);
-      const normalizedError = (requestedAbs - achievedAbs) / Math.max(1, requestedAbs);
-      const adjustment = normalizedError * this.learningRate;
-      const clampedFraction = Math.max(
-        SMALL_TURN_FRACTION_MIN,
-        Math.min(SMALL_TURN_FRACTION_MAX, currentFraction + adjustment),
+      const currentBrakeTimeMs = this.getSmallTurnBrakeTimeBucketValue(
+        result.direction,
+        bucketAngleDeg,
+      );
+      const errorDeg = achievedAbs - requestedAbs;
+      const normalizedError = errorDeg / Math.max(1, requestedAbs);
+      const adjustmentMs = -currentBrakeTimeMs * normalizedError * this.learningRate;
+      const clampedBrakeTimeMs = Math.max(
+        SMALL_TURN_MIN_BRAKE_TIME_MS,
+        Math.min(SMALL_TURN_MAX_BRAKE_TIME_MS, currentBrakeTimeMs + adjustmentMs),
       );
 
       if (result.direction === "ccw") {
-        this.parameters.smallTurnBrakeFractionsCcw[bucketIndex] = clampedFraction;
+        this.parameters.smallTurnBrakeTimesCcwMs[bucketIndex] = clampedBrakeTimeMs;
         this.parameters.smallTurnSampleCountsCcw[bucketIndex] += 1;
         this.parameters.smallTurnLastErrorCcwDeg[bucketIndex] = achievedAbs - requestedAbs;
       } else {
-        this.parameters.smallTurnBrakeFractionsCw[bucketIndex] = clampedFraction;
+        this.parameters.smallTurnBrakeTimesCwMs[bucketIndex] = clampedBrakeTimeMs;
         this.parameters.smallTurnSampleCountsCw[bucketIndex] += 1;
         this.parameters.smallTurnLastErrorCwDeg[bucketIndex] = achievedAbs - requestedAbs;
       }
@@ -155,11 +171,13 @@ export class TurnLearningModel {
         bucketAngleDeg,
         requestedAngleDeg: requestedAbs,
         achievedAngleDeg: achievedAbs,
-        mode: "bucketed_crawl_and_halt",
-        currentFraction,
+        mode: "bucketed_timeout_and_halt",
+        currentBrakeTimeMs,
+        brakeTimeUsedMs: result.brakeTimeUsedMs,
+        errorDeg,
         normalizedError,
-        adjustment,
-        newFraction: clampedFraction,
+        adjustmentMs,
+        newBrakeTimeMs: clampedBrakeTimeMs,
       });
       await this.saveParameters();
       return;
@@ -223,9 +241,10 @@ export class TurnLearningModel {
 
   getBrakeAngle(requestedAngleDeg: number, direction: TurnDirection): RelativeAngle {
     const requested = Math.abs(requestedAngleDeg);
-    const brakeDistance = requested <= this.parameters.smallAngleThresholdDeg
-      ? requested * this.getSmallTurnBrakeFraction(direction, requested)
-      : this.getLargeTurnBrakeDistance(direction, requested);
+    if (requested <= this.parameters.smallAngleThresholdDeg) {
+      return createRelativeAngle(0);
+    }
+    const brakeDistance = this.getLargeTurnBrakeDistance(direction, requested);
     return createRelativeAngle(Math.max(1, Math.min(requested, brakeDistance)));
   }
 
@@ -250,11 +269,26 @@ export class TurnLearningModel {
       : this.parameters.largeTurnBiasOffsetsCwDeg[bucketIndex];
   }
 
-  getSmallTurnBrakeFraction(direction: TurnDirection, requestedAngleDeg: number): number {
-    const bucketIndex = this.getSmallTurnBucketIndex(requestedAngleDeg);
-    return direction === "ccw"
-      ? this.parameters.smallTurnBrakeFractionsCcw[bucketIndex]
-      : this.parameters.smallTurnBrakeFractionsCw[bucketIndex];
+  getSmallTurnBrakeTimeMs(direction: TurnDirection, requestedAngleDeg: number): number {
+    const requested = Math.abs(requestedAngleDeg);
+    const clamped = Math.max(
+      SMALL_TURN_BUCKET_STEP_DEG,
+      Math.min(SMALL_TURN_BUCKET_MAX_DEG, requested),
+    );
+    const lowerBucketAngleDeg = Math.floor(clamped / SMALL_TURN_BUCKET_STEP_DEG) * SMALL_TURN_BUCKET_STEP_DEG;
+    const upperBucketAngleDeg = Math.ceil(clamped / SMALL_TURN_BUCKET_STEP_DEG) * SMALL_TURN_BUCKET_STEP_DEG;
+    const boundedLowerBucketAngleDeg = Math.max(SMALL_TURN_BUCKET_STEP_DEG, lowerBucketAngleDeg);
+    const boundedUpperBucketAngleDeg = Math.min(SMALL_TURN_BUCKET_MAX_DEG, upperBucketAngleDeg);
+
+    const lowerBrakeTimeMs = this.getSmallTurnBrakeTimeBucketValue(direction, boundedLowerBucketAngleDeg);
+    if (boundedLowerBucketAngleDeg === boundedUpperBucketAngleDeg) {
+      return lowerBrakeTimeMs;
+    }
+
+    const upperBrakeTimeMs = this.getSmallTurnBrakeTimeBucketValue(direction, boundedUpperBucketAngleDeg);
+    const interpolationFraction =
+      (clamped - boundedLowerBucketAngleDeg) / (boundedUpperBucketAngleDeg - boundedLowerBucketAngleDeg);
+    return lowerBrakeTimeMs + ((upperBrakeTimeMs - lowerBrakeTimeMs) * interpolationFraction);
   }
 
   getSmallTurnBucketAngleDeg(requestedAngleDeg: number): number {
@@ -300,8 +334,8 @@ export class TurnLearningModel {
 
   getLearningDiagnostics(): {
     learningRate: number;
-    smallTurnFractionMin: number;
-    smallTurnFractionMax: number;
+    smallTurnBrakeTimeMinMs: number;
+    smallTurnBrakeTimeMaxMs: number;
     largeTurnBrakeDistanceMinDeg: number;
     largeTurnBrakeDistanceMaxDeg: number;
     largeTurnBiasOffsetMinDeg: number;
@@ -309,8 +343,8 @@ export class TurnLearningModel {
   } {
     return {
       learningRate: this.learningRate,
-      smallTurnFractionMin: SMALL_TURN_FRACTION_MIN,
-      smallTurnFractionMax: SMALL_TURN_FRACTION_MAX,
+      smallTurnBrakeTimeMinMs: SMALL_TURN_MIN_BRAKE_TIME_MS,
+      smallTurnBrakeTimeMaxMs: SMALL_TURN_MAX_BRAKE_TIME_MS,
       largeTurnBrakeDistanceMinDeg: LARGE_TURN_MIN_BRAKE_DISTANCE_DEG,
       largeTurnBrakeDistanceMaxDeg: LARGE_TURN_MAX_BRAKE_DISTANCE_DEG,
       largeTurnBiasOffsetMinDeg: LARGE_TURN_MIN_BIAS_OFFSET_DEG,
@@ -333,13 +367,13 @@ export class TurnLearningModel {
     }
 
     if (
-      this.isNumericArray(raw.smallTurnBrakeFractionsCcw)
-      && this.isNumericArray(raw.smallTurnBrakeFractionsCw)
+      this.isNumericArray(raw.smallTurnBrakeTimesCcwMs)
+      && this.isNumericArray(raw.smallTurnBrakeTimesCwMs)
       && this.isNumericArray(raw.largeTurnBrakeDistancesCcwDeg)
       && this.isNumericArray(raw.largeTurnBrakeDistancesCwDeg)
     ) {
       return {
-        version: this.readNumber(raw.version, 2),
+        version: this.readNumber(raw.version, 3),
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
         smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
         smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -370,8 +404,16 @@ export class TurnLearningModel {
         largeTurnSampleCountsCw: this.normalizeNumericArray(raw.largeTurnSampleCountsCw, LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCcwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCcwDeg, LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCwDeg, LARGE_TURN_BUCKET_COUNT, 0),
-        smallTurnBrakeFractionsCcw: this.normalizeNumericArray(raw.smallTurnBrakeFractionsCcw, SMALL_TURN_BUCKET_COUNT, 0.5),
-        smallTurnBrakeFractionsCw: this.normalizeNumericArray(raw.smallTurnBrakeFractionsCw, SMALL_TURN_BUCKET_COUNT, 0.5),
+        smallTurnBrakeTimesCcwMs: this.normalizeNumericArray(
+          raw.smallTurnBrakeTimesCcwMs,
+          SMALL_TURN_BUCKET_COUNT,
+          SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG * SMALL_TURN_BUCKET_STEP_DEG,
+        ),
+        smallTurnBrakeTimesCwMs: this.normalizeNumericArray(
+          raw.smallTurnBrakeTimesCwMs,
+          SMALL_TURN_BUCKET_COUNT,
+          SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG * SMALL_TURN_BUCKET_STEP_DEG,
+        ),
         smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, 0),
         smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, 0),
         smallTurnLastErrorCcwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCcwDeg, SMALL_TURN_BUCKET_COUNT, 0),
@@ -385,15 +427,15 @@ export class TurnLearningModel {
       && typeof raw.smallTurnBrakeFractionCw === "number"
     ) {
       return this.createDefaultParameters({
-        smallTurnBrakeFractionCcw: this.readNumber(raw.smallTurnBrakeFractionCcw, 0.5),
-        smallTurnBrakeFractionCw: this.readNumber(raw.smallTurnBrakeFractionCw, 0.5),
+        smallTurnBrakeTimeCcwMs: this.convertLegacyFractionToBrakeTimeMs(this.readNumber(raw.smallTurnBrakeFractionCcw, 0.5)),
+        smallTurnBrakeTimeCwMs: this.convertLegacyFractionToBrakeTimeMs(this.readNumber(raw.smallTurnBrakeFractionCw, 0.5)),
       });
     }
 
     if (typeof raw.largeTurnBrakeCcwDeg === "number" && typeof raw.largeTurnBrakeCwDeg === "number") {
       const legacy = raw as LegacyTurnLearningParametersV2;
       return {
-        version: 2,
+        version: 3,
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
         smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
         smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -408,12 +450,18 @@ export class TurnLearningModel {
         largeTurnSampleCountsCw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
-        smallTurnBrakeFractionsCcw: this.isNumericArray(raw.smallTurnBrakeFractionsCcw)
-          ? this.normalizeNumericArray(raw.smallTurnBrakeFractionsCcw, SMALL_TURN_BUCKET_COUNT, 0.5)
-          : this.createNumericArray(SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnBrakeFractionCcw, 0.5)),
-        smallTurnBrakeFractionsCw: this.isNumericArray(raw.smallTurnBrakeFractionsCw)
-          ? this.normalizeNumericArray(raw.smallTurnBrakeFractionsCw, SMALL_TURN_BUCKET_COUNT, 0.5)
-          : this.createNumericArray(SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnBrakeFractionCw, 0.5)),
+        smallTurnBrakeTimesCcwMs: this.isNumericArray(raw.smallTurnBrakeFractionsCcw)
+          ? this.convertLegacyFractionArrayToBrakeTimes(raw.smallTurnBrakeFractionsCcw)
+          : this.createNumericArray(
+            SMALL_TURN_BUCKET_COUNT,
+            this.convertLegacyFractionToBrakeTimeMs(this.readNumber(legacy.smallTurnBrakeFractionCcw, 0.5)),
+          ),
+        smallTurnBrakeTimesCwMs: this.isNumericArray(raw.smallTurnBrakeFractionsCw)
+          ? this.convertLegacyFractionArrayToBrakeTimes(raw.smallTurnBrakeFractionsCw)
+          : this.createNumericArray(
+            SMALL_TURN_BUCKET_COUNT,
+            this.convertLegacyFractionToBrakeTimeMs(this.readNumber(legacy.smallTurnBrakeFractionCw, 0.5)),
+          ),
         smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnSampleCountCcw, 0)),
         smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.smallTurnSampleCountCw, 0)),
         smallTurnLastErrorCcwDeg: this.normalizeNumericArray(raw.smallTurnLastErrorCcwDeg, SMALL_TURN_BUCKET_COUNT, this.readNumber(legacy.lastSmallErrorCcwDeg, 0)),
@@ -427,8 +475,8 @@ export class TurnLearningModel {
 
   private createDefaultParameters(
     overrides: Partial<{
-      smallTurnBrakeFractionCcw: number;
-      smallTurnBrakeFractionCw: number;
+      smallTurnBrakeTimeCcwMs: number;
+      smallTurnBrakeTimeCwMs: number;
       smallTurnSampleCountCcw: number;
       smallTurnSampleCountCw: number;
       lastSmallErrorCcwDeg: number;
@@ -436,15 +484,23 @@ export class TurnLearningModel {
       lastUpdated: string | undefined;
     }> = {},
   ): TurnLearningParameters {
-    const smallTurnBrakeFractionsCcw = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.smallTurnBrakeFractionCcw ?? 0.5);
-    const smallTurnBrakeFractionsCw = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.smallTurnBrakeFractionCw ?? 0.5);
+    const smallTurnBrakeTimesCcwMs = Array.from(
+      { length: SMALL_TURN_BUCKET_COUNT },
+      (_, index) => overrides.smallTurnBrakeTimeCcwMs
+        ?? this.getDefaultSmallTurnBrakeTimeMs((index + 1) * SMALL_TURN_BUCKET_STEP_DEG),
+    );
+    const smallTurnBrakeTimesCwMs = Array.from(
+      { length: SMALL_TURN_BUCKET_COUNT },
+      (_, index) => overrides.smallTurnBrakeTimeCwMs
+        ?? this.getDefaultSmallTurnBrakeTimeMs((index + 1) * SMALL_TURN_BUCKET_STEP_DEG),
+    );
     const smallTurnSampleCountsCcw = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.smallTurnSampleCountCcw ?? 0);
     const smallTurnSampleCountsCw = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.smallTurnSampleCountCw ?? 0);
     const smallTurnLastErrorCcwDeg = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.lastSmallErrorCcwDeg ?? 0);
     const smallTurnLastErrorCwDeg = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.lastSmallErrorCwDeg ?? 0);
 
     return {
-      version: 2,
+      version: 3,
       smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
       smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
       smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -459,8 +515,8 @@ export class TurnLearningModel {
       largeTurnSampleCountsCw: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
       largeTurnLastErrorsCcwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
       largeTurnLastErrorsCwDeg: this.createNumericArray(LARGE_TURN_BUCKET_COUNT, 0),
-      smallTurnBrakeFractionsCcw,
-      smallTurnBrakeFractionsCw,
+      smallTurnBrakeTimesCcwMs,
+      smallTurnBrakeTimesCwMs,
       smallTurnSampleCountsCcw,
       smallTurnSampleCountsCw,
       smallTurnLastErrorCcwDeg,
@@ -507,6 +563,17 @@ export class TurnLearningModel {
     return (this.getSmallTurnBucketAngle(requestedAngleDeg) / SMALL_TURN_BUCKET_STEP_DEG) - 1;
   }
 
+  private isNearSmallTurnBucket(requestedAngleDeg: number, bucketAngleDeg: number): boolean {
+    return Math.abs(Math.abs(requestedAngleDeg) - bucketAngleDeg) <= SMALL_TURN_BUCKET_TRAINING_TOLERANCE_DEG;
+  }
+
+  private getSmallTurnBrakeTimeBucketValue(direction: TurnDirection, bucketAngleDeg: number): number {
+    const bucketIndex = this.getSmallTurnBucketIndex(bucketAngleDeg);
+    return direction === "ccw"
+      ? this.parameters.smallTurnBrakeTimesCcwMs[bucketIndex]
+      : this.parameters.smallTurnBrakeTimesCwMs[bucketIndex];
+  }
+
   private getLargeTurnBucketAngle(requestedAngleDeg: number): number {
     const clamped = Math.max(LARGE_TURN_MIN_ANGLE_DEG, Math.min(LARGE_TURN_MAX_ANGLE_DEG, Math.abs(requestedAngleDeg)));
     const bucket = Math.round(clamped / LARGE_TURN_BUCKET_STEP_DEG) * LARGE_TURN_BUCKET_STEP_DEG;
@@ -536,8 +603,8 @@ export class TurnLearningModel {
     for (let index = 0; index < SMALL_TURN_BUCKET_COUNT; index += 1) {
       buckets.push({
         bucketAngleDeg: (index + 1) * SMALL_TURN_BUCKET_STEP_DEG,
-        brakeFractionCcw: this.parameters.smallTurnBrakeFractionsCcw[index],
-        brakeFractionCw: this.parameters.smallTurnBrakeFractionsCw[index],
+        brakeTimeCcwMs: this.parameters.smallTurnBrakeTimesCcwMs[index],
+        brakeTimeCwMs: this.parameters.smallTurnBrakeTimesCwMs[index],
         sampleCountCcw: this.parameters.smallTurnSampleCountsCcw[index],
         sampleCountCw: this.parameters.smallTurnSampleCountsCw[index],
         lastErrorCcwDeg: this.parameters.smallTurnLastErrorCcwDeg[index],
@@ -545,5 +612,27 @@ export class TurnLearningModel {
       });
     }
     return buckets;
+  }
+
+  private getDefaultSmallTurnBrakeTimeMs(bucketAngleDeg: number): number {
+    return Math.max(
+      SMALL_TURN_MIN_BRAKE_TIME_MS,
+      Math.min(SMALL_TURN_MAX_BRAKE_TIME_MS, bucketAngleDeg * SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG),
+    );
+  }
+
+  private convertLegacyFractionToBrakeTimeMs(fraction: number): number {
+    const clampedFraction = Math.max(0.05, Math.min(0.95, fraction));
+    const representativeAngleDeg = 12;
+    return Math.round(this.getDefaultSmallTurnBrakeTimeMs(representativeAngleDeg) * clampedFraction / 0.5);
+  }
+
+  private convertLegacyFractionArrayToBrakeTimes(value: unknown): number[] {
+    const fractions = this.normalizeNumericArray(value, SMALL_TURN_BUCKET_COUNT, 0.5);
+    return fractions.map((fraction, index) => {
+      const bucketAngleDeg = (index + 1) * SMALL_TURN_BUCKET_STEP_DEG;
+      const clampedFraction = Math.max(0.05, Math.min(0.95, fraction));
+      return Math.round(this.getDefaultSmallTurnBrakeTimeMs(bucketAngleDeg) * clampedFraction / 0.5);
+    });
   }
 }

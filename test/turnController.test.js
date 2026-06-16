@@ -1,7 +1,7 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TurnController } from "../dist/control/turnController.js";
@@ -72,12 +72,15 @@ describe("TurnController", () => {
         return createRelativeAngle(angleDeg * 0.7);
       }),
       getLargeBiasOffset: mock.fn(() => 0),
-      getSmallTurnBrakeFraction: mock.fn(() => 0.5),
+      getSmallTurnBrakeTimeMs: mock.fn((direction, angleDeg) => angleDeg * 45),
       getSmallAngleThreshold: () => 20,
+      getSmallTurnBucketAngleDeg: (angleDeg) => Math.round(Math.abs(angleDeg) / 3) * 3,
+      getLargeTurnBucketAngleDeg: (angleDeg) => Math.round(Math.abs(angleDeg) / 10) * 10,
       updateFromTurn: mock.fn(async () => {}),
       saveParameters: mock.fn(async () => {}),
       loadParameters: mock.fn(async () => {}),
       getParameters: mock.fn(() => ({ parameters: [] })),
+      getLearningDiagnostics: mock.fn(() => ({})),
       resetToDefaults: mock.fn(async () => {}),
     };
   }
@@ -226,12 +229,14 @@ describe("TurnController", () => {
       learningEnabled: true,
     });
 
-    // Small turns now brake directly on learned IMU progress. The mock model
-    // returns a 0.5 fraction, so a 10° request brakes after 5° of progress.
+    // Small turns now brake on learned elapsed time from turn start. The mock
+    // model returns 45ms/deg, so a 10° request brakes after 450ms.
     await new Promise(resolve => setTimeout(resolve, 10));
+    elapsed = 400;
     mockSensor._testSetHeading(createInternalHeading(4.5));
     mockSensor._testEmitHeadingUpdate(createInternalHeading(4.5), 400);
     await new Promise(resolve => setTimeout(resolve, 5));
+    elapsed = 450;
     mockSensor._testSetHeading(createInternalHeading(5.0));
     mockSensor._testEmitHeadingUpdate(createInternalHeading(5.0), 425);
 
@@ -239,6 +244,8 @@ describe("TurnController", () => {
 
     assert.equal(result.status, "success");
     assert.equal(result.motorEngaged, true);
+    assert.equal(result.controlMode, "small_timeout");
+    assert.equal(result.triggerTimeUsedMs, 450);
     // Small turns use the same ramp-down path as large turns
     assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
   });
@@ -480,7 +487,7 @@ describe("TurnLearningModel", () => {
     assert.equal(brakeValue < 90, true);
   });
 
-  it("returns small-angle brake progress from the learned fraction bucket", () => {
+  it("returns no brake angle for small-angle timeout buckets", () => {
     const mockLogger = createMockLogger();
     const model = new TurnLearningModel({
       logger: mockLogger,
@@ -489,7 +496,115 @@ describe("TurnLearningModel", () => {
     const brakeAngle = model.getBrakeAngle(6, "ccw");
     const brakeValue = unwrapRelativeAngle(brakeAngle);
 
-    assert.equal(brakeValue, 3);
+    assert.equal(brakeValue, 0);
+  });
+
+  it("interpolates small-angle brake times between neighboring 3° buckets", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-interp-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const smallTurnBrakeTimesCcwMs = Array.from({ length: 20 }, (_, index) => (index + 1) * 45);
+      const model = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+      await writeFile(parametersPath, JSON.stringify({
+        version: 3,
+        smallAngleThresholdDeg: 60,
+        smallTurnBucketStepDeg: 3,
+        smallTurnMaxAngleDeg: 60,
+        largeTurnBucketStepDeg: 10,
+        largeTurnMinAngleDeg: 70,
+        largeTurnMaxAngleDeg: 180,
+        largeTurnBrakeDistancesCcwDeg: Array.from({ length: 12 }, () => 25),
+        largeTurnBrakeDistancesCwDeg: Array.from({ length: 12 }, () => 25),
+        largeTurnBiasOffsetsCcwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnBiasOffsetsCwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnSampleCountsCcw: Array.from({ length: 12 }, () => 0),
+        largeTurnSampleCountsCw: Array.from({ length: 12 }, () => 0),
+        largeTurnLastErrorsCcwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnLastErrorsCwDeg: Array.from({ length: 12 }, () => 0),
+        smallTurnBrakeTimesCcwMs,
+        smallTurnBrakeTimesCwMs: [...smallTurnBrakeTimesCcwMs],
+        smallTurnSampleCountsCcw: Array.from({ length: 20 }, () => 0),
+        smallTurnSampleCountsCw: Array.from({ length: 20 }, () => 0),
+        smallTurnLastErrorCcwDeg: Array.from({ length: 20 }, () => 0),
+        smallTurnLastErrorCwDeg: Array.from({ length: 20 }, () => 0),
+        lastUpdated: new Date().toISOString(),
+      }), "utf-8");
+      await model.loadParameters();
+
+      const brakeTime10Ms = model.getSmallTurnBrakeTimeMs("ccw", 10);
+      assert.equal(brakeTime10Ms, 400);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not learn a 10° small turn because it is not a bucket angle", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-single-bucket-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const smallTurnBrakeTimesCcwMs = Array.from({ length: 20 }, (_, index) => (index + 1) * 45);
+      const model = new TurnLearningModel({
+        logger: mockLogger,
+        parametersPath,
+      });
+      await writeFile(parametersPath, JSON.stringify({
+        version: 3,
+        smallAngleThresholdDeg: 60,
+        smallTurnBucketStepDeg: 3,
+        smallTurnMaxAngleDeg: 60,
+        largeTurnBucketStepDeg: 10,
+        largeTurnMinAngleDeg: 70,
+        largeTurnMaxAngleDeg: 180,
+        largeTurnBrakeDistancesCcwDeg: Array.from({ length: 12 }, () => 25),
+        largeTurnBrakeDistancesCwDeg: Array.from({ length: 12 }, () => 25),
+        largeTurnBiasOffsetsCcwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnBiasOffsetsCwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnSampleCountsCcw: Array.from({ length: 12 }, () => 0),
+        largeTurnSampleCountsCw: Array.from({ length: 12 }, () => 0),
+        largeTurnLastErrorsCcwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnLastErrorsCwDeg: Array.from({ length: 12 }, () => 0),
+        smallTurnBrakeTimesCcwMs,
+        smallTurnBrakeTimesCwMs: [...smallTurnBrakeTimesCcwMs],
+        smallTurnSampleCountsCcw: Array.from({ length: 20 }, () => 0),
+        smallTurnSampleCountsCw: Array.from({ length: 20 }, () => 0),
+        smallTurnLastErrorCcwDeg: Array.from({ length: 20 }, () => 0),
+        smallTurnLastErrorCwDeg: Array.from({ length: 20 }, () => 0),
+        lastUpdated: new Date().toISOString(),
+      }), "utf-8");
+      await model.loadParameters();
+
+      const before = model.getParameters();
+      const bucket9Before = before.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 9);
+      const bucket12Before = before.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 12);
+      assert.ok(bucket9Before);
+      assert.ok(bucket12Before);
+
+      await model.updateFromTurn({
+        requestedAngle: createRelativeAngle(10),
+        achievedAngle: createRelativeAngle(8),
+        errorAngle: createRelativeAngle(-2),
+        brakeDistanceUsed: createRelativeAngle(0),
+        brakeTimeUsedMs: 400,
+        direction: "ccw",
+      });
+
+      const after = model.getParameters();
+      const bucket9After = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 9);
+      const bucket12After = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 12);
+      assert.ok(bucket9After);
+      assert.ok(bucket12After);
+      assert.equal(bucket9After.brakeTimeCcwMs, bucket9Before.brakeTimeCcwMs);
+      assert.equal(bucket12After.brakeTimeCcwMs, bucket12Before.brakeTimeCcwMs);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("maps large angles to nearest 10° bin", async () => {
@@ -518,7 +633,7 @@ describe("TurnLearningModel", () => {
     assert.equal(differentBucketDiff > 0.01, true, `Expected different-bucket diff > 0.01 but got ${differentBucketDiff}`);
   });
 
-  it("learns the small-angle brake fraction and persists it", async () => {
+  it("learns the small-angle brake time and persists it", async () => {
     const mockLogger = createMockLogger();
     const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-"));
     const parametersPath = join(dir, "turn-learning.json");
@@ -533,13 +648,14 @@ describe("TurnLearningModel", () => {
       const before = model.getParameters();
       const bucket = before.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
       assert.ok(bucket);
-      const startFraction = bucket.brakeFractionCcw;
+      const startBrakeTimeMs = bucket.brakeTimeCcwMs;
 
       await model.updateFromTurn({
         requestedAngle: createRelativeAngle(20),
         achievedAngle: createRelativeAngle(3),
         errorAngle: createRelativeAngle(-17),
         brakeDistanceUsed: createRelativeAngle(0),
+        brakeTimeUsedMs: startBrakeTimeMs,
         direction: "ccw",
       });
 
@@ -547,7 +663,7 @@ describe("TurnLearningModel", () => {
       const updatedBucket = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
       assert.ok(updatedBucket);
       assert.equal(updatedBucket.sampleCountCcw, bucket.sampleCountCcw + 1);
-      assert.equal(updatedBucket.brakeFractionCcw > startFraction, true);
+      assert.equal(updatedBucket.brakeTimeCcwMs > startBrakeTimeMs, true);
 
       const reloaded = new TurnLearningModel({
         logger: mockLogger,
@@ -558,7 +674,7 @@ describe("TurnLearningModel", () => {
       const persistedBucket = persisted.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
       assert.ok(persistedBucket);
       assert.equal(persistedBucket.sampleCountCcw, updatedBucket.sampleCountCcw);
-      assert.equal(persistedBucket.brakeFractionCcw, updatedBucket.brakeFractionCcw);
+      assert.equal(persistedBucket.brakeTimeCcwMs, updatedBucket.brakeTimeCcwMs);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

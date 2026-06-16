@@ -52,275 +52,95 @@ ${getAppDialogStyles()}
     }
 
     .container {
-      max-width: 1800px;
+      max-width: 100%;
       margin: 0 auto;
-      padding: 1rem;
+      padding: 0.75rem 1rem 1rem;
       width: 100%;
     }
 
     .page-layout {
-      display: grid;
-      grid-template-columns: minmax(380px, 420px) minmax(0, 1fr);
-      gap: 1rem;
-      align-items: start;
+      display: flex;
+      flex-direction: column;
+      gap: 0.875rem;
     }
 
-    .sidebar-column {
-      position: sticky;
-      top: 5.5rem;
+    .top-grid {
       display: grid;
-      grid-template-rows: 1fr 1fr;
-      gap: 1rem;
-      align-self: start;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.875rem;
+      align-items: stretch;
+    }
+
+    .widget-shell {
+      background: var(--bg-primary);
+      border-radius: 0.75rem;
+      padding: 0.35rem;
+      box-shadow: var(--shadow-sm);
+      border: 1px solid var(--border-color);
+      min-width: 0;
+    }
+
+    .widget-shell imu-sensor-widget,
+    .widget-shell gnss-position-widget {
+      width: 100%;
+      min-height: 100%;
+    }
+
+    .compact-widget {
+      --widget-padding: 0.75rem;
+      --widget-title-size: 0.85rem;
+      --widget-value-size: 1rem;
+      --widget-label-size: 0.7rem;
+    }
+
+    .top-controls {
+      background: var(--bg-primary);
+      border-radius: 0.75rem;
+      padding: 1rem;
+      box-shadow: var(--shadow-md);
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 0.875rem;
+    }
+
+    .top-stats {
+      background: var(--bg-primary);
+      border-radius: 0.75rem;
+      padding: 1rem;
+      box-shadow: var(--shadow-md);
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .stats-list {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.65rem;
+    }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.75rem;
+      align-items: baseline;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stats-row .stat-label {
+      margin-bottom: 0;
+    }
+
+    .stats-row .stat-value {
+      font-size: 1.1rem;
+      text-align: right;
     }
 
     .main-column {
       min-width: 0;
-    }
-
-    .sensor-card {
-      background: var(--bg-primary);
-      border-radius: 0.75rem;
-      padding: 1.25rem;
-      box-shadow: var(--shadow-md);
-      border: 1px solid var(--border-color);
-    }
-
-    .sensor-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.875rem;
-      padding-bottom: 0.875rem;
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    .sensor-title {
-      font-size: 1rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-secondary);
-    }
-
-    .metric-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
-    }
-
-    .metric {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-    }
-
-    .metric-label {
-      font-size: 0.75rem;
-      color: var(--text-secondary);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .metric-value {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--text-primary);
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-    }
-
-    .metric-value.large {
-      font-size: 1.5rem;
-    }
-
-    .position-display {
-      text-align: center;
-      padding: 0.75rem;
-      background: var(--bg-tertiary);
-      border-radius: 0.5rem;
-      margin-top: 0.75rem;
-    }
-
-    .compass {
-      width: 100px;
-      height: 100px;
-      margin: 0 auto;
-      position: relative;
-    }
-
-    .compass-circle {
-      width: 100%;
-      height: 100%;
-      border: 3px solid var(--border-color);
-      border-radius: 50%;
-      position: relative;
-      background: radial-gradient(circle, var(--bg-secondary) 0%, var(--bg-primary) 70%);
-    }
-
-    .compass-needle {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 4px;
-      height: 45%;
-      background: linear-gradient(to top, var(--danger-color), var(--primary-color));
-      transform-origin: bottom center;
-      transform: translate(-50%, -100%) rotate(var(--heading-deg, 0deg));
-      border-radius: 2px;
-      transition: transform 0.3s ease-out;
-    }
-
-    .compass-center {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 12px;
-      height: 12px;
-      background: var(--text-primary);
-      border-radius: 50%;
-      transform: translate(-50%, -50%);
-      box-shadow: 0 0 0 3px var(--bg-primary);
-    }
-
-    .compass-label {
-      position: absolute;
-      font-size: 0.75rem;
-      font-weight: 600;
-      color: var(--text-secondary);
-    }
-
-    .compass-label.n { top: 8px; left: 50%; transform: translateX(-50%); }
-    .compass-label.e { right: 8px; top: 50%; transform: translateY(-50%); }
-    .compass-label.s { bottom: 8px; left: 50%; transform: translateX(-50%); }
-    .compass-label.w { left: 8px; top: 50%; transform: translateY(-50%); }
-
-    .tilt-indicators {
-      display: flex;
-      justify-content: space-around;
-      gap: 1rem;
-      margin-top: 1rem;
-    }
-
-    .tilt-indicator {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .tilt-circle {
-      width: 80px;
-      height: 80px;
-      border: 3px solid var(--border-color);
-      border-radius: 50%;
-      position: relative;
-      background: radial-gradient(circle, var(--bg-secondary) 0%, var(--bg-primary) 70%);
-    }
-
-    .tilt-line {
-      position: absolute;
-      top: 50%;
-      left: 10%;
-      right: 10%;
-      height: 3px;
-      background: var(--primary-color);
-      transform-origin: center center;
-      transform: translateY(-50%) rotate(var(--tilt-deg, 0deg));
-      border-radius: 2px;
-      transition: transform 0.3s ease-out;
-    }
-
-    .tilt-center {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 8px;
-      height: 8px;
-      background: var(--text-primary);
-      border-radius: 50%;
-      transform: translate(-50%, -50%);
-      box-shadow: 0 0 0 2px var(--bg-primary);
-    }
-
-    .tilt-label {
-      font-size: 0.75rem;
-      color: var(--text-secondary);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .tilt-value {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    .gnss-summary {
-      display: flex;
-      flex-direction: column;
-      gap: 0.9rem;
-      margin-top: 1rem;
-    }
-
-    .gnss-row {
-      display: grid;
-      gap: 1rem;
-    }
-
-    .gnss-row.three {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .gnss-row.two {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .gnss-fix-value {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 5.25rem;
-      padding: 0.35rem 0.7rem;
-      border-radius: 0.5rem;
-      background: var(--bg-tertiary);
-    }
-
-    .gnss-fix-value.gnss-fix-unknown,
-    .gnss-fix-value.gnss-fix-none {
-      background: #fee2e2;
-      color: #991b1b;
-    }
-
-    .gnss-fix-value.gnss-fix-single {
-      background: #ffedd5;
-      color: #9a3412;
-    }
-
-    .gnss-fix-value.gnss-fix-float {
-      background: #fef3c7;
-      color: #92400e;
-    }
-
-    .gnss-fix-value.gnss-fix-fixed,
-    .gnss-fix-value.gnss-fix-rtk-fixed {
-      background: #d1fae5;
-      color: #065f46;
-    }
-
-    .gnss-fix-value.gnss-fix-rtk-float {
-      background: #dcfce7;
-      color: #166534;
-    }
-
-    .error-message {
-      background: #fef2f2;
-      color: #991b1b;
-      padding: 0.75rem;
-      border-radius: 0.5rem;
-      font-size: 0.875rem;
-      margin-top: 0.5rem;
     }
 
     .header {
@@ -393,8 +213,7 @@ ${getAppDialogStyles()}
     .controls-panel {
       background: var(--bg-primary);
       border-radius: 0.75rem;
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
+      padding: 1rem;
       box-shadow: var(--shadow-md);
     }
 
@@ -408,7 +227,7 @@ ${getAppDialogStyles()}
     .controls-stack {
       display: flex;
       flex-direction: column;
-      gap: 1rem;
+      gap: 0.75rem;
     }
 
     .control-group {
@@ -419,25 +238,25 @@ ${getAppDialogStyles()}
 
     .center-row {
       display: flex;
-      justify-content: center;
-      gap: 0.75rem;
+      justify-content: flex-start;
+      gap: 0.625rem;
       flex-wrap: wrap;
       align-items: center;
     }
 
     .single-run-panel {
-      background: var(--bg-primary);
       border-radius: 0.75rem;
-      padding: 1.25rem;
-      box-shadow: var(--shadow-sm);
+      padding: 0.875rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
     }
 
     .single-run-grid {
       display: grid;
-      grid-template-columns: minmax(220px, 320px) auto;
-      gap: 1rem;
+      grid-template-columns: minmax(180px, 240px) auto;
+      gap: 0.75rem;
       align-items: end;
-      justify-content: center;
+      justify-content: start;
     }
 
     label {
@@ -546,20 +365,6 @@ ${getAppDialogStyles()}
       padding: 0.9rem 1.2rem;
     }
 
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .stat-card {
-      background: var(--bg-primary);
-      border-radius: 0.75rem;
-      padding: 1.25rem;
-      box-shadow: var(--shadow-sm);
-    }
-
     .stat-label {
       font-size: 0.75rem;
       font-weight: 500;
@@ -570,9 +375,12 @@ ${getAppDialogStyles()}
     }
 
     .stat-value {
-      font-size: 1.875rem;
+      font-size: 1.25rem;
       font-weight: 700;
       color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .stat-value.good {
@@ -586,23 +394,23 @@ ${getAppDialogStyles()}
     .results-section {
       background: var(--bg-primary);
       border-radius: 0.75rem;
-      padding: 1.5rem;
+      padding: 1.125rem;
       box-shadow: var(--shadow-md);
     }
 
     .parameters-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
+      grid-template-columns: minmax(260px, 360px) minmax(360px, 1fr) minmax(460px, 1.25fr);
+      gap: 0.875rem;
     }
 
     .parameter-card {
       background: var(--bg-primary);
       border-radius: 0.75rem;
-      padding: 1.25rem;
+      padding: 1rem;
       box-shadow: var(--shadow-sm);
       border: 1px solid var(--border-color);
+      min-width: 0;
     }
 
     .parameter-card h3 {
@@ -630,7 +438,7 @@ ${getAppDialogStyles()}
     }
 
     .parameter-table-wrap {
-      max-height: 22rem;
+      max-height: 20rem;
       overflow: auto;
       border: 1px solid var(--border-color);
       border-radius: 0.5rem;
@@ -646,7 +454,7 @@ ${getAppDialogStyles()}
     }
 
     h2 {
-      font-size: 1.25rem;
+      font-size: 1.125rem;
       font-weight: 600;
       color: var(--text-primary);
     }
@@ -660,7 +468,7 @@ ${getAppDialogStyles()}
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.875rem;
+      font-size: 0.8125rem;
     }
 
     thead {
@@ -668,7 +476,7 @@ ${getAppDialogStyles()}
     }
 
     th {
-      padding: 0.75rem 1rem;
+      padding: 0.625rem 0.75rem;
       text-align: left;
       font-weight: 600;
       color: var(--text-secondary);
@@ -677,7 +485,7 @@ ${getAppDialogStyles()}
     }
 
     td {
-      padding: 0.75rem 1rem;
+      padding: 0.625rem 0.75rem;
       border-bottom: 1px solid var(--border-color);
     }
 
@@ -751,10 +559,6 @@ ${getAppDialogStyles()}
         font-size: 1.25rem;
       }
 
-      .controls-grid {
-        grid-template-columns: 1fr;
-      }
-
       .button-group {
         flex-direction: column;
       }
@@ -762,10 +566,6 @@ ${getAppDialogStyles()}
       button {
         width: 100%;
         justify-content: center;
-      }
-
-      .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
       }
 
       .stat-value {
@@ -783,15 +583,15 @@ ${getAppDialogStyles()}
         right: 1rem;
       }
 
-      .page-layout {
+      .top-grid {
         grid-template-columns: 1fr;
       }
 
-      .sidebar-column {
-        position: static;
+      .single-run-grid {
+        grid-template-columns: 1fr;
       }
 
-      .single-run-grid {
+      .parameters-grid {
         grid-template-columns: 1fr;
       }
 
@@ -805,8 +605,12 @@ ${getAppDialogStyles()}
     }
 
     @media (max-width: 480px) {
-      .stats-grid {
+      .stats-row {
         grid-template-columns: 1fr;
+      }
+
+      .stats-row .stat-value {
+        text-align: left;
       }
     }
 
@@ -843,71 +647,76 @@ ${getSensorWidgetScriptTag()}
 
       <div class="container">
         <div class="page-layout">
-          <aside class="sidebar-column" aria-label="Live primitives">
-            <imu-sensor-widget id="imu-widget"></imu-sensor-widget>
-            <gnss-position-widget id="gnss-widget"></gnss-position-widget>
-      </aside>
-
       <main class="main-column">
         <button class="btn-danger stop-fab" id="stopCurrentRun">
           <span class="status-dot"></span>
           STOP
         </button>
 
-        <!-- Controls Panel -->
-        <div class="controls-panel">
-          <div class="controls-stack">
-            <div class="center-row">
-              <button class="btn-primary" id="runLargeAngleTraining">Train Large Angles</button>
-              <button class="btn-primary" id="runSmallAngleTraining">Train Small Angles</button>
-              <button class="btn-primary" id="runRealPoseValidation">Validate Real Pose</button>
+        <div class="top-grid">
+          <div class="widget-shell compact-widget" aria-label="IMU widget">
+            <imu-sensor-widget id="imu-widget"></imu-sensor-widget>
+          </div>
+          <div class="widget-shell compact-widget" aria-label="GNSS widget">
+            <gnss-position-widget id="gnss-widget"></gnss-position-widget>
+          </div>
+
+          <div class="top-controls">
+            <div class="controls-stack">
+              <div class="center-row">
+                <button class="btn-secondary" id="clearHistory">Clear History</button>
+                <button class="btn-secondary" id="resetLearning">Reset Learning</button>
+                <button class="btn-primary" id="runRealPoseValidation">Validate Real Pose</button>
+              </div>
             </div>
 
-            <div class="center-row">
-              <button class="btn-secondary" id="clearHistory">Clear History</button>
-              <button class="btn-secondary" id="resetLearning">Reset Learning</button>
+            <div class="single-run-panel">
+              <div class="single-run-grid">
+                <div class="control-group">
+                  <label for="testAngle">Turn / Training Start Angle (degrees)</label>
+                  <input type="number" id="testAngle" min="-180" max="180" step="10" value="50">
+                </div>
+                <div class="control-group">
+                  <label>&nbsp;</label>
+                  <div class="controls-stack">
+                    <div class="center-row">
+                      <button class="btn-primary" id="runSingleTurn">Run Single Turn</button>
+                      <button class="btn-primary" id="runSmallAngleTraining">Train Small Angles</button>
+                      <button class="btn-primary" id="runLargeAngleTraining">Train Large Angles</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div class="single-run-panel" style="margin-top: 1rem;">
-            <div class="single-run-grid">
-              <div class="control-group">
-                <label for="testAngle">Test Angle (degrees)</label>
-                <input type="number" id="testAngle" min="-180" max="180" step="10" value="50">
+          <div class="top-stats">
+            <div class="stats-list">
+              <div class="stats-row">
+                <div class="stat-label">Turns Completed</div>
+                <div class="stat-value" id="turnsCompleted">0</div>
               </div>
-              <div class="control-group">
-                <label>&nbsp;</label>
-                <button class="btn-primary" id="runSingleTurn">Run Single Turn</button>
+              <div class="stats-row">
+                <div class="stat-label">Average Error</div>
+                <div class="stat-value" id="averageError">0.0°</div>
+              </div>
+              <div class="stats-row">
+                <div class="stat-label">Last Error</div>
+                <div class="stat-value" id="lastError">—</div>
+              </div>
+              <div class="stats-row">
+                <div class="stat-label">Controller Status</div>
+                <div class="stat-value" id="statusText">Idle</div>
+              </div>
+              <div class="stats-row">
+                <div class="stat-label">Real Pose Sweep</div>
+                <div class="stat-value" id="validationStatus">Idle</div>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Statistics -->
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-label">Turns Completed</div>
-            <div class="stat-value" id="turnsCompleted">0</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Average Error</div>
-            <div class="stat-value" id="averageError">0.0°</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Last Error</div>
-            <div class="stat-value" id="lastError">—</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Controller Status</div>
-            <div class="stat-value" id="statusText">Idle</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Real Pose Sweep</div>
-            <div class="stat-value" id="validationStatus">Idle</div>
-          </div>
-        </div>
-
-        <div class="parameters-grid">
+        <div class="parameters-grid" style="margin-top: 0.125rem; margin-bottom: 0.875rem;">
           <div class="parameter-card">
             <h3>Learning Rates</h3>
             <div class="parameter-list" id="learningDiagnostics">
@@ -921,8 +730,8 @@ ${getSensorWidgetScriptTag()}
                 <thead>
                   <tr>
                     <th>Bucket</th>
-                    <th>CCW Fraction</th>
-                    <th>CW Fraction</th>
+                    <th>CCW Brake Time</th>
+                    <th>CW Brake Time</th>
                     <th>CCW Samples</th>
                     <th>CW Samples</th>
                   </tr>
@@ -1047,6 +856,10 @@ ${getAppDialogScript()}
       return deg >= 0 ? \`+\${deg.toFixed(1)}°\` : \`\${deg.toFixed(1)}°\`;
     }
 
+    function formatMilliseconds(ms) {
+      return Number(ms).toFixed(1) + 'ms';
+    }
+
     // Get error class
     function getErrorClass(errorDeg) {
       const abs = Math.abs(errorDeg);
@@ -1122,7 +935,7 @@ ${getAppDialogScript()}
       diagnosticsEl.innerHTML = [
         ['Learning rate', diagnostics.learningRate?.toFixed(3) ?? '—'],
         ['Small-angle threshold', formatAngle(parameters.smallAngleThresholdDeg ?? 0)],
-        ['Small fraction clamp', (diagnostics.smallTurnFractionMin ?? 0).toFixed(2) + ' .. ' + (diagnostics.smallTurnFractionMax ?? 0).toFixed(2)],
+        ['Small brake-time clamp', formatMilliseconds(diagnostics.smallTurnBrakeTimeMinMs ?? 0) + ' .. ' + formatMilliseconds(diagnostics.smallTurnBrakeTimeMaxMs ?? 0)],
         ['Large brake clamp', formatAngle(diagnostics.largeTurnBrakeDistanceMinDeg ?? 0) + ' .. ' + formatAngle(diagnostics.largeTurnBrakeDistanceMaxDeg ?? 0)],
         ['Large bias clamp', formatAngle(diagnostics.largeTurnBiasOffsetMinDeg ?? 0) + ' .. ' + formatAngle(diagnostics.largeTurnBiasOffsetMaxDeg ?? 0)],
       ].map(([label, value]) => '<div class="parameter-row"><span>' + label + '</span><span>' + value + '</span></div>').join('');
@@ -1131,8 +944,8 @@ ${getAppDialogScript()}
       smallBody.innerHTML = smallBuckets.map(bucket => (
         '<tr>' +
           '<td>' + formatAngle(bucket.bucketAngleDeg) + '</td>' +
-          '<td>' + bucket.brakeFractionCcw.toFixed(3) + ' (' + formatAngle(bucket.bucketAngleDeg * bucket.brakeFractionCcw) + ')</td>' +
-          '<td>' + bucket.brakeFractionCw.toFixed(3) + ' (' + formatAngle(bucket.bucketAngleDeg * bucket.brakeFractionCw) + ')</td>' +
+          '<td>' + formatMilliseconds(bucket.brakeTimeCcwMs) + '</td>' +
+          '<td>' + formatMilliseconds(bucket.brakeTimeCwMs) + '</td>' +
           '<td>' + bucket.sampleCountCcw + '</td>' +
           '<td>' + bucket.sampleCountCw + '</td>' +
         '</tr>'
@@ -1152,18 +965,25 @@ ${getAppDialogScript()}
     }
 
     function formatControlMode(mode) {
-      if (mode === 'small_progress') return 'small progress';
+      if (mode === 'small_timeout') return 'small timeout';
       if (mode === 'large_rate_bias') return 'rate + bias';
       return '—';
     }
 
     function formatTrigger(result) {
-      if (result.triggerProgressUsedDeg === undefined) return '—';
-      const progress = formatAngle(result.triggerProgressUsedDeg);
-      if (result.smallTurnBrakeFractionUsed === undefined) {
-        return progress;
+      if (result.triggerTimeUsedMs !== undefined) {
+        return formatMilliseconds(result.triggerTimeUsedMs);
       }
-      return progress + ' @ ' + result.smallTurnBrakeFractionUsed.toFixed(3);
+      if (result.triggerProgressUsedDeg === undefined) return '—';
+      return formatAngle(result.triggerProgressUsedDeg);
+    }
+
+    function getRequestedStartAngle() {
+      const angle = parseFloat(document.getElementById('testAngle').value);
+      if (!Number.isFinite(angle)) {
+        throw new Error('Please enter a valid angle');
+      }
+      return angle;
     }
 
     const turnActionButtons = [
@@ -1320,11 +1140,11 @@ ${getAppDialogScript()}
 
     // Run single turn
     document.getElementById('runSingleTurn').addEventListener('click', async () => {
-      const angle = parseFloat(document.getElementById('testAngle').value);
       pendingTurnActionId = 'runSingleTurn';
       syncTurnButtons();
 
       try {
+        const angle = getRequestedStartAngle();
         await fetch('/api/turn/execute', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1345,10 +1165,11 @@ ${getAppDialogScript()}
       syncTurnButtons();
 
       try {
+        const startAngleDeg = getRequestedStartAngle();
         await fetch('/api/turn/train-large', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ iterations: 1 })
+          body: JSON.stringify({ iterations: 1, startAngleDeg })
         });
         await updateStatus();
       } catch (error) {
@@ -1365,10 +1186,11 @@ ${getAppDialogScript()}
       syncTurnButtons();
 
       try {
+        const startAngleDeg = getRequestedStartAngle();
         await fetch('/api/turn/train-small', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targetErrorDeg: 2 })
+          body: JSON.stringify({ targetErrorDeg: 2, startAngleDeg })
         });
         await updateStatus();
       } catch (error) {

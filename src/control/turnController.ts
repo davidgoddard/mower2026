@@ -76,6 +76,7 @@ export class TurnController {
   private turnStartHeading: InternalHeading | null = null;
   private turnStartTime: number = 0;
   private turnBrakeDistance: RelativeAngle | null = null;
+  private turnBrakeTimeMs: number | null = null;
   private turnBiasOffset: number = 0;
   private turnResolve: ((result: TurnResult) => void) | null = null;
   private turnIsSmallAngle: boolean = false;
@@ -190,28 +191,28 @@ export class TurnController {
       });
 
       const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
-      this.turnBrakeDistance = this.learningModel.getBrakeAngle(absAngle, request.direction);
+      this.turnIsSmallAngle = absAngle <= this.learningModel.getSmallAngleThreshold();
+      this.turnBrakeTimeMs = this.turnIsSmallAngle
+        ? this.learningModel.getSmallTurnBrakeTimeMs(request.direction, absAngle)
+        : null;
+      this.turnBrakeDistance = this.turnIsSmallAngle
+        ? createRelativeAngle(0)
+        : this.learningModel.getBrakeAngle(absAngle, request.direction);
       this.turnBiasOffset = this.learningModel.getLargeBiasOffset(absAngle, request.direction);
       this.rateWindow = [];
-      // Record the output fraction (0..1) so the rate-based coast prediction can
-      // compute the effective ramp time (proportional to commanded speed).
-      // All turns use TURN_SMALL_CRAWL_SPEED_FACTOR; the fraction is the absolute
-      // output level, not a percentage.
       const wheelScaleForCoast = request.wheelOutputScale === undefined
         ? 1
         : Math.max(0.1, Math.min(1, request.wheelOutputScale));
       this.commandedWheelOutputFraction = this.maxWheelOutputPercent * wheelScaleForCoast * TURN_SMALL_CRAWL_SPEED_FACTOR;
 
-      this.turnIsSmallAngle = absAngle <= this.learningModel.getSmallAngleThreshold();
       const brakeDistance = this.turnBrakeDistance ?? createRelativeAngle(0);
-      const smallTurnBrakeFraction = this.learningModel.getSmallTurnBrakeFraction(request.direction, absAngle);
 
       this.logger.info("turn.brake_plan", {
         requestedAngle: absAngle,
         brakeTriggerProgressDeg: unwrapRelativeAngle(brakeDistance),
+        brakeTriggerTimeMs: this.turnBrakeTimeMs,
         largeBiasOffsetDeg: this.turnBiasOffset,
         smallCrawlWheelOutputPercent: this.maxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR,
-        smallTurnBrakeFraction,
         smallAngleThreshold: this.learningModel.getSmallAngleThreshold(),
         turnIsSmallAngle: this.turnIsSmallAngle,
         wheelOutputScale: request.wheelOutputScale ?? 1,
@@ -326,7 +327,8 @@ export class TurnController {
     // deceleration prediction with a learned bias bucket.
     let shouldBrake = false;
     if (this.turnIsSmallAngle) {
-      shouldBrake = absProgress >= Math.abs(unwrapRelativeAngle(this.turnBrakeDistance));
+      const elapsedMs = this.nowMillis() - this.turnStartTime;
+      shouldBrake = elapsedMs >= (this.turnBrakeTimeMs ?? 0);
     } else {
       const remaining = absAngle - absProgress;
       const decelPercentPerSecond = this.motorCalibration?.getDecelPercentPerSecond() ?? MOTOR_DECEL_PERCENT_PER_SECOND;
@@ -372,7 +374,7 @@ export class TurnController {
 
     try {
       const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
-      const smallTurnBrakeFraction = this.learningModel.getSmallTurnBrakeFraction(request.direction, absAngle);
+      const smallTurnBrakeTimeMs = this.turnIsSmallAngle ? this.turnBrakeTimeMs ?? 0 : undefined;
       const learningBucketAngleDeg = this.turnIsSmallAngle
         ? this.learningModel.getSmallTurnBucketAngleDeg(absAngle)
         : this.learningModel.getLargeTurnBucketAngleDeg(absAngle);
@@ -442,6 +444,7 @@ export class TurnController {
           achievedAngleUnwrappedDeg,
           errorAngle,
           brakeDistanceUsed,
+          brakeTimeUsedMs: smallTurnBrakeTimeMs,
           direction: request.direction,
         });
       }
@@ -455,10 +458,11 @@ export class TurnController {
         errorAngle,
         durationMs: this.nowMillis() - this.turnStartTime,
         brakeDistanceUsed: brakeDistanceUsed ?? createRelativeAngle(0),
-        controlMode: this.turnIsSmallAngle ? "small_progress" : "large_rate_bias",
+        controlMode: this.turnIsSmallAngle ? "small_timeout" : "large_rate_bias",
         learningBucketAngleDeg,
-        triggerProgressUsedDeg: brakeDistanceUsed ? Math.abs(unwrapRelativeAngle(brakeDistanceUsed)) : undefined,
-        smallTurnBrakeFractionUsed: this.turnIsSmallAngle ? smallTurnBrakeFraction : undefined,
+        triggerProgressUsedDeg: this.turnIsSmallAngle ? undefined : (brakeDistanceUsed ? Math.abs(unwrapRelativeAngle(brakeDistanceUsed)) : undefined),
+        triggerTimeUsedMs: smallTurnBrakeTimeMs,
+        smallTurnBrakeTimeUsedMs: smallTurnBrakeTimeMs,
         biasOffsetUsedDeg: this.turnIsSmallAngle ? undefined : this.turnBiasOffset,
         motorEngaged: true,
         status: "success",
@@ -513,11 +517,15 @@ export class TurnController {
   /**
    * Run the large-angle turn training sequence.
    */
-  async runLargeAngleTraining(iterations: number = 1, anglesToTest: number[] = this.getLargeTrainingAngles()): Promise<TurnResult[]> {
+  async runLargeAngleTraining(
+    iterations: number = 1,
+    anglesToTest?: number[],
+    startAngleDeg?: number,
+  ): Promise<TurnResult[]> {
     return this.runTrainingSequence({
       mode: "large",
       iterations,
-      anglesToTest,
+      anglesToTest: anglesToTest ?? this.getLargeTrainingAngles(startAngleDeg),
       targetErrorDeg: 2,
     });
   }
@@ -525,10 +533,14 @@ export class TurnController {
   /**
    * Run the small-angle turn training sequence until each bucket is within target error.
    */
-  async runSmallAngleTraining(targetErrorDeg: number = 2, anglesToTest: number[] = this.getSmallTrainingAngles()): Promise<TurnResult[]> {
+  async runSmallAngleTraining(
+    targetErrorDeg: number = 2,
+    anglesToTest?: number[],
+    startAngleDeg?: number,
+  ): Promise<TurnResult[]> {
     return this.runTrainingSequence({
       mode: "small",
-      anglesToTest,
+      anglesToTest: anglesToTest ?? this.getSmallTrainingAngles(startAngleDeg),
       targetErrorDeg,
     });
   }
@@ -810,10 +822,6 @@ export class TurnController {
    * legacy learned brake distance.
    */
   private getStaticFallbackCoastDeg(absAngle: number): number {
-    if (this.turnIsSmallAngle && this.currentTurn) {
-      const fraction = this.learningModel.getSmallTurnBrakeFraction(this.currentTurn.direction, absAngle);
-      return absAngle * (1 - fraction);
-    }
     return unwrapRelativeAngle(this.turnBrakeDistance ?? createRelativeAngle(0));
   }
 
@@ -843,17 +851,21 @@ export class TurnController {
     return normalize360(startHeadingDeg - finalHeadingDeg);
   }
 
-  private getLargeTrainingAngles(): number[] {
+  private getLargeTrainingAngles(startAngleDeg?: number): number[] {
     const angles: number[] = [];
-    for (let angleDeg = 70; angleDeg <= 180; angleDeg += 10) {
+    const requestedStart = Math.abs(startAngleDeg ?? 70);
+    const normalizedStart = Math.min(180, Math.max(70, Math.ceil(requestedStart / 10) * 10));
+    for (let angleDeg = normalizedStart; angleDeg <= 180; angleDeg += 10) {
       angles.push(angleDeg, -angleDeg);
     }
     return angles;
   }
 
-  private getSmallTrainingAngles(): number[] {
+  private getSmallTrainingAngles(startAngleDeg?: number): number[] {
     const angles: number[] = [];
-    for (let angleDeg = 3; angleDeg <= 60; angleDeg += 3) {
+    const requestedStart = Math.abs(startAngleDeg ?? 3);
+    const normalizedStart = Math.min(60, Math.max(3, Math.ceil(requestedStart / 3) * 3));
+    for (let angleDeg = normalizedStart; angleDeg <= 60; angleDeg += 3) {
       angles.push(angleDeg, -angleDeg);
     }
     return angles;

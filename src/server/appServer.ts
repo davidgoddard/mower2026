@@ -709,7 +709,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         // Large-angle turn training sequence
         if (requestUrl.pathname === "/api/turn/train-large" && turnController) {
           const data = JSON.parse(body);
-          const results = await turnController.runLargeAngleTraining(data.iterations);
+          const results = await turnController.runLargeAngleTraining(data.iterations, undefined, data.startAngleDeg);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson(results));
           return;
@@ -718,7 +718,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         // Small-angle turn training sequence
         if (requestUrl.pathname === "/api/turn/train-small" && turnController) {
           const data = JSON.parse(body);
-          const results = await turnController.runSmallAngleTraining(data.targetErrorDeg);
+          const results = await turnController.runSmallAngleTraining(data.targetErrorDeg, undefined, data.startAngleDeg);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson(results));
           return;

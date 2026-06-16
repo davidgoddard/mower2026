@@ -116,16 +116,17 @@ This document maps problem domains to candidate files removing the need for Code
   - records IMU-achieved angle versus real pose change for tuning-page inspection
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
-  - small-angle learning uses 3° progress-fraction buckets up to the configured small-angle threshold, meaning each bucket learns how far into the requested IMU turn progress the mower should keep driving before commanding stop
+  - small-angle learning uses 3° timeout buckets up to the configured small-angle threshold, meaning each bucket learns how many milliseconds from turn start the mower should keep driving before commanding stop; intermediate requested angles interpolate between neighboring bucket times for prediction only, and learning only writes back when the requested angle is effectively on a real bucket
   - large-angle learning uses independent 10° brake-distance buckets per direction above the small-angle threshold, initialized to 25°
   - JSON persistence at `config/turn-learning-parameters.json`
 - `src/control/turnControllerTypes.ts`: turn controller type definitions
 - `src/server/turnTuningPage.ts`: modern responsive web UI for turn tuning
   - real-time turn execution and monitoring
+  - shared angle field used for single-turn execution and as the starting bucket/angle for small-angle and large-angle training sweeps
   - results table with error visualization and without the misleading legacy brake-distance display
-  - each turn result row now shows the active control mode, learned bucket, actual small-turn IMU trigger progress/fraction, and large-turn bias used so operators can verify what the controller really applied
+  - each turn result row now shows the active control mode, learned bucket, actual small-turn timeout trigger, and large-turn bias used so operators can verify what the controller really applied
   - real-pose validation sweep table comparing IMU and pose fusion headings
-  - learning parameter display showing the actual persisted small-angle fraction buckets, large-angle brake/bias buckets, and learning-rate diagnostics used by the current controller
+  - learning parameter display showing the actual persisted small-angle timeout buckets, large-angle brake/bias buckets, and learning-rate diagnostics used by the current controller
   - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
   - prominent STOP button for emergency abort
 - `src/server/driveTuningPage.ts`: drive tuning UI with live primitive sidebar

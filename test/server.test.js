@@ -86,12 +86,18 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
 test('tuning pages expose the simplified drive training controls', () => {
   const turnPage = getTurnTuningPageHtml();
   assert.equal(turnPage.includes('class="page-layout"'), true);
-  assert.equal(turnPage.includes('class="sidebar-column"'), true);
-  assert.equal(turnPage.includes('id="imu-status"'), true);
-  assert.equal(turnPage.includes('id="gnss-status"'), true);
+  assert.equal(turnPage.includes('class="top-grid"'), true);
+  assert.equal(turnPage.includes('class="top-controls"'), true);
+  assert.equal(turnPage.includes('class="top-stats"'), true);
+  assert.equal(turnPage.includes('class="stats-list"'), true);
+  assert.equal(turnPage.includes('class="stats-row"'), true);
+  assert.equal(turnPage.includes('class="widget-shell compact-widget"'), true);
+  assert.equal(turnPage.includes('id="imu-widget"'), true);
+  assert.equal(turnPage.includes('id="gnss-widget"'), true);
   assert.equal(turnPage.includes('id="stopCurrentRun"'), true);
   assert.equal(turnPage.includes('class="center-row"'), true);
   assert.equal(turnPage.includes('class="single-run-panel"'), true);
+  assert.equal(turnPage.includes('Turn / Training Start Angle (degrees)'), true);
   assert.equal(turnPage.includes('id="runRealPoseValidation"'), true);
   assert.equal(turnPage.includes('appDialogBackdrop'), true);
   assert.equal(turnPage.includes('Are you sure you want to clear all turn history?'), true);
@@ -108,6 +114,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(turnPage.includes('Bucket</th>'), true);
   assert.equal(turnPage.includes('Trigger</th>'), true);
   assert.equal(turnPage.includes('Bias</th>'), true);
+  assert.equal(turnPage.includes('CCW Brake Time'), true);
+  assert.equal(turnPage.includes('small timeout'), true);
   assert.equal(turnPage.includes('function formatControlMode(mode)'), true);
   assert.equal(turnPage.includes('function formatTrigger(result)'), true);
   assert.equal(turnPage.includes('Brake Distance</th>'), false);
@@ -115,6 +123,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(turnPage.includes('const turnActionButtons = ['), true);
   assert.equal(turnPage.includes('function syncTurnButtons()'), true);
   assert.equal(turnPage.includes("stopButton.disabled = false;"), true);
+  assert.equal(turnPage.includes('startAngleDeg'), true);
 
   const drivePage = getDriveTuningPageHtml();
   assert.equal(drivePage.includes('class="page-layout"'), true);

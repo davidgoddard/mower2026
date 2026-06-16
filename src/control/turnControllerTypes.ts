@@ -30,10 +30,11 @@ export interface TurnResult {
   readonly errorAngle: RelativeAngle;
   readonly durationMs: number;
   readonly brakeDistanceUsed: RelativeAngle;
-  readonly controlMode?: "small_progress" | "large_rate_bias";
+  readonly controlMode?: "small_timeout" | "large_rate_bias";
   readonly learningBucketAngleDeg?: number;
   readonly triggerProgressUsedDeg?: number;
-  readonly smallTurnBrakeFractionUsed?: number;
+  readonly triggerTimeUsedMs?: number;
+  readonly smallTurnBrakeTimeUsedMs?: number;
   readonly biasOffsetUsedDeg?: number;
   readonly motorEngaged: boolean;
   readonly status: "success" | "error" | "stopped";
@@ -54,6 +55,7 @@ export interface TurnLearningInput {
   readonly achievedAngleUnwrappedDeg?: number;
   readonly errorAngle: RelativeAngle;
   readonly brakeDistanceUsed: RelativeAngle;
+  readonly brakeTimeUsedMs?: number;
   readonly direction: TurnDirection;
 }
 
@@ -69,8 +71,8 @@ export interface TurnLearningBin {
 
 export interface TurnLearningBucket {
   bucketAngleDeg: number;
-  brakeFractionCcw: number;
-  brakeFractionCw: number;
+  brakeTimeCcwMs: number;
+  brakeTimeCwMs: number;
   sampleCountCcw: number;
   sampleCountCw: number;
   lastErrorCcwDeg: number;
@@ -95,8 +97,8 @@ export interface TurnLearningParameters {
   largeTurnSampleCountsCw: number[];
   largeTurnLastErrorsCcwDeg: number[];
   largeTurnLastErrorsCwDeg: number[];
-  smallTurnBrakeFractionsCcw: number[];
-  smallTurnBrakeFractionsCw: number[];
+  smallTurnBrakeTimesCcwMs: number[];
+  smallTurnBrakeTimesCwMs: number[];
   smallTurnSampleCountsCcw: number[];
   smallTurnSampleCountsCw: number[];
   smallTurnLastErrorCcwDeg: number[];
