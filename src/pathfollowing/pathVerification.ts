@@ -116,11 +116,24 @@ export function buildDrivePathPointsForDirection(
     return [];
   }
 
-  const rotated = pathDirection === "forward"
-    ? rotatePathForward(normalized, nearestIndex)
-    : rotatePathReverse(normalized, nearestIndex);
+  return buildPathPointsForDirectionFromIndex(normalized, nearestIndex, pathDirection, normalizedPath.isClosedLoop);
+}
 
-  return normalizedPath.isClosedLoop ? rotated.concat([rotated[0]]) : rotated;
+function buildPathPointsForDirectionFromIndex(
+  points: PathPoint[],
+  startIndex: number,
+  pathDirection: "forward" | "reverse",
+  isClosedLoop: boolean,
+): PathPoint[] {
+  if (points.length === 0 || startIndex < 0 || startIndex >= points.length) {
+    return [];
+  }
+
+  const rotated = pathDirection === "forward"
+    ? rotatePathForward(points, startIndex)
+    : rotatePathReverse(points, startIndex);
+
+  return isClosedLoop ? rotated.concat([rotated[0]]) : rotated;
 }
 
 export function buildVerificationPathPoints(
@@ -138,11 +151,17 @@ export function buildVerificationPathPoints(
 
 export function buildVerificationPathPointsFromPlan(
   points: PathPoint[],
-  pose: Pose,
+  _pose: Pose,
   plan: VerificationApproachPlan,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
-  const drivePoints = buildDrivePathPointsForDirection(points, pose, plan.pathDirection, parameters);
+  const normalizedPath = normalizePath(points, parameters);
+  const drivePoints = buildPathPointsForDirectionFromIndex(
+    normalizedPath.points,
+    plan.nearestIndex,
+    plan.pathDirection,
+    normalizedPath.isClosedLoop,
+  );
   if (drivePoints.length < 2) {
     return drivePoints;
   }

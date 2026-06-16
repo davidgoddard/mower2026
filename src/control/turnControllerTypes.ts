@@ -30,6 +30,11 @@ export interface TurnResult {
   readonly errorAngle: RelativeAngle;
   readonly durationMs: number;
   readonly brakeDistanceUsed: RelativeAngle;
+  readonly controlMode?: "small_progress" | "large_rate_bias";
+  readonly learningBucketAngleDeg?: number;
+  readonly triggerProgressUsedDeg?: number;
+  readonly smallTurnBrakeFractionUsed?: number;
+  readonly biasOffsetUsedDeg?: number;
   readonly motorEngaged: boolean;
   readonly status: "success" | "error" | "stopped";
   readonly errorMessage?: string;

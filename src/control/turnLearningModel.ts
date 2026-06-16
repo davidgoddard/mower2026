@@ -224,7 +224,7 @@ export class TurnLearningModel {
   getBrakeAngle(requestedAngleDeg: number, direction: TurnDirection): RelativeAngle {
     const requested = Math.abs(requestedAngleDeg);
     const brakeDistance = requested <= this.parameters.smallAngleThresholdDeg
-      ? this.getLegacyLargeDirectionDefault(direction)
+      ? requested * this.getSmallTurnBrakeFraction(direction, requested)
       : this.getLargeTurnBrakeDistance(direction, requested);
     return createRelativeAngle(Math.max(1, Math.min(requested, brakeDistance)));
   }
@@ -257,6 +257,14 @@ export class TurnLearningModel {
       : this.parameters.smallTurnBrakeFractionsCw[bucketIndex];
   }
 
+  getSmallTurnBucketAngleDeg(requestedAngleDeg: number): number {
+    return this.getSmallTurnBucketAngle(requestedAngleDeg);
+  }
+
+  getLargeTurnBucketAngleDeg(requestedAngleDeg: number): number {
+    return this.getLargeTurnBucketAngle(requestedAngleDeg);
+  }
+
   getSmallAngleThreshold(): number {
     return this.parameters.smallAngleThresholdDeg;
   }
@@ -287,6 +295,26 @@ export class TurnLearningModel {
       ...this.parameters,
       parameters,
       smallTurnBuckets: this.getSmallTurnBuckets(),
+    };
+  }
+
+  getLearningDiagnostics(): {
+    learningRate: number;
+    smallTurnFractionMin: number;
+    smallTurnFractionMax: number;
+    largeTurnBrakeDistanceMinDeg: number;
+    largeTurnBrakeDistanceMaxDeg: number;
+    largeTurnBiasOffsetMinDeg: number;
+    largeTurnBiasOffsetMaxDeg: number;
+  } {
+    return {
+      learningRate: this.learningRate,
+      smallTurnFractionMin: SMALL_TURN_FRACTION_MIN,
+      smallTurnFractionMax: SMALL_TURN_FRACTION_MAX,
+      largeTurnBrakeDistanceMinDeg: LARGE_TURN_MIN_BRAKE_DISTANCE_DEG,
+      largeTurnBrakeDistanceMaxDeg: LARGE_TURN_MAX_BRAKE_DISTANCE_DEG,
+      largeTurnBiasOffsetMinDeg: LARGE_TURN_MIN_BIAS_OFFSET_DEG,
+      largeTurnBiasOffsetMaxDeg: LARGE_TURN_MAX_BIAS_OFFSET_DEG,
     };
   }
 

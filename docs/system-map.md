@@ -4,7 +4,7 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Constants
 - `src/constants.ts`: system-wide DESIGN DECISION constants (see `docs/CONSTANTS-ARCHITECTURE.md`).
-  - timing design decisions: sensor poll intervals (sensor loop 50Hz, GNSS polling 20Hz, motor polling 50Hz), pose-fusion downstream emit cadence (50Hz), manual drive loop rate, retry policies
+  - timing design decisions: sensor poll intervals (sensor loop / IMU 100Hz, GNSS polling 20Hz, motor polling 50Hz), pose-fusion downstream emit cadence (50Hz), manual drive loop rate, retry policies
   - I2C hardware addresses: GNSS (0x52), motor (0x66), IMU (0x69) - system topology
   - manual drive tuning: 12 parameters for joystick response, deadbands, spin thresholds
   - motor configuration: direction signs for hardware inversion, max wheel speed
@@ -104,6 +104,7 @@ This document maps problem domains to candidate files removing the need for Code
   - executes on-the-spot turns using IMU heading integration
   - polls heading at the sensor controller update rate
   - adaptive brake angle learning per turn angle and direction
+  - small-angle turns brake after a learned amount of actual IMU progress for the requested bucket; large-angle turns continue to use live angular-velocity coast prediction plus learned bias buckets
   - pauses for a deliberate one-second settle before final measurement and learning, and inserts a one-second pause between successive training turns so the operator can see each turn fully finish before the next begins
   - both large-angle and small-angle training now repeat each requested angle until the turn error is within target or the per-angle retry cap is reached
   - emergency stop support during turn execution
@@ -115,15 +116,16 @@ This document maps problem domains to candidate files removing the need for Code
   - records IMU-achieved angle versus real pose change for tuning-page inspection
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
-  - small-angle learning uses 3° brake-fraction buckets up to the configured small-angle threshold
+  - small-angle learning uses 3° progress-fraction buckets up to the configured small-angle threshold, meaning each bucket learns how far into the requested IMU turn progress the mower should keep driving before commanding stop
   - large-angle learning uses independent 10° brake-distance buckets per direction above the small-angle threshold, initialized to 25°
   - JSON persistence at `config/turn-learning-parameters.json`
 - `src/control/turnControllerTypes.ts`: turn controller type definitions
 - `src/server/turnTuningPage.ts`: modern responsive web UI for turn tuning
   - real-time turn execution and monitoring
-  - results table with error visualization
+  - results table with error visualization and without the misleading legacy brake-distance display
+  - each turn result row now shows the active control mode, learned bucket, actual small-turn IMU trigger progress/fraction, and large-turn bias used so operators can verify what the controller really applied
   - real-pose validation sweep table comparing IMU and pose fusion headings
-  - learning parameter display
+  - learning parameter display showing the actual persisted small-angle fraction buckets, large-angle brake/bias buckets, and learning-rate diagnostics used by the current controller
   - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
   - prominent STOP button for emergency abort
 - `src/server/driveTuningPage.ts`: drive tuning UI with live primitive sidebar
@@ -142,6 +144,7 @@ This document maps problem domains to candidate files removing the need for Code
 - API endpoints:
   - `GET /turn-tuning` - turn tuning web page
   - `GET /api/turn/status` - controller state and history
+    - also returns persisted turn-learning parameters and learning diagnostics for the turn-tuning page
   - `POST /api/turn/execute` - execute single turn
   - `POST /api/turn/train-large` - run large-angle training sequence
   - `POST /api/turn/train-small` - run small-angle training sequence
@@ -227,6 +230,7 @@ This document maps problem domains to candidate files removing the need for Code
   - simplifies manually recorded wiggles using a chord tolerance plus a per-vertex turn-angle gate, so any kept vertex is one the mower will pivot through on the spot
   - subdivides long simplified spans into bounded segment-drive targets
   - re-anchors target execution to the nearest target at runtime and skips targets already under the current pose
+  - callers that already chose a specific join point can preserve that target order while still dropping any first target that is already within the minimum segment distance of the mower
   - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
 - `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
   - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
@@ -237,6 +241,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification/drive starts at the nearest recorded point and (for closed perimeters) loops back to the join point
   - chooses forward or reverse traversal by tangent alignment at the nearest point
   - verification approach stages 10cm short of the join point so the mower has body clearance to pivot before joining the perimeter
+  - once verify has chosen its join point and direction, the follow loop stays anchored to that plan instead of being recomputed from the post-approach pose
   - both obstacle perimeters and mowing area perimeters preserve the recorded geometry verbatim — no outward inflation
   - path safety distances are supplied from `PathFollowingConfig` rather than hard-coded in this helper
 - `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
@@ -333,7 +338,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/protocols/codecPrimitives.ts`: optional scalar codec helpers for protocol payloads.
 - `src/bus/frameCodec.ts`: frame encode/decode and CRC validation.
 - `src/bus/crc.ts`: CRC16-CCITT implementation.
-- `src/sensing/sensorController.ts`: single 200Hz sensor polling controller and latest sensor state integration.
+- `src/sensing/sensorController.ts`: single 100Hz sensor polling controller and latest sensor state integration.
   - heading API: `getHeading()` returns `InternalHeading`; `setHeading(InternalHeading, timestampMillis?)` for timestamp-aware absolute heading reset integration.
   - heading convention: uses `InternalHeading` type internally; GNSS field headings converted via `fieldToInternal()`.
   - IMU yaw integration: projects the 3-axis gyro vector onto the gravity axis derived from pitch and roll, then uses `addRelativeAngle()` with `RelativeAngle` deltas from that tilt-compensated yaw rate and applies the persisted IMU yaw scale factor before updating the heading.
@@ -426,7 +431,7 @@ This document maps problem domains to candidate files removing the need for Code
 ## Dead-Reckoning Calibration
 - `src/control/deadReckoningCalibrator.ts`: three-phase dead-reckoning calibration procedure
   - Phase 1 (straight line): line-drives forward to derive first-pass left/right `metersPerTick` from GNSS chord and encoder totals
-  - Phase 2 (arc CW): drives a gentle constant-speed forward clockwise arc until the IMU reaches the requested sweep, derives effective moving-turn wheelbase from left/right travelled distance difference and IMU heading change, and rejects the phase when DR endpoint error indicates excessive mismatch
+  - Phase 2 (arc CW): drives a moderate constant-speed forward clockwise arc until the IMU reaches the requested sweep, derives effective moving-turn wheelbase from left/right travelled distance difference and IMU heading change, and rejects the phase when DR endpoint error indicates excessive mismatch
   - Phase 3 (arc CCW): mirror of phase 2
   - outputs suggested per-wheel m/tick, moving wheelbase, and DR endpoint error for operator review before applying
   - settle diagnostics: logs `dead_reckoning.pose_not_settled` with the live blocker reason plus pose-fusion diagnostics whenever the 2-second settle dwell is interrupted, logs `dead_reckoning.pose_settled_anchor_rejected` when the pose is settled but the raw GNSS anchor is unusable, and logs the final fused/gnss snapshot on timeout

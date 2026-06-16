@@ -208,7 +208,7 @@ export class TurnController {
 
       this.logger.info("turn.brake_plan", {
         requestedAngle: absAngle,
-        largeBrakeDistanceDeg: unwrapRelativeAngle(brakeDistance),
+        brakeTriggerProgressDeg: unwrapRelativeAngle(brakeDistance),
         largeBiasOffsetDeg: this.turnBiasOffset,
         smallCrawlWheelOutputPercent: this.maxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR,
         smallTurnBrakeFraction,
@@ -320,44 +320,37 @@ export class TurnController {
       this.rateWindow.shift();
     }
 
-    // Check for brake condition
+    // Small turns use the learned IMU-progress trigger directly: for a
+    // requested 6° turn, for example, brake after the learned x° of actual IMU
+    // progress has been reached. Large turns keep the angular-velocity +
+    // deceleration prediction with a learned bias bucket.
     let shouldBrake = false;
+    if (this.turnIsSmallAngle) {
+      shouldBrake = absProgress >= Math.abs(unwrapRelativeAngle(this.turnBrakeDistance));
+    } else {
+      const remaining = absAngle - absProgress;
+      const decelPercentPerSecond = this.motorCalibration?.getDecelPercentPerSecond() ?? MOTOR_DECEL_PERCENT_PER_SECOND;
+      const commandedPercent = this.commandedWheelOutputFraction * 100;
+      let predictedCoastDeg: number;
 
-    // Rate-based brake trigger for all turns.
-    //
-    // The firmware applies a fixed deceleration of `decelPercentPerSecond`
-    // every tick.  A motor running at `commandedPercent` takes:
-    //   effectiveRampSeconds = commandedPercent / decelPercentPerSecond
-    // to reach zero.  With linear decel the average speed is half the initial
-    // speed, so:
-    //   predictedCoastDeg = liveRateDeg/s × effectiveRampSeconds / 2
-    //                     = liveRateDeg/s × commandedPercent / (2 × decelPercentPerSecond)
-    //
-    // This replaces the old formulation that used the full ramp-down time
-    // regardless of the current speed, which produced a 2× over-estimate
-    // for crawl-speed small turns and any sub-full-speed large turns.
-    const remaining = absAngle - absProgress;
-    const decelPercentPerSecond = this.motorCalibration?.getDecelPercentPerSecond() ?? MOTOR_DECEL_PERCENT_PER_SECOND;
-    const commandedPercent = this.commandedWheelOutputFraction * 100;
-    let predictedCoastDeg: number;
-
-    if (this.rateWindow.length >= 2) {
-      const oldest = this.rateWindow[0];
-      const newest = this.rateWindow[this.rateWindow.length - 1];
-      const dtMs = newest.timestampMillis - oldest.timestampMillis;
-      if (dtMs > 0) {
-        const rateDegPerMs = (newest.cumulativeAngleDeg - oldest.cumulativeAngleDeg) / dtMs;
-        const effectiveRampMs = (commandedPercent / decelPercentPerSecond) * 1000;
-        predictedCoastDeg = rateDegPerMs * (effectiveRampMs / 2) + this.turnBiasOffset;
+      if (this.rateWindow.length >= 2) {
+        const oldest = this.rateWindow[0];
+        const newest = this.rateWindow[this.rateWindow.length - 1];
+        const dtMs = newest.timestampMillis - oldest.timestampMillis;
+        if (dtMs > 0) {
+          const rateDegPerMs = (newest.cumulativeAngleDeg - oldest.cumulativeAngleDeg) / dtMs;
+          const effectiveRampMs = (commandedPercent / decelPercentPerSecond) * 1000;
+          predictedCoastDeg = rateDegPerMs * (effectiveRampMs / 2) + this.turnBiasOffset;
+        } else {
+          predictedCoastDeg = this.getStaticFallbackCoastDeg(absAngle);
+        }
       } else {
         predictedCoastDeg = this.getStaticFallbackCoastDeg(absAngle);
       }
-    } else {
-      predictedCoastDeg = this.getStaticFallbackCoastDeg(absAngle);
-    }
 
-    if (remaining <= predictedCoastDeg) {
-      shouldBrake = true;
+      if (remaining <= predictedCoastDeg) {
+        shouldBrake = true;
+      }
     }
 
     // If brake condition met, complete the turn
@@ -380,9 +373,10 @@ export class TurnController {
     try {
       const absAngle = Math.abs(unwrapRelativeAngle(request.targetAngle));
       const smallTurnBrakeFraction = this.learningModel.getSmallTurnBrakeFraction(request.direction, absAngle);
-      const brakeDistanceUsed = this.turnIsSmallAngle
-        ? createRelativeAngle(absAngle * smallTurnBrakeFraction)
-        : this.turnBrakeDistance;
+      const learningBucketAngleDeg = this.turnIsSmallAngle
+        ? this.learningModel.getSmallTurnBucketAngleDeg(absAngle)
+        : this.learningModel.getLargeTurnBucketAngleDeg(absAngle);
+      const brakeDistanceUsed = this.turnBrakeDistance;
 
       // 6. BRAKING - Command motors to ramp to zero and wait for ramp-down.
       // Both small and large turns now use the rate-based brake trigger, which
@@ -461,6 +455,11 @@ export class TurnController {
         errorAngle,
         durationMs: this.nowMillis() - this.turnStartTime,
         brakeDistanceUsed: brakeDistanceUsed ?? createRelativeAngle(0),
+        controlMode: this.turnIsSmallAngle ? "small_progress" : "large_rate_bias",
+        learningBucketAngleDeg,
+        triggerProgressUsedDeg: brakeDistanceUsed ? Math.abs(unwrapRelativeAngle(brakeDistanceUsed)) : undefined,
+        smallTurnBrakeFractionUsed: this.turnIsSmallAngle ? smallTurnBrakeFraction : undefined,
+        biasOffsetUsedDeg: this.turnIsSmallAngle ? undefined : this.turnBiasOffset,
         motorEngaged: true,
         status: "success",
         timestamp: new Date().toISOString(),
@@ -728,6 +727,14 @@ export class TurnController {
       turnsCompleted: this.turnsCompleted,
       averageErrorDeg: this.turnsCompleted > 0 ? this.totalErrorDeg / this.turnsCompleted : 0,
     };
+  }
+
+  getLearningParameters() {
+    return this.learningModel.getParameters();
+  }
+
+  getLearningDiagnostics() {
+    return this.learningModel.getLearningDiagnostics();
   }
 
   /**

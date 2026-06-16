@@ -1,12 +1,12 @@
 {
   "version": 6,
-  "longDriveBrakeDistanceForwardMeters": 0.18357433156069497,
+  "longDriveBrakeDistanceForwardMeters": 0.2077502627836956,
   "longDriveBrakeDistanceReverseMeters": 0.21023404477605237,
   "longHeadingBiasForwardPercent": 0,
   "longHeadingBiasReversePercent": 0,
   "longHeadingGainForwardPerDeg": 0.01,
   "longHeadingGainReversePerDeg": 0.01,
-  "forwardCteGain": 1.4955,
+  "forwardCteGain": 1.5,
   "reverseCteGain": 1.468782086744853,
   "longDriveMinDistanceMeters": 1,
   "shortDriveBrakeDistancesPositive": [
@@ -135,5 +135,5 @@
     -0.01643470150531669,
     0.02506172933693595
   ],
-  "updatedAt": "2026-06-14T16:05:45.615Z"
+  "updatedAt": "2026-06-15T19:18:54.573Z"
 }

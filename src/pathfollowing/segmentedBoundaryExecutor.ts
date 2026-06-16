@@ -19,6 +19,12 @@ export interface SegmentedBoundaryExecutionOptions {
   readonly parameters?: PathFollowingParameters;
   readonly startPose?: Pose;
   /**
+   * When false, preserve the caller-supplied target order instead of rotating
+   * the path to the nearest live pose. This is useful when an earlier planning
+   * step has already chosen the correct join point and traversal direction.
+   */
+  readonly reanchorToStartPose?: boolean;
+  /**
    * Optional sink for recording each target the executor has just completed.
    * The retry manager uses this trail to retrace recent targets backward when
    * recovering from a grass-jam high-current obstruction.
@@ -58,13 +64,16 @@ export function buildSegmentedBoundaryExecutionTargets(
   points: PathPoint[],
   parameters: PathFollowingParameters = DEFAULT_PATH_FOLLOWING_PARAMETERS,
   startPose?: Pose,
+  reanchorToStartPose = true,
 ): PathPoint[] {
   const targets = buildSegmentedBoundaryTargets(points, parameters);
   if (!startPose || targets.length <= 1) {
     return targets;
   }
 
-  const reanchored = rotateTargetsToNearestPose(targets, startPose);
+  const reanchored = reanchorToStartPose
+    ? rotateTargetsToNearestPose(targets, startPose)
+    : targets;
   return dropTargetsAlreadyAtPose(
     reanchored,
     startPose,
@@ -78,7 +87,12 @@ export async function executeSegmentedBoundaryPath(
   options: SegmentedBoundaryExecutionOptions = {},
 ): Promise<SegmentedBoundaryResult> {
   const parameters = options.parameters ?? DEFAULT_PATH_FOLLOWING_PARAMETERS;
-  const targets = buildSegmentedBoundaryExecutionTargets(points, parameters, options.startPose);
+  const targets = buildSegmentedBoundaryExecutionTargets(
+    points,
+    parameters,
+    options.startPose,
+    options.reanchorToStartPose ?? true,
+  );
   let completedSegments = 0;
   let distanceTraveled = 0;
 

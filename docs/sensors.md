@@ -61,7 +61,7 @@ Current sensor-related shape:
   "sampledAt": "2026-05-17T16:00:00.000Z",
   "sensorController": {
     "status": "running",
-    "pollIntervalMs": 33,
+    "pollIntervalMs": 10,
     "lastLoopDurationMs": 3
   },
   "imu": {

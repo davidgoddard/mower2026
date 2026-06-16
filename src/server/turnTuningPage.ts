@@ -590,6 +590,52 @@ ${getAppDialogStyles()}
       box-shadow: var(--shadow-md);
     }
 
+    .parameters-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .parameter-card {
+      background: var(--bg-primary);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      box-shadow: var(--shadow-sm);
+      border: 1px solid var(--border-color);
+    }
+
+    .parameter-card h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      color: var(--text-primary);
+    }
+
+    .parameter-list {
+      display: grid;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+    }
+
+    .parameter-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .parameter-row span:first-child {
+      color: var(--text-secondary);
+    }
+
+    .parameter-table-wrap {
+      max-height: 22rem;
+      overflow: auto;
+      border: 1px solid var(--border-color);
+      border-radius: 0.5rem;
+    }
+
     .section-header {
       display: flex;
       justify-content: space-between;
@@ -861,6 +907,54 @@ ${getSensorWidgetScriptTag()}
           </div>
         </div>
 
+        <div class="parameters-grid">
+          <div class="parameter-card">
+            <h3>Learning Rates</h3>
+            <div class="parameter-list" id="learningDiagnostics">
+              <div class="parameter-row"><span>Loading…</span><span>—</span></div>
+            </div>
+          </div>
+          <div class="parameter-card">
+            <h3>Small-Angle Buckets</h3>
+            <div class="parameter-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Bucket</th>
+                    <th>CCW Fraction</th>
+                    <th>CW Fraction</th>
+                    <th>CCW Samples</th>
+                    <th>CW Samples</th>
+                  </tr>
+                </thead>
+                <tbody id="smallTurnParametersBody">
+                  <tr><td colspan="5">Loading…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="parameter-card">
+            <h3>Large-Angle Buckets</h3>
+            <div class="parameter-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Dir</th>
+                    <th>Angle</th>
+                    <th>Brake Bucket</th>
+                    <th>Bias</th>
+                    <th>Samples</th>
+                    <th>Last Error</th>
+                  </tr>
+                </thead>
+                <tbody id="largeTurnParametersBody">
+                  <tr><td colspan="6">Loading…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
         <!-- Results Table -->
         <div class="results-section">
           <div class="section-header">
@@ -875,14 +969,17 @@ ${getSensorWidgetScriptTag()}
                   <th>Requested</th>
                   <th>Achieved</th>
                   <th>Error</th>
+                  <th>Mode</th>
+                  <th>Bucket</th>
+                  <th>Trigger</th>
+                  <th>Bias</th>
                   <th>Duration</th>
-                  <th>Brake Distance</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody id="resultsTableBody">
                 <tr>
-                  <td colspan="7">
+                  <td colspan="10">
                     <div class="empty-state">
                       <div class="empty-icon">📊</div>
                       <div>No turn results yet. Run a turn to see results here.</div>
@@ -1006,6 +1103,69 @@ ${getAppDialogScript()}
         : 'Idle';
     }
 
+    function renderLearningDiagnostics(parameters, diagnostics) {
+      const diagnosticsEl = document.getElementById('learningDiagnostics');
+      const smallBody = document.getElementById('smallTurnParametersBody');
+      const largeBody = document.getElementById('largeTurnParametersBody');
+
+      if (!diagnosticsEl || !smallBody || !largeBody) {
+        return;
+      }
+
+      if (!parameters || !diagnostics) {
+        diagnosticsEl.innerHTML = '<div class="parameter-row"><span>Unavailable</span><span>—</span></div>';
+        smallBody.innerHTML = '<tr><td colspan="5">Unavailable</td></tr>';
+        largeBody.innerHTML = '<tr><td colspan="6">Unavailable</td></tr>';
+        return;
+      }
+
+      diagnosticsEl.innerHTML = [
+        ['Learning rate', diagnostics.learningRate?.toFixed(3) ?? '—'],
+        ['Small-angle threshold', formatAngle(parameters.smallAngleThresholdDeg ?? 0)],
+        ['Small fraction clamp', (diagnostics.smallTurnFractionMin ?? 0).toFixed(2) + ' .. ' + (diagnostics.smallTurnFractionMax ?? 0).toFixed(2)],
+        ['Large brake clamp', formatAngle(diagnostics.largeTurnBrakeDistanceMinDeg ?? 0) + ' .. ' + formatAngle(diagnostics.largeTurnBrakeDistanceMaxDeg ?? 0)],
+        ['Large bias clamp', formatAngle(diagnostics.largeTurnBiasOffsetMinDeg ?? 0) + ' .. ' + formatAngle(diagnostics.largeTurnBiasOffsetMaxDeg ?? 0)],
+      ].map(([label, value]) => '<div class="parameter-row"><span>' + label + '</span><span>' + value + '</span></div>').join('');
+
+      const smallBuckets = parameters.smallTurnBuckets ?? [];
+      smallBody.innerHTML = smallBuckets.map(bucket => (
+        '<tr>' +
+          '<td>' + formatAngle(bucket.bucketAngleDeg) + '</td>' +
+          '<td>' + bucket.brakeFractionCcw.toFixed(3) + ' (' + formatAngle(bucket.bucketAngleDeg * bucket.brakeFractionCcw) + ')</td>' +
+          '<td>' + bucket.brakeFractionCw.toFixed(3) + ' (' + formatAngle(bucket.bucketAngleDeg * bucket.brakeFractionCw) + ')</td>' +
+          '<td>' + bucket.sampleCountCcw + '</td>' +
+          '<td>' + bucket.sampleCountCw + '</td>' +
+        '</tr>'
+      )).join('') || '<tr><td colspan="5">No small-angle buckets</td></tr>';
+
+      const largeBuckets = parameters.parameters ?? [];
+      largeBody.innerHTML = largeBuckets.map(bucket => (
+        '<tr>' +
+          '<td>' + bucket.direction.toUpperCase() + '</td>' +
+          '<td>' + formatAngle(bucket.requestedAngleDeg) + '</td>' +
+          '<td>' + formatAngle(bucket.brakeDistanceDeg) + '</td>' +
+          '<td>' + formatAngle(bucket.biasOffsetDeg) + '</td>' +
+          '<td>' + (bucket.sampleCount ?? 0) + '</td>' +
+          '<td>' + (bucket.lastErrorDeg === undefined ? '—' : formatAngle(bucket.lastErrorDeg)) + '</td>' +
+        '</tr>'
+      )).join('') || '<tr><td colspan="6">No large-angle buckets</td></tr>';
+    }
+
+    function formatControlMode(mode) {
+      if (mode === 'small_progress') return 'small progress';
+      if (mode === 'large_rate_bias') return 'rate + bias';
+      return '—';
+    }
+
+    function formatTrigger(result) {
+      if (result.triggerProgressUsedDeg === undefined) return '—';
+      const progress = formatAngle(result.triggerProgressUsedDeg);
+      if (result.smallTurnBrakeFractionUsed === undefined) {
+        return progress;
+      }
+      return progress + ' @ ' + result.smallTurnBrakeFractionUsed.toFixed(3);
+    }
+
     const turnActionButtons = [
       { id: 'runSingleTurn', idleLabel: 'Run Single Turn', pendingLabel: '<span class="spinner"></span> Running...' },
       { id: 'runLargeAngleTraining', idleLabel: 'Train Large Angles', pendingLabel: '<span class="spinner"></span> Training Large Angles...' },
@@ -1056,6 +1216,7 @@ ${getAppDialogScript()}
         updateSensorWidgets(primitives);
         turnStateSnapshot = data.state ?? { status: 'idle' };
         realPoseValidationSnapshot = data.realPoseValidation ?? null;
+        renderLearningDiagnostics(data.parameters, data.learningDiagnostics);
         syncTurnButtons();
 
         // Update controller status badge
@@ -1074,7 +1235,7 @@ ${getAppDialogScript()}
 
         const avgError = data.state.averageErrorDeg;
         const avgErrorEl = document.getElementById('averageError');
-        avgErrorEl.textContent = \`\${avgError.toFixed(2)}°\`;
+        avgErrorEl.textContent = avgError.toFixed(2) + '°';
         avgErrorEl.className = 'stat-value ' + (avgError <= 2 ? 'good' : avgError <= 5 ? 'warning' : '');
 
         // Update last error
@@ -1101,8 +1262,11 @@ ${getAppDialogScript()}
               <td class="angle-cell">\${formatAngle(result.requestedAngle)}</td>
               <td class="angle-cell">\${formatAngle(result.achievedAngle)}</td>
               <td class="error-cell \${getErrorClass(result.errorAngle)}">\${formatAngle(result.errorAngle)}</td>
+              <td>\${formatControlMode(result.controlMode)}</td>
+              <td>\${result.learningBucketAngleDeg === undefined ? '—' : formatAngle(result.learningBucketAngleDeg)}</td>
+              <td>\${formatTrigger(result)}</td>
+              <td>\${result.biasOffsetUsedDeg === undefined ? '—' : formatAngle(result.biasOffsetUsedDeg)}</td>
               <td>\${result.durationMs}ms</td>
-              <td>\${formatAngle(result.brakeDistanceUsed)}</td>
               <td><span class="status-cell status-\${result.status}">\${result.status}</span></td>
             </tr>
           \`).join('');
@@ -1110,7 +1274,7 @@ ${getAppDialogScript()}
           resultsCount.textContent = '0 turns';
           tbody.innerHTML = \`
             <tr>
-              <td colspan="7">
+              <td colspan="10">
                 <div class="empty-state">
                   <div class="empty-icon">📊</div>
                   <div>No turn results yet. Run a turn to see results here.</div>

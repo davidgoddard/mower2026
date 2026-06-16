@@ -20,11 +20,10 @@ export const SENSOR_POLL_INTERVAL_MS = 33;
 
 /**
  * Sensor controller polling interval in milliseconds
- * 20ms ≈ 50Hz update rate for the controller's internal sensor loop.
- * This keeps stop/control responsiveness comfortably sub-100ms while reducing
- * shared-process CPU and I2C pressure.
+ * 10ms = 100Hz update rate for the controller's internal sensor loop / IMU
+ * integration path. GNSS and motor feedback keep their own slower cadences.
  */
-export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 20;
+export const SENSOR_CONTROLLER_POLL_INTERVAL_MS = 10;
 
 /**
  * GNSS polling interval in milliseconds.
@@ -383,14 +382,14 @@ export const MOTOR_CONTROL_TICK_MS = 10;
  * `config/motor-calibration.json`; this constant is the fall-back default and
  * must match `DEFAULT_DECEL_PERCENT_PER_SECOND` in the ESP32 firmware.
  */
-export const MOTOR_DECEL_PERCENT_PER_SECOND = 250;
+export const MOTOR_DECEL_PERCENT_PER_SECOND = 150;
 
 /**
  * Default motor acceleration rate (%/s).
  *
  * Equivalent to the old 460 ms full-range ramp: 100/0.46 ≈ 217 %/s.
  */
-export const MOTOR_ACCEL_PERCENT_PER_SECOND = 217;
+export const MOTOR_ACCEL_PERCENT_PER_SECOND = 150;
 
 /**
  * Backward-compatible alias: milliseconds for a full 0→100 % ramp at the
@@ -414,13 +413,13 @@ export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 60;
  * Crawl speed factor used for small-angle turns
  * A lower-than-full-speed turn that still keeps enough momentum to avoid stalls.
  */
-export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.45;
+export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.5;
 
 /**
  * Learning rate for brake angle adaptation (0-1)
  * Higher = faster learning but less stable
  */
-export const TURN_LEARNING_RATE = 0.3;
+export const TURN_LEARNING_RATE = 0.18;
 
 /**
  * Per-update clamp on the absolute change to a short-drive brake distance (meters).

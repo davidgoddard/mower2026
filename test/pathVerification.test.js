@@ -264,6 +264,34 @@ test("buildVerificationPathPointsFromPlan preserves the chosen direction", () =>
   );
 });
 
+test("buildVerificationPathPointsFromPlan preserves the original join point even if the live pose moves near another vertex", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const planningPose = createPose(0.1, -0.2, createInternalHeading(0), "gnss");
+  const plan = buildVerificationApproachPlan(points, planningPose, TEST_PARAMETERS);
+  assert.ok(plan);
+  assert.equal(plan.nearestIndex, 0);
+
+  const movedPose = createPose(0.95, 0.05, createInternalHeading(0), "gnss");
+  const verificationPoints = buildVerificationPathPointsFromPlan(points, movedPose, plan, TEST_PARAMETERS);
+
+  assert.deepEqual(
+    verificationPoints.map((point) => [point.xMeters, point.yMeters]),
+    [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+      [0, 0],
+    ],
+  );
+});
+
 test("buildSegmentedBoundaryTargets fuses gentle wiggles within tolerance into a single chord", () => {
   const points = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -328,6 +356,35 @@ test("buildSegmentedBoundaryExecutionTargets resumes from the nearest target and
       [0, 1],
       [0, 0],
       [1, 0],
+    ],
+  );
+});
+
+test("buildSegmentedBoundaryExecutionTargets can preserve target order while still dropping points already under the mower", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const pose = createPose(0.02, 0.01, createInternalHeading(0), "gnss");
+  const parameters = {
+    ...TEST_PARAMETERS,
+    segmentedDriveSimplificationToleranceMeters: 0,
+    segmentedDriveMaxVertexTurnDeg: 0,
+    segmentedDriveMaxSegmentLengthMeters: 2,
+  };
+
+  const targets = buildSegmentedBoundaryExecutionTargets(points, parameters, pose, false);
+
+  assert.deepEqual(
+    targets.map((point) => [point.xMeters, point.yMeters]),
+    [
+      [1, 0],
+      [1, 1],
+      [0, 1],
+      [0, 0],
     ],
   );
 });

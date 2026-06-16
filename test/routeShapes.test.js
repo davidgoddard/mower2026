@@ -47,12 +47,16 @@ test("/api/turn/status returns 503 with error code when controller is missing", 
 test("/api/turn/status returns full envelope when controller and validation runner present", () => {
   const turnState = { phase: "idle" };
   const turnHistory = [];
+  const parameters = { smallAngleThresholdDeg: 60 };
+  const learningDiagnostics = { learningRate: 0.18 };
   const validationHistory = [{ requestedAngle: 30, achievedAngle: 28 }];
   const validationState = { running: false };
 
   const turnController = {
     getState: () => turnState,
     getTurnHistory: () => turnHistory,
+    getLearningParameters: () => parameters,
+    getLearningDiagnostics: () => learningDiagnostics,
   };
   const turnValidationRunner = {
     getHistory: () => validationHistory,
@@ -65,6 +69,8 @@ test("/api/turn/status returns full envelope when controller and validation runn
   const body = JSON.parse(route.body);
   assert.deepEqual(body.state, turnState);
   assert.deepEqual(body.history, turnHistory);
+  assert.deepEqual(body.parameters, parameters);
+  assert.deepEqual(body.learningDiagnostics, learningDiagnostics);
   assert.deepEqual(body.realPoseHistory, validationHistory);
   assert.deepEqual(body.realPoseValidation, validationState);
 });

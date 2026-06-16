@@ -226,17 +226,14 @@ describe("TurnController", () => {
       learningEnabled: true,
     });
 
-    // decel=250, crawl=0.45 → effectiveRampMs=180ms → half-ramp=90ms.
-    // Rate: 2°/100ms = 0.02 deg/ms → predictedCoast = 0.02 × 90 = 1.8°.
-    // At 8° progress: remaining = 2° > 1.8° → no brake.
-    // At 8.5° progress: remaining = 1.5° ≤ 1.8° → brake fires.
+    // Small turns now brake directly on learned IMU progress. The mock model
+    // returns a 0.5 fraction, so a 10° request brakes after 5° of progress.
     await new Promise(resolve => setTimeout(resolve, 10));
-    mockSensor._testSetHeading(createInternalHeading(8));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(8), 400);
+    mockSensor._testSetHeading(createInternalHeading(4.5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(4.5), 400);
     await new Promise(resolve => setTimeout(resolve, 5));
-    // 0.5° later in 25ms → rate = 0.5/25 = 0.02 deg/ms; remaining = 1.5° ≤ 1.8° → brake
-    mockSensor._testSetHeading(createInternalHeading(8.5));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(8.5), 425);
+    mockSensor._testSetHeading(createInternalHeading(5.0));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(5.0), 425);
 
     const result = await turnPromise;
 
@@ -481,6 +478,18 @@ describe("TurnLearningModel", () => {
 
     assert.equal(brakeValue > 0, true);
     assert.equal(brakeValue < 90, true);
+  });
+
+  it("returns small-angle brake progress from the learned fraction bucket", () => {
+    const mockLogger = createMockLogger();
+    const model = new TurnLearningModel({
+      logger: mockLogger,
+    });
+
+    const brakeAngle = model.getBrakeAngle(6, "ccw");
+    const brakeValue = unwrapRelativeAngle(brakeAngle);
+
+    assert.equal(brakeValue, 3);
   });
 
   it("maps large angles to nearest 10° bin", async () => {

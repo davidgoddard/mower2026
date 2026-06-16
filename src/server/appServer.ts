@@ -291,12 +291,15 @@ export function routeServerRequest(
         logNotFound: false,
       };
     }
+    const history = turnController.getTurnHistory().map(({ brakeDistanceUsed: _brakeDistanceUsed, ...result }) => result);
     return {
       statusCode: 200,
       contentType: "application/json; charset=utf-8",
       body: encodeJson({
         state: turnController.getState(),
-        history: turnController.getTurnHistory(),
+        history,
+        parameters: turnController.getLearningParameters(),
+        learningDiagnostics: turnController.getLearningDiagnostics(),
         realPoseHistory: turnValidationRunner?.getHistory() ?? [],
         realPoseValidation: turnValidationRunner?.getState() ?? null,
       }),
@@ -421,7 +424,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
    * from its constructor-injected dependencies. The route handlers all funnel
    * through this so retry is uniform.
    */
-  async function runSegmentedPerimeterFollow(boundaryPoints: PathPoint[]) {
+  async function runSegmentedPerimeterFollow(
+    boundaryPoints: PathPoint[],
+    options: { reanchorToStartPose?: boolean } = {},
+  ) {
     if (!driveController) {
       throw new Error("driveController_unavailable");
     }
@@ -451,6 +457,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         parameters: pathFollowingParameters,
         learningEnabled: true,
         startPose: poseFusion?.getCurrentPose(),
+        reanchorToStartPose: options.reanchorToStartPose ?? true,
         recentTargetSink,
       });
     } finally {
@@ -1217,7 +1224,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             throw new BadRequestError("path_too_short_for_verification");
           }
 
-          const result = await runSegmentedPerimeterFollow(verificationPoints);
+          const result = await runSegmentedPerimeterFollow(verificationPoints, { reanchorToStartPose: false });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             mode: "verify",
