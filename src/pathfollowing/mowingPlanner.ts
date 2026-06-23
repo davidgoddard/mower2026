@@ -55,6 +55,8 @@ const DEFAULT_STRIP_SPACING_METERS = 0.3;
 const DEFAULT_BLADE_WIDTH_METERS = 0.4;
 const EPSILON = 1e-9;
 const MOWN_STRIP_CROSSING_PENALTY = 10;
+const INITIAL_ENTRY_CORNER_CLEARANCE_METERS = 0.3;
+const SAME_OFFSET_ROUTED_OBSTACLE_PENALTY = 5;
 
 interface Vector {
   readonly x: number;
@@ -209,13 +211,21 @@ export function buildMowingInitialEntryPlan(
     .filter((obstacle) => obstacle.length >= 3);
   const current = { x: currentPosition.xMeters, y: currentPosition.yMeters };
   const signedArea = calculateSignedArea(areaPolygon);
+  const currentInsideArea = pointInPolygon(current, areaPolygon);
   let bestPlan: MowingInitialEntryPlan | null = null;
 
   for (let segmentIndex = 0; segmentIndex < areaPolygon.length; segmentIndex += 1) {
     const segmentStart = areaPolygon[segmentIndex];
     const segmentEnd = areaPolygon[(segmentIndex + 1) % areaPolygon.length];
-    const entry = nearestPointOnSegment(current, segmentStart, segmentEnd);
-    if (!isAreaEntryLineOfSight(current, entry, areaPolygon, obstacles)) {
+    const projection = nearestPointOnSegmentWithT(current, segmentStart, segmentEnd);
+    const entry = moveEntryPointAwayFromCorners(
+      projection.point,
+      projection.t,
+      segmentStart,
+      segmentEnd,
+      INITIAL_ENTRY_CORNER_CLEARANCE_METERS,
+    );
+    if (!isAreaEntryCandidateReachable(current, entry, areaPolygon, obstacles, currentInsideArea)) {
       continue;
     }
 
@@ -405,7 +415,7 @@ function sequenceStripsForMowing(
   while (remaining.length > 0 && currentPoint !== null) {
     const currentOffset = traversal[traversal.length - 1].strip.centerOffsetMeters;
     const candidates = selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
-    const bestStep = chooseBestTraversalStep(candidates, currentPoint, direction, obstacles, mownCrossings);
+    const bestStep = chooseBestTraversalStep(candidates, currentPoint, currentOffset, direction, obstacles, mownCrossings);
     const nextStrip = bestStep.strip;
     const nextOffsetDelta = nextStrip.centerOffsetMeters - currentOffset;
     if (lockedOffsetDirection === null && Math.abs(nextOffsetDelta) > EPSILON) {
@@ -460,7 +470,14 @@ function selectTraversalCandidates(
 ): MowingStrip[] {
   const sameOffset = remaining.filter((strip) => Math.abs(strip.centerOffsetMeters - currentOffset) <= EPSILON);
   if (sameOffset.length > 0) {
-    return sameOffset;
+    const otherOffsets = remaining.filter((strip) => Math.abs(strip.centerOffsetMeters - currentOffset) > EPSILON);
+    if (otherOffsets.length === 0) {
+      return sameOffset;
+    }
+
+    const nearestOtherOffsetDistance = Math.min(...otherOffsets.map((strip) => Math.abs(strip.centerOffsetMeters - currentOffset)));
+    const nearestOtherOffsets = otherOffsets.filter((strip) => Math.abs(Math.abs(strip.centerOffsetMeters - currentOffset) - nearestOtherOffsetDistance) <= EPSILON);
+    return [...sameOffset, ...nearestOtherOffsets];
   }
 
   const direction = lockedOffsetDirection ?? 1;
@@ -477,6 +494,7 @@ function selectTraversalCandidates(
 function chooseBestTraversalStep(
   candidates: MowingStrip[],
   currentPoint: Vector,
+  currentOffset: number,
   direction: Vector,
   obstacles: Vector[][],
   mownCrossings: ReadonlyMap<MowingStrip, number>,
@@ -487,7 +505,14 @@ function chooseBestTraversalStep(
   for (const candidate of candidates) {
     for (const reversed of [false, true] as const) {
       const candidateStart = stripTraversalStart(candidate, reversed);
-      const cost = connectorCost(currentPoint, candidateStart, obstacles, mownCrossings);
+      const cost = traversalCandidateCost(
+        currentPoint,
+        candidateStart,
+        currentOffset,
+        candidate.centerOffsetMeters,
+        obstacles,
+        mownCrossings,
+      );
       if (cost < bestCost - EPSILON || (Math.abs(cost - bestCost) <= EPSILON && (!bestStep || preferCandidate(candidate, reversed, bestStep.strip, bestStep.reversed, direction)))) {
         bestStep = { strip: candidate, reversed };
         bestCost = cost;
@@ -513,20 +538,49 @@ function reanchorTraversalToPreferredStart(
   }
 
   const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
-  let bestIndex = 0;
+  let bestTraversal = traversal;
   let bestDistance = Infinity;
 
-  for (let index = 0; index < traversal.length; index += 1) {
-    const step = traversal[index];
-    const start = stripTraversalStart(step.strip, step.reversed);
+  const candidateTraversals = buildPreferredStartTraversalCandidates(traversal);
+  for (const candidate of candidateTraversals) {
+    const firstStep = candidate[0];
+    if (!firstStep) {
+      continue;
+    }
+    const start = stripTraversalStart(firstStep.strip, firstStep.reversed);
     const currentDistance = distance(preferred, start);
     if (currentDistance < bestDistance - EPSILON) {
       bestDistance = currentDistance;
-      bestIndex = index;
+      bestTraversal = candidate;
     }
   }
 
-  return traversal.slice(bestIndex).concat(traversal.slice(0, bestIndex));
+  return bestTraversal;
+}
+
+function buildPreferredStartTraversalCandidates(traversal: TraversalStep[]): TraversalStep[][] {
+  if (traversal.length === 0) {
+    return [];
+  }
+
+  const forwardCandidates: TraversalStep[][] = [];
+  for (let index = 0; index < traversal.length; index += 1) {
+    forwardCandidates.push(traversal.slice(index).concat(traversal.slice(0, index)));
+  }
+
+  const reversedTraversal = traversal
+    .slice()
+    .reverse()
+    .map((step) => ({
+      ...step,
+      reversed: !step.reversed,
+    }));
+  const reverseCandidates: TraversalStep[][] = [];
+  for (let index = 0; index < reversedTraversal.length; index += 1) {
+    reverseCandidates.push(reversedTraversal.slice(index).concat(reversedTraversal.slice(0, index)));
+  }
+
+  return [...forwardCandidates, ...reverseCandidates];
 }
 
 function buildStripConnectors(
@@ -754,25 +808,66 @@ function pointToSegmentDistance(point: Vector, start: Vector, end: Vector): numb
 }
 
 function nearestPointOnSegment(point: Vector, start: Vector, end: Vector): Vector {
+  return nearestPointOnSegmentWithT(point, start, end).point;
+}
+
+function nearestPointOnSegmentWithT(point: Vector, start: Vector, end: Vector): { point: Vector; t: number } {
   const segment = { x: end.x - start.x, y: end.y - start.y };
   const lengthSquared = dot(segment, segment);
   if (lengthSquared <= EPSILON) {
-    return start;
+    return { point: start, t: 0 };
   }
 
   const t = Math.max(0, Math.min(1, dot({ x: point.x - start.x, y: point.y - start.y }, segment) / lengthSquared));
   return {
-    x: start.x + (segment.x * t),
-    y: start.y + (segment.y * t),
+    point: {
+      x: start.x + (segment.x * t),
+      y: start.y + (segment.y * t),
+    },
+    t,
   };
 }
 
-function isAreaEntryLineOfSight(current: Vector, entry: Vector, areaPolygon: Vector[], obstacles: Vector[][]): boolean {
+function moveEntryPointAwayFromCorners(
+  entry: Vector,
+  t: number,
+  start: Vector,
+  end: Vector,
+  clearanceMeters: number,
+): Vector {
+  const segmentLength = distance(start, end);
+  if (segmentLength <= (2 * clearanceMeters) || clearanceMeters <= EPSILON) {
+    return entry;
+  }
+
+  const minT = clearanceMeters / segmentLength;
+  const clampedT = Math.max(minT, Math.min(1 - minT, t));
+  if (Math.abs(clampedT - t) <= EPSILON) {
+    return entry;
+  }
+
+  return {
+    x: start.x + ((end.x - start.x) * clampedT),
+    y: start.y + ((end.y - start.y) * clampedT),
+  };
+}
+
+function isAreaEntryCandidateReachable(
+  current: Vector,
+  entry: Vector,
+  areaPolygon: Vector[],
+  obstacles: Vector[][],
+  currentInsideArea: boolean,
+): boolean {
   if (obstacles.some((obstacle) => segmentIntersectsPolygon(current, entry, obstacle))) {
     return false;
   }
 
-  if (areaApproachCrossesBoundary(current, entry, areaPolygon)) {
+  if (!currentInsideArea && areaApproachCrossesBoundary(current, entry, areaPolygon)) {
+    return false;
+  }
+
+  if (currentInsideArea && !pointInPolygon(midpoint(current, entry), areaPolygon)) {
     return false;
   }
 
@@ -892,6 +987,30 @@ function connectorCost(from: Vector, to: Vector, obstacles: Vector[][], mownCros
     total += distance(path[index - 1], path[index]);
   }
   total += mownCrossingPenalty(path, mownCrossings);
+  return total;
+}
+
+function traversalCandidateCost(
+  from: Vector,
+  to: Vector,
+  currentOffset: number,
+  candidateOffset: number,
+  obstacles: Vector[][],
+  mownCrossings: ReadonlyMap<MowingStrip, number>,
+): number {
+  const path = buildConnectorVectors(from, to, obstacles);
+  let total = 0;
+  for (let index = 1; index < path.length; index += 1) {
+    total += distance(path[index - 1], path[index]);
+  }
+  total += mownCrossingPenalty(path, mownCrossings);
+
+  const isSameOffset = Math.abs(candidateOffset - currentOffset) <= EPSILON;
+  const requiresObstacleRouting = path.length > 2;
+  if (isSameOffset && requiresObstacleRouting) {
+    total += SAME_OFFSET_ROUTED_OBSTACLE_PENALTY;
+  }
+
   return total;
 }
 

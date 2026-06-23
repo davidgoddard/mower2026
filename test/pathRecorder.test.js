@@ -119,3 +119,74 @@ test('path recorder recovers when the first captured point is from a stale origi
     [8.2, 5],
   ]);
 });
+
+test('path recorder saves raw obstacle recordings even when save processing is requested', async () => {
+  const { recorder, poseFusion, getSaved } = createRecorder({ saveProcessing: 'obstacle_safe_smoothed' });
+
+  recorder.startRecording('Obstacle 1');
+  poseFusion.emit('poseUpdate', pose(0, 0));
+  poseFusion.emit('poseUpdate', pose(1, 0.1));
+  poseFusion.emit('poseUpdate', pose(1.1, 0.9));
+  poseFusion.emit('poseUpdate', pose(0.2, 1));
+  poseFusion.emit('poseUpdate', pose(-0.1, 0.5));
+  poseFusion.emit('poseUpdate', pose(0, 0));
+
+  await recorder.stopAndSave();
+
+  assert.deepEqual(getSaved().points.map((point) => [point.xMeters, point.yMeters]), [
+    [0, 0],
+    [1, 0.1],
+    [1.1, 0.9],
+    [0.2, 1],
+    [-0.1, 0.5],
+    [0, 0],
+  ]);
+});
+
+test('path recorder saves raw area recordings even when save processing is requested', async () => {
+  const { recorder, poseFusion, getSaved } = createRecorder({ saveProcessing: 'area_safe_smoothed' });
+
+  recorder.startRecording('Area 1');
+  poseFusion.emit('poseUpdate', pose(0, 0));
+  poseFusion.emit('poseUpdate', pose(2, 0.2));
+  poseFusion.emit('poseUpdate', pose(2.1, 1.8));
+  poseFusion.emit('poseUpdate', pose(0.3, 2));
+  poseFusion.emit('poseUpdate', pose(-0.1, 1));
+  poseFusion.emit('poseUpdate', pose(0, 0));
+
+  await recorder.stopAndSave();
+
+  assert.deepEqual(getSaved().points.map((point) => [point.xMeters, point.yMeters]), [
+    [0, 0],
+    [2, 0.2],
+    [2.1, 1.8],
+    [0.3, 2],
+    [-0.1, 1],
+    [0, 0],
+  ]);
+});
+
+test('path recorder preserves stepped mowing-area edges when using area save processing', async () => {
+  const { recorder, poseFusion, getSaved } = createRecorder({ saveProcessing: 'area_safe_smoothed' });
+
+  recorder.startRecording('Area stepped');
+  poseFusion.emit('poseUpdate', pose(0, 0));
+  poseFusion.emit('poseUpdate', pose(0, 4));
+  poseFusion.emit('poseUpdate', pose(3, 4));
+  poseFusion.emit('poseUpdate', pose(3, 1));
+  poseFusion.emit('poseUpdate', pose(5, 1));
+  poseFusion.emit('poseUpdate', pose(5, 3));
+  poseFusion.emit('poseUpdate', pose(8, 3));
+  poseFusion.emit('poseUpdate', pose(8, 0));
+  poseFusion.emit('poseUpdate', pose(0, 0));
+
+  await recorder.stopAndSave();
+
+  const saved = getSaved().points;
+  assert.equal(saved.length, 9);
+  assert.equal(saved[0].xMeters, saved.at(-1).xMeters);
+  assert.equal(saved[0].yMeters, saved.at(-1).yMeters);
+  assert.equal(saved.some((point) => point.yMeters < 0.5), true);
+  assert.equal(saved.some((point) => point.xMeters > 4.5 && point.yMeters < 1.5), true);
+  assert.equal(saved.some((point) => point.xMeters > 4.5 && point.yMeters > 2.5), true);
+});

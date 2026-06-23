@@ -19,11 +19,30 @@ export interface SegmentedBoundaryExecutionOptions {
   readonly parameters?: PathFollowingParameters;
   readonly startPose?: Pose;
   /**
+   * When true, use the caller-supplied points directly instead of applying the
+   * segmented-drive simplifier/resampler first. Obstacle paths use this because
+   * they are already saved in a smoothed safe shape and re-simplifying them
+   * can recreate inside-cutting chords.
+   */
+  readonly useRawPoints?: boolean;
+  /**
    * When false, preserve the caller-supplied target order instead of rotating
    * the path to the nearest live pose. This is useful when an earlier planning
    * step has already chosen the correct join point and traversal direction.
    */
   readonly reanchorToStartPose?: boolean;
+  /**
+   * When true, retain the first planned target even if the mower is already
+   * sitting on it. Verification loops use this so "start at join point, then
+   * come back to it" cannot collapse into an immediate completion.
+   */
+  readonly preserveFirstTargetAtPose?: boolean;
+  /**
+   * When true, always drive to the next required target in sequence instead of
+   * choosing a forward look-ahead target. Obstacle perimeters use this so the
+   * mower does not cut chords across the inside of the shape.
+   */
+  readonly exactSequentialTargets?: boolean;
   /**
    * Optional sink for recording each target the executor has just completed.
    * The retry manager uses this trail to retrace recent targets backward when
@@ -46,6 +65,15 @@ interface Point2 {
   readonly yMeters: number;
 }
 
+interface PolylineProjection {
+  readonly segmentStartIndex: number;
+  readonly distanceAlongPathMeters: number;
+  readonly distanceToPathMeters: number;
+}
+
+const PROGRESS_LOOKAHEAD_MIN_METERS = 0.2;
+const TARGET_PASS_MARGIN_MIN_METERS = 0.05;
+
 export function buildSegmentedBoundaryTargets(
   points: PathPoint[],
   parameters: PathFollowingParameters = DEFAULT_PATH_FOLLOWING_PARAMETERS,
@@ -65,8 +93,10 @@ export function buildSegmentedBoundaryExecutionTargets(
   parameters: PathFollowingParameters = DEFAULT_PATH_FOLLOWING_PARAMETERS,
   startPose?: Pose,
   reanchorToStartPose = true,
+  preserveFirstTargetAtPose = false,
+  useRawPoints = false,
 ): PathPoint[] {
-  const targets = buildSegmentedBoundaryTargets(points, parameters);
+  const targets = useRawPoints ? points.slice() : buildSegmentedBoundaryTargets(points, parameters);
   if (!startPose || targets.length <= 1) {
     return targets;
   }
@@ -74,6 +104,9 @@ export function buildSegmentedBoundaryExecutionTargets(
   const reanchored = reanchorToStartPose
     ? rotateTargetsToNearestPose(targets, startPose)
     : targets;
+  if (preserveFirstTargetAtPose) {
+    return reanchored;
+  }
   return dropTargetsAlreadyAtPose(
     reanchored,
     startPose,
@@ -92,6 +125,8 @@ export async function executeSegmentedBoundaryPath(
     parameters,
     options.startPose,
     options.reanchorToStartPose ?? true,
+    options.preserveFirstTargetAtPose ?? false,
+    options.useRawPoints ?? false,
   );
   let completedSegments = 0;
   let distanceTraveled = 0;
@@ -110,7 +145,11 @@ export async function executeSegmentedBoundaryPath(
     };
   }
 
-  for (let index = 0; index < targets.length; index += 1) {
+  let currentPose = options.startPose ?? driveController.getCurrentPose();
+  let currentIndex = 0;
+  let preserveCurrentTargetAtPose = options.preserveFirstTargetAtPose ?? false;
+
+  while (currentIndex < targets.length) {
     if (systemStop.isStopped()) {
       return {
         algorithm: "segmented_drive",
@@ -124,11 +163,32 @@ export async function executeSegmentedBoundaryPath(
         completedSegments,
       };
     }
-
-    const target = targets[index];
-    if (index > 0) {
-      distanceTraveled += distance(targets[index - 1], target);
+    currentIndex = advancePassedTargets(
+      targets,
+      currentPose,
+      currentIndex,
+      parameters,
+      preserveCurrentTargetAtPose,
+    );
+    preserveCurrentTargetAtPose = false;
+    if (currentIndex >= targets.length) {
+      break;
     }
+
+    const targetIndex = selectSegmentedBoundaryTargetIndex(
+      targets,
+      currentIndex,
+      parameters,
+      options.exactSequentialTargets ?? false,
+    );
+    if (targetIndex > currentIndex) {
+      for (let index = Math.max(1, currentIndex); index <= targetIndex; index += 1) {
+        distanceTraveled += distance(targets[index - 1], targets[index]);
+      }
+    }
+    currentIndex = targetIndex;
+
+    const target = targets[currentIndex];
     const driveResult = await driveController.executeDrive({
       targetPosition: createPosition(target.xMeters, target.yMeters),
       learningEnabled: options.learningEnabled ?? true,
@@ -153,6 +213,7 @@ export async function executeSegmentedBoundaryPath(
 
     completedSegments += 1;
     options.recentTargetSink?.recordCompletedTarget(target);
+    currentPose = driveController.getCurrentPose();
     if (Math.abs(unwrapMeters(driveResult.maxCteMeters)) > parameters.segmentedDriveMaxCteMeters) {
       systemStop.requestStop("segmented-boundary", "segmented_boundary_cte_exceeded");
       return {
@@ -168,6 +229,8 @@ export async function executeSegmentedBoundaryPath(
         failedSegment: driveResult,
       };
     }
+
+    currentIndex = advancePassedTargets(targets, currentPose, currentIndex, parameters);
   }
 
   return {
@@ -180,6 +243,68 @@ export async function executeSegmentedBoundaryPath(
     segmentCount: targets.length,
     completedSegments,
   };
+}
+
+export function selectSegmentedBoundaryTargetIndex(
+  points: PathPoint[],
+  startIndex: number,
+  parameters: PathFollowingParameters = DEFAULT_PATH_FOLLOWING_PARAMETERS,
+  exactSequentialTargets = false,
+): number {
+  if (points.length === 0) {
+    return -1;
+  }
+
+  const clampedStartIndex = Math.max(0, Math.min(startIndex, points.length - 1));
+  if (exactSequentialTargets || clampedStartIndex >= points.length - 1) {
+    return clampedStartIndex;
+  }
+
+  const cumulativeDistances = buildCumulativeDistances(points);
+  const lookaheadMeters = Math.min(
+    parameters.segmentedDriveMaxSegmentLengthMeters,
+    Math.max(parameters.segmentedDriveMinSegmentLengthMeters, PROGRESS_LOOKAHEAD_MIN_METERS),
+  );
+  const targetDistance = cumulativeDistances[clampedStartIndex] + lookaheadMeters;
+
+  for (let index = clampedStartIndex; index < points.length; index += 1) {
+    if (cumulativeDistances[index] >= targetDistance) {
+      return index;
+    }
+  }
+
+  return points.length - 1;
+}
+
+export function advancePassedTargets(
+  points: PathPoint[],
+  pose: Pose,
+  startIndex: number,
+  parameters: PathFollowingParameters = DEFAULT_PATH_FOLLOWING_PARAMETERS,
+  preserveCurrentTargetAtPose = false,
+  allowClosedLoopStartProgression = false,
+): number {
+  if (points.length === 0) {
+    return 0;
+  }
+
+  const passMarginMeters = Math.max(
+    TARGET_PASS_MARGIN_MIN_METERS,
+    parameters.segmentedDriveMinSegmentLengthMeters,
+  );
+  let index = Math.max(0, startIndex);
+
+  while (index < points.length) {
+    if (preserveCurrentTargetAtPose) {
+      break;
+    }
+    if (!hasPassedTarget(points, pose, index, passMarginMeters, allowClosedLoopStartProgression)) {
+      break;
+    }
+    index += 1;
+  }
+
+  return index;
 }
 
 function removeTinySegments(points: PathPoint[], minDistanceMeters: number): PathPoint[] {
@@ -364,24 +489,143 @@ function dropTargetsAlreadyAtPose(
   return points.slice(firstTargetIndex);
 }
 
+function projectPoseOntoRemainingPath(
+  points: PathPoint[],
+  pose: Pose,
+  startIndex: number,
+): PolylineProjection | null {
+  if (points.length === 0 || startIndex >= points.length) {
+    return null;
+  }
+
+  const clampedStartIndex = Math.max(0, Math.min(startIndex, points.length - 1));
+  const cumulativeDistances = buildCumulativeDistances(points);
+  const posePoint = {
+    xMeters: unwrapMeters(pose.position.xMeters),
+    yMeters: unwrapMeters(pose.position.yMeters),
+  };
+
+  if (clampedStartIndex >= points.length - 1) {
+    return {
+      segmentStartIndex: clampedStartIndex,
+      distanceAlongPathMeters: cumulativeDistances[clampedStartIndex],
+      distanceToPathMeters: distance(posePoint, points[clampedStartIndex]),
+    };
+  }
+
+  let best: PolylineProjection | null = null;
+  for (let index = clampedStartIndex; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    const projection = projectPointOntoSegment(posePoint, start, end);
+    const distanceAlongPathMeters = cumulativeDistances[index] + (projection.t * distance(start, end));
+    if (
+      best === null ||
+      projection.distanceToSegmentMeters < best.distanceToPathMeters
+    ) {
+      best = {
+        segmentStartIndex: index,
+        distanceAlongPathMeters,
+        distanceToPathMeters: projection.distanceToSegmentMeters,
+      };
+    }
+  }
+
+  return best;
+}
+
+function buildCumulativeDistances(points: PathPoint[]): number[] {
+  const cumulative = new Array<number>(points.length).fill(0);
+  for (let index = 1; index < points.length; index += 1) {
+    cumulative[index] = cumulative[index - 1] + distance(points[index - 1], points[index]);
+  }
+  return cumulative;
+}
+
+function hasPassedTarget(
+  points: PathPoint[],
+  pose: Pose,
+  targetIndex: number,
+  passMarginMeters: number,
+  allowClosedLoopStartProgression = false,
+): boolean {
+  const posePoint = {
+    xMeters: unwrapMeters(pose.position.xMeters),
+    yMeters: unwrapMeters(pose.position.yMeters),
+  };
+  const target = points[targetIndex];
+  if (distance(posePoint, target) <= passMarginMeters) {
+    return true;
+  }
+
+  if (targetIndex === 0) {
+    if (allowClosedLoopStartProgression && points.length >= 3) {
+      const next = points[1];
+      const segmentDx = next.xMeters - target.xMeters;
+      const segmentDy = next.yMeters - target.yMeters;
+      const segmentLength = Math.hypot(segmentDx, segmentDy);
+      if (segmentLength > 1e-9) {
+        const unitX = segmentDx / segmentLength;
+        const unitY = segmentDy / segmentLength;
+        const poseDx = posePoint.xMeters - target.xMeters;
+        const poseDy = posePoint.yMeters - target.yMeters;
+        const alongMeters = (poseDx * unitX) + (poseDy * unitY);
+        const crossMeters = Math.abs((poseDx * -unitY) + (poseDy * unitX));
+        if (alongMeters >= passMarginMeters && crossMeters <= (passMarginMeters * 2)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  const previous = points[targetIndex - 1];
+  const segmentDx = target.xMeters - previous.xMeters;
+  const segmentDy = target.yMeters - previous.yMeters;
+  const segmentLength = Math.hypot(segmentDx, segmentDy);
+  if (segmentLength <= 1e-9) {
+    return false;
+  }
+
+  const unitX = segmentDx / segmentLength;
+  const unitY = segmentDy / segmentLength;
+  const poseDx = posePoint.xMeters - previous.xMeters;
+  const poseDy = posePoint.yMeters - previous.yMeters;
+  const alongMeters = (poseDx * unitX) + (poseDy * unitY);
+
+  return alongMeters >= segmentLength + passMarginMeters;
+}
+
 function areSamePoint(a: Point2, b: Point2): boolean {
   return Math.hypot(a.xMeters - b.xMeters, a.yMeters - b.yMeters) <= 1e-9;
 }
 
-function pointToSegmentDistance(point: Point2, start: Point2, end: Point2): number {
+function projectPointOntoSegment(point: Point2, start: Point2, end: Point2): { t: number; distanceToSegmentMeters: number } {
   const dx = end.xMeters - start.xMeters;
   const dy = end.yMeters - start.yMeters;
   const lengthSquared = (dx * dx) + (dy * dy);
   if (lengthSquared <= 0) {
-    return distance(point, start);
+    return {
+      t: 0,
+      distanceToSegmentMeters: distance(point, start),
+    };
   }
 
-  const t = Math.max(0, Math.min(1, (((point.xMeters - start.xMeters) * dx) + ((point.yMeters - start.yMeters) * dy)) / lengthSquared));
+  const unclampedT = (((point.xMeters - start.xMeters) * dx) + ((point.yMeters - start.yMeters) * dy)) / lengthSquared;
+  const t = Math.max(0, Math.min(1, unclampedT));
   const projected = {
     xMeters: start.xMeters + (dx * t),
     yMeters: start.yMeters + (dy * t),
   };
-  return distance(point, projected);
+
+  return {
+    t,
+    distanceToSegmentMeters: distance(point, projected),
+  };
+}
+
+function pointToSegmentDistance(point: Point2, start: Point2, end: Point2): number {
+  return projectPointOntoSegment(point, start, end).distanceToSegmentMeters;
 }
 
 function distance(a: Point2, b: Point2): number {

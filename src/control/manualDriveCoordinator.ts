@@ -12,6 +12,7 @@ import {
   MANUAL_DRIVE_OUTPUT_QUANTIZATION_PERCENT,
   MANUAL_DRIVE_RAMP_DOWN_TIME_MS,
   MANUAL_DRIVE_RAMP_UP_TIME_MS,
+  MANUAL_DRIVE_SNAPSHOT_STALE_AFTER_MS,
 } from "../constants.js";
 
 interface ManualDriveCoordinatorOptions {
@@ -118,6 +119,7 @@ export class ManualDriveCoordinator {
         ...snapshot,
         lastUpdateMillis: snapshot.lastUpdateMillis > 0 ? snapshot.lastUpdateMillis : this.nowMillis(),
       };
+      this.clearGlobalStopFromManualInput(this.snapshot);
       if (!snapshot.connected) {
         if (this.manualDriveEnabled && this.controllerLostSinceMillis === null) {
           this.controllerLostSinceMillis = this.nowMillis();
@@ -214,6 +216,7 @@ export class ManualDriveCoordinator {
 
         const snapshotAgeMillis = this.nowMillis() - this.snapshot.lastUpdateMillis;
         const snapshotStaleAfterMillis = Math.max(
+          MANUAL_DRIVE_SNAPSHOT_STALE_AFTER_MS,
           this.commandRefreshIntervalMs * 2,
           this.controlIntervalMs * 2,
         );
@@ -291,14 +294,38 @@ export class ManualDriveCoordinator {
   }
 
   private shouldSendManualWheelCommand(left: number, right: number): boolean {
+    const elapsedSinceLastCommand =
+      this.lastCommandSentMillis === null ? Number.POSITIVE_INFINITY : this.nowMillis() - this.lastCommandSentMillis;
     if (
       !this.drivingActive ||
       this.lastCommandedLeftWheelOutputPercent !== left ||
-      this.lastCommandedRightWheelOutputPercent !== right
+      this.lastCommandedRightWheelOutputPercent !== right ||
+      elapsedSinceLastCommand >= this.commandRefreshIntervalMs
     ) {
       return true;
     }
     return false;
+  }
+
+  private clearGlobalStopFromManualInput(snapshot: HidGameControllerSnapshot): void {
+    if (!this.manualDriveEnabled || !snapshot.connected || !systemStop.isStopped()) {
+      return;
+    }
+
+    const hasPressedButton = Object.values(snapshot.buttons).some(Boolean);
+    const hasDriveDemand = Math.abs(snapshot.speed) > 0.01 || Math.abs(snapshot.angleDegrees) > 1;
+    if (!hasPressedButton && !hasDriveDemand) {
+      return;
+    }
+
+    systemStop.clearStop("manual-drive-hid-command");
+    this.logger.info("control.manual_drive.cleared_system_stop_from_hid", {
+      speed: snapshot.speed,
+      angleDegrees: snapshot.angleDegrees,
+      pressedButtons: Object.entries(snapshot.buttons)
+        .filter(([, pressed]) => pressed)
+        .map(([label]) => label),
+    });
   }
 
   private async sendManualWheelCommand(left: number, right: number): Promise<void> {

@@ -21,6 +21,7 @@ import {
 } from "../geometry/headingTypes.js";
 import {
   Position,
+  Pose,
   createPosition,
   createMeters,
   unwrapMeters,
@@ -56,6 +57,8 @@ import {
 } from "../constants.js";
 import { systemStop } from "./systemStop.js";
 import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
+
+const DRIVE_SHORT_HOP_SKIP_TURN_DISTANCE_METERS = 0.15;
 
 export interface DriveControllerOptions {
   sensorController: SensorController;
@@ -167,17 +170,32 @@ export class DriveController {
         //    line — useful when retracing recent targets after a grass jam without
         //    pivoting through the obstruction.
         const driveDirectionSign: 1 | -1 = request.driveDirectionSign ?? 1;
+        const targetDistanceMeters = unwrapMeters(distanceBetween(
+          this.driveStartPosition,
+          request.targetPosition,
+        ));
         const angleToTarget = angleTo(this.driveStartPosition, request.targetPosition);
         const desiredHeading: InternalHeading = driveDirectionSign === 1
           ? angleToTarget
           : addRelativeAngle(angleToTarget, createRelativeAngle(180));
         const headingError = headingDifference(this.driveStartHeading, desiredHeading);
         const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingError));
+        const shouldSkipInitialTurn = !request.alwaysTurnToFaceTarget
+          && targetDistanceMeters <= DRIVE_SHORT_HOP_SKIP_TURN_DISTANCE_METERS;
+
+        if (shouldSkipInitialTurn) {
+          this.logger.info("drive.short_hop_skip_turn", {
+            targetDistanceMeters,
+            headingErrorDeg,
+            driveDirectionSign,
+          });
+        }
 
         // 3. Turn to face the desired heading — always when alwaysTurnToFaceTarget
         //    is set (e.g. short boundary segments), otherwise only when error
         //    exceeds the threshold.
-        if (request.alwaysTurnToFaceTarget || headingErrorDeg > DRIVE_INITIAL_TURN_THRESHOLD_DEG) {
+        if (!shouldSkipInitialTurn
+          && (request.alwaysTurnToFaceTarget || headingErrorDeg > DRIVE_INITIAL_TURN_THRESHOLD_DEG)) {
           this.status = "turning";
           this.logger.info("drive.turning", {
             headingError: unwrapRelativeAngle(headingError),
@@ -249,7 +267,12 @@ export class DriveController {
    */
   async stopCurrentDrive(): Promise<void> {
     this.stopRequested = true;
-    await this.turnController.stopCurrentTurn();
+    const turnController = this.turnController as unknown as {
+      stopCurrentTurn?: () => Promise<void>;
+    };
+    if (typeof turnController.stopCurrentTurn === "function") {
+      await turnController.stopCurrentTurn();
+    }
     await this.lineDriveController.stopCurrentDrive();
   }
 
@@ -265,6 +288,10 @@ export class DriveController {
       alwaysTurnToFaceTarget: true,
       learningEnabled: false,
     });
+  }
+
+  getCurrentPose(): Pose {
+    return this.poseFusion.getCurrentPose();
   }
 
   /**

@@ -71,7 +71,7 @@ async function waitFor(predicate, timeoutMs = 100) {
   }
 }
 
-test('manual drive does not resend an unchanged held moving command', async () => {
+test('manual drive periodically refreshes an unchanged held moving command', async () => {
   systemStop.clearStop('manual-drive-test');
   let now = 0;
   const hidController = new FakeHidController();
@@ -94,12 +94,13 @@ test('manual drive does not resend an unchanged held moving command', async () =
   hidController.emit('update', createSnapshot());
   hidController.emit('right-top');
 
-  await waitFor(() => commands.length >= 1);
+  await waitFor(() => commands.filter((command) => command.length >= 2 && typeof command[0] === 'number').length >= 2);
   await coordinator.stop();
 
   const wheelCommands = commands.filter((command) => command.length >= 2 && typeof command[0] === 'number');
-  assert.equal(wheelCommands.length, 1);
+  assert.equal(wheelCommands.length >= 2, true);
   assert.deepEqual(wheelCommands[0], [0.6, 0.6, { rampUpTimeMs: 120, rampDownTimeMs: 120 }]);
+  assert.deepEqual(wheelCommands[1], [0.6, 0.6, { rampUpTimeMs: 120, rampDownTimeMs: 120 }]);
 });
 
 test('manual drive coalesces tiny held-stick output jitter', async () => {
@@ -287,4 +288,35 @@ test('manual drive sends a normal zero command when the stick centres', async ()
     wheelCommands.find((command) => command[0] === 0 && command[1] === 0),
     [0, 0, { rampUpTimeMs: 120, rampDownTimeMs: 120 }],
   );
+});
+
+test('manual drive clears a latched global stop on live HID drive input', async () => {
+  systemStop.clearStop('manual-drive-test');
+  let now = 0;
+  const hidController = new FakeHidController();
+  const { controller: sensorController } = createSensorController();
+  const coordinator = new ManualDriveCoordinator({
+    logger: createLogger(),
+    sensorController,
+    hidController,
+    controlIntervalMs: 50,
+    commandRefreshIntervalMs: 150,
+    nowMillis: () => now,
+    sleep: async (delayMs) => {
+      now += delayMs;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+  });
+
+  coordinator.start();
+  hidController.emit('update', createSnapshot({ speed: 0.6, lastUpdateMillis: now }));
+  hidController.emit('right-top');
+  systemStop.requestStop('test', 'stall');
+  assert.equal(systemStop.isStopped(), true);
+
+  hidController.emit('update', createSnapshot({ speed: 0.6, lastUpdateMillis: now + 1 }));
+  await waitFor(() => systemStop.isStopped() === false);
+
+  await coordinator.stop();
+  assert.equal(systemStop.isStopped(), false);
 });

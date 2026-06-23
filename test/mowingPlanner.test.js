@@ -237,6 +237,38 @@ test("buildMowingPlan uses configured mowing standoff for same-boundary connecto
   );
 });
 
+test("buildMowingPlan prefers adjacent strips over routed same-offset continuation across an obstacle", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 4, capturedAt: 3 },
+    { xMeters: 0, yMeters: 4, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const obstacle = [
+    { xMeters: 1.6, yMeters: 1.4, capturedAt: 6 },
+    { xMeters: 2.4, yMeters: 1.4, capturedAt: 7 },
+    { xMeters: 2.4, yMeters: 2.6, capturedAt: 8 },
+    { xMeters: 1.6, yMeters: 2.6, capturedAt: 9 },
+    { xMeters: 1.6, yMeters: 1.4, capturedAt: 10 },
+  ];
+
+  const plan = buildMowingPlan(area, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.4,
+    obstacles: [obstacle],
+  });
+
+  for (let index = 0; index < plan.strips.length - 1; index += 1) {
+    const current = plan.strips[index];
+    const next = plan.strips[index + 1];
+    assert.notEqual(
+      Math.abs(current.centerOffsetMeters - next.centerOffsetMeters) <= 1e-9,
+      true,
+    );
+  }
+});
+
 test("buildMowingPlan reanchors strip order around the preferred perimeter start point", () => {
   const plan = buildMowingPlan(square, {
     headingDeg: 90,
@@ -262,6 +294,48 @@ test("buildMowingPlan reanchors strip order around the preferred perimeter start
   assert.equal(plan.connectors.length, 2);
 });
 
+test("buildMowingPlan reanchors to the nearest strip end when that end is closer than the stored strip start", () => {
+  const plan = buildMowingPlan(square, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.5,
+    preferredStartPoint: { xMeters: 0.45, yMeters: 1.02 },
+  });
+
+  assert.equal(plan.stripCount, 3);
+  assert.deepEqual(
+    [
+      Number(plan.strips[0].start.xMeters.toFixed(2)),
+      Number(plan.strips[0].start.yMeters.toFixed(2)),
+      Number(plan.strips[0].end.xMeters.toFixed(2)),
+      Number(plan.strips[0].end.yMeters.toFixed(2)),
+      plan.strips[0].traversalReversed,
+    ],
+    [0.5, 0, 0.5, 1, true],
+  );
+});
+
+test("buildMowingPlan reanchors with a consistent traversal after choosing the opposite strip end", () => {
+  const plan = buildMowingPlan(square, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.5,
+    preferredStartPoint: { xMeters: 0.45, yMeters: 1.02 },
+  });
+
+  assert.equal(plan.stripCount, 3);
+  assert.equal(plan.strips[0].traversalReversed, true);
+  assert.equal(plan.strips[1].traversalReversed, false);
+  assert.equal(plan.strips[2].traversalReversed, true);
+  assert.deepEqual(
+    [
+      Number(plan.strips[1].start.xMeters.toFixed(2)),
+      Number(plan.strips[1].start.yMeters.toFixed(2)),
+      Number(plan.strips[1].end.xMeters.toFixed(2)),
+      Number(plan.strips[1].end.yMeters.toFixed(2)),
+    ],
+    [0, 0, 0, 1],
+  );
+});
+
 test("buildMowingInitialEntryPlan selects nearest projected area perimeter point", () => {
   const area = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -284,6 +358,63 @@ test("buildMowingInitialEntryPlan selects nearest projected area perimeter point
       Number(plan.distanceMeters.toFixed(2)),
     ],
     [2, 0, 2, 0.15, 1],
+  );
+});
+
+test("buildMowingInitialEntryPlan shifts entry away from perimeter corners", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 4, capturedAt: 3 },
+    { xMeters: 0, yMeters: 4, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+
+  const plan = buildMowingInitialEntryPlan(area, { xMeters: 0.05, yMeters: 0.2 });
+
+  assert.ok(plan);
+  assert.equal(plan.segmentIndex, 3);
+  assert.equal(Number(plan.entryPoint.yMeters.toFixed(2)) >= 0.3, true);
+  assert.equal(Number(plan.entryPoint.yMeters.toFixed(2)) <= 3.7, true);
+});
+
+test("buildMowingInitialEntryPlan allows inside-area starts to pick a stable nearby edge join", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 6, yMeters: 0, capturedAt: 2 },
+    { xMeters: 6, yMeters: 4, capturedAt: 3 },
+    { xMeters: 0, yMeters: 4, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+
+  const plan = buildMowingInitialEntryPlan(area, { xMeters: 3, yMeters: 0.2 });
+
+  assert.ok(plan);
+  assert.equal(plan.segmentIndex, 0);
+  assert.equal(Number(plan.entryPoint.xMeters.toFixed(2)) >= 0.3, true);
+  assert.equal(Number(plan.entryPoint.xMeters.toFixed(2)) <= 5.7, true);
+  assert.equal(Number(plan.entryPoint.yMeters.toFixed(2)), 0);
+});
+
+test("buildMowingInitialEntryPlan allows outside-area starts to select a direct boundary join", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 3, capturedAt: 3 },
+    { xMeters: 0, yMeters: 3, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+
+  const plan = buildMowingInitialEntryPlan(area, { xMeters: 4.8, yMeters: 1.2 });
+
+  assert.ok(plan);
+  assert.equal(plan.segmentIndex, 1);
+  assert.deepEqual(
+    [
+      Number(plan.entryPoint.xMeters.toFixed(2)),
+      Number(plan.entryPoint.yMeters.toFixed(2)),
+    ],
+    [4, 1.2],
   );
 });
 

@@ -190,6 +190,32 @@ export function buildPerimeterDrivePathPoints(
   return buildPerimeterPathPointsFromPlan(points, plan, parameters);
 }
 
+export function buildPerimeterFollowPlan(
+  points: PathPoint[],
+  pose: Pose,
+  pathDirection: "forward" | "reverse",
+  parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
+): VerificationApproachPlan | null {
+  const normalized = normalizePathPoints(points, parameters);
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const nearestIndex = findNearestPathPointIndex(normalized, pose);
+  if (nearestIndex < 0) {
+    return null;
+  }
+
+  const { approachAlignmentErrorDeg: _unused, ...plan } = buildDirectJoinPlanForDirection(
+    normalized,
+    pose,
+    nearestIndex,
+    pathDirection,
+    parameters,
+  );
+  return plan;
+}
+
 export function buildPerimeterPathPointsFromPlan(
   points: PathPoint[],
   plan: VerificationApproachPlan,

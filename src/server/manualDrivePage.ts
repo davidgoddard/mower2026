@@ -785,16 +785,48 @@ ${getAppDialogScript()}
       return 'E-W';
     }
 
+    const MOWING_HEADING_STORAGE_KEY = 'manualDrivePage.mowingHeadingDeg';
+    const MOWING_PREVIEW_DEBOUNCE_MS = 100;
+
+    function loadStoredMowingHeading() {
+      try {
+        return window.localStorage.getItem(MOWING_HEADING_STORAGE_KEY);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function storeMowingHeading(headingDeg) {
+      try {
+        window.localStorage.setItem(MOWING_HEADING_STORAGE_KEY, String(Math.round(normalizeAxisHeading(headingDeg))));
+      } catch (_error) {
+        // Ignore storage failures; the page still works without persistence.
+      }
+    }
+
     function updateHeadingLabel() {
       const heading = normalizeAxisHeading(mowingHeadingInput.value);
       mowingHeadingValue.textContent = \`\${Math.round(heading)}° \${describeHeading(heading)}\`;
     }
 
+    let mowingPlanPreviewDebounceTimer = null;
+
+    function requestMowingPlanPreviewDebounced() {
+      if (mowingPlanPreviewDebounceTimer !== null) {
+        window.clearTimeout(mowingPlanPreviewDebounceTimer);
+      }
+      mowingPlanPreviewDebounceTimer = window.setTimeout(() => {
+        mowingPlanPreviewDebounceTimer = null;
+        requestMowingPlanPreview();
+      }, MOWING_PREVIEW_DEBOUNCE_MS);
+    }
+
     function setMowingHeading(headingDeg) {
       const heading = Math.round(normalizeAxisHeading(headingDeg));
       mowingHeadingInput.value = String(heading);
+      storeMowingHeading(heading);
       updateHeadingLabel();
-      requestMowingPlanPreview();
+      requestMowingPlanPreviewDebounced();
     }
 
     // Position history tracking
@@ -1303,6 +1335,10 @@ ${getAppDialogScript()}
     }
 
     async function requestMowingPlanPreview() {
+      if (mowingPlanPreviewDebounceTimer !== null) {
+        window.clearTimeout(mowingPlanPreviewDebounceTimer);
+        mowingPlanPreviewDebounceTimer = null;
+      }
       const areaName = mowingPlanAreaSelect.value;
       const headingDeg = normalizeAxisHeading(mowingHeadingInput.value);
       const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
@@ -1799,8 +1835,9 @@ ${getAppDialogScript()}
     });
 
     mowingHeadingInput.addEventListener('input', () => {
+      storeMowingHeading(mowingHeadingInput.value);
       updateHeadingLabel();
-      requestMowingPlanPreview();
+      requestMowingPlanPreviewDebounced();
     });
 
     stripSpacingInput.addEventListener('change', () => {
@@ -1994,6 +2031,11 @@ ${getAppDialogScript()}
       } catch (error) {
         console.error('Failed to update status:', error);
       }
+    }
+
+    const storedMowingHeading = loadStoredMowingHeading();
+    if (storedMowingHeading !== null) {
+      mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(storedMowingHeading)));
     }
 
     updateRecordingUi();

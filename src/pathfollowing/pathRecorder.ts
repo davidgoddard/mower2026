@@ -85,8 +85,10 @@ export class PathRecorder implements IPathRecorder {
       skippedImplausibleJumpCount: this.skippedImplausibleJumpCount,
     });
 
+    const pointsToSave = this.currentPath.slice();
+
     // Save path
-    await this.deps.pathStore.savePath(this.currentPathName, this.currentPath);
+    await this.deps.pathStore.savePath(this.currentPathName, pointsToSave);
 
     // Load and return the saved path
     const savedPath = await this.deps.pathStore.loadPath(this.currentPathName);
@@ -94,6 +96,7 @@ export class PathRecorder implements IPathRecorder {
     this.logger.info("path_recorder.saved", {
       pathName: this.currentPathName,
       pointCount,
+      savedPointCount: pointsToSave.length,
     });
 
     // Clear state

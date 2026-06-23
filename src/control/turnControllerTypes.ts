@@ -30,12 +30,12 @@ export interface TurnResult {
   readonly errorAngle: RelativeAngle;
   readonly durationMs: number;
   readonly brakeDistanceUsed: RelativeAngle;
-  readonly controlMode?: "small_timeout" | "large_rate_bias";
+  readonly controlMode?: "small_timeout" | "large_rate_scalar";
   readonly learningBucketAngleDeg?: number;
   readonly triggerProgressUsedDeg?: number;
   readonly triggerTimeUsedMs?: number;
   readonly smallTurnBrakeTimeUsedMs?: number;
-  readonly biasOffsetUsedDeg?: number;
+  readonly largeTurnBrakeScalarUsedMs?: number;
   readonly motorEngaged: boolean;
   readonly status: "success" | "error" | "stopped";
   readonly errorMessage?: string;
@@ -56,14 +56,13 @@ export interface TurnLearningInput {
   readonly errorAngle: RelativeAngle;
   readonly brakeDistanceUsed: RelativeAngle;
   readonly brakeTimeUsedMs?: number;
+  readonly brakeRateUsedDegPerMs?: number;
   readonly direction: TurnDirection;
 }
 
 export interface TurnLearningBin {
   requestedAngleDeg: number;
-  brakeDistanceDeg: number;
-  /** Residual bias added to the rate-based brake prediction (degrees). */
-  biasOffsetDeg: number;
+  brakeScalarMs: number;
   direction: TurnDirection;
   sampleCount?: number;
   lastErrorDeg?: number;
@@ -87,12 +86,8 @@ export interface TurnLearningParameters {
   largeTurnBucketStepDeg: number;
   largeTurnMinAngleDeg: number;
   largeTurnMaxAngleDeg: number;
-  largeTurnBrakeDistancesCcwDeg: number[];
-  largeTurnBrakeDistancesCwDeg: number[];
-  /** Per-bucket residual bias for rate-based brake prediction (CCW). */
-  largeTurnBiasOffsetsCcwDeg: number[];
-  /** Per-bucket residual bias for rate-based brake prediction (CW). */
-  largeTurnBiasOffsetsCwDeg: number[];
+  largeTurnBrakeScalarsCcwMs: number[];
+  largeTurnBrakeScalarsCwMs: number[];
   largeTurnSampleCountsCcw: number[];
   largeTurnSampleCountsCw: number[];
   largeTurnLastErrorsCcwDeg: number[];

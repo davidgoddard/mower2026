@@ -42,8 +42,9 @@ import {
   WHEEL_BASE_METERS_MIN_PLAUSIBLE,
   WHEEL_BASE_METERS_MAX_PLAUSIBLE,
 } from "../constants.js";
-import { PathRecorder, PathStore, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath, MowingExecutor } from "../pathfollowing/index.js";
+import { ContinuousPathFollower, PathRecorder, PathStore, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildPerimeterFollowPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath, MowingExecutor } from "../pathfollowing/index.js";
 import type { MowingStatus, PathPoint } from "../pathfollowing/index.js";
+import { shapeAreaRecordedPath, shapeObstacleRecordedPath } from "../pathfollowing/obstaclePathShaper.js";
 import { CheckpointStore, OperationContextTracker, RetryManager } from "../retry/index.js";
 import type { ObstructionEvent } from "../retry/index.js";
 import type { ObstructionDetectedEvent } from "../sensing/sensorEvents.js";
@@ -388,6 +389,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let driveLearningModel: DriveLearningModel | null = null;
   let driveLineController: DriveLineController | null = null;
   let driveController: DriveController | null = null;
+  let continuousPathFollower: ContinuousPathFollower | null = null;
   let segmentTestRunner: SegmentTestRunner | null = null;
   let deadReckoningCalibrator: DeadReckoningCalibrator | null = null;
   let motorCalibration: MotorCalibration | null = null;
@@ -426,7 +428,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
    */
   async function runSegmentedPerimeterFollow(
     boundaryPoints: PathPoint[],
-    options: { reanchorToStartPose?: boolean } = {},
+    options: {
+      reanchorToStartPose?: boolean;
+      preserveFirstTargetAtPose?: boolean;
+      exactSequentialTargets?: boolean;
+      useRawPoints?: boolean;
+    } = {},
   ) {
     if (!driveController) {
       throw new Error("driveController_unavailable");
@@ -458,10 +465,53 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         learningEnabled: true,
         startPose: poseFusion?.getCurrentPose(),
         reanchorToStartPose: options.reanchorToStartPose ?? true,
+        preserveFirstTargetAtPose: options.preserveFirstTargetAtPose ?? false,
+        exactSequentialTargets: options.exactSequentialTargets ?? false,
+        useRawPoints: options.useRawPoints ?? false,
         recentTargetSink,
       });
     } finally {
       retryManager?.endSession();
+      operationContextTracker?.clearContext();
+    }
+  }
+
+  async function runContinuousObstacleFollow(
+    boundaryPoints: PathPoint[],
+    options: { preserveFirstTargetAtPose?: boolean; loopPath?: boolean } = {},
+  ) {
+    if (!continuousPathFollower) {
+      throw new Error("continuousPathFollower_unavailable");
+    }
+
+    operationContextTracker?.setContext("path");
+    try {
+      return await continuousPathFollower.executePath(boundaryPoints, {
+        parameters: pathFollowingConfig?.getParameters(),
+        preserveFirstTargetAtPose: options.preserveFirstTargetAtPose ?? false,
+        loopPath: options.loopPath ?? true,
+      });
+    } finally {
+      operationContextTracker?.clearContext();
+    }
+  }
+
+  async function runContinuousAreaFollow(
+    boundaryPoints: PathPoint[],
+    options: { preserveFirstTargetAtPose?: boolean; loopPath?: boolean } = {},
+  ) {
+    if (!continuousPathFollower) {
+      throw new Error("continuousPathFollower_unavailable");
+    }
+
+    operationContextTracker?.setContext("path");
+    try {
+      return await continuousPathFollower.executePath(boundaryPoints, {
+        parameters: pathFollowingConfig?.getParameters(),
+        preserveFirstTargetAtPose: options.preserveFirstTargetAtPose ?? false,
+        loopPath: options.loopPath ?? true,
+      });
+    } finally {
       operationContextTracker?.clearContext();
     }
   }
@@ -965,14 +1015,15 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const path = await pathStore.loadPath(pathName);
-          if (path.points.length === 0) {
+          const obstaclePoints = shapeObstacleRecordedPath(path.points);
+          if (obstaclePoints.length === 0) {
             throw new BadRequestError("path_empty");
           }
 
           systemStop.clearStop("api-path-drive");
           const currentPose = poseFusion.getCurrentPose();
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
-          const approachPlan = buildVerificationApproachPlan(path.points, currentPose, pathFollowingParameters);
+          const approachPlan = buildVerificationApproachPlan(obstaclePoints, currentPose, pathFollowingParameters);
           if (approachPlan === null) {
             throw new BadRequestError("path_too_short_for_drive");
           }
@@ -1035,7 +1086,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const drivePoints = buildDrivePathPointsForDirection(
-            path.points,
+            obstaclePoints,
             poseFusion.getCurrentPose(),
             approachPlan.pathDirection,
             pathFollowingParameters,
@@ -1044,7 +1095,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             throw new BadRequestError("path_too_short_for_drive");
           }
 
-          const followResult = await runSegmentedPerimeterFollow(drivePoints);
+          const followResult = await runContinuousObstacleFollow(drivePoints, {
+            loopPath: false,
+          });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             mode: "drive",
@@ -1082,24 +1135,25 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const path = await areaPerimeterStore.loadPath(pathName);
-          if (path.points.length === 0) {
+          const areaPoints = shapeAreaRecordedPath(path.points);
+          if (areaPoints.length === 0) {
             throw new BadRequestError("path_empty");
           }
 
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const currentPose = poseFusion.getCurrentPose();
-          const joinPlan = buildPerimeterJoinPlan(path.points, currentPose, pathFollowingParameters);
+          const joinPlan = buildPerimeterJoinPlan(areaPoints, currentPose, pathFollowingParameters);
           if (joinPlan === null) {
             throw new BadRequestError("path_too_short_for_drive");
           }
 
-          const drivePoints = buildPerimeterPathPointsFromPlan(path.points, joinPlan, pathFollowingParameters);
+          const drivePoints = buildPerimeterPathPointsFromPlan(areaPoints, joinPlan, pathFollowingParameters);
           if (drivePoints.length < 2) {
             throw new BadRequestError("path_too_short_for_drive");
           }
 
           systemStop.clearStop("api-area-perimeter-drive");
-          const result = await runSegmentedPerimeterFollow(drivePoints);
+          const result = await runContinuousAreaFollow(drivePoints, { loopPath: true });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             mode: "area_perimeter_drive",
@@ -1145,14 +1199,15 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const path = await pathStore.loadPath(pathName);
-          if (path.points.length === 0) {
+          const obstaclePoints = shapeObstacleRecordedPath(path.points);
+          if (obstaclePoints.length === 0) {
             throw new BadRequestError("path_empty");
           }
 
           systemStop.clearStop("api-path-verify");
           const currentPose = poseFusion.getCurrentPose();
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
-          const approachPlan = buildVerificationApproachPlan(path.points, currentPose, pathFollowingParameters);
+          const approachPlan = buildVerificationApproachPlan(obstaclePoints, currentPose, pathFollowingParameters);
           if (approachPlan === null) {
             throw new BadRequestError("path_too_short_for_verification");
           }
@@ -1215,7 +1270,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const verificationPoints = buildVerificationPathPointsFromPlan(
-            path.points,
+            obstaclePoints,
             poseFusion.getCurrentPose(),
             approachPlan,
             pathFollowingParameters,
@@ -1224,7 +1279,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             throw new BadRequestError("path_too_short_for_verification");
           }
 
-          const result = await runSegmentedPerimeterFollow(verificationPoints, { reanchorToStartPose: false });
+          const result = await runContinuousObstacleFollow(verificationPoints, {
+            preserveFirstTargetAtPose: true,
+            loopPath: true,
+          });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             mode: "verify",
@@ -1263,33 +1321,36 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const path = await areaPerimeterStore.loadPath(pathName);
-          if (path.points.length === 0) {
+          const areaPoints = shapeAreaRecordedPath(path.points);
+          if (areaPoints.length === 0) {
             throw new BadRequestError("path_empty");
           }
 
           systemStop.clearStop("api-area-perimeter-verify");
           const currentPose = poseFusion.getCurrentPose();
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
-          const joinPlan = buildPerimeterJoinPlan(path.points, currentPose, pathFollowingParameters);
-          if (joinPlan === null) {
+          const approachPlan = buildVerificationApproachPlan(areaPoints, currentPose, pathFollowingParameters);
+          if (approachPlan === null) {
             throw new BadRequestError("path_too_short_for_verification");
           }
 
           let approachResult: Record<string, unknown> = {
             phase: "already_at_join",
-            joinPoint: joinPlan.joinPoint,
-            tangentHeadingDeg: joinPlan.tangentHeading,
+            joinPoint: approachPlan.joinPoint,
+            tangentHeadingDeg: approachPlan.tangentHeading,
+            pathDirection: approachPlan.pathDirection,
           };
-          if (!joinPlan.turnOnly) {
+          if (!approachPlan.turnOnly) {
             const driveResult = await driveController.executeDrive({
-              targetPosition: createPosition(joinPlan.approachTarget.xMeters, joinPlan.approachTarget.yMeters),
+              targetPosition: createPosition(approachPlan.approachTarget.xMeters, approachPlan.approachTarget.yMeters),
               learningEnabled: true,
             });
             approachResult = {
               phase: "nearest_perimeter_drive",
-              joinPoint: joinPlan.joinPoint,
-              tangentHeadingDeg: joinPlan.tangentHeading,
-              approachTarget: joinPlan.approachTarget,
+              joinPoint: approachPlan.joinPoint,
+              tangentHeadingDeg: approachPlan.tangentHeading,
+              approachTarget: approachPlan.approachTarget,
+              pathDirection: approachPlan.pathDirection,
               driveResult,
             };
 
@@ -1300,7 +1361,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const poseBeforeFollow = poseFusion.getCurrentPose();
-          const turnAngle = headingDifference(poseBeforeFollow.heading, joinPlan.tangentHeading);
+          const turnAngle = headingDifference(poseBeforeFollow.heading, approachPlan.tangentHeading);
           if (Math.abs(unwrapRelativeAngle(turnAngle)) > getTurnAlignmentThresholdDeg(pathFollowingConfig)) {
             const turnResult = await turnController.executeTurn({
               targetAngle: turnAngle,
@@ -1319,12 +1380,33 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             }
           }
 
-          const perimeterPoints = buildPerimeterPathPointsFromPlan(path.points, joinPlan, pathFollowingParameters);
+          const poseAtFollowStart = poseFusion.getCurrentPose();
+          const followPlan = buildPerimeterFollowPlan(
+            areaPoints,
+            poseAtFollowStart,
+            approachPlan.pathDirection,
+            pathFollowingParameters,
+          );
+          if (followPlan === null) {
+            throw new BadRequestError("path_too_short_for_verification");
+          }
+
+          approachResult = {
+            ...approachResult,
+            phase: "follow_join_ready",
+            followJoinPoint: followPlan.joinPoint,
+            followTangentHeadingDeg: followPlan.tangentHeading,
+          };
+
+          const perimeterPoints = buildPerimeterPathPointsFromPlan(areaPoints, followPlan, pathFollowingParameters);
           if (perimeterPoints.length < 2) {
             throw new BadRequestError("path_too_short_for_verification");
           }
 
-          const result = await runSegmentedPerimeterFollow(perimeterPoints);
+          const result = await runContinuousAreaFollow(perimeterPoints, {
+            preserveFirstTargetAtPose: true,
+            loopPath: true,
+          });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             mode: "area_perimeter_verify",
@@ -1360,14 +1442,15 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const area = await areaPerimeterStore.loadPath(areaName);
+          const shapedAreaPoints = shapeAreaRecordedPath(area.points);
           const obstacleNames = await pathStore.listPaths();
           const obstaclePointsArray = await Promise.all(obstacleNames.map(async (name) => {
             const obs = await pathStore!.loadPath(name);
-            return obs.points;
+            return shapeObstacleRecordedPath(obs.points);
           }));
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const currentPose = poseFusion.getCurrentPose();
-          const initialEntryPlan = buildMowingInitialEntryPlan(area.points, {
+          const initialEntryPlan = buildMowingInitialEntryPlan(shapedAreaPoints, {
             xMeters: unwrapMeters(currentPose.position.xMeters),
             yMeters: unwrapMeters(currentPose.position.yMeters),
           }, {
@@ -1377,7 +1460,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           if (!initialEntryPlan) {
             throw new BadRequestError("no_line_of_sight_area_entry");
           }
-          const plan = buildMowingPlan(area.points, {
+          const plan = buildMowingPlan(shapedAreaPoints, {
             headingDeg,
             stripSpacingMeters,
             bladeWidthMeters: 0.4,
@@ -1394,11 +1477,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           mowingExecutor = new MowingExecutor({
             plan,
             initialEntryPlan,
-            areaPoints: area.points,
+            areaPoints: shapedAreaPoints,
             obstaclePointsArray,
             driveController,
             turnController,
             poseFusion,
+            continuousPathFollower: continuousPathFollower!,
             logger: logger.child({ context: "mowing", source: "MowingExecutor" }),
             parameters: pathFollowingParameters,
             recentTargetSink: retryManager ?? undefined,
@@ -1462,13 +1546,14 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const area = await areaPerimeterStore.loadPath(areaName);
+          const shapedAreaPoints = shapeAreaRecordedPath(area.points);
           const obstacleNames = await pathStore.listPaths();
           const obstacles = await Promise.all(obstacleNames.map(async (obstacleName) => {
             const obstacle = await pathStore!.loadPath(obstacleName);
-            return obstacle.points;
+            return shapeObstacleRecordedPath(obstacle.points);
           }));
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
-          const plan = buildMowingPlan(area.points, {
+          const plan = buildMowingPlan(shapedAreaPoints, {
             headingDeg,
             stripSpacingMeters,
             bladeWidthMeters: 0.4,
@@ -1927,6 +2012,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       pathRecorder = new PathRecorder({
         logger: logger.child({ context: "paths", source: "PathRecorder" }),
         distanceThreshold: 0.1,
+        saveProcessing: "none",
       }, {
         pathStore: pathStore!,
         poseFusion: poseFusion!,
@@ -1936,6 +2022,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         areaPerimeterRecorder = new PathRecorder({
           logger: logger.child({ context: "paths", source: "AreaPerimeterRecorder" }),
           distanceThreshold: 0.1,
+          saveProcessing: "none",
         }, {
           pathStore: areaPerimeterStore,
           poseFusion: poseFusion!,
@@ -1964,6 +2051,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       learningModel: driveLearningModel,
       lineDriveController: driveLineController,
       motorCalibration: motorCalibration!,
+    });
+    continuousPathFollower = new ContinuousPathFollower({
+      sensorController,
+      poseFusion,
+      logger: logger.child({ context: "pathfollowing", source: "ContinuousPathFollower" }),
     });
 
     operationContextTracker = new OperationContextTracker();

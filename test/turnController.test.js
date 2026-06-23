@@ -467,24 +467,21 @@ describe("TurnLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 2);
+    assert.equal(params.version, 5);
     assert.equal(params.parameters.length > 0, true);
     assert.equal(params.parameters[0].requestedAngleDeg, 70);
     assert.equal(params.parameters[0].direction, "ccw");
-    assert.equal(params.parameters[0].brakeDistanceDeg, 25);
+    assert.equal(typeof params.parameters[0].brakeScalarMs, "number");
   });
 
-  it("returns brake angle for requested turn", () => {
+  it("returns interpolated large-angle brake scalar for requested turn", () => {
     const mockLogger = createMockLogger();
     const model = new TurnLearningModel({
       logger: mockLogger,
     });
 
-    const brakeAngle = model.getBrakeAngle(90, "ccw");
-    const brakeValue = unwrapRelativeAngle(brakeAngle);
-
-    assert.equal(brakeValue > 0, true);
-    assert.equal(brakeValue < 90, true);
+    const brakeScalarMs = model.getLargeTurnBrakeScalarMs("ccw", 90);
+    assert.equal(brakeScalarMs > 0, true);
   });
 
   it("returns no brake angle for small-angle timeout buckets", () => {
@@ -511,17 +508,15 @@ describe("TurnLearningModel", () => {
         parametersPath,
       });
       await writeFile(parametersPath, JSON.stringify({
-        version: 3,
+        version: 5,
         smallAngleThresholdDeg: 60,
         smallTurnBucketStepDeg: 3,
         smallTurnMaxAngleDeg: 60,
         largeTurnBucketStepDeg: 10,
         largeTurnMinAngleDeg: 70,
         largeTurnMaxAngleDeg: 180,
-        largeTurnBrakeDistancesCcwDeg: Array.from({ length: 12 }, () => 25),
-        largeTurnBrakeDistancesCwDeg: Array.from({ length: 12 }, () => 25),
-        largeTurnBiasOffsetsCcwDeg: Array.from({ length: 12 }, () => 0),
-        largeTurnBiasOffsetsCwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnBrakeScalarsCcwMs: Array.from({ length: 12 }, (_, index) => 80 + index),
+        largeTurnBrakeScalarsCwMs: Array.from({ length: 12 }, (_, index) => 80 + index),
         largeTurnSampleCountsCcw: Array.from({ length: 12 }, () => 0),
         largeTurnSampleCountsCw: Array.from({ length: 12 }, () => 0),
         largeTurnLastErrorsCcwDeg: Array.from({ length: 12 }, () => 0),
@@ -555,17 +550,15 @@ describe("TurnLearningModel", () => {
         parametersPath,
       });
       await writeFile(parametersPath, JSON.stringify({
-        version: 3,
+        version: 5,
         smallAngleThresholdDeg: 60,
         smallTurnBucketStepDeg: 3,
         smallTurnMaxAngleDeg: 60,
         largeTurnBucketStepDeg: 10,
         largeTurnMinAngleDeg: 70,
         largeTurnMaxAngleDeg: 180,
-        largeTurnBrakeDistancesCcwDeg: Array.from({ length: 12 }, () => 25),
-        largeTurnBrakeDistancesCwDeg: Array.from({ length: 12 }, () => 25),
-        largeTurnBiasOffsetsCcwDeg: Array.from({ length: 12 }, () => 0),
-        largeTurnBiasOffsetsCwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnBrakeScalarsCcwMs: Array.from({ length: 12 }, (_, index) => 80 + index),
+        largeTurnBrakeScalarsCwMs: Array.from({ length: 12 }, (_, index) => 80 + index),
         largeTurnSampleCountsCcw: Array.from({ length: 12 }, () => 0),
         largeTurnSampleCountsCw: Array.from({ length: 12 }, () => 0),
         largeTurnLastErrorsCcwDeg: Array.from({ length: 12 }, () => 0),
@@ -607,7 +600,7 @@ describe("TurnLearningModel", () => {
     }
   });
 
-  it("maps large angles to nearest 10° bin", async () => {
+  it("interpolates large-angle brake scalars between neighboring 10° bins", async () => {
     const mockLogger = createMockLogger();
     const model = new TurnLearningModel({
       logger: mockLogger,
@@ -620,17 +613,18 @@ describe("TurnLearningModel", () => {
       achievedAngle: createRelativeAngle(100),
       errorAngle: createRelativeAngle(10),
       brakeDistanceUsed: createRelativeAngle(25),
+      brakeRateUsedDegPerMs: 0.05,
       direction: "ccw",
     });
 
-    const brake89 = model.getBrakeAngle(89, "ccw");
-    const brake91 = model.getBrakeAngle(91, "ccw");
-    const brake120 = model.getBrakeAngle(120, "ccw");
+    const brake89 = model.getLargeTurnBrakeScalarMs("ccw", 89);
+    const brake91 = model.getLargeTurnBrakeScalarMs("ccw", 91);
+    const brake120 = model.getLargeTurnBrakeScalarMs("ccw", 120);
 
-    const sameBucketDiff = Math.abs(unwrapRelativeAngle(brake89) - unwrapRelativeAngle(brake91));
-    const differentBucketDiff = Math.abs(unwrapRelativeAngle(brake91) - unwrapRelativeAngle(brake120));
-    assert.equal(sameBucketDiff < 0.01, true, `Expected same-bucket diff < 0.01 but got ${sameBucketDiff}`);
-    assert.equal(differentBucketDiff > 0.01, true, `Expected different-bucket diff > 0.01 but got ${differentBucketDiff}`);
+    const sameBucketDiff = Math.abs(brake89 - brake91);
+    const differentBucketDiff = Math.abs(brake91 - brake120);
+    assert.equal(sameBucketDiff < 1, true, `Expected same-bucket diff < 1 but got ${sameBucketDiff}`);
+    assert.equal(differentBucketDiff > 1, true, `Expected different-bucket diff > 1 but got ${differentBucketDiff}`);
   });
 
   it("learns the small-angle brake time and persists it", async () => {
@@ -651,9 +645,9 @@ describe("TurnLearningModel", () => {
       const startBrakeTimeMs = bucket.brakeTimeCcwMs;
 
       await model.updateFromTurn({
-        requestedAngle: createRelativeAngle(20),
+        requestedAngle: createRelativeAngle(21),
         achievedAngle: createRelativeAngle(3),
-        errorAngle: createRelativeAngle(-17),
+        errorAngle: createRelativeAngle(-18),
         brakeDistanceUsed: createRelativeAngle(0),
         brakeTimeUsedMs: startBrakeTimeMs,
         direction: "ccw",
@@ -680,7 +674,7 @@ describe("TurnLearningModel", () => {
     }
   });
 
-  it("learns a large-angle brake bucket and persists it", async () => {
+  it("learns a large-angle brake scalar bucket and persists it", async () => {
     const mockLogger = createMockLogger();
     const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-large-"));
     const parametersPath = join(dir, "turn-learning.json");
@@ -697,13 +691,14 @@ describe("TurnLearningModel", () => {
       const untouchedBucket = before.parameters.find((entry) => entry.requestedAngleDeg === 90 && entry.direction === "ccw");
       assert.ok(startBucket);
       assert.ok(untouchedBucket);
-      assert.equal(startBucket.brakeDistanceDeg, 25);
+      assert.equal(typeof startBucket.brakeScalarMs, "number");
 
       await model.updateFromTurn({
-        requestedAngle: createRelativeAngle(121),
+        requestedAngle: createRelativeAngle(120),
         achievedAngle: createRelativeAngle(131),
-        errorAngle: createRelativeAngle(10),
+        errorAngle: createRelativeAngle(11),
         brakeDistanceUsed: createRelativeAngle(25),
+        brakeRateUsedDegPerMs: 0.05,
         direction: "ccw",
       });
 
@@ -713,8 +708,8 @@ describe("TurnLearningModel", () => {
       assert.ok(updatedBucket);
       assert.ok(unchangedBucket);
       assert.equal(updatedBucket.sampleCount, (startBucket.sampleCount ?? 0) + 1);
-      assert.equal(updatedBucket.brakeDistanceDeg > startBucket.brakeDistanceDeg, true);
-      assert.equal(unchangedBucket.brakeDistanceDeg, untouchedBucket.brakeDistanceDeg);
+      assert.equal(updatedBucket.brakeScalarMs > startBucket.brakeScalarMs, true);
+      assert.equal(unchangedBucket.brakeScalarMs, untouchedBucket.brakeScalarMs);
 
       const reloaded = new TurnLearningModel({
         logger: mockLogger,
@@ -725,7 +720,7 @@ describe("TurnLearningModel", () => {
       const persistedBucket = persisted.parameters.find((entry) => entry.requestedAngleDeg === 120 && entry.direction === "ccw");
       assert.ok(persistedBucket);
       assert.equal(persistedBucket.sampleCount, updatedBucket.sampleCount);
-      assert.equal(persistedBucket.brakeDistanceDeg, updatedBucket.brakeDistanceDeg);
+      assert.equal(persistedBucket.brakeScalarMs, updatedBucket.brakeScalarMs);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -746,7 +741,7 @@ describe("TurnLearningModel", () => {
       const before = model.getParameters();
       const startBucket = before.parameters.find((entry) => entry.requestedAngleDeg === 180 && entry.direction === "ccw");
       assert.ok(startBucket);
-      assert.equal(startBucket.brakeDistanceDeg, 25);
+      assert.equal(typeof startBucket.brakeScalarMs, "number");
 
       await model.updateFromTurn({
         requestedAngle: createRelativeAngle(180),
@@ -754,13 +749,14 @@ describe("TurnLearningModel", () => {
         achievedAngleUnwrappedDeg: 185,
         errorAngle: createRelativeAngle(5),
         brakeDistanceUsed: createRelativeAngle(25),
+        brakeRateUsedDegPerMs: 0.05,
         direction: "ccw",
       });
 
       const after = model.getParameters();
       const updatedBucket = after.parameters.find((entry) => entry.requestedAngleDeg === 180 && entry.direction === "ccw");
       assert.ok(updatedBucket);
-      assert.equal(updatedBucket.brakeDistanceDeg > startBucket.brakeDistanceDeg, true);
+      assert.equal(updatedBucket.brakeScalarMs > startBucket.brakeScalarMs, true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

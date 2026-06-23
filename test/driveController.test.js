@@ -7,8 +7,24 @@ import { tmpdir } from "node:os";
 import { DriveController } from "../dist/control/driveController.js";
 import { DriveLineController } from "../dist/control/driveLineController.js";
 import { DriveLearningModel } from "../dist/control/driveLearningModel.js";
+import {
+  DRIVE_LONG_SAMPLE_DISTANCES_METERS,
+  DRIVE_SEGMENT_MAX_DISTANCE_METERS,
+  DRIVE_SEGMENT_MIN_DISTANCE_METERS,
+  DRIVE_SEGMENT_STEP_METERS,
+  DRIVE_SHORT_BUCKET_DISTANCES_METERS,
+} from "../dist/constants.js";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPosition, createMeters, unwrapMeters } from "../dist/geometry/positionTypes.js";
+
+const STRAIGHT_LINE_TRAINING_DISTANCES_METERS = [
+  ...DRIVE_SHORT_BUCKET_DISTANCES_METERS,
+  ...DRIVE_LONG_SAMPLE_DISTANCES_METERS,
+];
+const STRAIGHT_LINE_TRAINING_DRIVE_COUNT = STRAIGHT_LINE_TRAINING_DISTANCES_METERS.length * 2;
+const SEGMENT_TRAINING_DISTANCE_COUNT =
+  Math.floor((DRIVE_SEGMENT_MAX_DISTANCE_METERS - DRIVE_SEGMENT_MIN_DISTANCE_METERS + 1e-9) / DRIVE_SEGMENT_STEP_METERS) + 1;
+const SEGMENT_TRAINING_DRIVE_COUNT = SEGMENT_TRAINING_DISTANCE_COUNT * 2;
 
 describe("DriveController", () => {
   function createMockLogger() {
@@ -124,7 +140,7 @@ describe("DriveController", () => {
       })),
       runShortDistanceTraining: mock.fn(async () => {
         const results = [];
-        for (let distance = 0.05; distance <= 1.0 + 1e-9; distance += 0.05) {
+        for (const distance of STRAIGHT_LINE_TRAINING_DISTANCES_METERS) {
           for (const directionSign of [1, -1]) {
             results.push({
               startPosition: createPosition(0, 0),
@@ -180,12 +196,12 @@ describe("DriveController", () => {
         forwardCteGain: 0.3,
         reverseCteGain: 0.3,
         longDriveMinDistanceMeters: 1.0,
-        shortDriveBrakeDistancesPositive: Array(20).fill(0.2),
-        shortDriveBrakeDistancesNegative: Array(20).fill(0.2),
-        shortDriveSampleCountsPositive: Array(20).fill(0),
-        shortDriveSampleCountsNegative: Array(20).fill(0),
-        shortDriveLastErrorPositiveMeters: Array(20).fill(0),
-        shortDriveLastErrorNegativeMeters: Array(20).fill(0),
+        shortDriveBrakeDistancesPositive: Array(DRIVE_SHORT_BUCKET_DISTANCES_METERS.length).fill(0.2),
+        shortDriveBrakeDistancesNegative: Array(DRIVE_SHORT_BUCKET_DISTANCES_METERS.length).fill(0.2),
+        shortDriveSampleCountsPositive: Array(DRIVE_SHORT_BUCKET_DISTANCES_METERS.length).fill(0),
+        shortDriveSampleCountsNegative: Array(DRIVE_SHORT_BUCKET_DISTANCES_METERS.length).fill(0),
+        shortDriveLastErrorPositiveMeters: Array(DRIVE_SHORT_BUCKET_DISTANCES_METERS.length).fill(0),
+        shortDriveLastErrorNegativeMeters: Array(DRIVE_SHORT_BUCKET_DISTANCES_METERS.length).fill(0),
       })),
       resetToDefaults: mock.fn(async () => {}),
     };
@@ -304,6 +320,40 @@ describe("DriveController", () => {
 
     assert.equal(result.status, "success");
     assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
+  });
+
+  it("skips the initial pivot for a short hop even when heading error is large", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockTurn = createMockTurnController();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+
+    mockPose._testSetPose({
+      position: createPosition(0, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    const result = await controller.executeDrive({
+      targetPosition: createPosition(0, 0.1),
+      learningEnabled: true,
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 0);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 
   it("stops drive immediately on stopCurrentDrive()", async () => {
@@ -561,13 +611,13 @@ describe("DriveController", () => {
         options.progressReporter?.({
           mode: "short-distance",
           phase: "started",
-          distanceMeters: 0.05,
+          distanceMeters: DRIVE_SHORT_BUCKET_DISTANCES_METERS[0],
           pairAttempt: 0,
           legAttempt: 0,
           directionSign: null,
           targetXErrorMeters: 0.04,
           completedDrives: 0,
-          totalPlannedDrives: 52,
+          totalPlannedDrives: STRAIGHT_LINE_TRAINING_DRIVE_COUNT,
           message: "starting",
           timestamp: new Date().toISOString(),
         });
@@ -580,17 +630,17 @@ describe("DriveController", () => {
           legAttempt: 2,
           directionSign: null,
           targetXErrorMeters: 0.04,
-          completedDrives: 52,
-          totalPlannedDrives: 52,
+          completedDrives: STRAIGHT_LINE_TRAINING_DRIVE_COUNT,
+          totalPlannedDrives: STRAIGHT_LINE_TRAINING_DRIVE_COUNT,
           message: "completed",
           timestamp: new Date().toISOString(),
           resultStatus: "success",
         });
         progressMessages.push("completed");
-        return new Array(52).fill(null).map(() => ({
+        return new Array(STRAIGHT_LINE_TRAINING_DRIVE_COUNT).fill(null).map(() => ({
           startPosition: createPosition(0, 0),
-          targetPosition: createPosition(0.05, 0),
-          finalPosition: createPosition(0.05, 0),
+          targetPosition: createPosition(DRIVE_SHORT_BUCKET_DISTANCES_METERS[0], 0),
+          finalPosition: createPosition(DRIVE_SHORT_BUCKET_DISTANCES_METERS[0], 0),
           errorX: createMeters(0.01),
           errorY: createMeters(0),
           maxCteMeters: createMeters(0.01),
@@ -631,7 +681,7 @@ describe("DriveController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 52);
+    assert.equal(results.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
     const state = controller.getState();
     assert.equal(state.shortTrainingProgress?.message, "completed");
     assert.equal(progressMessages.length, 2);
@@ -681,18 +731,18 @@ describe("DriveController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 50);
-    assert.equal(calls.length, 50);
-    assert.ok(Math.abs(calls[0].x - 1.05) < 1e-9);
+    assert.equal(results.length, SEGMENT_TRAINING_DRIVE_COUNT);
+    assert.equal(calls.length, SEGMENT_TRAINING_DRIVE_COUNT);
+    assert.ok(Math.abs(calls[0].x - DRIVE_SEGMENT_MIN_DISTANCE_METERS) < 1e-9);
     assert.ok(Math.abs(calls[0].y - 0) < 1e-9);
-    assert.ok(Math.abs(calls[1].x + 1.05) < 1e-9);
+    assert.ok(Math.abs(calls[1].x + DRIVE_SEGMENT_MIN_DISTANCE_METERS) < 1e-9);
     assert.ok(Math.abs(calls[1].y - 0) < 1e-9);
-    assert.ok(Math.abs(calls[2].x - 1.25) < 1e-9);
-    assert.ok(Math.abs(calls[3].x + 1.25) < 1e-9);
+    assert.ok(Math.abs(calls[2].x - (DRIVE_SEGMENT_MIN_DISTANCE_METERS + DRIVE_SEGMENT_STEP_METERS)) < 1e-9);
+    assert.ok(Math.abs(calls[3].x + (DRIVE_SEGMENT_MIN_DISTANCE_METERS + DRIVE_SEGMENT_STEP_METERS)) < 1e-9);
 
     const state = controller.getState();
     assert.equal(state.segmentTrainingProgress?.message.includes("complete"), true);
-    assert.equal(state.segmentTrainingResults.length, 50);
+    assert.equal(state.segmentTrainingResults.length, SEGMENT_TRAINING_DRIVE_COUNT);
   });
 
   it("keeps segment targets projected onto the initial line A even if the mower pose changes during training", async () => {
@@ -754,18 +804,19 @@ describe("DriveController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 50);
+    assert.equal(results.length, SEGMENT_TRAINING_DRIVE_COUNT);
     const cos30 = Math.cos((30 * Math.PI) / 180);
     const sin30 = Math.sin((30 * Math.PI) / 180);
 
-    assert.ok(Math.abs(calls[0].x - (1 + (1.05 * cos30))) < 1e-9);
-    assert.ok(Math.abs(calls[0].y - (2 + (1.05 * sin30))) < 1e-9);
-    assert.ok(Math.abs(calls[1].x - (1 - (1.05 * cos30))) < 1e-9);
-    assert.ok(Math.abs(calls[1].y - (2 - (1.05 * sin30))) < 1e-9);
-    assert.ok(Math.abs(calls[2].x - (1 + (1.25 * cos30))) < 1e-9);
-    assert.ok(Math.abs(calls[2].y - (2 + (1.25 * sin30))) < 1e-9);
-    assert.ok(Math.abs(calls[3].x - (1 - (1.25 * cos30))) < 1e-9);
-    assert.ok(Math.abs(calls[3].y - (2 - (1.25 * sin30))) < 1e-9);
+    assert.ok(Math.abs(calls[0].x - (1 + (DRIVE_SEGMENT_MIN_DISTANCE_METERS * cos30))) < 1e-9);
+    assert.ok(Math.abs(calls[0].y - (2 + (DRIVE_SEGMENT_MIN_DISTANCE_METERS * sin30))) < 1e-9);
+    assert.ok(Math.abs(calls[1].x - (1 - (DRIVE_SEGMENT_MIN_DISTANCE_METERS * cos30))) < 1e-9);
+    assert.ok(Math.abs(calls[1].y - (2 - (DRIVE_SEGMENT_MIN_DISTANCE_METERS * sin30))) < 1e-9);
+    const secondSegmentDistance = DRIVE_SEGMENT_MIN_DISTANCE_METERS + DRIVE_SEGMENT_STEP_METERS;
+    assert.ok(Math.abs(calls[2].x - (1 + (secondSegmentDistance * cos30))) < 1e-9);
+    assert.ok(Math.abs(calls[2].y - (2 + (secondSegmentDistance * sin30))) < 1e-9);
+    assert.ok(Math.abs(calls[3].x - (1 - (secondSegmentDistance * cos30))) < 1e-9);
+    assert.ok(Math.abs(calls[3].y - (2 - (secondSegmentDistance * sin30))) < 1e-9);
   });
 });
 
@@ -930,15 +981,15 @@ describe("DriveLineController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 52);
-    assert.equal(calls.length, 52);
-    assert.equal(calls[0].x, 0.05);
+    assert.equal(results.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
+    assert.equal(calls.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
+    assert.equal(calls[0].x, DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
     assert.equal(calls[0].driveDirectionSign, 1);
-    assert.equal(calls[1].x, -0.05);
+    assert.equal(calls[1].x, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
     assert.equal(calls[1].driveDirectionSign, -1);
-    assert.equal(calls[2].x, 0.1);
+    assert.equal(calls[2].x, DRIVE_SHORT_BUCKET_DISTANCES_METERS[1]);
     assert.equal(calls[2].driveDirectionSign, 1);
-    assert.equal(calls[3].x, -0.1);
+    assert.equal(calls[3].x, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[1]);
     assert.equal(calls[3].driveDirectionSign, -1);
   });
 
@@ -1056,11 +1107,11 @@ describe("DriveLineController", () => {
     assert.equal(results.length, 5);
     assert.equal(calls.length, 5);
     assert.deepEqual(calls.slice(0, 4).map((call) => call.driveDirectionSign), [1, -1, 1, -1]);
-    assert.equal(calls[0].x, 0.05);
-    assert.equal(calls[1].x, -0.05);
-    assert.equal(calls[2].x, 0.05);
-    assert.equal(calls[3].x, -0.05);
-    assert.equal(calls[4].x, 0.1);
+    assert.equal(calls[0].x, DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
+    assert.equal(calls[1].x, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
+    assert.equal(calls[2].x, DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
+    assert.equal(calls[3].x, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
+    assert.equal(calls[4].x, DRIVE_SHORT_BUCKET_DISTANCES_METERS[1]);
     assert.equal(calls[4].driveDirectionSign, 1);
   });
 
@@ -1205,13 +1256,13 @@ describe("DriveLineController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 52);
-    assert.equal(calls.length, 52);
+    assert.equal(results.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
+    assert.equal(calls.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
     assert.ok(Math.abs(calls[0].x - 0) < 1e-9);
-    assert.equal(calls[0].y, 0.05);
+    assert.equal(calls[0].y, DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
     assert.equal(calls[0].driveDirectionSign, 1);
     assert.ok(Math.abs(calls[1].x - 0) < 1e-9);
-    assert.equal(calls[1].y, -0.05);
+    assert.equal(calls[1].y, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
     assert.equal(calls[1].driveDirectionSign, -1);
   });
 
@@ -1702,12 +1753,12 @@ describe("DriveLineController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 52);
+    assert.equal(results.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
     assert.ok(calls.length >= 2);
-    assert.ok(Math.abs(calls[0].x - 0.05) < 1e-9);
+    assert.ok(Math.abs(calls[0].x - DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]) < 1e-9);
     assert.ok(Math.abs(calls[0].y - 0) < 1e-9);
     assert.ok(Math.abs(calls[1].x - 0) < 1e-9);
-    assert.ok(Math.abs(calls[1].y + 0.05) < 1e-9);
+    assert.ok(Math.abs(calls[1].y + DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]) < 1e-9);
     assert.equal(calls[0].driveDirectionSign, 1);
     assert.equal(calls[1].driveDirectionSign, -1);
   });
@@ -1864,12 +1915,12 @@ describe("DriveLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 5);
+    assert.equal(params.version, 6);
     assert.equal(params.longDriveBrakeDistanceForwardMeters, 2.0);
     assert.equal(params.longDriveBrakeDistanceReverseMeters, 2.0);
     assert.equal(params.forwardCteGain, 0.3);
     assert.equal(params.reverseCteGain, 0.3);
-    assert.equal(params.shortDriveBuckets?.length, 20);
+    assert.equal(params.shortDriveBuckets?.length, DRIVE_SHORT_BUCKET_DISTANCES_METERS.length);
   });
 
   it("updates brake distance from error", async () => {

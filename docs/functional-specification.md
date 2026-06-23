@@ -523,16 +523,13 @@ There will also be a button to 'Verify'.
 The drive button shall immediately follow the stored path from the mower's current position.
 The verify button shall first execute a segment-style approach to about 10cm short of the nearest recorded point, then continue around the stored path until it returns to that join point. The 10cm standoff exists so the mower has body clearance to turn on the spot at arrival without fouling the recorded edge; it is not an inflation of the path itself.
 
-All perimeter follows — obstacle perimeters, mowing area perimeters, mowing first-encounter boundary traces, and inter-strip connectors — shall use the segmented drive executor. There shall be no separate pure-pursuit follower and no per-path drive-algorithm choice.
+Stored obstacle and area perimeter traces shall use the continuous path follower so the mower stays in a smooth line-following mode once it has joined the perimeter. Verification, mowing first-encounter boundary traces, and multi-point perimeter-style inter-strip connectors shall all reuse that same continuous follower. Simple two-point standoff transfers may still use a direct straight-line drive.
 
-The segmented drive executor shall simplify the manually driven recording before execution using both a chord tolerance and a per-vertex turn-angle gate:
-- A run of consecutive recorded points may be replaced by a single straight segment if every original point in the run lies within the configured simplification tolerance of that chord, and no original interior vertex of the run requires a heading change above the configured maximum vertex turn angle.
-- The first vertex that fails either test ends the chord at the last good vertex; that failing vertex becomes a turn-on-the-spot pivot before the next chord begins.
-- Long simplified chords shall still be subdivided into bounded segment targets so the segment drive controller has frequent re-anchor opportunities.
+Before starting a perimeter follow, the runtime shall choose the nearest recorded perimeter point, turn to align tangentially with the selected travel direction, then re-evaluate the nearest join point from the post-turn pose while preserving that chosen direction. This prevents the mower from short-cutting the loop or jumping into the wrong lane after the alignment turn.
 
 The recorded perimeter points are the boundary to follow as faithfully as the simplifier allows. No outward inflation is applied to either obstacle or area perimeters; the original manually driven trace is presumed to already respect the safe edge of the obstacle or area.
 
-Driving a mowing area perimeter assumes the mower is already on or close to the perimeter: the runtime shall choose the nearest recorded perimeter point and continue in the direction that best matches the mower's current heading. Verifying a mowing area perimeter shall segment-drive to the nearest perimeter point, stop there, turn to align with the chosen path direction, and then continue around the perimeter using the same segmented executor.
+Driving a mowing area perimeter assumes the mower is already on or close to the perimeter: the runtime shall choose the nearest recorded perimeter point and continue in the direction that best matches the mower's current heading. Verifying a mowing area perimeter shall drive to the nearest perimeter point, stop there, turn to align with the chosen path direction, then continue around the perimeter using the same continuous path follower as the other perimeter workflows.
 
 At execution time the segmented executor shall re-anchor the target list to the nearest target to the mower's current pose and skip targets already reached, so it resumes from where the mower meets the boundary rather than returning to the saved path's first point. The executor shall abort the run if the measured segment cross-track error exceeds the configured path-following limit.
 
@@ -588,7 +585,7 @@ The sequence on first arrival at a boundary is:
 
 1. **Stop short.** The mowing strip or connector brings the mower to within the standoff distance (15 cm) of the boundary, then stops.  The boundary is flagged as not yet traced.
 2. **Align to the boundary tangent.** The mower turns on the spot to face tangentially along the boundary at the nearest recorded boundary point, choosing the direction that will travel around the boundary in the correct orientation (clockwise around obstacles, following the recorded direction for the area perimeter).
-3. **Line-follow the boundary.** The mower switches to path-follower mode and follows the recorded boundary path.  It continues until it returns to the point at which it joined the boundary — the join point is detected when the mower is within the closed-loop tolerance of that starting point and has travelled enough distance to have genuinely completed a loop.
+3. **Line-follow the boundary.** The mower switches to the continuous path follower and follows the recorded boundary path.  It continues until it returns to the point at which it joined the boundary — the join point is detected when the mower is within the closed-loop tolerance of that starting point and has travelled enough distance to have genuinely completed a loop.
 4. **Mark boundary as traced.** The boundary is flagged as fully traced for this mowing session.
 5. **Resume strip sequencing.** The mower returns to the strip end at which it first stopped and continues the normal strip-mowing sequence from that point.
 
@@ -600,7 +597,7 @@ The safe transition sequence at a strip end is therefore:
 
 1. **Stop at the standoff point.** The strip drive ends when the mower reaches the point on the strip that is the standoff distance back from the boundary.  If this is the first arrival at this boundary the mower performs the boundary trace described above before continuing.
 2. **Turn to face along the boundary.** The mower performs a turn-on-the-spot to align its heading tangentially with the recorded boundary at the nearest boundary point.
-3. **Line-follow the boundary to the next strip entry.** The mower switches to path-follower mode and travels along the recorded boundary — known safe ground — until it reaches the standoff point of the next strip's entry end.  Because the boundary has already been traced at this stage, this leg travels inward of the boundary by the standoff distance rather than on the boundary line itself.
+3. **Line-follow the boundary to the next strip entry.** When the connector contains a perimeter leg, the mower stays in the same continuous path-following mode and travels along the recorded boundary — known safe ground — until it reaches the standoff point of the next strip's entry end.  Because the boundary has already been traced at this stage, this leg travels inward of the boundary by the standoff distance rather than on the boundary line itself.
 4. **Segment drive down the next strip.** At the next strip's entry standoff point the mower executes a segment drive: it turns on the spot to face along the strip axis and then drives the strip in a straight line using the straight-line drive controller until it reaches the standoff point at the far end.
 
 This means inter-strip travel is always composed of two phases: a boundary-following phase (safe known ground, inside the standoff margin) and a segment-drive phase (straight mowing pass).  The planner pre-computes the full sequence of strip standoff endpoints and connector waypoints before motion starts so the operator can preview the entire planned route on the canvas.

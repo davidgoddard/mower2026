@@ -12,7 +12,10 @@ File:
 
 - runs as I2C slave at address `0x66`
 - accepts explicit left/right wheel output commands (`-1.0..1.0`, where `1.0` is full output)
-- enforces watchdog timeout
+- does not enforce the legacy watchdog timeout field; the Pi intentionally avoids
+  flooding the I2C bus with duplicate motor commands, so the ESP32 continues
+  applying the last accepted command until a new command arrives or drive is
+  explicitly disabled
 - preserves asymmetric ramp-up / ramp-down behavior
 - preserves stop-before-reverse behavior
 - counts FG/tach pulses

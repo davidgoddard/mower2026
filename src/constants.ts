@@ -53,10 +53,19 @@ export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 20;
 
 /**
  * Manual drive keepalive interval in milliseconds.
- * Manual drive uses this when deciding whether the HID snapshot stream has
- * gone stale; unchanged wheel commands are no longer resent as keepalives.
+ * While the operator holds a steady input, the manual-drive coordinator
+ * re-sends the same wheel command at this cadence so the motor node keeps
+ * seeing fresh commands even if the HID packet stream is bursty.
  */
 export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
+
+/**
+ * Manual drive HID snapshot stale threshold in milliseconds.
+ * HID packet delivery can be uneven even while the controller is still being
+ * used, so manual drive waits this long before treating the snapshot stream as
+ * stale and commanding a gentle halt.
+ */
+export const MANUAL_DRIVE_SNAPSHOT_STALE_AFTER_MS = 1000;
 
 /**
  * Manual drive motor ramp-up time in milliseconds.
@@ -413,7 +422,7 @@ export const TURN_SMALL_ANGLE_THRESHOLD_DEG = 60;
  * Crawl speed factor used for small-angle turns
  * A lower-than-full-speed turn that still keeps enough momentum to avoid stalls.
  */
-export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.5;
+export const TURN_SMALL_CRAWL_SPEED_FACTOR = 0.575;
 
 /**
  * Learning rate for brake angle adaptation (0-1)
@@ -451,11 +460,11 @@ export const TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS = 30_000;
  * the brake trigger fires at the right moment regardless of the current
  * session's battery voltage or motor temperature.
  *
- * 200 ms at the 50 Hz sensor loop gives ~10 samples — enough to smooth
- * single-sample jitter without being too slow to react if the mower
- * accelerates during the first part of the turn.
+ * 1000 ms at the 50 Hz sensor loop gives ~50 samples — a slower, smoother
+ * estimate intended to reduce short-term IMU jitter and turn-speed wobble
+ * during large-angle turns.
  */
-export const TURN_RATE_WINDOW_MS = 200;
+export const TURN_RATE_WINDOW_MS = 1000;
 
 /**
  * Turn learning parameters file path (relative to project root)

@@ -750,14 +750,13 @@ ${getSensorWidgetScriptTag()}
                   <tr>
                     <th>Dir</th>
                     <th>Angle</th>
-                    <th>Brake Bucket</th>
-                    <th>Bias</th>
+                    <th>Brake Scalar</th>
                     <th>Samples</th>
                     <th>Last Error</th>
                   </tr>
                 </thead>
                 <tbody id="largeTurnParametersBody">
-                  <tr><td colspan="6">Loading…</td></tr>
+                  <tr><td colspan="5">Loading…</td></tr>
                 </tbody>
               </table>
             </div>
@@ -781,14 +780,13 @@ ${getSensorWidgetScriptTag()}
                   <th>Mode</th>
                   <th>Bucket</th>
                   <th>Trigger</th>
-                  <th>Bias</th>
                   <th>Duration</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody id="resultsTableBody">
                 <tr>
-                  <td colspan="10">
+                  <td colspan="9">
                     <div class="empty-state">
                       <div class="empty-icon">📊</div>
                       <div>No turn results yet. Run a turn to see results here.</div>
@@ -928,7 +926,7 @@ ${getAppDialogScript()}
       if (!parameters || !diagnostics) {
         diagnosticsEl.innerHTML = '<div class="parameter-row"><span>Unavailable</span><span>—</span></div>';
         smallBody.innerHTML = '<tr><td colspan="5">Unavailable</td></tr>';
-        largeBody.innerHTML = '<tr><td colspan="6">Unavailable</td></tr>';
+        largeBody.innerHTML = '<tr><td colspan="5">Unavailable</td></tr>';
         return;
       }
 
@@ -936,8 +934,7 @@ ${getAppDialogScript()}
         ['Learning rate', diagnostics.learningRate?.toFixed(3) ?? '—'],
         ['Small-angle threshold', formatAngle(parameters.smallAngleThresholdDeg ?? 0)],
         ['Small brake-time clamp', formatMilliseconds(diagnostics.smallTurnBrakeTimeMinMs ?? 0) + ' .. ' + formatMilliseconds(diagnostics.smallTurnBrakeTimeMaxMs ?? 0)],
-        ['Large brake clamp', formatAngle(diagnostics.largeTurnBrakeDistanceMinDeg ?? 0) + ' .. ' + formatAngle(diagnostics.largeTurnBrakeDistanceMaxDeg ?? 0)],
-        ['Large bias clamp', formatAngle(diagnostics.largeTurnBiasOffsetMinDeg ?? 0) + ' .. ' + formatAngle(diagnostics.largeTurnBiasOffsetMaxDeg ?? 0)],
+        ['Large brake-scalar clamp', formatMilliseconds(diagnostics.largeTurnBrakeScalarMinMs ?? 0) + ' .. ' + formatMilliseconds(diagnostics.largeTurnBrakeScalarMaxMs ?? 0)],
       ].map(([label, value]) => '<div class="parameter-row"><span>' + label + '</span><span>' + value + '</span></div>').join('');
 
       const smallBuckets = parameters.smallTurnBuckets ?? [];
@@ -956,17 +953,16 @@ ${getAppDialogScript()}
         '<tr>' +
           '<td>' + bucket.direction.toUpperCase() + '</td>' +
           '<td>' + formatAngle(bucket.requestedAngleDeg) + '</td>' +
-          '<td>' + formatAngle(bucket.brakeDistanceDeg) + '</td>' +
-          '<td>' + formatAngle(bucket.biasOffsetDeg) + '</td>' +
+          '<td>' + formatMilliseconds(bucket.brakeScalarMs) + '</td>' +
           '<td>' + (bucket.sampleCount ?? 0) + '</td>' +
           '<td>' + (bucket.lastErrorDeg === undefined ? '—' : formatAngle(bucket.lastErrorDeg)) + '</td>' +
         '</tr>'
-      )).join('') || '<tr><td colspan="6">No large-angle buckets</td></tr>';
+      )).join('') || '<tr><td colspan="5">No large-angle buckets</td></tr>';
     }
 
     function formatControlMode(mode) {
       if (mode === 'small_timeout') return 'small timeout';
-      if (mode === 'large_rate_bias') return 'rate + bias';
+      if (mode === 'large_rate_scalar') return 'rate × scalar';
       return '—';
     }
 
@@ -974,8 +970,10 @@ ${getAppDialogScript()}
       if (result.triggerTimeUsedMs !== undefined) {
         return formatMilliseconds(result.triggerTimeUsedMs);
       }
-      if (result.triggerProgressUsedDeg === undefined) return '—';
-      return formatAngle(result.triggerProgressUsedDeg);
+      if (result.triggerProgressUsedDeg !== undefined) {
+        return formatAngle(result.triggerProgressUsedDeg);
+      }
+      return '—';
     }
 
     function getRequestedStartAngle() {
@@ -1085,8 +1083,7 @@ ${getAppDialogScript()}
               <td>\${formatControlMode(result.controlMode)}</td>
               <td>\${result.learningBucketAngleDeg === undefined ? '—' : formatAngle(result.learningBucketAngleDeg)}</td>
               <td>\${formatTrigger(result)}</td>
-              <td>\${result.biasOffsetUsedDeg === undefined ? '—' : formatAngle(result.biasOffsetUsedDeg)}</td>
-              <td>\${result.durationMs}ms</td>
+              <td>\${formatMilliseconds(result.durationMs)}</td>
               <td><span class="status-cell status-\${result.status}">\${result.status}</span></td>
             </tr>
           \`).join('');
@@ -1094,7 +1091,7 @@ ${getAppDialogScript()}
           resultsCount.textContent = '0 turns';
           tbody.innerHTML = \`
             <tr>
-              <td colspan="10">
+              <td colspan="9">
                 <div class="empty-state">
                   <div class="empty-icon">📊</div>
                   <div>No turn results yet. Run a turn to see results here.</div>

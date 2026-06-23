@@ -41,6 +41,12 @@ export interface PathRecorderOptions {
   distanceThreshold: number;
   maxSegmentDistanceMeters?: number;
   requireGnssQuality?: boolean;
+  /**
+   * Retained for backwards compatibility; recorded paths are now always saved
+   * raw and any obstacle/area safety shaping is applied at runtime by the
+   * consumer that is about to drive, verify, or plan from the path.
+   */
+  saveProcessing?: "none" | "obstacle_safe_smoothed" | "area_safe_smoothed";
   logger: LoggerScope;
 }
 

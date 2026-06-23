@@ -148,6 +148,7 @@ CurrentSensorState g_rightCurrentSensor = { RIGHT_CURRENT_SENSE_PIN, CURRENT_SEN
 
 uint16_t g_lastFeedbackRequestSequence = 0;
 bool g_haveFeedbackRequest = false;
+portMUX_TYPE g_protocolStateMux = portMUX_INITIALIZER_UNLOCKED;
 
 uint8_t g_txFrame[MAX_FRAME_SIZE];
 size_t g_txFrameLength = 0;
@@ -497,11 +498,15 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
 
 void runControlStep(uint32_t nowMillis) {
   static uint32_t lastStepMillis = 0;
+  WheelSpeedCommand commandSnapshot;
+  portENTER_CRITICAL(&g_protocolStateMux);
+  commandSnapshot = g_latestCommand;
+  portEXIT_CRITICAL(&g_protocolStateMux);
 
-  bool allowDrive = g_latestCommand.enableDrive;
+  bool allowDrive = commandSnapshot.enableDrive;
 
-  float leftTarget = allowDrive ? g_latestCommand.leftWheelTargetPercent : 0.0f;
-  float rightTarget = allowDrive ? g_latestCommand.rightWheelTargetPercent : 0.0f;
+  float leftTarget = allowDrive ? commandSnapshot.leftWheelTargetPercent : 0.0f;
+  float rightTarget = allowDrive ? commandSnapshot.rightWheelTargetPercent : 0.0f;
   g_leftMotor.targetPercent = leftTarget;
   g_rightMotor.targetPercent = rightTarget;
 
@@ -519,11 +524,11 @@ void runControlStep(uint32_t nowMillis) {
   lastStepMillis = nowMillis;
 
   // Wire field is 1/rampSeconds; convert to %/s: rate = wireValue × 100.
-  float accelRate = g_latestCommand.hasAccelLimit
-    ? g_latestCommand.maxAccelerationPercentPerSecond * 100.0f
+  float accelRate = commandSnapshot.hasAccelLimit
+    ? commandSnapshot.maxAccelerationPercentPerSecond * 100.0f
     : DEFAULT_ACCEL_PERCENT_PER_SECOND;
-  float decelRate = g_latestCommand.hasDecelLimit
-    ? g_latestCommand.maxDecelerationPercentPerSecond * 100.0f
+  float decelRate = commandSnapshot.hasDecelLimit
+    ? commandSnapshot.maxDecelerationPercentPerSecond * 100.0f
     : DEFAULT_DECEL_PERCENT_PER_SECOND;
 
   stepMotorTowardRequested(g_leftMotor, elapsedMs, accelRate, decelRate);
@@ -556,16 +561,25 @@ void onReceive(int numBytes) {
   if (messageType == MESSAGE_TYPE_WHEEL_SPEED_COMMAND) {
     WheelSpeedCommand decoded;
     if (decodeWheelSpeedCommandPayload(payload, payloadLength, decoded)) {
+      portENTER_CRITICAL(&g_protocolStateMux);
       g_latestCommand = decoded;
+      portEXIT_CRITICAL(&g_protocolStateMux);
     }
   } else if (messageType == MESSAGE_TYPE_MOTOR_FEEDBACK) {
+    portENTER_CRITICAL(&g_protocolStateMux);
     g_lastFeedbackRequestSequence = sequence;
     g_haveFeedbackRequest = true;
+    portEXIT_CRITICAL(&g_protocolStateMux);
   }
 }
 
 void onRequest() {
-  if (!g_haveFeedbackRequest) {
+  bool haveFeedbackRequest = false;
+  portENTER_CRITICAL(&g_protocolStateMux);
+  haveFeedbackRequest = g_haveFeedbackRequest;
+  portEXIT_CRITICAL(&g_protocolStateMux);
+
+  if (!haveFeedbackRequest) {
     refreshFeedbackSnapshot(millis());
   }
   Wire.write(g_txFrame, g_txFrameLength);

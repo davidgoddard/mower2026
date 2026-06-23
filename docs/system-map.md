@@ -65,10 +65,13 @@ This document maps problem domains to candidate files removing the need for Code
   - neutral stop requests while `systemStop` is latched must resend disabled motor frames rather than zero-speed enabled frames, so the ESP32 keeps seeing a hard stop and never resumes on a stale command
   - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
+  - live HID input while manual drive is armed clears a latched global stop so the operator can consciously recover from a stall/stop during manual manoeuvring
+  - unchanged held-stick commands are periodically re-sent at the configured keepalive cadence, and HID snapshots now tolerate a longer documented stale window before gentle-halt/disarm logic starts
 - `src/control/turnController.ts`: turn stop checks and stop handling.
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
+  - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
 
 ## Pose Fusion
 - `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.
@@ -92,6 +95,8 @@ This document maps problem domains to candidate files removing the need for Code
   - runs the top-level sensor loop, with IMU on every loop tick while GNSS and motor polling run at their own lower cadences to reduce CPU and I2C load
 - `src/sensing/sensorHardwareGateway.ts`: clamps normalized wheel outputs (`-1..1`) and applies direction mapping before sending to the motor client.
 - `external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino`: ESP32 motor controller firmware; acts as a ramped PWM bridge that applies commanded wheel targets, handles safe zero-crossing on reversals, and reports encoder/current telemetry back to the Pi without local wheel-speed regulation.
+  - no local motor-command watchdog is enforced; the node intentionally holds the last accepted command until the Pi sends a different target or an explicit disable
+  - command frames and feedback-request metadata are now copied under a small critical section so the control loop cannot consume a partially written command struct while the I2C callback is updating it
 - `src/motors/motorMapping.ts`: motor sign mapping and normalized wheel-output clamp helpers.
 
 ## GNSS ESP32 Firmware
@@ -103,8 +108,10 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
   - executes on-the-spot turns using IMU heading integration
   - polls heading at the sensor controller update rate
-  - adaptive brake angle learning per turn angle and direction
-  - small-angle turns brake after a learned amount of actual IMU progress for the requested bucket; large-angle turns continue to use live angular-velocity coast prediction plus learned bias buckets
+  - large-turn rate estimation uses a rolling `1000ms` IMU progress window before converting rate × learned scalar into a predicted coast angle
+  - adaptive per-angle timeout learning per turn angle and direction
+  - small-angle turns brake after a learned number of milliseconds from turn start
+  - large-angle turns use live angular velocity multiplied by a learned per-bucket scalar to predict coast and decide when to brake; intermediate requested angles interpolate between their nearest stored buckets for prediction only
   - pauses for a deliberate one-second settle before final measurement and learning, and inserts a one-second pause between successive training turns so the operator can see each turn fully finish before the next begins
   - both large-angle and small-angle training now repeat each requested angle until the turn error is within target or the per-angle retry cap is reached
   - emergency stop support during turn execution
@@ -117,16 +124,16 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
   - small-angle learning uses 3° timeout buckets up to the configured small-angle threshold, meaning each bucket learns how many milliseconds from turn start the mower should keep driving before commanding stop; intermediate requested angles interpolate between neighboring bucket times for prediction only, and learning only writes back when the requested angle is effectively on a real bucket
-  - large-angle learning uses independent 10° brake-distance buckets per direction above the small-angle threshold, initialized to 25°
+  - large-angle learning uses independent 10° angular-rate scalar buckets per direction above the small-angle threshold; each scalar multiplies the live angular rate to predict remaining coast, and intermediate requested angles interpolate between neighboring bucket scalars for prediction only while learning only writes back when the requested angle is effectively on a real bucket
   - JSON persistence at `config/turn-learning-parameters.json`
 - `src/control/turnControllerTypes.ts`: turn controller type definitions
 - `src/server/turnTuningPage.ts`: modern responsive web UI for turn tuning
   - real-time turn execution and monitoring
   - shared angle field used for single-turn execution and as the starting bucket/angle for small-angle and large-angle training sweeps
   - results table with error visualization and without the misleading legacy brake-distance display
-  - each turn result row now shows the active control mode, learned bucket, actual small-turn timeout trigger, and large-turn bias used so operators can verify what the controller really applied
+  - each turn result row now shows the active control mode, learned bucket, and the actual brake trigger used (timeout for small turns, predicted brake angle for large turns)
   - real-pose validation sweep table comparing IMU and pose fusion headings
-  - learning parameter display showing the actual persisted small-angle timeout buckets, large-angle brake/bias buckets, and learning-rate diagnostics used by the current controller
+  - learning parameter display showing the actual persisted small-angle timeout buckets, large-angle rate-scalar buckets, and learning-rate diagnostics used by the current controller
   - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
   - prominent STOP button for emergency abort
 - `src/server/driveTuningPage.ts`: drive tuning UI with live primitive sidebar
@@ -158,7 +165,9 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/driveController.ts`: segment drive controller that turns to face the target and then delegates straight-line travel
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
+  - skips the initial pivot for very short non-forced hops (15 cm or less) so tiny pose corrections do not degrade into turn-drive-turn startup dithering
   - delegates to line controller immediately after the turn, then records successful segment history
+  - `getCurrentPose()` exposes the live fused pose for higher-level path executors that need to re-evaluate progress between segment drives
   - stop requests are unconditional: they are awaited through both the turn phase and the line-drive phase when active, and still issue an immediate stop command even when no drive is currently active
   - surfaces short-distance and segment training progress to the drive tuning page state while a training run is active
   - segment-learning runner for 105cm to 6m fixed-line runs in 20cm steps
@@ -220,6 +229,7 @@ This document maps problem domains to candidate files removing the need for Code
   - injects `pathRestart(waypoints)` that re-runs `executeSegmentedBoundaryPath` with the same recent-target sink
   - subscribes `sensorController.on("obstructionDetected", ...)` and routes the event to `retryManager.handleObstruction(...)` only when the operation-context tracker reports an active context
   - `runSegmentedPerimeterFollow` helper wraps each perimeter-follow route (path drive/verify, area-perimeter drive/verify) with operation-context set/clear + retry session start/end + path checkpoint registration
+  - area-perimeter save/drive/verify now reuse the same inward-safe smoothing + continuous-follow approach used by obstacle tracing, except the safe offset is inward rather than outward
   - mowing run wires `recentTargetSink: retryManager` into `MowingExecutor` and brackets the background execution with the same retry-session lifecycle
 
 ## Path Following
@@ -227,36 +237,86 @@ This document maps problem domains to candidate files removing the need for Code
   - `PathPoint`, `StoredPath`: shared geometry types
   - `IPathRecorder`: interface for recording paths during manual driving
   - `IPathStore`: interface for persistent path storage
-- `src/pathfollowing/segmentedBoundaryExecutor.ts`: **PERIMETER FOLLOW IMPLEMENTATION** — the only follower used at runtime
+- `src/pathfollowing/obstaclePathShaper.ts`: closed-loop path shaping for recorded perimeters
+  - obstacle recordings are smoothed and offset outward so the mower follows just outside the mapped obstacle
+  - mowing-area recordings are smoothed and offset inward so the mower follows just inside the mapped area edge
+- `src/pathfollowing/pathRecorder.ts`: save-time path post-processing
+  - obstacle recordings use `obstacle_safe_smoothed`
+  - area perimeter recordings use `area_safe_smoothed`
+- `src/pathfollowing/segmentedBoundaryExecutor.ts`: segmented perimeter-follow implementation for general stored paths and exact waypoint sequences
   - simplifies manually recorded wiggles using a chord tolerance plus a per-vertex turn-angle gate, so any kept vertex is one the mower will pivot through on the spot
   - subdivides long simplified spans into bounded segment-drive targets
   - re-anchors target execution to the nearest target at runtime and skips targets already under the current pose
+  - verification flows can preserve the intentional first join-point target even when the mower is already sitting on it, preventing closed-loop verify from terminating immediately after the tangent turn
+  - the passed-waypoint helper also supports a closed-loop start-target progression mode so a preserved join point can become passed once the mower has genuinely moved down the first segment, preventing obstacle verify from orbiting the join point
+  - before every segment drive, advances completed waypoints strictly in order using a small pass margin; if the mower has already overshot a tiny segment, that waypoint is skipped only after it is truly passed
+  - once the next required waypoint is known, it can still choose a short look-ahead target farther along the same ordered route to reduce needless micro-turns
+  - stored obstacle path drive/verify disables that look-ahead and uses exact next-target tracing so the mower does not cut chords across the inside of the obstacle
+  - stored obstacle path drive/verify also bypasses runtime simplification/resampling and follows the saved smoothed-safe points directly
+  - completion is based on all ordered waypoints having been passed, not merely on exhausting a selected-target list
   - callers that already chose a specific join point can preserve that target order while still dropping any first target that is already within the minimum segment distance of the mower
   - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
+- `src/pathfollowing/continuousPathFollower.ts`: continuous forward follower for smooth perimeter traces and multi-point lane connectors
+  - supports ordered-progress protection so projection stays on the local segment window instead of jumping ahead to a later non-adjacent segment
+  - supports sharp-corner waypoint pivots: when close to a waypoint that implies a steep outgoing turn, it pivots to the new heading instead of trying to arc-cut outside the perimeter
+  - supports a caller-supplied minimum trace speed so perimeter loops do not slow into near-stall commands
+  - can also pivot when the requested arc would drive the inner wheel below a healthy floor, preventing long stall-prone crawl turns during perimeter tracing
+  - drives saved or planned polylines using direct left/right wheel outputs instead of turn-drive-turn segments
+  - mowing traces/connectors can enable strict ordered progress so nearby non-adjacent segments, including the closing leg back to the join point, cannot falsely jump the follower far ahead in the route
+  - advances ordered path progress using the same passed-waypoint logic, then projects the mower onto the ordered polyline and picks lookahead by true forward arc-length progress instead of only waypoint index
+  - continuously steers by combining cross-track error against the current projected segment with heading-to-lookahead error
+  - closed-loop obstacle verify enables the start-target progression mode so the follower can leave the preserved join point after tangential departure instead of repeatedly steering back into a tight local loop
+  - adaptively reduces forward speed on tighter local path curvature, larger live heading error, and larger live cross-track error, while allowing broader smoother perimeters to run faster
+  - can pivot in place only as a fallback for very large heading errors and now uses pivot-entry / pivot-exit hysteresis so it does not flap between arc-drive and pivot-turn modes
 - `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
   - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
   - in-memory caching for loaded paths
   - path metadata: total distance, point count, creation timestamp
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
   - records fused GNSS and dead-reckoning poses, ignores unknown-quality poses, and skips implausible segment jumps while keeping skip counts in the stop summary
+  - always persists raw recorded points so future perimeter-shaping fixes can be applied at runtime without forcing an operator re-trace
+- `src/pathfollowing/obstaclePathShaper.ts`: reshapes recorded obstacle loops into a convex, slightly outward-offset, Chaikin-smoothed loop and nudges any stray points back outside the originally recorded obstacle polygon
+  - mowing-area runtime shaping now avoids both the old convex-hull simplification and centroid shrink; instead it removes tiny local wiggles and fuses near-collinear runs while preserving substantive corners
+  - shaping margins and smoothing behaviour are defined by clearly named local constants, including the obstacle outward offset, per-step outside nudge, Chaikin pass count, and the area wiggle-removal / corner-preservation thresholds
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification/drive starts at the nearest recorded point and (for closed perimeters) loops back to the join point
   - chooses forward or reverse traversal by tangent alignment at the nearest point
   - verification approach stages 10cm short of the join point so the mower has body clearance to pivot before joining the perimeter
-  - once verify has chosen its join point and direction, the follow loop stays anchored to that plan instead of being recomputed from the post-approach pose
-  - both obstacle perimeters and mowing area perimeters preserve the recorded geometry verbatim — no outward inflation
+  - obstacle verify now reuses the chosen direction but recomputes the nearest perimeter join from the post-turn pose before starting the follow loop
+  - mowing area perimeters preserve the recorded geometry verbatim; obstacle paths may now be saved as a smoothed outward-safe loop for easier tracing and then followed by the continuous obstacle follower
   - path safety distances are supplied from `PathFollowingConfig` rather than hard-coded in this helper
 - `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
   - normalizes the requested mowing axis to 0-180 degrees because opposite directions produce the same strip layout
   - clips parallel strips to the selected mowing area perimeter using the requested strip spacing, defaulting to 30cm spacing for the 40cm blade
   - selects the nearest obstacle-clear line-of-sight area perimeter entry point for mow-start entry planning
-  - can re-anchor strip traversal around a preferred perimeter start point so mowing resumes near the entry location and still covers every strip
+  - outside-area starts may join directly from outside so long as the approach only meets the area boundary at the chosen join and does not cross an obstacle; the "midpoint must stay inside" guard applies only when already inside the area
+  - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
+  - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
+  - can re-anchor strip traversal around a preferred perimeter start point so mowing resumes near the entry location and still covers every strip; re-anchoring now evaluates whole consistent traversal candidates in both forward and reverse overall order instead of flipping only the first strip end
   - sequences strips in locked normal-axis order and marks per-strip traversal direction for boustrophedon preview and execution
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
+  - traversal sequencing now lets adjacent strip ends compete with same-offset obstacle-split continuations and penalizes routed same-offset continuation, so an obstacle acts more like a divider than a cue to keep resuming the same lane around it
   - returns logical strip segments for canvas preview and future execution planning
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
+  - initial area entry traces the full area perimeter before strip mowing begins, then re-anchors strip order to the live pose
+  - perimeter tracing for areas and obstacles now uses a hybrid strategy: continuous following on straight/gentle runs, with explicit `TurnController` pivots at sharp corners, plus a raised minimum speed floor and pivot fallback when an arc would nearly stop the inner wheel
+  - mowing-area perimeter tracing now follows the recorded area boundary verbatim at runtime rather than passing it through the obstacle/area shaper, so corner logic sees the operator-drawn perimeter instead of a synthetic convex/smoothed substitute
+  - after an explicit perimeter corner turn, it now drives a short committed capture segment onto the outgoing edge before handing control back to the continuous follower, reducing the pivot/arc dithering that used to stall mid-perimeter
+  - includes a 5 cm outside-area watchdog that stops the mow if the pose escapes beyond the saved area boundary
+  - if the mower starts outside the area, adjusts the perimeter-entry approach target so the staging point lies inside the recorded area before tracing begins
+  - skips the initial perimeter-entry drive when the live pose is already within the same small "close enough" tolerance of the staging point, preventing large corrective turns for a few centimetres of error
   - approaches the planned line-of-sight area perimeter standoff point before strip mowing
   - traces the area perimeter first and marks it traced before continuing into strips
+  - rebuilds the strip order from the mower's actual post-trace pose so the first strip and its connector sequence are chosen from where the mower really ended up, not only from the pre-entry estimate
+  - uses the planner-provided strip boundary references so first-encounter tracing is tied to the actual area/obstacle endpoint, not whichever recorded loop happens to be geometrically nearest
+  - re-evaluates the nearest perimeter join after the tangent turn, then follows the resulting explicit closed loop without enabling closed-loop start progression in the live follower, preventing immediate perimeter-trace completion at the join point
+  - ordinary strip-to-strip transfers now prefer a single direct drive from the live end-of-strip pose to the next strip entry target, so small X/Y arrival errors do not trigger long corrective dances around saved connector geometry
+  - follows multi-point inter-lane connectors with the same continuous follower used for perimeter tracing so lane changes and obstacle-wrap connectors stay smooth instead of degenerating into repeated micro turn-drive retargets
+  - only falls back to routed connector following when a direct transfer line is blocked by an obstacle
+  - skips approach / strip / direct-connector micro-corrections when the live pose is already within 10 cm of the target, avoiding large turns for effectively completed 5 cm moves
+  - keeps two-point connectors as direct line drives between standoff targets
+  - starts an in-run area watchdog after the initial perimeter trace and requests an immediate stop if the mower drifts more than 50 cm outside the mowing area
+  - stops the mowing workflow if a boundary trace does not complete successfully
 - `src/server/manualDrivePage.ts`: combined Drive & Paths UI
   - live position map at the top of the page
   - manual-drive telemetry cards
@@ -361,10 +421,12 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
 - `src/i2c/i2cBusController.ts`: single-bus queued priority controller with key-based request replacement.
 - `src/i2c/liveI2cTransport.ts`: live Raspberry Pi I2C transport (`i2c-bus` module wrapper).
+  - reopens the bus handle and retries once after recoverable Linux/I2C failures such as `EIO`, `EREMOTEIO`, `ENXIO`, `EBUSY`, timeout-style errors, or short read/write counts
 - `external-hardware/manual-tests/imu_manual_test.js`: manual BMI160 bring-up poller script; uses built runtime modules from `dist/i2c/*` and `dist/imu/*` after `npm run build`.
 - `external-hardware/manual-tests/imu_gnss_turn_calibration.js`: interactive IMU/GNSS heading capture utility; press `S` to start a run and locally align the IMU to the current GNSS heading, then press `E` to save paired start/end headings, a suggested yaw-scale correction to JSONL, and the averaged export to `config/imu-yaw-calibration.json`.
 - `external-hardware/manual-tests/rotation_center_calibration.js`: manual GNSS geometry calibration utility that spins the mower through at least one full rotation and writes `config/geometry-calibration.json`.
 - `test/i2cBusController.test.js`: queue priority and replacement behavior tests.
+- `test/liveI2cTransport.test.js`: transport reopen/retry behavior for recoverable bus faults.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
 - `test/motorNodeClient.test.js`: motor command priority and feedback-frame decode tests.
