@@ -1,7 +1,7 @@
 import { PathPoint } from "./pathFollowerApi.js";
 import { ContinuousPathFollower } from "./continuousPathFollower.js";
 import { buildMowingPlan, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
-import { buildPerimeterPathPointsFromPlan, buildPerimeterJoinPlan } from "./pathVerification.js";
+import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan } from "./pathVerification.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
@@ -50,15 +50,19 @@ export interface MowingExecutorOptions {
    * a high-current obstruction interrupts a mowing run.
    */
   readonly recentTargetSink?: RecentTargetSink;
+  readonly updateRecoveryCheckpoint?: (waypoints: PathPoint[]) => void;
 }
 
-const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
+interface AreaStartAnchorPlan {
+  readonly entryPlan: MowingInitialEntryPlan;
+  readonly preferredStartPoint: { xMeters: number; yMeters: number };
+}
+
 const AREA_ESCAPE_STOP_DISTANCE_METERS = 0.05;
 const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
-const PERIMETER_EXPLICIT_CORNER_TURN_DEG = 35;
-const PERIMETER_CORNER_MIN_SEGMENT_METERS = 0.15;
-const PERIMETER_CORNER_CAPTURE_DISTANCE_METERS = 0.3;
+const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
+const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
 export class MowingExecutor {
   private plan: MowingPlan;
@@ -73,6 +77,7 @@ export class MowingExecutor {
   private readonly parameters: PathFollowingParameters;
   private readonly standoff: number;
   private readonly recentTargetSink: RecentTargetSink | undefined;
+  private readonly updateRecoveryCheckpoint: ((waypoints: PathPoint[]) => void) | undefined;
 
   private phase: MowingPhase = "idle";
   private currentStripIndex: number = 0;
@@ -80,6 +85,7 @@ export class MowingExecutor {
   private stopRequested: boolean = false;
   private areaEscapeMonitor: NodeJS.Timeout | null = null;
   private outsideAreaViolationMessage: string | null = null;
+  private selectedAreaStartAnchor: AreaStartAnchorPlan | null = null;
 
   constructor(options: MowingExecutorOptions) {
     this.plan = options.plan;
@@ -94,6 +100,7 @@ export class MowingExecutor {
     this.parameters = options.parameters ?? DEFAULT_PATH_FOLLOWING_PARAMETERS;
     this.standoff = this.parameters.mowingStandoffMeters;
     this.recentTargetSink = options.recentTargetSink;
+    this.updateRecoveryCheckpoint = options.updateRecoveryCheckpoint;
   }
 
   getStatus(): MowingStatus {
@@ -113,16 +120,22 @@ export class MowingExecutor {
     this.stopRequested = false;
     this.tracedBoundaries = new Set();
     this.outsideAreaViolationMessage = null;
+    this.selectedAreaStartAnchor = null;
     this.stopAreaEscapeMonitor();
     this.logger.info("mowing.execute.start", { stripCount: this.plan.strips.length });
 
     try {
+      this.prepareAreaStartAnchorPlan();
       const initialEntryStatus = await this.executeInitialEntry();
       if (initialEntryStatus) {
         return initialEntryStatus;
       }
 
-      this.reanchorPlanToCurrentPose();
+      if (!this.selectedAreaStartAnchor) {
+        this.reanchorPlanToCurrentPose();
+      } else {
+        this.currentStripIndex = 0;
+      }
       this.startAreaEscapeMonitor();
       const outsideAreaStatus = this.buildOutsideAreaStatus();
       if (outsideAreaStatus) {
@@ -272,7 +285,7 @@ export class MowingExecutor {
   }
 
   private async executeInitialEntry(): Promise<MowingStatus | null> {
-    const entryPlan = this.initialEntryPlan;
+    const entryPlan = this.selectedAreaStartAnchor?.entryPlan ?? this.initialEntryPlan;
     if (!entryPlan) {
       return null;
     }
@@ -374,24 +387,62 @@ export class MowingExecutor {
       nearY: nearPoint.yMeters,
     });
 
-    const boundaryPoints = insertPreferredBoundaryPoint(this.getBoundaryPoints(boundaryKey), nearPoint);
+    const boundaryPoints = this.getBoundaryPoints(boundaryKey);
     if (boundaryPoints.length < 3) {
       this.logger.warn("mowing.trace_boundary.too_short", { boundary: boundaryKey });
       return true;
     }
 
     const currentPose = this.poseFusion.getCurrentPose();
-    const anchoredJoinPose = {
-      ...currentPose,
-      position: createPosition(nearPoint.xMeters, nearPoint.yMeters),
-    };
-    const joinPlan = buildPerimeterJoinPlan(boundaryPoints, anchoredJoinPose, this.parameters);
+    const forcedInitialAreaPlan = this.buildForcedInitialAreaTracePlan(boundaryKey, boundaryPoints, currentPose);
+    const tracingBoundaryPoints = forcedInitialAreaPlan?.boundaryPoints ?? boundaryPoints;
+    const joinPlan = forcedInitialAreaPlan?.plan ?? buildPerimeterJoinPlan(tracingBoundaryPoints, currentPose, this.parameters);
     if (!joinPlan) {
       this.logger.warn("mowing.trace_boundary.no_join_plan", { boundary: boundaryKey });
       return true;
     }
 
-    const turnAngle = headingDifference(currentPose.heading, joinPlan.tangentHeading);
+    if (forcedInitialAreaPlan) {
+      this.updateRecoveryCheckpoint?.(forcedInitialAreaPlan.orderedLoopPoints);
+      this.logger.info("mowing.trace_boundary.forced_anchor", {
+        boundary: boundaryKey,
+        anchorX: forcedInitialAreaPlan.anchorPoint.xMeters,
+        anchorY: forcedInitialAreaPlan.anchorPoint.yMeters,
+        pathDirection: joinPlan.pathDirection,
+      });
+    }
+
+    const preTurnPath = forcedInitialAreaPlan
+      ? buildPerimeterPathPointsFromPlanAndPose(
+        tracingBoundaryPoints,
+        currentPose,
+        joinPlan,
+        this.parameters,
+        PERIMETER_JOIN_START_DISTANCE_METERS,
+      )
+      : buildPerimeterPathPointsFromPose(
+        tracingBoundaryPoints,
+        currentPose,
+        joinPlan.pathDirection,
+        this.parameters,
+        PERIMETER_JOIN_START_DISTANCE_METERS,
+      );
+    if (preTurnPath.length < 2) {
+      this.logger.warn("mowing.trace_boundary.no_preturn_path", {
+        boundary: boundaryKey,
+        pathDirection: joinPlan.pathDirection,
+      });
+      return true;
+    }
+
+    const joinLeadTarget = preTurnPath[1];
+    const joinLeadHeading = createInternalHeading(
+      Math.atan2(
+        joinLeadTarget.yMeters - currentPose.position.yMeters,
+        joinLeadTarget.xMeters - currentPose.position.xMeters,
+      ) * (180 / Math.PI),
+    );
+    const turnAngle = headingDifference(currentPose.heading, joinLeadHeading);
     if (Math.abs(unwrapRelativeAngle(turnAngle)) > this.parameters.turnAlignmentThresholdDeg) {
       const turnResult = await this.turnController.executeTurn({
         targetAngle: turnAngle,
@@ -411,12 +462,50 @@ export class MowingExecutor {
       return false;
     }
 
-    const loopPoints = buildPerimeterPathPointsFromPlan(boundaryPoints, joinPlan, this.parameters);
+    const postTurnPose = this.poseFusion.getCurrentPose();
+    const followPlan = forcedInitialAreaPlan
+      ? joinPlan
+      : buildPerimeterFollowPlan(
+        tracingBoundaryPoints,
+        postTurnPose,
+        joinPlan.pathDirection,
+        this.parameters,
+      );
+    if (!followPlan) {
+      this.logger.warn("mowing.trace_boundary.no_follow_plan", {
+        boundary: boundaryKey,
+        pathDirection: joinPlan.pathDirection,
+      });
+      return true;
+    }
+
+    const loopPoints = forcedInitialAreaPlan
+      ? buildPerimeterPathPointsFromPlanAndPose(
+        tracingBoundaryPoints,
+        postTurnPose,
+        followPlan,
+        this.parameters,
+        PERIMETER_JOIN_START_DISTANCE_METERS,
+      )
+      : buildPerimeterPathPointsFromPose(
+        tracingBoundaryPoints,
+        postTurnPose,
+        followPlan.pathDirection,
+        this.parameters,
+        PERIMETER_JOIN_START_DISTANCE_METERS,
+      );
     if (loopPoints.length < 2) {
       return true;
     }
 
-    const followResult = await this.executePerimeterRuns(loopPoints);
+    const followResult = await this.continuousPathFollower.executePath([...loopPoints], {
+      parameters: this.parameters,
+      preserveFirstTargetAtPose: true,
+      loopPath: false,
+      strictOrderedProgress: true,
+      minimumSpeed: 0.68,
+      pivotIfInnerWheelBelow: 0.25,
+    });
     if (!followResult.completed) {
       if (followResult.reason === "user_stopped") {
         this.phase = "stopped";
@@ -425,173 +514,16 @@ export class MowingExecutor {
       this.phase = "error";
       this.logger.warn("mowing.trace_boundary.failed", {
         boundary: boundaryKey,
-        reason: followResult.reason,
-        error: followResult.error,
+        reason: followResult.reason === "obstruction" ? "error" : followResult.reason,
+        error: followResult.error ?? (followResult.reason === "obstruction"
+          ? "perimeter_follow_obstruction"
+          : "perimeter_follow_failed"),
       });
       return false;
     }
 
     this.logger.info("mowing.trace_boundary.done", { boundary: boundaryKey });
     return true;
-  }
-
-  private async executePerimeterRuns(loopPoints: ReadonlyArray<PathPoint>): Promise<{
-    readonly completed: boolean;
-    readonly reason: "reached_end" | "user_stopped" | "error";
-    readonly error?: string;
-  }> {
-    const cornerIndices = findSharpCornerIndices(loopPoints, PERIMETER_EXPLICIT_CORNER_TURN_DEG, PERIMETER_CORNER_MIN_SEGMENT_METERS);
-    let runStartIndex = 0;
-    let preserveFirstTargetAtPose = true;
-    let pendingLeadPoint: PathPoint | null = null;
-
-    for (const cornerIndex of [...cornerIndices, loopPoints.length - 1]) {
-      const baseRunPoints = loopPoints.slice(runStartIndex, cornerIndex + 1);
-      const runPoints = pendingLeadPoint
-        ? [pendingLeadPoint, ...baseRunPoints]
-        : baseRunPoints;
-      if (runPoints.length >= 2) {
-        const followResult = await this.continuousPathFollower.executePath(runPoints, {
-          parameters: this.parameters,
-          preserveFirstTargetAtPose,
-          loopPath: false,
-          strictOrderedProgress: true,
-          minimumSpeed: 0.68,
-          pivotIfInnerWheelBelow: 0.45,
-        });
-        preserveFirstTargetAtPose = false;
-        pendingLeadPoint = null;
-        if (!followResult.completed) {
-          return {
-            completed: false,
-            reason: followResult.reason === "user_stopped" ? "user_stopped" : "error",
-            error: followResult.error ?? (followResult.reason === "obstruction"
-              ? "perimeter_follow_obstruction"
-              : "perimeter_follow_failed"),
-          };
-        }
-      }
-
-      if (cornerIndex >= loopPoints.length - 1) {
-        break;
-      }
-
-      const cornerPoint = loopPoints[cornerIndex];
-      const nextPoint = loopPoints[cornerIndex + 1];
-      const currentPose = this.poseFusion.getCurrentPose();
-      const targetHeading = createInternalHeading(
-        Math.atan2(nextPoint.yMeters - cornerPoint.yMeters, nextPoint.xMeters - cornerPoint.xMeters) * (180 / Math.PI),
-      );
-      const turnAngle = headingDifference(currentPose.heading, targetHeading);
-      if (Math.abs(unwrapRelativeAngle(turnAngle)) > this.parameters.turnAlignmentThresholdDeg) {
-        const turnResult = await this.turnController.executeTurn({
-          targetAngle: turnAngle,
-          direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
-          learningEnabled: true,
-        });
-        if (turnResult.status !== "success") {
-          return {
-            completed: false,
-            reason: turnResult.status === "stopped" ? "user_stopped" : "error",
-            error: "perimeter_corner_turn_failed",
-          };
-        }
-      }
-
-      const captureResult = await this.capturePerimeterRunAfterCorner(cornerPoint, nextPoint);
-      if (!captureResult.completed) {
-        return {
-          completed: false,
-          reason: captureResult.reason === "user_stopped" ? "user_stopped" : "error",
-          error: captureResult.error ?? "perimeter_corner_capture_failed",
-        };
-      }
-
-      const capturePoint = captureResult.capturePoint;
-      if (capturePoint) {
-        pendingLeadPoint = capturePoint;
-      }
-      runStartIndex = cornerIndex + 1;
-      preserveFirstTargetAtPose = false;
-    }
-
-    return { completed: true, reason: "reached_end" };
-  }
-
-  private async capturePerimeterRunAfterCorner(
-    cornerPoint: PathPoint,
-    nextPoint: PathPoint,
-  ): Promise<{
-    readonly completed: boolean;
-    readonly reason: "reached_end" | "user_stopped" | "error";
-    readonly error?: string;
-    readonly capturePoint?: PathPoint;
-  }> {
-    const segmentDx = nextPoint.xMeters - cornerPoint.xMeters;
-    const segmentDy = nextPoint.yMeters - cornerPoint.yMeters;
-    const segmentLengthMeters = Math.hypot(segmentDx, segmentDy);
-    if (segmentLengthMeters <= MOWING_TARGET_REACHED_TOLERANCE_METERS) {
-      return { completed: true, reason: "reached_end" };
-    }
-
-    const desiredCaptureDistanceMeters = Math.min(
-      PERIMETER_CORNER_CAPTURE_DISTANCE_METERS,
-      segmentLengthMeters,
-    );
-    const pose = this.poseFusion.getCurrentPose();
-    const poseDx = pose.position.xMeters - cornerPoint.xMeters;
-    const poseDy = pose.position.yMeters - cornerPoint.yMeters;
-    const projectionRatio = Math.max(
-      0,
-      Math.min(
-        1,
-        ((poseDx * segmentDx) + (poseDy * segmentDy)) / Math.max(segmentLengthMeters * segmentLengthMeters, 1e-9),
-      ),
-    );
-    const liveAlongSegmentMeters = projectionRatio * segmentLengthMeters;
-    const captureDistanceMeters = Math.max(desiredCaptureDistanceMeters, liveAlongSegmentMeters);
-    const captureRatio = captureDistanceMeters / Math.max(segmentLengthMeters, 1e-9);
-    const capturePoint: PathPoint = {
-      xMeters: cornerPoint.xMeters + (segmentDx * captureRatio),
-      yMeters: cornerPoint.yMeters + (segmentDy * captureRatio),
-      capturedAt: nextPoint.capturedAt,
-    };
-
-    if (this.isNearCurrentPose(capturePoint.xMeters, capturePoint.yMeters)) {
-      return {
-        completed: true,
-        reason: "reached_end",
-        capturePoint,
-      };
-    }
-
-    this.logger.info("mowing.trace_boundary.corner_capture.start", {
-      fromX: cornerPoint.xMeters,
-      fromY: cornerPoint.yMeters,
-      toX: capturePoint.xMeters,
-      toY: capturePoint.yMeters,
-      distanceMeters: captureDistanceMeters,
-      desiredDistanceMeters: desiredCaptureDistanceMeters,
-      liveAlongSegmentMeters,
-    });
-
-    const driveResult = await this.driveController.executeDrive({
-      targetPosition: createPosition(capturePoint.xMeters, capturePoint.yMeters),
-      learningEnabled: true,
-    });
-    if (driveResult.status !== "success") {
-      return {
-        completed: false,
-        reason: driveResult.status === "stopped" ? "user_stopped" : "error",
-        error: "perimeter_corner_capture_failed",
-      };
-    }
-
-    return {
-      completed: true,
-      reason: "reached_end",
-      capturePoint,
-    };
   }
 
   private async followConnector(connector: ReadonlyArray<PathPoint>): Promise<{
@@ -751,6 +683,253 @@ export class MowingExecutor {
     });
   }
 
+  private prepareAreaStartAnchorPlan(): void {
+    if (this.plan.strips.length === 0) {
+      return;
+    }
+
+    const currentPose = this.poseFusion.getCurrentPose();
+    const current = {
+      x: currentPose.position.xMeters,
+      y: currentPose.position.yMeters,
+    };
+    const areaPolygon = normalizePolygon(this.areaPoints);
+    if (areaPolygon.length < 3) {
+      return;
+    }
+    const obstaclePolygons = this.obstaclePointsArray
+      .map((obstacle) => normalizePolygon(obstacle))
+      .filter((obstacle) => obstacle.length >= 3);
+    const currentInsideArea = pointInPolygon(current.x, current.y, this.areaPoints);
+
+    let bestAnchor: AreaStartAnchorPlan | null = null;
+    let bestDistanceMeters = Infinity;
+
+    for (const strip of this.plan.strips) {
+      const startCandidate = this.buildAreaStartAnchorCandidate(
+        strip.startBoundary.kind === "area" ? strip.start : null,
+        strip.startBoundary.kind === "area" ? strip.end : null,
+        current,
+        areaPolygon,
+        obstaclePolygons,
+        currentInsideArea,
+      );
+      if (startCandidate) {
+        const distanceMeters = Math.hypot(
+          startCandidate.entryPlan.approachTarget.xMeters - current.x,
+          startCandidate.entryPlan.approachTarget.yMeters - current.y,
+        );
+        if (distanceMeters < bestDistanceMeters) {
+          bestDistanceMeters = distanceMeters;
+          bestAnchor = startCandidate;
+        }
+      }
+
+      const endCandidate = this.buildAreaStartAnchorCandidate(
+        strip.endBoundary.kind === "area" ? strip.end : null,
+        strip.endBoundary.kind === "area" ? strip.start : null,
+        current,
+        areaPolygon,
+        obstaclePolygons,
+        currentInsideArea,
+      );
+      if (endCandidate) {
+        const distanceMeters = Math.hypot(
+          endCandidate.entryPlan.approachTarget.xMeters - current.x,
+          endCandidate.entryPlan.approachTarget.yMeters - current.y,
+        );
+        if (distanceMeters < bestDistanceMeters) {
+          bestDistanceMeters = distanceMeters;
+          bestAnchor = endCandidate;
+        }
+      }
+    }
+
+    if (!bestAnchor) {
+      this.logger.info("mowing.start_anchor.none_found", {
+        strips: this.plan.strips.length,
+      });
+      return;
+    }
+
+    const anchoredPlan = buildMowingPlan([...this.areaPoints], {
+      headingDeg: this.plan.headingDeg,
+      stripSpacingMeters: this.plan.stripSpacingMeters,
+      bladeWidthMeters: this.plan.bladeWidthMeters,
+      mowingStandoffMeters: this.parameters.mowingStandoffMeters,
+      preferredStartPoint: bestAnchor.preferredStartPoint,
+      obstacles: this.obstaclePointsArray,
+    });
+    if (anchoredPlan.stripCount !== this.plan.stripCount || anchoredPlan.strips.length === 0) {
+      this.logger.warn("mowing.start_anchor.replan_rejected", {
+        originalStripCount: this.plan.stripCount,
+        anchoredStripCount: anchoredPlan.stripCount,
+      });
+      return;
+    }
+    const anchoredFirstStrip = anchoredPlan.strips[0];
+    const anchoredFirstStripStart = anchoredFirstStrip?.traversalReversed
+      ? anchoredFirstStrip.end
+      : anchoredFirstStrip?.start;
+    if (!anchoredFirstStripStart || Math.hypot(
+      anchoredFirstStripStart.xMeters - bestAnchor.preferredStartPoint.xMeters,
+      anchoredFirstStripStart.yMeters - bestAnchor.preferredStartPoint.yMeters,
+    ) > MOWING_TARGET_REACHED_TOLERANCE_METERS) {
+      this.logger.warn("mowing.start_anchor.replan_start_mismatch", {
+        preferredStartX: bestAnchor.preferredStartPoint.xMeters,
+        preferredStartY: bestAnchor.preferredStartPoint.yMeters,
+        anchoredStartX: anchoredFirstStripStart?.xMeters ?? null,
+        anchoredStartY: anchoredFirstStripStart?.yMeters ?? null,
+      });
+      return;
+    }
+
+    this.plan = anchoredPlan;
+    this.selectedAreaStartAnchor = bestAnchor;
+    this.currentStripIndex = 0;
+    this.logger.info("mowing.start_anchor.selected", {
+      distanceMeters: bestDistanceMeters,
+      entryX: bestAnchor.entryPlan.entryPoint.xMeters,
+      entryY: bestAnchor.entryPlan.entryPoint.yMeters,
+      approachX: bestAnchor.entryPlan.approachTarget.xMeters,
+      approachY: bestAnchor.entryPlan.approachTarget.yMeters,
+      firstStripStartX: anchoredPlan.strips[0]?.traversalReversed
+        ? anchoredPlan.strips[0].end.xMeters
+        : anchoredPlan.strips[0].start.xMeters,
+      firstStripStartY: anchoredPlan.strips[0]?.traversalReversed
+        ? anchoredPlan.strips[0].end.yMeters
+        : anchoredPlan.strips[0].start.yMeters,
+    });
+  }
+
+  private buildForcedInitialAreaTracePlan(
+    boundaryKey: string,
+    boundaryPoints: ReadonlyArray<PathPoint>,
+    currentPose: ReturnType<PoseFusion["getCurrentPose"]>,
+  ): { plan: ReturnType<typeof buildPerimeterJoinPlan>; orderedLoopPoints: PathPoint[]; anchorPoint: PathPoint; boundaryPoints: PathPoint[] } | null {
+    if (boundaryKey !== "area" || this.tracedBoundaries.has("area") || !this.selectedAreaStartAnchor) {
+      return null;
+    }
+
+    const anchorPoint = this.selectedAreaStartAnchor.entryPlan.entryPoint;
+    const anchoredBoundaryPoints = insertPreferredBoundaryPoint(boundaryPoints, anchorPoint);
+    const anchorPose = {
+      ...currentPose,
+      position: createPosition(anchorPoint.xMeters, anchorPoint.yMeters),
+    };
+    const plan = buildPerimeterJoinPlan(anchoredBoundaryPoints, anchorPose, this.parameters);
+    if (!plan) {
+      return null;
+    }
+
+    const orderedLoopPoints = buildPerimeterPathPointsFromPlan(anchoredBoundaryPoints, plan, this.parameters);
+    if (orderedLoopPoints.length < 2) {
+      return null;
+    }
+
+    return {
+      plan,
+      orderedLoopPoints,
+      anchorPoint,
+      boundaryPoints: anchoredBoundaryPoints,
+    };
+  }
+
+  private buildAreaStartAnchorCandidate(
+    perimeterPoint: PathPoint | null,
+    oppositePoint: PathPoint | null,
+    current: { x: number; y: number },
+    areaPolygon: Array<{ x: number; y: number }>,
+    obstaclePolygons: Array<Array<{ x: number; y: number }>>,
+    currentInsideArea: boolean,
+  ): AreaStartAnchorPlan | null {
+    if (!perimeterPoint || !oppositePoint) {
+      return null;
+    }
+
+    const stripVector = {
+      x: oppositePoint.xMeters - perimeterPoint.xMeters,
+      y: oppositePoint.yMeters - perimeterPoint.yMeters,
+    };
+    const stripLength = Math.hypot(stripVector.x, stripVector.y);
+    if (stripLength <= 1e-6) {
+      return null;
+    }
+
+    const approachTarget = {
+      xMeters: perimeterPoint.xMeters + ((stripVector.x / stripLength) * this.standoff),
+      yMeters: perimeterPoint.yMeters + ((stripVector.y / stripLength) * this.standoff),
+    };
+    if (!pointInPolygon(approachTarget.xMeters, approachTarget.yMeters, this.areaPoints)) {
+      return null;
+    }
+    if (!this.isAreaStartAnchorReachable(
+      current,
+      approachTarget,
+      obstaclePolygons,
+      currentInsideArea,
+    )) {
+      return null;
+    }
+
+    return {
+      preferredStartPoint: {
+        xMeters: perimeterPoint.xMeters,
+        yMeters: perimeterPoint.yMeters,
+      },
+      entryPlan: {
+        entryPoint: {
+          xMeters: perimeterPoint.xMeters,
+          yMeters: perimeterPoint.yMeters,
+          capturedAt: perimeterPoint.capturedAt,
+        },
+        approachTarget,
+        segmentIndex: nearestAreaSegmentIndex(areaPolygon, {
+          x: perimeterPoint.xMeters,
+          y: perimeterPoint.yMeters,
+        }),
+        distanceMeters: Math.hypot(
+          approachTarget.xMeters - current.x,
+          approachTarget.yMeters - current.y,
+        ),
+        tangentHeadingDeg: Math.atan2(stripVector.y, stripVector.x) * (180 / Math.PI),
+      },
+    };
+  }
+
+  private isAreaStartAnchorReachable(
+    current: { x: number; y: number },
+    target: { xMeters: number; yMeters: number },
+    obstaclePolygons: Array<Array<{ x: number; y: number }>>,
+    currentInsideArea: boolean,
+  ): boolean {
+    const start = { x: current.x, y: current.y };
+    const end = { x: target.xMeters, y: target.yMeters };
+    if (obstaclePolygons.some((obstacle) => segmentIntersectsPolygon(start, end, obstacle))) {
+      return false;
+    }
+
+    let hasEnteredArea = currentInsideArea;
+    const sampleCount = 40;
+    for (let index = 1; index <= sampleCount; index += 1) {
+      const t = index / sampleCount;
+      const sample = {
+        x: start.x + ((end.x - start.x) * t),
+        y: start.y + ((end.y - start.y) * t),
+      };
+      const inside = pointInPolygon(sample.x, sample.y, this.areaPoints);
+      if (inside) {
+        hasEnteredArea = true;
+        continue;
+      }
+      if (hasEnteredArea) {
+        return false;
+      }
+    }
+
+    return !currentInsideArea || pointInPolygon(midpoint(start, end).x, midpoint(start, end).y, this.areaPoints) || hasEnteredArea;
+  }
+
   private getBoundaryPoints(key: string): ReadonlyArray<PathPoint> {
     if (key === "area") {
       return [...this.areaPoints];
@@ -821,6 +1000,13 @@ function offsetPoint(p: PathPoint, dir: { x: number; y: number }, distance: numb
   return { x: p.xMeters + dir.x * distance, y: p.yMeters + dir.y * distance };
 }
 
+function midpoint(a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number } {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
 function pointToPathDistance(point: PathPoint, path: ReadonlyArray<PathPoint>): number {
   let nearest = Infinity;
   for (const p of path) {
@@ -840,12 +1026,12 @@ function insertPreferredBoundaryPoint(boundaryPoints: ReadonlyArray<PathPoint>, 
   const points = boundaryPoints.slice();
   const first = points[0];
   const last = points[points.length - 1];
-  const wasClosed = pointDistance(first, last) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS;
+  const wasClosed = Math.hypot(first.xMeters - last.xMeters, first.yMeters - last.yMeters) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS;
   if (wasClosed) {
     points.pop();
   }
 
-  if (points.some((point) => pointDistance(point, preferredPoint) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS)) {
+  if (points.some((point) => Math.hypot(point.xMeters - preferredPoint.xMeters, point.yMeters - preferredPoint.yMeters) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS)) {
     return wasClosed ? points.concat([points[0]]) : points;
   }
 
@@ -871,55 +1057,13 @@ function pointToSegmentDistance(point: PathPoint, start: PathPoint, end: PathPoi
   const segmentY = end.yMeters - start.yMeters;
   const lengthSquared = (segmentX * segmentX) + (segmentY * segmentY);
   if (lengthSquared <= 1e-9) {
-    return pointDistance(point, start);
+    return Math.hypot(point.xMeters - start.xMeters, point.yMeters - start.yMeters);
   }
 
   const t = Math.max(0, Math.min(1, (((point.xMeters - start.xMeters) * segmentX) + ((point.yMeters - start.yMeters) * segmentY)) / lengthSquared));
-  const projected = {
-    xMeters: start.xMeters + (segmentX * t),
-    yMeters: start.yMeters + (segmentY * t),
-    capturedAt: point.capturedAt,
-  };
-  return pointDistance(point, projected);
-}
-
-function pointDistance(a: PathPoint, b: PathPoint): number {
-  return Math.hypot(a.xMeters - b.xMeters, a.yMeters - b.yMeters);
-}
-
-function findSharpCornerIndices(
-  points: ReadonlyArray<PathPoint>,
-  thresholdDeg: number,
-  minSegmentMeters: number,
-): number[] {
-  const indices: number[] = [];
-  if (points.length < 3) {
-    return indices;
-  }
-
-  for (let index = 1; index < points.length - 1; index += 1) {
-    const previous = points[index - 1];
-    const current = points[index];
-    const next = points[index + 1];
-    const incomingDx = current.xMeters - previous.xMeters;
-    const incomingDy = current.yMeters - previous.yMeters;
-    const outgoingDx = next.xMeters - current.xMeters;
-    const outgoingDy = next.yMeters - current.yMeters;
-    const incomingLength = Math.hypot(incomingDx, incomingDy);
-    const outgoingLength = Math.hypot(outgoingDx, outgoingDy);
-    if (incomingLength < minSegmentMeters || outgoingLength < minSegmentMeters) {
-      continue;
-    }
-
-    const incomingHeading = Math.atan2(incomingDy, incomingDx) * (180 / Math.PI);
-    const outgoingHeading = Math.atan2(outgoingDy, outgoingDx) * (180 / Math.PI);
-    const turnDeg = Math.abs(normalizeSignedDegrees(outgoingHeading - incomingHeading));
-    if (turnDeg >= thresholdDeg) {
-      indices.push(index);
-    }
-  }
-
-  return indices;
+  const projectedX = start.xMeters + (segmentX * t);
+  const projectedY = start.yMeters + (segmentY * t);
+  return Math.hypot(point.xMeters - projectedX, point.yMeters - projectedY);
 }
 
 function normalizeSignedDegrees(angleDeg: number): number {
@@ -941,6 +1085,47 @@ function normalizePolygon(points: ReadonlyArray<PathPoint>): Array<{ x: number; 
     polygon.pop();
   }
   return polygon;
+}
+
+function nearestAreaSegmentIndex(
+  polygon: ReadonlyArray<{ x: number; y: number }>,
+  point: { x: number; y: number },
+): number {
+  if (polygon.length < 2) {
+    return 0;
+  }
+
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  for (let index = 0; index < polygon.length; index += 1) {
+    const start = polygon[index];
+    const end = polygon[(index + 1) % polygon.length];
+    const projection = nearestPointOnSegment(point, start, end);
+    const distance = Math.hypot(point.x - projection.x, point.y - projection.y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
+function nearestPointOnSegment(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): { x: number; y: number } {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = (dx * dx) + (dy * dy);
+  if (lengthSquared <= 1e-12) {
+    return start;
+  }
+  const t = Math.max(0, Math.min(1, (((point.x - start.x) * dx) + ((point.y - start.y) * dy)) / lengthSquared));
+  return {
+    x: start.x + (dx * t),
+    y: start.y + (dy * t),
+  };
 }
 
 function pointInPolygon(x: number, y: number, polygonPoints: ReadonlyArray<PathPoint>): boolean {

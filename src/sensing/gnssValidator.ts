@@ -86,8 +86,8 @@ export interface GnssValidatorOptions {
 
 const DEFAULTS = {
   minSatellites: 8,
-  maxPositionAccuracyMeters: 0.05,
-  maxHeadingAccuracyDeg: 1.0,
+  maxPositionAccuracyMeters: 0.10,
+  maxHeadingAccuracyDeg: 3.0,
   baselineNominalMeters: 0.30,
   baselineToleranceMeters: 0.05,
   maxHeadingRateDegPerSec: 20,

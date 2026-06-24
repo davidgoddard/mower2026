@@ -62,6 +62,7 @@ test("MowingExecutor traces the full boundary back to the original encounter poi
   };
 
   const followCalls = [];
+  const checkpointWaypoints = [];
   const continuousPathFollower = {
     async executePath(pathPoints, options) {
       followCalls.push({ pathPoints, options });
@@ -83,10 +84,12 @@ test("MowingExecutor traces the full boundary back to the original encounter poi
   const status = await executor.execute();
 
   assert.equal(status.phase, "complete");
-  assert.equal(followCalls.length >= 2, true);
+  assert.equal(followCalls.length >= 1, true);
   assert.equal(followCalls[0].options.loopPath, false);
   assert.equal(followCalls[0].options.strictOrderedProgress, true);
-  assert.equal(turnCalls.length >= 2, true);
+  assert.equal(followCalls[0].options.minimumSpeed, 0.68);
+  assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.25);
+  assert.equal(turnCalls.length >= 1, true);
   const traversedPoints = followCalls.flatMap((call) => call.pathPoints.map((point) => [point.xMeters, point.yMeters]));
   assert.equal(traversedPoints.some(([x, y]) => x === 0 && y === 0), true);
   assert.equal(traversedPoints.some(([x, y]) => x === 1 && y === 0), true);
@@ -94,7 +97,7 @@ test("MowingExecutor traces the full boundary back to the original encounter poi
   assert.equal(traversedPoints.some(([x, y]) => x === 0 && y === 1), true);
 });
 
-test("MowingExecutor drives a short capture segment after a perimeter corner turn", async () => {
+test("MowingExecutor turns toward the 50cm-ahead perimeter lead target and follows in one continuous run", async () => {
   const areaPoints = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
@@ -166,16 +169,12 @@ test("MowingExecutor drives a short capture segment after a perimeter corner tur
   const status = await executor.execute();
 
   assert.equal(status.phase, "complete");
-  assert.equal(driveTargets.length > 0, true);
-  assert.deepEqual(driveTargets[0], [1, 0.3]);
-  assert.equal(followCalls.length >= 2, true);
-  assert.deepEqual(
-    followCalls[1].pathPoints.slice(0, 2).map((point) => [point.xMeters, point.yMeters]),
-    [
-      [1, 0.3],
-      [1, 1],
-    ],
-  );
+  assert.equal(driveTargets.some(([x, y]) => x === 1 && y === 0.3), false);
+  assert.equal(followCalls.length >= 1, true);
+  assert.equal(followCalls[0].pathPoints[0].xMeters, 0.92);
+  assert.equal(followCalls[0].pathPoints[0].yMeters, 0.08);
+  assert.equal(Number(followCalls[0].pathPoints[1].xMeters.toFixed(2)), 1.00);
+  assert.equal(Number(followCalls[0].pathPoints[1].yMeters.toFixed(2)), 0.42);
 });
 
 test("MowingExecutor follows multi-point connectors with the continuous follower", async () => {
@@ -677,4 +676,96 @@ test("MowingExecutor skips tiny initial-entry approach drives when already at th
   assert.equal(status.phase, "complete");
   assert.equal(driveTargets.length, 0);
   assert.equal(followCalls.length, 1);
+});
+
+test("MowingExecutor can seed area tracing from the nearest strip-adjacent perimeter anchor", async () => {
+  const areaPoints = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 2, yMeters: 0, capturedAt: 2 },
+    { xMeters: 2, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const driveTargets = [];
+  const driveController = {
+    async executeDrive(options) {
+      driveTargets.push([options.targetPosition.xMeters, options.targetPosition.yMeters]);
+      return { status: "success", maxCteMeters: 0 };
+    },
+  };
+  const turnController = {
+    async executeTurn() {
+      return { status: "success" };
+    },
+  };
+  const poses = [
+    createPose(1.9, -0.2, createInternalHeading(90), "gnss"),
+    createPose(1.9, -0.2, createInternalHeading(90), "gnss"),
+    createPose(1.8, 0.15, createInternalHeading(90), "gnss"),
+    createPose(1.8, 0.15, createInternalHeading(90), "gnss"),
+    createPose(1.8, 0.15, createInternalHeading(90), "gnss"),
+  ];
+  const poseFusion = {
+    getCurrentPose() {
+      return poses.shift() ?? createPose(1.8, 0.15, createInternalHeading(90), "gnss");
+    },
+  };
+  const followCalls = [];
+  const continuousPathFollower = {
+    async executePath(pathPoints, options) {
+      followCalls.push({ pathPoints, options });
+      return { completed: true, reason: "reached_end" };
+    },
+  };
+
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 90,
+      stripSpacingMeters: 0.3,
+      bladeWidthMeters: 0.4,
+      stripCount: 2,
+      strips: [
+        {
+          start: { xMeters: 0.2, yMeters: 0, capturedAt: 10 },
+          end: { xMeters: 0.2, yMeters: 1, capturedAt: 11 },
+          startBoundary: { kind: "area" },
+          endBoundary: { kind: "area" },
+          centerOffsetMeters: 0.2,
+          sequenceIndex: 0,
+          traversalReversed: false,
+        },
+        {
+          start: { xMeters: 1.8, yMeters: 0, capturedAt: 12 },
+          end: { xMeters: 1.8, yMeters: 1, capturedAt: 13 },
+          startBoundary: { kind: "area" },
+          endBoundary: { kind: "area" },
+          centerOffsetMeters: 1.8,
+          sequenceIndex: 1,
+          traversalReversed: false,
+        },
+      ],
+      connectors: [[
+        { xMeters: 0.2, yMeters: 0.85, capturedAt: 20 },
+        { xMeters: 1.8, yMeters: 0.85, capturedAt: 21 },
+      ]],
+    },
+    areaPoints,
+    obstaclePointsArray: [],
+    driveController,
+    turnController,
+    poseFusion,
+    continuousPathFollower,
+    logger: createLogger(),
+    updateRecoveryCheckpoint(waypoints) {
+      checkpointWaypoints.push(waypoints);
+    },
+  });
+
+  const status = await executor.execute();
+
+  assert.equal(status.phase, "complete");
+  assert.deepEqual(driveTargets[0], [1.8, 0.15]);
+  assert.equal(followCalls.length >= 1, true);
+  assert.equal(checkpointWaypoints.length >= 1, true);
+  assert.equal(checkpointWaypoints[0].some((point) => point.xMeters === 1.8 && point.yMeters === 0), true);
 });

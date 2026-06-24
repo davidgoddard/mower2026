@@ -1486,6 +1486,21 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             logger: logger.child({ context: "mowing", source: "MowingExecutor" }),
             parameters: pathFollowingParameters,
             recentTargetSink: retryManager ?? undefined,
+            updateRecoveryCheckpoint: (waypoints) => {
+              if (!poseFusion || !checkpointStore) {
+                return;
+              }
+              checkpointStore.addCheckpoint({
+                id: `${mowingSessionId}-active-path-${Date.now()}`,
+                timestamp: Date.now(),
+                pose: poseFusion.getCurrentPose(),
+                context: "path",
+                metadata: {
+                  type: "path",
+                  waypoints,
+                },
+              });
+            },
           });
           mowingStatus = mowingExecutor.getStatus();
 
@@ -1497,6 +1512,18 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           operationContextTracker?.setContext("path");
           retryManager?.startSession(mowingSessionId, "path");
           retryManager?.clearRecentTargets();
+          if (poseFusion && checkpointStore) {
+            checkpointStore.addCheckpoint({
+              id: `${mowingSessionId}-initial-area-boundary`,
+              timestamp: Date.now(),
+              pose: poseFusion.getCurrentPose(),
+              context: "path",
+              metadata: {
+                type: "path",
+                waypoints: shapedAreaPoints,
+              },
+            });
+          }
 
           // Run in background; update shared status when done
           mowingExecutor.execute().then((finalStatus) => {

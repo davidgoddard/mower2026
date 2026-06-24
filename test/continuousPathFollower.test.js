@@ -120,6 +120,25 @@ test("computeContinuousPathWheelCommands pivots instead of demanding a crawl arc
   assert.equal(commands.pivoting, true);
 });
 
+test("computeContinuousPathWheelCommands stays in pivot mode until heading error is substantially reduced", () => {
+  const pose = createPose(0, 0, createInternalHeading(0), "gnss");
+  const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
+  const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
+  const lookaheadTarget = { xMeters: 0.766, yMeters: 0.643, capturedAt: 3 };
+
+  const commands = computeContinuousPathWheelCommands(
+    pose,
+    previousPoint,
+    currentTarget,
+    lookaheadTarget,
+    0.75,
+    true,
+  );
+
+  assert.equal(commands.pivoting, true);
+  assert.equal(commands.left < 0 || commands.right < 0, true);
+});
+
 test("computeContinuousPathBaseSpeed stays high on gentle clean path sections", () => {
   const speed = computeContinuousPathBaseSpeed(0.65, 3, 2, 0.01);
 

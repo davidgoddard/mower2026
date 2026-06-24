@@ -7,6 +7,7 @@ import {
   buildDrivePathPointsForDirection,
   buildPerimeterFollowPlan,
   buildPerimeterDrivePathPoints,
+  buildPerimeterPathPointsFromPose,
   buildPerimeterJoinPlan,
   buildPerimeterPathPointsFromPlan,
   buildVerificationPathPoints,
@@ -232,6 +233,34 @@ test("buildPerimeterFollowPlan preserves the chosen direction when rejoining aft
   assert.deepEqual(
     perimeterPoints.map((point) => point.xMeters),
     [2, 1, 0, 3],
+  );
+});
+
+test("buildPerimeterPathPointsFromPose injects the live pose and skips tiny startup targets", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.2, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.4, yMeters: 0, capturedAt: 3 },
+    { xMeters: 0.8, yMeters: 0, capturedAt: 4 },
+    { xMeters: 1.2, yMeters: 0, capturedAt: 5 },
+  ];
+  const pose = createPose(0.05, 0, createInternalHeading(0), "gnss");
+
+  const perimeterPoints = buildPerimeterPathPointsFromPose(
+    points,
+    pose,
+    "forward",
+    TEST_PARAMETERS,
+    0.5,
+  );
+
+  assert.equal(perimeterPoints[0].xMeters, 0.05);
+  assert.equal(perimeterPoints[0].yMeters, 0);
+  assert.equal(Number(perimeterPoints[1].xMeters.toFixed(6)), 0.55);
+  assert.equal(perimeterPoints[1].yMeters, 0);
+  assert.deepEqual(
+    perimeterPoints.slice(2).map((point) => point.xMeters),
+    [0.8, 1.2],
   );
 });
 

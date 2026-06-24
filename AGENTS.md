@@ -3,6 +3,7 @@
 ## Agents
 
 - Stay within `/Volumes/Mower/mower` and its subdirectories unless the task explicitly says otherwise.
+- Treat bug reports, log reviews, and diagnostic questions as analysis-only by default: explain findings, likely causes, and suggested fixes without changing code unless the user explicitly asks for implementation.
 - Check whether the session actually has the needed toolchain before attempting builds or package-manager commands.
 - If `node`, `npm`, or the repo build command is unavailable in this session, do not keep retrying those commands.
 - When tooling is unavailable, switch to source inspection, code edits, and a clear note that build/test verification could not be run here.

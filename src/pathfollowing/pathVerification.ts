@@ -29,13 +29,13 @@ function arePathPointsClose(a: PathPoint, b: PathPoint, parameters: PathVerifica
 }
 
 function normalizePathPoints(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
   return normalizePath(points, parameters).points;
 }
 
-function normalizePath(points: PathPoint[], parameters: PathVerificationParameters): NormalizedPath {
+function normalizePath(points: ReadonlyArray<PathPoint>, parameters: PathVerificationParameters): NormalizedPath {
   if (points.length <= 1) {
     return { points: points.slice(), isClosedLoop: false };
   }
@@ -60,7 +60,7 @@ function normalizePath(points: PathPoint[], parameters: PathVerificationParamete
   };
 }
 
-export function findNearestPathPointIndex(points: PathPoint[], pose: Pose): number {
+export function findNearestPathPointIndex(points: ReadonlyArray<PathPoint>, pose: Pose): number {
   if (points.length === 0) {
     return -1;
   }
@@ -87,7 +87,7 @@ export function findNearestPathPointIndex(points: PathPoint[], pose: Pose): numb
 }
 
 export function buildDrivePathPoints(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
@@ -100,7 +100,7 @@ export function buildDrivePathPoints(
 }
 
 export function buildDrivePathPointsForDirection(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   pathDirection: "forward" | "reverse",
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
@@ -120,7 +120,7 @@ export function buildDrivePathPointsForDirection(
 }
 
 function buildPathPointsForDirectionFromIndex(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   startIndex: number,
   pathDirection: "forward" | "reverse",
   isClosedLoop: boolean,
@@ -137,7 +137,7 @@ function buildPathPointsForDirectionFromIndex(
 }
 
 export function buildVerificationPathPoints(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
@@ -150,7 +150,7 @@ export function buildVerificationPathPoints(
 }
 
 export function buildVerificationPathPointsFromPlan(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   _pose: Pose,
   plan: VerificationApproachPlan,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
@@ -178,7 +178,7 @@ export function buildVerificationPathPointsFromPlan(
 }
 
 export function buildPerimeterDrivePathPoints(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
@@ -191,7 +191,7 @@ export function buildPerimeterDrivePathPoints(
 }
 
 export function buildPerimeterFollowPlan(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   pathDirection: "forward" | "reverse",
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
@@ -217,7 +217,7 @@ export function buildPerimeterFollowPlan(
 }
 
 export function buildPerimeterPathPointsFromPlan(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   plan: VerificationApproachPlan,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): PathPoint[] {
@@ -234,6 +234,148 @@ export function buildPerimeterPathPointsFromPlan(
   return normalizedPath.isClosedLoop
     ? rotated.concat([rotated[0]])
     : rotated;
+}
+
+export function buildPerimeterPathPointsFromPose(
+  points: ReadonlyArray<PathPoint>,
+  pose: Pose,
+  pathDirection: "forward" | "reverse",
+  parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
+  minimumStartDistanceMeters = 0.5,
+): PathPoint[] {
+  const followPlan = buildPerimeterFollowPlan(points, pose, pathDirection, parameters);
+  if (followPlan === null) {
+    return [];
+  }
+
+  const normalizedPath = normalizePath(points, parameters);
+  const perimeterPoints = buildPathPointsForDirectionFromIndex(
+    normalizedPath.points,
+    followPlan.nearestIndex,
+    followPlan.pathDirection,
+    normalizedPath.isClosedLoop,
+  );
+  if (perimeterPoints.length === 0) {
+    return [];
+  }
+
+  const livePosePoint: PathPoint = {
+    xMeters: unwrapMeters(pose.position.xMeters),
+    yMeters: unwrapMeters(pose.position.yMeters),
+    capturedAt: perimeterPoints[0]?.capturedAt ?? Date.now(),
+  };
+
+  const startDistanceMeters = Math.max(0, minimumStartDistanceMeters);
+  if (startDistanceMeters <= 1e-9) {
+    return finalizePoseJoinedPerimeterPath(livePosePoint, perimeterPoints, normalizedPath.isClosedLoop);
+  }
+
+  let accumulatedMeters = pointDistance(livePosePoint, perimeterPoints[0]);
+  if (accumulatedMeters >= startDistanceMeters) {
+    return finalizePoseJoinedPerimeterPath(livePosePoint, perimeterPoints, normalizedPath.isClosedLoop);
+  }
+
+  for (let index = 1; index < perimeterPoints.length; index += 1) {
+    const previous = perimeterPoints[index - 1];
+    const current = perimeterPoints[index];
+    const segmentLengthMeters = pointDistance(previous, current);
+    if (segmentLengthMeters <= 1e-9) {
+      continue;
+    }
+
+    if (accumulatedMeters + segmentLengthMeters >= startDistanceMeters) {
+      const remainingMeters = startDistanceMeters - accumulatedMeters;
+      const ratio = remainingMeters / segmentLengthMeters;
+      const injectedPoint: PathPoint = {
+        xMeters: previous.xMeters + ((current.xMeters - previous.xMeters) * ratio),
+        yMeters: previous.yMeters + ((current.yMeters - previous.yMeters) * ratio),
+        capturedAt: current.capturedAt,
+      };
+      return finalizePoseJoinedPerimeterPath(
+        livePosePoint,
+        [injectedPoint, ...perimeterPoints.slice(index)],
+        normalizedPath.isClosedLoop,
+      );
+    }
+    accumulatedMeters += segmentLengthMeters;
+  }
+
+  return finalizePoseJoinedPerimeterPath(livePosePoint, perimeterPoints, normalizedPath.isClosedLoop);
+}
+
+export function buildPerimeterPathPointsFromPlanAndPose(
+  points: ReadonlyArray<PathPoint>,
+  pose: Pose,
+  plan: VerificationApproachPlan,
+  parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
+  minimumStartDistanceMeters = 0.5,
+): PathPoint[] {
+  const normalizedPath = normalizePath(points, parameters);
+  const perimeterPoints = buildPathPointsForDirectionFromIndex(
+    normalizedPath.points,
+    plan.nearestIndex,
+    plan.pathDirection,
+    normalizedPath.isClosedLoop,
+  );
+  if (perimeterPoints.length === 0) {
+    return [];
+  }
+
+  const livePosePoint: PathPoint = {
+    xMeters: unwrapMeters(pose.position.xMeters),
+    yMeters: unwrapMeters(pose.position.yMeters),
+    capturedAt: perimeterPoints[0]?.capturedAt ?? Date.now(),
+  };
+
+  const startDistanceMeters = Math.max(0, minimumStartDistanceMeters);
+  if (startDistanceMeters <= 1e-9) {
+    return finalizePoseJoinedPerimeterPath(livePosePoint, perimeterPoints, normalizedPath.isClosedLoop);
+  }
+
+  let accumulatedMeters = pointDistance(livePosePoint, perimeterPoints[0]);
+  if (accumulatedMeters >= startDistanceMeters) {
+    return finalizePoseJoinedPerimeterPath(livePosePoint, perimeterPoints, normalizedPath.isClosedLoop);
+  }
+
+  for (let index = 1; index < perimeterPoints.length; index += 1) {
+    const previous = perimeterPoints[index - 1];
+    const current = perimeterPoints[index];
+    const segmentLengthMeters = pointDistance(previous, current);
+    if (segmentLengthMeters <= 1e-9) {
+      continue;
+    }
+
+    if (accumulatedMeters + segmentLengthMeters >= startDistanceMeters) {
+      const remainingMeters = startDistanceMeters - accumulatedMeters;
+      const ratio = remainingMeters / segmentLengthMeters;
+      const injectedPoint: PathPoint = {
+        xMeters: previous.xMeters + ((current.xMeters - previous.xMeters) * ratio),
+        yMeters: previous.yMeters + ((current.yMeters - previous.yMeters) * ratio),
+        capturedAt: current.capturedAt,
+      };
+      return finalizePoseJoinedPerimeterPath(
+        livePosePoint,
+        [injectedPoint, ...perimeterPoints.slice(index)],
+        normalizedPath.isClosedLoop,
+      );
+    }
+    accumulatedMeters += segmentLengthMeters;
+  }
+
+  return finalizePoseJoinedPerimeterPath(livePosePoint, perimeterPoints, normalizedPath.isClosedLoop);
+}
+
+function pointDistance(a: PathPoint, b: PathPoint): number {
+  return Math.hypot(a.xMeters - b.xMeters, a.yMeters - b.yMeters);
+}
+
+function finalizePoseJoinedPerimeterPath(
+  livePosePoint: PathPoint,
+  remainder: PathPoint[],
+  isClosedLoop: boolean,
+): PathPoint[] {
+  const path = [livePosePoint, ...remainder];
+  return isClosedLoop ? path.concat([livePosePoint]) : path;
 }
 
 /**
@@ -254,7 +396,7 @@ interface VerificationApproachCandidate extends VerificationApproachPlan {
   readonly approachAlignmentErrorDeg: number;
 }
 
-function getForwardTangentPoint(points: PathPoint[], nearestIndex: number): PathPoint {
+function getForwardTangentPoint(points: ReadonlyArray<PathPoint>, nearestIndex: number): PathPoint {
   if (points.length === 1) {
     return points[nearestIndex];
   }
@@ -268,7 +410,7 @@ function getForwardTangentPoint(points: PathPoint[], nearestIndex: number): Path
   return points[previousIndex];
 }
 
-function getReverseTangentPoint(points: PathPoint[], nearestIndex: number): PathPoint {
+function getReverseTangentPoint(points: ReadonlyArray<PathPoint>, nearestIndex: number): PathPoint {
   if (points.length === 1) {
     return points[nearestIndex];
   }
@@ -282,11 +424,11 @@ function getReverseTangentPoint(points: PathPoint[], nearestIndex: number): Path
   return points[nextIndex];
 }
 
-function rotatePathForward(points: PathPoint[], startIndex: number): PathPoint[] {
+function rotatePathForward(points: ReadonlyArray<PathPoint>, startIndex: number): PathPoint[] {
   return points.slice(startIndex).concat(points.slice(0, startIndex));
 }
 
-function rotatePathReverse(points: PathPoint[], startIndex: number): PathPoint[] {
+function rotatePathReverse(points: ReadonlyArray<PathPoint>, startIndex: number): PathPoint[] {
   const reversed = points.slice().reverse();
   const reverseStartIndex = points.length - 1 - startIndex;
   return reversed.slice(reverseStartIndex).concat(reversed.slice(0, reverseStartIndex));
@@ -297,7 +439,7 @@ function getHeadingAlignmentCost(pose: Pose, tangentHeading: InternalHeading): n
 }
 
 function buildApproachPlanForDirection(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   nearestIndex: number,
   pathDirection: "forward" | "reverse",
@@ -335,7 +477,7 @@ function buildApproachPlanForDirection(
 }
 
 export function buildVerificationApproachPlan(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): VerificationApproachPlan | null {
@@ -360,7 +502,7 @@ export function buildVerificationApproachPlan(
 }
 
 export function buildPerimeterJoinPlan(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   parameters: PathVerificationParameters = DEFAULT_PATH_VERIFICATION_PARAMETERS,
 ): VerificationApproachPlan | null {
@@ -414,7 +556,7 @@ function buildTangentialApproachTarget(
 }
 
 function buildDirectJoinPlanForDirection(
-  points: PathPoint[],
+  points: ReadonlyArray<PathPoint>,
   pose: Pose,
   nearestIndex: number,
   pathDirection: "forward" | "reverse",

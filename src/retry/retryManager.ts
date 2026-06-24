@@ -2,11 +2,10 @@
  * Retry Manager - Event-driven recovery system for obstructions during a
  * perimeter follow.
  *
- * High-current events trigger the path-context retry: walk the recent-target
- * trail backward by reverse-driving each completed target until a configured
- * retreat distance is reached, then restart the boundary follow from the new
- * pose. Wheel-slip and stall events mean the mower is physically stuck and
- * abort the session immediately.
+ * High-current, stall, and wheel-slip events trigger the path-context retry: walk the
+ * recent-target trail backward by reverse-driving each completed target until
+ * a configured retreat distance is reached, then restart the boundary follow
+ * from the new pose.
  */
 
 import { EventEmitter } from "node:events";
@@ -127,25 +126,14 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
       return { success: false, attemptNumber: 0, error: "no_active_session" };
     }
 
-    if (event.type !== "high_current") {
-      // Wheel slip and stall mean the mower is physically stuck — no point in
-      // trying to drive through it. Abort the session.
-      this.logger.error("retry.unrecoverable_obstruction", {
-        type: event.type,
-        context: event.context,
-        motorCurrents: event.motorCurrents,
-      });
-      await this.abortSession(event.type);
-      return { success: false, attemptNumber: 0, error: event.type };
-    }
-
     this.isRecovering = true;
 
     try {
       const sessionId = this.currentSessionId;
       const attempts = this.retryCount.get(sessionId) || 0;
 
-      this.logger.warn("retry.high_current_detected", {
+      this.logger.warn("retry.recoverable_obstruction_detected", {
+        type: event.type,
         context: event.context,
         attemptNumber: attempts + 1,
         maxRetries: this.maxRetries,
@@ -190,7 +178,7 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     await this.sleep(500);
 
     try {
-      await this.recoverFromPath(checkpoint.metadata.waypoints);
+      await this.recoverFromPath(checkpoint.metadata.waypoints, event.position);
 
       this.logger.info("retry.recovery_completed", { context: event.context, attemptNumber: attempts + 1 });
       this.emit("recovery_completed", { context: event.context, attemptNumber: attempts + 1 });
@@ -209,7 +197,7 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     }
   }
 
-  private async recoverFromPath(waypoints: PathPoint[]): Promise<void> {
+  private async recoverFromPath(waypoints: PathPoint[], obstructionPose: Pose): Promise<void> {
     // Walk the recent-target trail backward, reverse-driving each completed
     // target in turn until we have travelled at least the configured retreat
     // distance. The executor's nearest-target re-anchor will pick up forward
@@ -254,11 +242,34 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
     if (legsDriven === 0) {
       // No recent targets recorded (e.g. obstruction on the very first segment).
       // Fall back to a duration-based reverse so the mower at least clears the
-      // jam before the boundary follow restarts.
+      // jam, then drive a direct recovery segment back to the obstruction pose.
+      // That return line must be judged against its own start/end geometry,
+      // not against the perimeter CTE envelope.
       this.logger.warn("retry.path_recovery.no_recent_targets", {
         durationMs: this.reverseDurationMs,
       });
       await this.deps.driveController.reverseForDuration(this.reverseDurationMs);
+
+      const returnPose = this.deps.getCurrentPose();
+      const returnOriginXMeters = unwrapMeters(returnPose.position.xMeters);
+      const returnOriginYMeters = unwrapMeters(returnPose.position.yMeters);
+      const obstructionXMeters = unwrapMeters(obstructionPose.position.xMeters);
+      const obstructionYMeters = unwrapMeters(obstructionPose.position.yMeters);
+      const returnDistanceMeters = Math.hypot(
+        obstructionXMeters - returnOriginXMeters,
+        obstructionYMeters - returnOriginYMeters,
+      );
+
+      this.logger.info("retry.path_recovery.returning_to_obstruction_pose", {
+        from: { xMeters: returnOriginXMeters, yMeters: returnOriginYMeters },
+        to: { xMeters: obstructionXMeters, yMeters: obstructionYMeters },
+        returnDistanceMeters,
+      });
+
+      await this.deps.driveController.driveSegment(
+        { xMeters: obstructionXMeters, yMeters: obstructionYMeters },
+        1,
+      );
     }
 
     await this.sleep(500);

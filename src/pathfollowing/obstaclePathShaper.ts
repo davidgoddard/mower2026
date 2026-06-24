@@ -18,12 +18,15 @@ const LOOP_CLOSE_TOLERANCE_METERS = 0.05;
 const OBSTACLE_SHAPING_OUTWARD_OFFSET_METERS = 0.08;
 /**
  * Area runtime shaping should preserve the operator's actual perimeter while
- * removing local GNSS wiggles. These thresholds collapse tiny segments and
- * fuse near-collinear runs, but keep any substantive corner.
+ * removing local GNSS wiggles. The adaptive fitter first tries to replace
+ * roughly 2m runs with one straight leg; if the trend is not consistent it
+ * recursively halves the attempted run length down to about 20cm.
  */
 const AREA_PATH_MIN_SEGMENT_METERS = 0.08;
-const AREA_PATH_SIMPLIFY_TOLERANCE_METERS = 0.04;
-const AREA_PATH_MAX_VERTEX_TURN_DEG = 12;
+const AREA_PATH_MAX_TREND_LEG_METERS = 2.0;
+const AREA_PATH_MIN_TREND_LEG_METERS = 0.2;
+const AREA_PATH_MAX_DEVIATION_METERS = 0.05;
+const AREA_PATH_MAX_HEADING_DEVIATION_DEG = 18;
 const OBSTACLE_SHAPING_OUTSIDE_MARGIN_STEP_METERS = 0.02;
 /**
  * Number of Chaikin corner-cutting passes used to smooth the offset hull.
@@ -53,11 +56,7 @@ export function shapeAreaRecordedPath(points: PathPoint[]): PathPoint[] {
   }
 
   const filtered = removeTinyClosedSegments(normalized, AREA_PATH_MIN_SEGMENT_METERS);
-  const simplified = simplifyClosedLoopPreservingCorners(
-    filtered,
-    AREA_PATH_SIMPLIFY_TOLERANCE_METERS,
-    AREA_PATH_MAX_VERTEX_TURN_DEG,
-  );
+  const simplified = simplifyClosedLoopByTrend(filtered);
   return closeLoop(
     simplified.map((point, index) => ({
       xMeters: point.x,
@@ -270,29 +269,16 @@ function removeTinyClosedSegments(points: Vector2[], minDistanceMeters: number):
   return filtered.length >= 3 ? filtered : points.slice();
 }
 
-function simplifyClosedLoopPreservingCorners(
-  points: Vector2[],
-  toleranceMeters: number,
-  maxVertexTurnDeg: number,
-): Vector2[] {
+function simplifyClosedLoopByTrend(points: Vector2[]): Vector2[] {
   if (points.length <= 3) {
     return points.slice();
   }
 
-  const tolerance = Math.max(0, toleranceMeters);
-  const turnRadians = Math.max(0, maxVertexTurnDeg) * (Math.PI / 180);
-  const cosLimit = Math.cos(turnRadians);
   const kept: Vector2[] = [points[0]];
   let anchorIndex = 0;
 
   while (anchorIndex < points.length - 1) {
-    let candidateEnd = anchorIndex + 1;
-    for (let probe = anchorIndex + 2; probe < points.length; probe += 1) {
-      if (closedChordViolation(points, anchorIndex, probe, tolerance, cosLimit)) {
-        break;
-      }
-      candidateEnd = probe;
-    }
+    const candidateEnd = pickAdaptiveTrendEndpoint(points, anchorIndex);
     kept.push(points[candidateEnd]);
     anchorIndex = candidateEnd;
   }
@@ -303,47 +289,82 @@ function simplifyClosedLoopPreservingCorners(
   return kept.length >= 3 ? kept : points.slice();
 }
 
-function closedChordViolation(
+function pickAdaptiveTrendEndpoint(points: Vector2[], anchorIndex: number): number {
+  if (anchorIndex >= points.length - 1) {
+    return anchorIndex;
+  }
+
+  let attemptLengthMeters = AREA_PATH_MAX_TREND_LEG_METERS;
+  while (attemptLengthMeters >= AREA_PATH_MIN_TREND_LEG_METERS) {
+    const candidateIndex = advanceIndexByDistance(points, anchorIndex, attemptLengthMeters);
+    if (candidateIndex <= anchorIndex + 1) {
+      break;
+    }
+    if (!closedTrendViolation(points, anchorIndex, candidateIndex)) {
+      return candidateIndex;
+    }
+    attemptLengthMeters /= 2;
+  }
+
+  const minimumCandidateIndex = advanceIndexByDistance(points, anchorIndex, AREA_PATH_MIN_TREND_LEG_METERS);
+  if (minimumCandidateIndex > anchorIndex) {
+    return minimumCandidateIndex;
+  }
+  return anchorIndex + 1;
+}
+
+function advanceIndexByDistance(points: Vector2[], anchorIndex: number, targetDistanceMeters: number): number {
+  let travelledMeters = 0;
+  let index = anchorIndex;
+  while (index < points.length - 1) {
+    const nextIndex = index + 1;
+    travelledMeters += distance(points[index], points[nextIndex]);
+    index = nextIndex;
+    if (travelledMeters >= targetDistanceMeters) {
+      return index;
+    }
+  }
+  return points.length - 1;
+}
+
+function closedTrendViolation(
   points: Vector2[],
   anchorIndex: number,
   probeIndex: number,
-  toleranceMeters: number,
-  cosLimit: number,
 ): boolean {
   const start = points[anchorIndex];
   const end = points[probeIndex];
+  const direction = normalizeVector({
+    x: end.x - start.x,
+    y: end.y - start.y,
+  });
+  const cosLimit = Math.cos((AREA_PATH_MAX_HEADING_DEVIATION_DEG * Math.PI) / 180);
 
   for (let index = anchorIndex + 1; index < probeIndex; index += 1) {
-    if (pointToSegmentDistance(points[index], start, end) > toleranceMeters) {
+    if (pointToSegmentDistance(points[index], start, end) > AREA_PATH_MAX_DEVIATION_METERS) {
       return true;
     }
-    if (vertexTurnExceeds(points, index, cosLimit)) {
+    if (localHeadingDeviationExceeds(points[index - 1], points[index], direction, cosLimit)) {
       return true;
     }
+  }
+
+  if (localHeadingDeviationExceeds(points[probeIndex - 1], points[probeIndex], direction, cosLimit)) {
+    return true;
   }
 
   return false;
 }
 
-function vertexTurnExceeds(points: Vector2[], vertexIndex: number, cosLimit: number): boolean {
-  const previous = points[vertexIndex - 1];
-  const current = points[vertexIndex];
-  const next = points[vertexIndex + 1];
-  if (!previous || !current || !next) {
+function localHeadingDeviationExceeds(start: Vector2, end: Vector2, overallDirection: Vector2, cosLimit: number): boolean {
+  const segmentDx = end.x - start.x;
+  const segmentDy = end.y - start.y;
+  const segmentLength = Math.hypot(segmentDx, segmentDy);
+  if (segmentLength <= 1e-9) {
     return false;
   }
 
-  const inDx = current.x - previous.x;
-  const inDy = current.y - previous.y;
-  const outDx = next.x - current.x;
-  const outDy = next.y - current.y;
-  const inLength = Math.hypot(inDx, inDy);
-  const outLength = Math.hypot(outDx, outDy);
-  if (inLength <= 1e-9 || outLength <= 1e-9) {
-    return false;
-  }
-
-  const cosine = ((inDx * outDx) + (inDy * outDy)) / (inLength * outLength);
+  const cosine = ((segmentDx * overallDirection.x) + (segmentDy * overallDirection.y)) / segmentLength;
   return cosine < cosLimit;
 }
 
