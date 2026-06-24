@@ -158,7 +158,16 @@ export class MotorNodeClient {
           responseLength: frameLengthForPayload(motorFeedbackSampleLength()),
         });
 
-        const decoded = decodeFrame(responseFrame);
+        let decoded: ReturnType<typeof decodeFrame>;
+        try {
+          decoded = decodeFrame(responseFrame);
+        } catch (decodeError) {
+          const prefix = Array.from(responseFrame.subarray(0, Math.min(8, responseFrame.length)))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join(" ");
+          const msg = decodeError instanceof Error ? decodeError.message : String(decodeError);
+          throw new Error(`${msg} [raw: ${prefix}]`);
+        }
         if (decoded.header.nodeId !== NodeId.Motor || decoded.header.messageType !== MessageType.MotorFeedbackSample) {
           throw new Error("Unexpected motor response frame");
         }

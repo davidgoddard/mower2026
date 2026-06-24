@@ -491,9 +491,34 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   g_latestFeedback.faultFlags = 0;
   g_latestFeedback.watchdogHealthy = g_latestCommand.enableDrive;
 
+  // Snapshot the sequence number under the protocol lock so we don't race
+  // with onReceive() updating g_lastFeedbackRequestSequence concurrently.
+  portENTER_CRITICAL(&g_protocolStateMux);
+  uint16_t seqSnapshot = g_lastFeedbackRequestSequence;
+  portEXIT_CRITICAL(&g_protocolStateMux);
+
+  // Encode into a local buffer first, then copy into g_txFrame under the
+  // protocol lock. onRequest() fires from the I2C interrupt and reads
+  // g_txFrame at any moment; without the lock it would observe a
+  // partially-written frame, producing "Invalid start of frame", "CRC
+  // mismatch", or "Frame length mismatch" errors on the Pi side.
   uint8_t payload[MOTOR_FEEDBACK_PAYLOAD_SIZE];
   encodeMotorFeedbackPayload(g_latestFeedback, payload);
-  g_txFrameLength = encodeFrame(MESSAGE_TYPE_MOTOR_FEEDBACK, g_lastFeedbackRequestSequence, g_latestFeedback.faultFlags == 0 ? 0 : 0x01, payload, MOTOR_FEEDBACK_PAYLOAD_SIZE, g_txFrame);
+
+  uint8_t tempFrame[MAX_FRAME_SIZE];
+  size_t tempLength = encodeFrame(
+    MESSAGE_TYPE_MOTOR_FEEDBACK,
+    seqSnapshot,
+    g_latestFeedback.faultFlags == 0 ? 0 : 0x01,
+    payload,
+    MOTOR_FEEDBACK_PAYLOAD_SIZE,
+    tempFrame
+  );
+
+  portENTER_CRITICAL(&g_protocolStateMux);
+  memcpy(g_txFrame, tempFrame, tempLength);
+  g_txFrameLength = tempLength;
+  portEXIT_CRITICAL(&g_protocolStateMux);
 }
 
 void runControlStep(uint32_t nowMillis) {
@@ -574,15 +599,29 @@ void onReceive(int numBytes) {
 }
 
 void onRequest() {
-  bool haveFeedbackRequest = false;
+  // Copy g_txFrame into a local buffer under the protocol lock so we never
+  // hand the Pi a torn frame that was being written by refreshFeedbackSnapshot()
+  // in loop() at the moment this interrupt fired.
+  uint8_t localFrame[MAX_FRAME_SIZE];
+  size_t localLength;
+
   portENTER_CRITICAL(&g_protocolStateMux);
-  haveFeedbackRequest = g_haveFeedbackRequest;
+  bool hadRequest = g_haveFeedbackRequest;
+  g_haveFeedbackRequest = false;
+  localLength = g_txFrameLength;
+  memcpy(localFrame, g_txFrame, localLength);
   portEXIT_CRITICAL(&g_protocolStateMux);
 
-  if (!haveFeedbackRequest) {
-    refreshFeedbackSnapshot(millis());
+  if (!hadRequest) {
+    // No request arrived since the last snapshot; the frame is still valid
+    // but we refresh it in-place via the normal loop path. Nothing to do
+    // here — just send whatever is already prepared.
+    (void)hadRequest;
   }
-  Wire.write(g_txFrame, g_txFrameLength);
+
+  if (localLength > 0) {
+    Wire.write(localFrame, localLength);
+  }
 }
 
 // ===== Setup / loop =====
