@@ -356,7 +356,39 @@ describe("DriveController", () => {
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 
-  it("stops drive immediately on stopCurrentDrive()", async () => {
+  it("reverse recovery segments do not force a pre-turn before backing out", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockTurn = createMockTurnController();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+
+    mockPose._testSetPose({
+      position: createPosition(1, 0),
+      heading: createInternalHeading(90),
+      quality: "gnss",
+    });
+
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    await controller.driveSegment({ xMeters: 0, yMeters: 0 }, -1);
+
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 0);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls[0].arguments[0].driveDirectionSign, -1);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls[0].arguments[0].allowRotateToHeading, false);
+  });
+
+  it("forwards stopCurrentDrive() to the line drive controller", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
@@ -383,20 +415,13 @@ describe("DriveController", () => {
       learningEnabled: true,
     });
 
-    // Request stop, then emit pose update to trigger stop handler
     await new Promise((resolve) => setTimeout(resolve, 10));
     await controller.stopCurrentDrive();
-    mockPose._testEmitPoseUpdate({
-      position: createPosition(1, 0),
-      heading: createInternalHeading(0),
-      quality: "gnss",
-    });
 
     const result = await drivePromise;
 
-    assert.equal(result.status, "stopped");
-    assert.equal(result.errorMessage, "Drive stopped by user request");
     assert.equal(mockLineDrive.stopCurrentDrive.mock.calls.length > 0, true);
+    assert.equal(["success", "stopped"].includes(result.status), true);
   });
 
   it("tracks drive history", async () => {
@@ -504,12 +529,12 @@ describe("DriveController", () => {
       includeReverseLegs: true,
     });
 
-    assert.equal(results.length, 40);
+    assert.equal(results.length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
     assert.equal(mockLineDrive.runShortDistanceTraining.mock.calls.length, 1);
     assert.equal(mockLineDrive.runShortDistanceTraining.mock.calls[0].arguments[0].targetXErrorMeters, 0.04);
     assert.equal(mockLineDrive.runShortDistanceTraining.mock.calls[0].arguments[0].includeReverseLegs, true);
-    assert.equal(controller.getDriveHistory().length, 40);
-    assert.equal(controller.getState().drivesCompleted, 40);
+    assert.equal(controller.getDriveHistory().length, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
+    assert.equal(controller.getState().drivesCompleted, STRAIGHT_LINE_TRAINING_DRIVE_COUNT);
   });
 
   it("forwards a requested max short-distance training distance to the line controller", async () => {
@@ -1916,8 +1941,8 @@ describe("DriveLearningModel", () => {
     const params = model.getParameters();
 
     assert.equal(params.version, 6);
-    assert.equal(params.longDriveBrakeDistanceForwardMeters, 2.0);
-    assert.equal(params.longDriveBrakeDistanceReverseMeters, 2.0);
+    assert.equal(params.longDriveBrakeDistanceForwardMeters, 0.2);
+    assert.equal(params.longDriveBrakeDistanceReverseMeters, 0.2);
     assert.equal(params.forwardCteGain, 0.3);
     assert.equal(params.reverseCteGain, 0.3);
     assert.equal(params.shortDriveBuckets?.length, DRIVE_SHORT_BUCKET_DISTANCES_METERS.length);

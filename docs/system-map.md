@@ -67,11 +67,14 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
   - live HID input while manual drive is armed clears a latched global stop so the operator can consciously recover from a stall/stop during manual manoeuvring
   - unchanged held-stick commands are periodically re-sent at the configured keepalive cadence, and HID snapshots now tolerate a longer documented stale window before gentle-halt/disarm logic starts
+  - shutdown now unregisters HID event listeners and closes the controller before awaiting the control-loop drain, so tests and process shutdown do not stay alive on stale manual-drive events
 - `src/control/turnController.ts`: turn stop checks and stop handling.
+  - IMU heading watchdog timers are internal safety timers only and are `unref()`'d so an abandoned turn test does not keep Node alive by itself
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
+  - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
 
 ## Pose Fusion
 - `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.
@@ -181,6 +184,7 @@ This document maps problem domains to candidate files removing the need for Code
   - encoder calibration is NOT updated opportunistically from line drives; calibration is owned by the dead-reckoning workflow
   - short-drive stop-trigger learning uses exact buckets at 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, and 100cm
   - straight-line training runs those short buckets plus longer sample drives at 2m, 3m, and 4m, with the short/long distinction taken from the intended training distance rather than raw floating-point geometry
+  - explicit training requests beyond the canned bucket list are preserved as custom distances instead of silently falling back to the full default training sweep
   - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
   - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
   - self-contained stop handling and learning updates for the line-following phase
@@ -240,7 +244,9 @@ This document maps problem domains to candidate files removing the need for Code
   - `IPathStore`: interface for persistent path storage
 - `src/pathfollowing/obstaclePathShaper.ts`: closed-loop path shaping for recorded perimeters
   - obstacle recordings are smoothed and offset outward so the mower follows just outside the mapped obstacle
-  - mowing-area recordings are left raw on disk and then runtime-shaped with an adaptive trend fitter that collapses long consistent runs while preserving genuine corners and step changes
+  - mowing-area recordings are left raw on disk; the obstacle shaper now delegates area cleanup to the dedicated inward-constrained area cleaner below
+- `src/pathfollowing/areaPerimeterPathCleaner.ts`: inward-constrained cleanup for recorded mowing-area perimeters
+  - trims start/end overlap, resamples the loop, protects real corners, removes short double-backs, simplifies only when the replacement stays inside or touching the recorded polygon and within the configured 10cm deviation bound, and applies only light safe rounding to unprotected wiggles
 - `src/pathfollowing/pathRecorder.ts`: save-time path post-processing
   - legacy save-processing flags remain for compatibility but recording now persists raw points so shaping policy can evolve without forcing a perimeter re-trace
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: segmented perimeter-follow implementation for general stored paths and exact waypoint sequences
@@ -277,8 +283,8 @@ This document maps problem domains to candidate files removing the need for Code
   - records fused GNSS and dead-reckoning poses, ignores unknown-quality poses, and skips implausible segment jumps while keeping skip counts in the stop summary
   - always persists raw recorded points so future perimeter-shaping fixes can be applied at runtime without forcing an operator re-trace
 - `src/pathfollowing/obstaclePathShaper.ts`: reshapes recorded obstacle loops into a convex, slightly outward-offset, Chaikin-smoothed loop and nudges any stray points back outside the originally recorded obstacle polygon
-  - mowing-area runtime shaping now uses a coarse-to-fine trend fitter: it first tries to replace about 2m of perimeter with one straight leg, halves that window when the trend is inconsistent, and stops refining around 20cm so local joystick/GNSS wiggles disappear without cutting true corners
-  - shaping behaviour is defined by clearly named local constants, including the obstacle outward offset, per-step outside nudge, Chaikin pass count, and the area trend-fitting thresholds
+  - obstacle shaping remains separate from mowing-area cleanup so the obstacle-safe outward offset logic does not leak into area-perimeter handling
+  - shaping behaviour is defined by clearly named local constants, including the obstacle outward offset, per-step outside nudge, and Chaikin pass count
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification/drive starts at the nearest recorded point and (for closed perimeters) loops back to the join point
   - chooses forward or reverse traversal by tangent alignment at the nearest point
   - verification approach stages 10cm short of the join point so the mower has body clearance to pivot before joining the perimeter
@@ -299,6 +305,9 @@ This document maps problem domains to candidate files removing the need for Code
   - traversal sequencing now lets adjacent strip ends compete with same-offset obstacle-split continuations and penalizes routed same-offset continuation, so an obstacle acts more like a divider than a cue to keep resuming the same lane around it
   - returns logical strip segments for canvas preview and future execution planning
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
+  - persists exact in-progress mowing step state through the app-server callback so failed or stopped sessions can resume from the saved operation rather than rebuilding the strip plan from scratch
+- `src/pathfollowing/mowingResumeStore.ts`: JSON persistence for the saved mowing resume state
+  - stores the exact active mowing operation, traced-boundary progress, saved strip plan, and recorded area/obstacle geometry used by `/api/mowing/resume`
   - on mow start, now tries to select a strip-adjacent area-perimeter anchor that is directly reachable without re-leaving the area after entry; when one is found it re-anchors the strip order to that perimeter point, drives to the associated inside standoff, traces the full area loop once, and then starts strip mowing from that same strip-adjacent point instead of re-planning again from the post-trace pose
   - that forced first area trace now injects the chosen strip-adjacent perimeter point into the traced loop itself and also refreshes the retry checkpoint with that ordered loop, so a stall during the first lap resumes on the same anchored perimeter order instead of falling back to a generic nearest-point boundary restart
   - initial area entry traces the full area perimeter before strip mowing begins; when no safe strip-adjacent area anchor can be chosen up front it falls back to re-anchoring strip order from the live post-trace pose

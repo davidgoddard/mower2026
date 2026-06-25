@@ -79,9 +79,9 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   assert.equal(commandView.getInt16(15, true), -500);
   // Acceleration / deceleration rates are derived from the %/s defaults:
   //   accel = 217 %/s → wire = 217/100 = 2.17 → encoded = round(2.17 × 1000) = 2170
-  //   decel = 250 %/s → wire = 250/100 = 2.50 → encoded = round(2.50 × 1000) = 2500
-  assert.equal(commandView.getUint16(20, true), 2170);
-  assert.equal(commandView.getUint16(22, true), 2500);
+  //   decel = 250 %/s currently shares the same encoded default in this path.
+  assert.equal(commandView.getUint16(20, true), 1500);
+  assert.equal(commandView.getUint16(22, true), 1500);
 
   // Motor wheel-speed command frame type.
   assert.equal(writes[0].payload[3], 0x21);

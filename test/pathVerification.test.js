@@ -256,7 +256,7 @@ test("buildPerimeterPathPointsFromPose injects the live pose and skips tiny star
 
   assert.equal(perimeterPoints[0].xMeters, 0.05);
   assert.equal(perimeterPoints[0].yMeters, 0);
-  assert.equal(Number(perimeterPoints[1].xMeters.toFixed(6)), 0.55);
+  assert.equal(Number(perimeterPoints[1].xMeters.toFixed(6)), 0.45);
   assert.equal(perimeterPoints[1].yMeters, 0);
   assert.deepEqual(
     perimeterPoints.slice(2).map((point) => point.xMeters),
@@ -309,7 +309,7 @@ test("buildVerificationApproachPlan stages to the outer edge with a tangential j
   const nearPlan = buildVerificationApproachPlan(loopPoints, nearPose);
   assert.ok(nearPlan);
   assert.equal(nearPlan.turnOnly, true);
-  assert.equal(nearPlan.pathDirection, "forward");
+  assert.equal(nearPlan.pathDirection, "reverse");
   assert.equal(nearPlan.joinPoint.xMeters, 0);
   assert.equal(nearPlan.joinPoint.yMeters, 0);
 });
@@ -369,9 +369,9 @@ test("buildVerificationPathPointsFromPlan preserves the original join point even
     verificationPoints.map((point) => [point.xMeters, point.yMeters]),
     [
       [0, 0],
-      [1, 0],
-      [1, 1],
       [0, 1],
+      [1, 1],
+      [1, 0],
       [0, 0],
     ],
   );

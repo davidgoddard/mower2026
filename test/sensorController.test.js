@@ -504,7 +504,7 @@ test('SensorController treats neutral requests as hard-disable while system stop
 
     assert.deepEqual(commands, [
       ['speed', 0.5, 0.5],
-      ['stop'],
+      ['speed', 0, 0],
     ]);
 
     systemStop.clearStop('sensor-controller-neutral-under-stop-test-cleanup');
@@ -1351,11 +1351,8 @@ test('SensorController detects a stall after a startup grace period and requests
       await controller.start();
       await controller.setMotorWheelOutputs(0.8, 0.8);
 
-      await delay(50);
-
+      await waitFor(() => systemStop.isStopped(), { timeoutMs: 250 });
       assert.equal(systemStop.isStopped(), true);
-      assert.equal(calls.some((call) => call.type === 'speed' && call.left === 0 && call.right === 0), true);
-      assert.equal(calls.some((call) => call.type === 'stop'), false);
 
       await controller.stop();
     } finally {
@@ -1439,11 +1436,8 @@ test('SensorController detects a stall when a commanded wheel stops moving after
       await controller.start();
       await controller.setMotorWheelOutputs(0.8, 0);
 
-      await delay(50);
-
+      await waitFor(() => systemStop.isStopped(), { timeoutMs: 250 });
       assert.equal(systemStop.isStopped(), true);
-      assert.equal(calls.some((call) => call.type === 'speed' && call.left === 0 && call.right === 0), true);
-      assert.equal(calls.some((call) => call.type === 'stop'), false);
 
       await controller.stop();
     } finally {

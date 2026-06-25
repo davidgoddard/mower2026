@@ -180,8 +180,9 @@ export class DriveController {
           : addRelativeAngle(angleToTarget, createRelativeAngle(180));
         const headingError = headingDifference(this.driveStartHeading, desiredHeading);
         const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingError));
-        const shouldSkipInitialTurn = !request.alwaysTurnToFaceTarget
-          && targetDistanceMeters <= DRIVE_SHORT_HOP_SKIP_TURN_DISTANCE_METERS;
+        const shouldSkipInitialTurn = request.skipInitialTurn === true
+          || (!request.alwaysTurnToFaceTarget
+          && targetDistanceMeters <= DRIVE_SHORT_HOP_SKIP_TURN_DISTANCE_METERS);
 
         if (shouldSkipInitialTurn) {
           this.logger.info("drive.short_hop_skip_turn", {
@@ -216,6 +217,7 @@ export class DriveController {
           learningEnabled: request.learningEnabled,
           driveDirectionSign,
           maxCrossTrackErrorMeters: request.maxCrossTrackErrorMeters,
+          allowRotateToHeading: request.skipInitialTurn !== true,
         });
 
         if (lineResult.status === "success") {
@@ -281,11 +283,12 @@ export class DriveController {
    * path to retrace recently completed targets in reverse.
    */
   async driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<void> {
-    systemStop.clearStop("drive-segment-recovery");
+      systemStop.clearStop("drive-segment-recovery");
     await this.executeDrive({
       targetPosition: createPosition(target.xMeters, target.yMeters),
       driveDirectionSign,
-      alwaysTurnToFaceTarget: true,
+      alwaysTurnToFaceTarget: driveDirectionSign === 1,
+      skipInitialTurn: driveDirectionSign === -1,
       learningEnabled: false,
     });
   }

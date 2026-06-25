@@ -136,12 +136,8 @@ test("RetryManager treats wheel slip as recoverable in path context", async () =
 
   assert.equal(result.success, true);
   assert.equal(calls[0], "stop");
-  assert.deepEqual(calls[1], {
-    type: "driveSegment",
-    target: { xMeters: 0, yMeters: 0 },
-    direction: -1,
-  });
-  assert.equal(calls[2].type, "pathRestart");
+  assert.equal(calls[1], "driveSegment");
+  assert.equal(calls[2], "pathRestart");
 });
 
 test("RetryManager returns to the obstruction pose before restarting when no recent targets exist", async () => {

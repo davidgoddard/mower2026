@@ -279,5 +279,6 @@ export class HidGameController extends EventEmitter {
       this.retryTimer = undefined;
       void this.attach();
     }, this.reconnectDelayMs);
+    this.retryTimer.unref?.();
   }
 }

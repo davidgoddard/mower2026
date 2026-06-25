@@ -17,11 +17,49 @@ function createMockLogger() {
   return logger;
 }
 
-function findLogCall(logger, message) {
-  return logger.info.mock.calls.find((call) => call.arguments[0] === message);
+function emitImuHeading(sensorController, headingDeg, timestampMillis) {
+  sensorController.emit("imuHeadingUpdate", {
+    heading: createInternalHeading(headingDeg),
+    pitchDeg: 0,
+    rollDeg: 0,
+    timestampMillis,
+  });
 }
 
-test("PoseFusion rebases the IMU from the first good GNSS heading fix", async () => {
+function emitGnssPosition(sensorController, {
+  xMeters = 1,
+  yMeters = 2,
+  headingDeg = null,
+  positionAccuracyMeters = 0.03,
+  headingAccuracyDeg = 0.4,
+  fixType = "fixed",
+  satellitesInUse = 20,
+  timestampMillis,
+}) {
+  sensorController.emit("gnssPositionUpdate", {
+    xMeters,
+    yMeters,
+    heading: headingDeg === null ? null : createInternalHeading(headingDeg),
+    positionAccuracyMeters,
+    headingAccuracyDeg,
+    fixType,
+    satellitesInUse,
+    timestampMillis,
+  });
+}
+
+function emitRepeatedGnssPositions(sensorController, count, options) {
+  const start = options.timestampMillis ?? 1000;
+  const step = options.stepMillis ?? 100;
+  for (let index = 0; index < count; index += 1) {
+    emitGnssPosition(sensorController, {
+      ...options,
+      timestampMillis: start + (index * step),
+    });
+  }
+}
+
+test("PoseFusion rebases the IMU once GNSS position has been trusted for enough epochs", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
   if (!sensorController.getHeadingRebaseReadiness) {
@@ -34,17 +72,11 @@ test("PoseFusion rebases the IMU from the first good GNSS heading fix", async ()
 
   await fusion.start();
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(25),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 1000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 25, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 3.5,
     yMeters: 7.2,
-    heading: createInternalHeading(120),
+    headingDeg: 120,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -72,10 +104,10 @@ test("PoseFusion ignores poor GNSS fixes when deciding whether to reset heading"
 
   await fusion.start();
 
-  sensorController.emit("gnssPositionUpdate", {
+  emitGnssPosition(sensorController, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(90),
+    headingDeg: 90,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.5,
     fixType: "single",
@@ -92,9 +124,8 @@ test("PoseFusion ignores poor GNSS fixes when deciding whether to reset heading"
 test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
-  if (!sensorController.getHeadingRebaseReadiness) {
-    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
-  }
+  let rebaseReadiness = { safe: true };
+  sensorController.getHeadingRebaseReadiness = () => rebaseReadiness;
   const fusion = new PoseFusion({
     sensorController,
     logger: createMockLogger(),
@@ -102,17 +133,11 @@ test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", as
 
   await fusion.start();
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(10),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 1000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(10),
+    headingDeg: 10,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -122,10 +147,11 @@ test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", as
 
   assert.equal(fusion.getPrimitiveState().usingGnssHeading, true);
 
-  sensorController.emit("gnssPositionUpdate", {
+  rebaseReadiness = { safe: false };
+  emitGnssPosition(sensorController, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(40),
+    headingDeg: 50,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -138,7 +164,7 @@ test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", as
   await fusion.stop();
 });
 
-test("PoseFusion keeps GNSS position even when heading accuracy is too poor to rebase heading", async () => {
+test("PoseFusion accepts trusted GNSS position even when heading does not validate", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
   if (!sensorController.getHeadingRebaseReadiness) {
@@ -151,10 +177,10 @@ test("PoseFusion keeps GNSS position even when heading accuracy is too poor to r
 
   await fusion.start();
 
-  sensorController.emit("gnssPositionUpdate", {
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(90),
+    headingDeg: 90,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 6,
     fixType: "fixed",
@@ -162,14 +188,14 @@ test("PoseFusion keeps GNSS position even when heading accuracy is too poor to r
     timestampMillis: 1000,
   });
 
-  assert.equal(sensorController.setHeading.mock.calls.length, 0);
-  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 0);
+  assert.equal(sensorController.setHeading.mock.calls.length, 1);
+  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 90);
   assert.equal(fusion.getCurrentPose().quality, "gnss");
 
   await fusion.stop();
 });
 
-test("PoseFusion still syncs heading from GNSS when position accuracy is poor", async () => {
+test("PoseFusion does not sync heading from GNSS before position trust is established", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
   if (!sensorController.getHeadingRebaseReadiness) {
@@ -182,10 +208,10 @@ test("PoseFusion still syncs heading from GNSS when position accuracy is poor", 
 
   await fusion.start();
 
-  sensorController.emit("gnssPositionUpdate", {
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(90),
+    headingDeg: 90,
     positionAccuracyMeters: 0.101,
     headingAccuracyDeg: 1,
     fixType: "fixed",
@@ -193,9 +219,8 @@ test("PoseFusion still syncs heading from GNSS when position accuracy is poor", 
     timestampMillis: 1000,
   });
 
-  assert.equal(sensorController.setHeading.mock.calls.length, 1);
-  assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[0].arguments[0]), 90);
-  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 90);
+  assert.equal(sensorController.setHeading.mock.calls.length, 0);
+  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 0);
   assert.equal(unwrapMeters(fusion.getCurrentPose().position.xMeters), 0);
   assert.equal(unwrapMeters(fusion.getCurrentPose().position.yMeters), 0);
   assert.equal(fusion.getCurrentPose().quality, "unknown");
@@ -203,7 +228,7 @@ test("PoseFusion still syncs heading from GNSS when position accuracy is poor", 
   await fusion.stop();
 });
 
-test("PoseFusion keeps the IMU heading when later GNSS is too far away and rebases only when close", async () => {
+test("PoseFusion can apply a stationary-safe trusted GNSS heading update after bootstrap", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
   if (!sensorController.getHeadingRebaseReadiness) {
@@ -217,17 +242,11 @@ test("PoseFusion keeps the IMU heading when later GNSS is too far away and rebas
 
   await fusion.start();
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(10),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 1000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(10),
+    headingDeg: 10,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -239,10 +258,10 @@ test("PoseFusion keeps the IMU heading when later GNSS is too far away and rebas
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[0].arguments[0]), 10);
   assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 10);
 
-  sensorController.emit("gnssPositionUpdate", {
+  emitGnssPosition(sensorController, {
     xMeters: 2,
     yMeters: 3,
-    heading: createInternalHeading(20),
+    headingDeg: 20,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -250,94 +269,36 @@ test("PoseFusion keeps the IMU heading when later GNSS is too far away and rebas
     timestampMillis: 2600,
   });
 
-  assert.equal(sensorController.setHeading.mock.calls.length, 1);
-  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 10);
-  const rejectedLog = findLogCall(logger, "pose_fusion.gnss_heading_not_aligned");
-  assert.ok(rejectedLog);
-  assert.equal(rejectedLog.arguments[1].alignmentDeltaDeg, 10);
-
-  sensorController.emit("gnssPositionUpdate", {
-    xMeters: 3,
-    yMeters: 4,
-    heading: createInternalHeading(11),
-    positionAccuracyMeters: 0.03,
-    headingAccuracyDeg: 0.4,
-    fixType: "fixed",
-    satellitesInUse: 20,
-    timestampMillis: 3600,
-  });
-
   assert.equal(sensorController.setHeading.mock.calls.length, 2);
-  assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 11);
-  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 11);
+  assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 20);
+  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 20);
 
   await fusion.stop();
 });
 
-test("PoseFusion rebases from GNSS after a long zero-speed stop even when heading gap is large", async () => {
+test("PoseFusion rebases from trusted GNSS when the controller reports a safe stationary override state", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
-  if (!sensorController.getHeadingRebaseReadiness) {
-    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
-  }
-  sensorController.getMotorZeroCommandSinceMillis = mock.fn(() => 1000);
-  sensorController.getCurrentTimeMillis = mock.fn(() => 1000);
-  sensorController.getRecentImuDiagnosticSummary = mock.fn(() => ({
-    windowMs: 5000,
-    sampleCount: 2,
-    startTimestampMillis: 5000,
-    endTimestampMillis: 6000,
-    durationMs: 1000,
-    headingBeforeDeg: 40,
-    headingAfterDeg: 44,
-    headingChangeDeg: 4,
-    integratedYawDeltaDeg: 4,
-    averageYawRateDegPerSec: 4,
-    minYawRateDegPerSec: 4,
-    maxYawRateDegPerSec: 4,
-    averageSampleDeltaMs: 1000,
-    minSampleDeltaMs: 1000,
-    maxSampleDeltaMs: 1000,
-    recentSamples: [
-      {
-        timestampMillis: 5000,
-        sampleDeltaMs: 1000,
-        deltaSeconds: 1,
-        headingBeforeDeg: 40,
-        headingAfterDeg: 42,
-        yawRateDegPerSec: 2,
-        yawDeltaDeg: 2,
-      },
-      {
-        timestampMillis: 6000,
-        sampleDeltaMs: 1000,
-        deltaSeconds: 1,
-        headingBeforeDeg: 42,
-        headingAfterDeg: 44,
-        yawRateDegPerSec: 2,
-        yawDeltaDeg: 2,
-      },
-    ],
+  sensorController.getHeadingRebaseReadiness = mock.fn(() => ({
+    safe: true,
+    motorCommandActive: false,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
+    wheelsStationary: true,
+    maxStationaryTickDelta: 1,
   }));
-  const logger = createMockLogger();
   const fusion = new PoseFusion({
     sensorController,
-    logger,
+    logger: createMockLogger(),
   });
 
   await fusion.start();
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(10),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 1000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(10),
+    headingDeg: 10,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -348,18 +309,11 @@ test("PoseFusion rebases from GNSS after a long zero-speed stop even when headin
   assert.equal(sensorController.setHeading.mock.calls.length, 1);
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[0].arguments[0]), 10);
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(40),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 5000,
-  });
-  sensorController.getCurrentTimeMillis = mock.fn(() => 12000);
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 40, 5000);
+  emitGnssPosition(sensorController, {
     xMeters: 2,
     yMeters: 3,
-    heading: createInternalHeading(100),
+    headingDeg: 65,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -368,13 +322,8 @@ test("PoseFusion rebases from GNSS after a long zero-speed stop even when headin
   });
 
   assert.equal(sensorController.setHeading.mock.calls.length, 2);
-  assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 100);
-  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 100);
-  const rebaseLog = findLogCall(logger, "pose_fusion.gnss_heading_rebased_after_stop");
-  assert.ok(rebaseLog);
-  assert.equal(rebaseLog.arguments[1].stationaryZeroCommandAgeMs, 11000);
-  assert.equal(rebaseLog.arguments[1].imuDiagnostics.sampleCount, 2);
-  assert.equal(rebaseLog.arguments[1].imuDiagnostics.integratedYawDeltaDeg, 4);
+  assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 65);
+  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 65);
 
   await fusion.stop();
 });
@@ -402,17 +351,11 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
 
   await fusion.start();
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(10),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 1000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(10),
+    headingDeg: 10,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -432,17 +375,11 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   };
   sensorController.getCurrentTimeMillis = mock.fn(() => 2000);
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(11),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 2000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 11, 2000);
+  emitGnssPosition(sensorController, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(11),
+    headingDeg: 11,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -463,10 +400,10 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   };
   sensorController.getCurrentTimeMillis = mock.fn(() => 2300);
 
-  sensorController.emit("gnssPositionUpdate", {
+  emitGnssPosition(sensorController, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(11),
+    headingDeg: 11,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -481,32 +418,29 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
 });
 
 
-test("PoseFusion rebases from GNSS after a consistent mirrored offset", async () => {
+test("PoseFusion applies a stationary-safe trusted GNSS heading correction after bootstrap", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
-  if (!sensorController.getHeadingRebaseReadiness) {
-    sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
-  }
-  sensorController.getMotorZeroCommandSinceMillis = mock.fn(() => null);
-  const logger = createMockLogger();
+  sensorController.getHeadingRebaseReadiness = () => ({
+    safe: true,
+    motorCommandActive: false,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
+    wheelsStationary: true,
+    maxStationaryTickDelta: 1,
+  });
   const fusion = new PoseFusion({
     sensorController,
-    logger,
+    logger: createMockLogger(),
   });
 
   await fusion.start();
 
-  sensorController.emit("imuHeadingUpdate", {
-    heading: createInternalHeading(10),
-    pitchDeg: 0,
-    rollDeg: 0,
-    timestampMillis: 1000,
-  });
-
-  sensorController.emit("gnssPositionUpdate", {
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
     xMeters: 1,
     yMeters: 2,
-    heading: createInternalHeading(10),
+    headingDeg: 10,
     positionAccuracyMeters: 0.03,
     headingAccuracyDeg: 0.4,
     fixType: "fixed",
@@ -516,44 +450,21 @@ test("PoseFusion rebases from GNSS after a consistent mirrored offset", async ()
 
   assert.equal(sensorController.setHeading.mock.calls.length, 1);
 
-  const samples = [
-    { imu: 20, gnss: 30, t: 2000 },
-    { imu: 24, gnss: 34, t: 2300 },
-    { imu: 28, gnss: 38, t: 2600 },
-    { imu: 31, gnss: 41, t: 2900 },
-    { imu: 35, gnss: 45, t: 3200 },
-    { imu: 39, gnss: 49, t: 3500 },
-  ];
-
-  for (const sample of samples) {
-    sensorController.emit("imuHeadingUpdate", {
-      heading: createInternalHeading(sample.imu),
-      pitchDeg: 0,
-      rollDeg: 0,
-      timestampMillis: sample.t,
-    });
-
-    sensorController.emit("gnssPositionUpdate", {
-      xMeters: 1,
-      yMeters: 2,
-      heading: createInternalHeading(sample.gnss),
-      positionAccuracyMeters: 0.03,
-      headingAccuracyDeg: 0.4,
-      fixType: "fixed",
-      satellitesInUse: 20,
-      timestampMillis: sample.t,
-    });
-  }
+  emitImuHeading(sensorController, 39, 3500);
+  emitGnssPosition(sensorController, {
+    xMeters: 1,
+    yMeters: 2,
+    headingDeg: 49,
+    positionAccuracyMeters: 0.03,
+    headingAccuracyDeg: 0.4,
+    fixType: "fixed",
+    satellitesInUse: 20,
+    timestampMillis: 3500,
+  });
 
   assert.equal(sensorController.setHeading.mock.calls.length, 2);
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 49);
   assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 49);
-
-  const rebaseLog = findLogCall(logger, "pose_fusion.gnss_heading_rebased_after_consistent_offset");
-  assert.ok(rebaseLog);
-  assert.equal(Math.round(rebaseLog.arguments[1].alignmentDeltaDeg), 10);
-  assert.equal(rebaseLog.arguments[1].consistentOffsetDurationMs >= 1500, true);
-  assert.equal(rebaseLog.arguments[1].consistentOffsetSamples >= 6, true);
 
   await fusion.stop();
 });
@@ -813,11 +724,15 @@ test("PoseFusion re-anchors encoder-only track and boosts confidence when GNSS r
   sensorController.emit("imuHeadingUpdate", {
     heading: createInternalHeading(0), pitchDeg: 0, rollDeg: 0, timestampMillis: 100,
   });
-  sensorController.emit("gnssPositionUpdate", {
-    xMeters: 10, yMeters: 20,
-    heading: createInternalHeading(0),
-    positionAccuracyMeters: 0.02, headingAccuracyDeg: 0.5,
-    fixType: "fixed", satellitesInUse: 20, timestampMillis: 200,
+  emitRepeatedGnssPositions(sensorController, 3, {
+    xMeters: 10,
+    yMeters: 20,
+    headingDeg: 0,
+    positionAccuracyMeters: 0.02,
+    headingAccuracyDeg: 0.5,
+    fixType: "fixed",
+    satellitesInUse: 20,
+    timestampMillis: 200,
   });
 
   // Artificially drift the encoder-only position to simulate movement
@@ -838,11 +753,15 @@ test("PoseFusion re-anchors encoder-only track and boosts confidence when GNSS r
 
   // Now trigger a GNSS heading rebase — same heading so alignmentDelta = 0,
   // which means it will rebase unconditionally (within-threshold path).
-  sensorController.emit("gnssPositionUpdate", {
-    xMeters: 10, yMeters: 20,
-    heading: createInternalHeading(0),
-    positionAccuracyMeters: 0.02, headingAccuracyDeg: 0.5,
-    fixType: "fixed", satellitesInUse: 20, timestampMillis: 400,
+  emitGnssPosition(sensorController, {
+    xMeters: 10,
+    yMeters: 20,
+    headingDeg: 0,
+    positionAccuracyMeters: 0.02,
+    headingAccuracyDeg: 0.5,
+    fixType: "fixed",
+    satellitesInUse: 20,
+    timestampMillis: 400,
   });
 
   const stateAfter = fusion.getPrimitiveState();

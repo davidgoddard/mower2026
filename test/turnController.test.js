@@ -72,6 +72,7 @@ describe("TurnController", () => {
         return createRelativeAngle(angleDeg * 0.7);
       }),
       getLargeBiasOffset: mock.fn(() => 0),
+      getLargeTurnBrakeScalarMs: mock.fn(() => 90),
       getSmallTurnBrakeTimeMs: mock.fn((direction, angleDeg) => angleDeg * 45),
       getSmallAngleThreshold: () => 20,
       getSmallTurnBucketAngleDeg: (angleDeg) => Math.round(Math.abs(angleDeg) / 3) * 3,
@@ -132,7 +133,7 @@ describe("TurnController", () => {
     // With decel=250 %/s and crawl=0.45, effectiveRampMs = (45/250)×1000 = 180ms.
     // Rate window: 3° over 100ms → rate = 0.03 deg/ms.
     // predictedCoast = 0.03 × (180/2) = 0.03 × 90 = 2.7°.
-    // At 87° progress: remaining = 3° ≤ 2.7° → brake fires.
+    // At 87.5° progress: remaining = 2.5° ≤ 2.7° → brake fires.
     const turnPromise = controller.executeTurn({
       targetAngle: createRelativeAngle(90),
       direction: "ccw",
@@ -144,10 +145,10 @@ describe("TurnController", () => {
     mockSensor._testSetHeading(createInternalHeading(84));
     mockSensor._testEmitHeadingUpdate(createInternalHeading(84), 900);
     await new Promise(resolve => setTimeout(resolve, 5));
-    // Second event: 87° progress, 100ms later — rate = 3/100 = 0.03 deg/ms,
-    // remaining = 3° ≤ predictedCoast 2.7° → brake fires.
-    mockSensor._testSetHeading(createInternalHeading(87));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(87), 1000);
+    // Second event: 87.5° progress, 100ms later — rate = 3.5/100 = 0.035 deg/ms,
+    // remaining = 2.5° ≤ predictedCoast 3.15° → brake fires.
+    mockSensor._testSetHeading(createInternalHeading(87.5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(87.5), 1000);
 
     const result = await turnPromise;
 
@@ -338,8 +339,11 @@ describe("TurnController", () => {
     });
 
     await new Promise(resolve => setTimeout(resolve, 10));
-    mockSensor._testSetHeading(createInternalHeading(63));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(63), 1000);
+    mockSensor._testSetHeading(createInternalHeading(84));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(84), 900);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    mockSensor._testSetHeading(createInternalHeading(87.5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(87.5), 1000);
 
     await turnPromise;
 
@@ -369,8 +373,11 @@ describe("TurnController", () => {
     });
 
     await new Promise(resolve => setTimeout(resolve, 10));
-    mockSensor._testSetHeading(createInternalHeading(31.5));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(31.5), 500);
+    mockSensor._testSetHeading(createInternalHeading(40));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(40), 900);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    mockSensor._testSetHeading(createInternalHeading(44));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(44), 1000);
 
     await turnPromise;
 
@@ -532,7 +539,7 @@ describe("TurnLearningModel", () => {
       await model.loadParameters();
 
       const brakeTime10Ms = model.getSmallTurnBrakeTimeMs("ccw", 10);
-      assert.equal(brakeTime10Ms, 400);
+      assert.equal(brakeTime10Ms, 150);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

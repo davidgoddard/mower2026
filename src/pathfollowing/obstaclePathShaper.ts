@@ -1,4 +1,5 @@
 import { PathPoint } from "./pathFollowerApi.js";
+import { shapeAreaRecordedPath as cleanAreaRecordedPath } from "./areaPerimeterPathCleaner.js";
 
 interface Vector2 {
   readonly x: number;
@@ -16,17 +17,6 @@ const LOOP_CLOSE_TOLERANCE_METERS = 0.05;
  * sits slightly outside the operator-drawn perimeter.
  */
 const OBSTACLE_SHAPING_OUTWARD_OFFSET_METERS = 0.08;
-/**
- * Area runtime shaping should preserve the operator's actual perimeter while
- * removing local GNSS wiggles. The adaptive fitter first tries to replace
- * roughly 2m runs with one straight leg; if the trend is not consistent it
- * recursively halves the attempted run length down to about 20cm.
- */
-const AREA_PATH_MIN_SEGMENT_METERS = 0.08;
-const AREA_PATH_MAX_TREND_LEG_METERS = 2.0;
-const AREA_PATH_MIN_TREND_LEG_METERS = 0.2;
-const AREA_PATH_MAX_DEVIATION_METERS = 0.05;
-const AREA_PATH_MAX_HEADING_DEVIATION_DEG = 18;
 const OBSTACLE_SHAPING_OUTSIDE_MARGIN_STEP_METERS = 0.02;
 /**
  * Number of Chaikin corner-cutting passes used to smooth the offset hull.
@@ -50,20 +40,7 @@ export function shapeObstacleRecordedPath(points: PathPoint[]): PathPoint[] {
 }
 
 export function shapeAreaRecordedPath(points: PathPoint[]): PathPoint[] {
-  const normalized = normalizeClosedLoop(points);
-  if (normalized.length < 3) {
-    return points.slice();
-  }
-
-  const filtered = removeTinyClosedSegments(normalized, AREA_PATH_MIN_SEGMENT_METERS);
-  const simplified = simplifyClosedLoopByTrend(filtered);
-  return closeLoop(
-    simplified.map((point, index) => ({
-      xMeters: point.x,
-      yMeters: point.y,
-      capturedAt: points[Math.min(index, points.length - 1)]?.capturedAt ?? Date.now(),
-    })),
-  );
+  return cleanAreaRecordedPath(points);
 }
 
 function shapeRecordedClosedPath(points: PathPoint[], mode: "outward" | "inward"): PathPoint[] {
@@ -250,138 +227,6 @@ function pushPointOutsidePolygon(point: Vector2, polygon: Vector2[], centroid: V
     attempts += 1;
   }
   return candidate;
-}
-
-function removeTinyClosedSegments(points: Vector2[], minDistanceMeters: number): Vector2[] {
-  if (points.length <= 1) {
-    return points.slice();
-  }
-
-  const filtered: Vector2[] = [points[0]];
-  for (let index = 1; index < points.length; index += 1) {
-    const point = points[index];
-    const previous = filtered[filtered.length - 1];
-    const isLast = index === points.length - 1;
-    if (isLast || distance(previous, point) >= minDistanceMeters) {
-      filtered.push(point);
-    }
-  }
-  return filtered.length >= 3 ? filtered : points.slice();
-}
-
-function simplifyClosedLoopByTrend(points: Vector2[]): Vector2[] {
-  if (points.length <= 3) {
-    return points.slice();
-  }
-
-  const kept: Vector2[] = [points[0]];
-  let anchorIndex = 0;
-
-  while (anchorIndex < points.length - 1) {
-    const candidateEnd = pickAdaptiveTrendEndpoint(points, anchorIndex);
-    kept.push(points[candidateEnd]);
-    anchorIndex = candidateEnd;
-  }
-
-  if (kept.length >= 3 && distance(kept[0], kept[kept.length - 1]) <= LOOP_CLOSE_TOLERANCE_METERS) {
-    kept.pop();
-  }
-  return kept.length >= 3 ? kept : points.slice();
-}
-
-function pickAdaptiveTrendEndpoint(points: Vector2[], anchorIndex: number): number {
-  if (anchorIndex >= points.length - 1) {
-    return anchorIndex;
-  }
-
-  let attemptLengthMeters = AREA_PATH_MAX_TREND_LEG_METERS;
-  while (attemptLengthMeters >= AREA_PATH_MIN_TREND_LEG_METERS) {
-    const candidateIndex = advanceIndexByDistance(points, anchorIndex, attemptLengthMeters);
-    if (candidateIndex <= anchorIndex + 1) {
-      break;
-    }
-    if (!closedTrendViolation(points, anchorIndex, candidateIndex)) {
-      return candidateIndex;
-    }
-    attemptLengthMeters /= 2;
-  }
-
-  const minimumCandidateIndex = advanceIndexByDistance(points, anchorIndex, AREA_PATH_MIN_TREND_LEG_METERS);
-  if (minimumCandidateIndex > anchorIndex) {
-    return minimumCandidateIndex;
-  }
-  return anchorIndex + 1;
-}
-
-function advanceIndexByDistance(points: Vector2[], anchorIndex: number, targetDistanceMeters: number): number {
-  let travelledMeters = 0;
-  let index = anchorIndex;
-  while (index < points.length - 1) {
-    const nextIndex = index + 1;
-    travelledMeters += distance(points[index], points[nextIndex]);
-    index = nextIndex;
-    if (travelledMeters >= targetDistanceMeters) {
-      return index;
-    }
-  }
-  return points.length - 1;
-}
-
-function closedTrendViolation(
-  points: Vector2[],
-  anchorIndex: number,
-  probeIndex: number,
-): boolean {
-  const start = points[anchorIndex];
-  const end = points[probeIndex];
-  const direction = normalizeVector({
-    x: end.x - start.x,
-    y: end.y - start.y,
-  });
-  const cosLimit = Math.cos((AREA_PATH_MAX_HEADING_DEVIATION_DEG * Math.PI) / 180);
-
-  for (let index = anchorIndex + 1; index < probeIndex; index += 1) {
-    if (pointToSegmentDistance(points[index], start, end) > AREA_PATH_MAX_DEVIATION_METERS) {
-      return true;
-    }
-    if (localHeadingDeviationExceeds(points[index - 1], points[index], direction, cosLimit)) {
-      return true;
-    }
-  }
-
-  if (localHeadingDeviationExceeds(points[probeIndex - 1], points[probeIndex], direction, cosLimit)) {
-    return true;
-  }
-
-  return false;
-}
-
-function localHeadingDeviationExceeds(start: Vector2, end: Vector2, overallDirection: Vector2, cosLimit: number): boolean {
-  const segmentDx = end.x - start.x;
-  const segmentDy = end.y - start.y;
-  const segmentLength = Math.hypot(segmentDx, segmentDy);
-  if (segmentLength <= 1e-9) {
-    return false;
-  }
-
-  const cosine = ((segmentDx * overallDirection.x) + (segmentDy * overallDirection.y)) / segmentLength;
-  return cosine < cosLimit;
-}
-
-function pointToSegmentDistance(point: Vector2, start: Vector2, end: Vector2): number {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const lenSq = (dx * dx) + (dy * dy);
-  if (lenSq <= 1e-9) {
-    return distance(point, start);
-  }
-
-  const t = Math.max(0, Math.min(1, (((point.x - start.x) * dx) + ((point.y - start.y) * dy)) / lenSq));
-  const projected = {
-    x: start.x + (dx * t),
-    y: start.y + (dy * t),
-  };
-  return distance(point, projected);
 }
 
 function polygonCentroid(points: Vector2[]): Vector2 {

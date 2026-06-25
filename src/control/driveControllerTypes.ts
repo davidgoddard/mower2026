@@ -10,6 +10,12 @@ export interface DriveRequest {
   readonly maxCrossTrackErrorMeters?: number;
   readonly alwaysTurnToFaceTarget?: boolean; // When true, always pivot to face the target regardless of heading error magnitude
   /**
+   * When true, suppress the controller's initial alignment turn even if the
+   * heading error is large. Used by retry back-tracks that must reverse away
+   * from an obstruction without pivoting first.
+   */
+  readonly skipInitialTurn?: boolean;
+  /**
    * Optional explicit learning-class override. Training flows should set this
    * from the intended bucket/sample type so a nominal 100 cm run never flips
    * between short and long learning due to floating-point distance noise.

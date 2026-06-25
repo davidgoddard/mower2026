@@ -593,6 +593,9 @@ ${getAppDialogStyles()}
           <button id="startMowingBtn" class="button button-success" type="button">
             <span>🌿</span> Mow Area
           </button>
+          <button id="resumeMowingBtn" class="button button-primary" type="button" style="display:none">
+            <span>↻</span> Resume Mow
+          </button>
           <button id="stopMowingBtn" class="button button-danger" type="button">
             <span>⏹</span> Stop Mowing
           </button>
@@ -880,6 +883,7 @@ ${getAppDialogScript()}
     const mowingHeadingValue = $("mowingHeadingValue");
     const stripSpacingInput = $("stripSpacingCm");
     const previewMowingPlanBtn = $("previewMowingPlanBtn");
+    const resumeMowingBtn = $("resumeMowingBtn");
 
     function addPositionToHistory(x, y, heading, timestamp) {
       const previous = positionHistory[positionHistory.length - 1];
@@ -1607,6 +1611,9 @@ ${getAppDialogScript()}
 
       const isRunning = status.phase !== 'idle' && status.phase !== 'complete' && status.phase !== 'stopped' && status.phase !== 'error';
       startMowingBtn.style.display = isRunning ? 'none' : '';
+      const canResume = !isRunning && Boolean(status.resumeAvailable);
+      resumeMowingBtn.style.display = canResume ? '' : 'none';
+      resumeMowingBtn.disabled = !canResume;
       stopMowingBtn.style.display = '';
       mowingActive = isRunning;
     }
@@ -1657,6 +1664,31 @@ ${getAppDialogScript()}
         mowingStatusInterval = setInterval(pollMowingStatus, 1000);
       } catch (error) {
         alert('Failed to start mowing: ' + error.message);
+      }
+    });
+
+    resumeMowingBtn.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/api/mowing/resume', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to resume mowing');
+        }
+
+        updateMowingStatusUi({
+          phase: 'approaching_strip',
+          currentStripIndex: result.currentStripIndex ?? 0,
+          totalStrips: result.stripCount ?? 0,
+          tracedBoundaryCount: 0,
+          resumeAvailable: false,
+        });
+        if (mowingStatusInterval) clearInterval(mowingStatusInterval);
+        mowingStatusInterval = setInterval(pollMowingStatus, 1000);
+      } catch (error) {
+        alert('Failed to resume mowing: ' + error.message);
       }
     });
 

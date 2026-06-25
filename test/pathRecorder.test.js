@@ -121,7 +121,10 @@ test('path recorder recovers when the first captured point is from a stale origi
 });
 
 test('path recorder saves raw obstacle recordings even when save processing is requested', async () => {
-  const { recorder, poseFusion, getSaved } = createRecorder({ saveProcessing: 'obstacle_safe_smoothed' });
+  const { recorder, poseFusion, getSaved } = createRecorder({
+    saveProcessing: 'obstacle_safe_smoothed',
+    maxSegmentDistanceMeters: 5,
+  });
 
   recorder.startRecording('Obstacle 1');
   poseFusion.emit('poseUpdate', pose(0, 0));
@@ -144,7 +147,10 @@ test('path recorder saves raw obstacle recordings even when save processing is r
 });
 
 test('path recorder saves raw area recordings even when save processing is requested', async () => {
-  const { recorder, poseFusion, getSaved } = createRecorder({ saveProcessing: 'area_safe_smoothed' });
+  const { recorder, poseFusion, getSaved } = createRecorder({
+    saveProcessing: 'area_safe_smoothed',
+    maxSegmentDistanceMeters: 5,
+  });
 
   recorder.startRecording('Area 1');
   poseFusion.emit('poseUpdate', pose(0, 0));
@@ -167,7 +173,10 @@ test('path recorder saves raw area recordings even when save processing is reque
 });
 
 test('path recorder preserves stepped mowing-area edges when using area save processing', async () => {
-  const { recorder, poseFusion, getSaved } = createRecorder({ saveProcessing: 'area_safe_smoothed' });
+  const { recorder, poseFusion, getSaved } = createRecorder({
+    saveProcessing: 'area_safe_smoothed',
+    maxSegmentDistanceMeters: 10,
+  });
 
   recorder.startRecording('Area stepped');
   poseFusion.emit('poseUpdate', pose(0, 0));

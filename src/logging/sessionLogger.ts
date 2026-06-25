@@ -212,6 +212,9 @@ export class SessionLogger implements LoggerScope {
         maxBufferedEntries: options.maxBufferedEntries ?? 4096,
       },
     });
+    // Logging should never be the only reason a failed test or partially
+    // initialized process stays alive.
+    worker.unref();
 
     const minLevel = options.minLevel ?? "info";
     if (!LOG_LEVELS.includes(minLevel)) {

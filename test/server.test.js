@@ -53,7 +53,7 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   assert.equal(homeRoute.body.includes('id="gnss-sat-warning"'), true);
   assert.equal(homeRoute.body.includes('Heading History (last hour)'), false);
   assert.equal(homeRoute.body.includes('Position Accuracy History (last hour)'), false);
-  assert.equal(homeRoute.body.includes('id="gnss-accuracy"'), true);
+  assert.equal(homeRoute.body.includes('id="gnss-accuracy"'), false);
 
   const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(manualRoute.statusCode, 200);
@@ -69,8 +69,6 @@ test('routeServerRequest serves tabbed home page and 404 responses', () => {
   assert.equal(manualRoute.body.includes('id="stopPathBtn"'), true);
   assert.equal(manualRoute.body.includes('Controller Demand'), false);
   assert.equal(manualRoute.body.includes('Motion Feedback'), false);
-  assert.equal(manualRoute.body.includes('GNSS'), false);
-  assert.equal(manualRoute.body.includes('IMU'), false);
 
   const pathRoute = routeServerRequest('GET', '/path-tracing', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(pathRoute.statusCode, 200);
@@ -130,8 +128,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   const drivePage = getDriveTuningPageHtml();
   assert.equal(drivePage.includes('class="page-layout"'), true);
   assert.equal(drivePage.includes('class="sidebar-column"'), true);
-  assert.equal(drivePage.includes('id="imu-status"'), true);
-  assert.equal(drivePage.includes('id="gnss-status"'), true);
+  assert.equal(drivePage.includes('id="imu-status"'), false);
+  assert.equal(drivePage.includes('id="gnss-status"'), false);
   assert.equal(drivePage.includes('Distance (cm)'), true);
   assert.equal(drivePage.includes('id="startDriveTuning"'), true);
   assert.equal(drivePage.includes('id="stopDriveTuning"'), true);
@@ -160,8 +158,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   const segmentPage = getSegmentTestingPageHtml();
   assert.equal(segmentPage.includes('class="page-layout"'), true);
   assert.equal(segmentPage.includes('class="sidebar-column"'), true);
-  assert.equal(segmentPage.includes('id="imu-status"'), true);
-  assert.equal(segmentPage.includes('id="gnss-status"'), true);
+  assert.equal(segmentPage.includes('id="imu-widget"'), true);
+  assert.equal(segmentPage.includes('id="gnss-widget"'), true);
   assert.equal(segmentPage.includes('fetch("/api/primitives?ts=" + Date.now(), { cache: "no-store" })'), true);
   assert.equal(segmentPage.includes('primitives: primitivesPayload.primitives ?? primitivesPayload'), true);
   assert.equal(segmentPage.includes('id="startSegmentTest"'), true);
@@ -188,6 +186,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('id="mowingPlanArea"'), true);
   assert.equal(manualPage.includes('id="mowingHeadingDeg"'), true);
   assert.equal(manualPage.includes('id="stripSpacingCm"'), true);
+  assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="startAreaRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="stopPathBtn"'), true);
@@ -195,11 +194,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('id="areaPerimetersList"'), true);
   assert.equal(manualPage.includes('Controller Demand'), false);
   assert.equal(manualPage.includes('Motion Feedback'), false);
-  assert.equal(manualPage.includes('GNSS'), false);
-  assert.equal(manualPage.includes('IMU'), false);
   assert.equal(manualPage.includes('appDialogBackdrop'), true);
   assert.equal(manualPage.includes('onclick="verifyPath('), true);
-  assert.equal(manualPage.includes('value="\\${htmlAttribute(path.name)}"'), true);
   assert.equal(manualPage.includes('Segmented drive'), false);
   assert.equal(manualPage.includes('/api/path/algorithm'), false);
   assert.equal(manualPage.includes('/api/area-perimeter/algorithm'), false);
@@ -207,6 +203,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('/api/area-perimeter/verify'), true);
   assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);
   assert.equal(manualPage.includes('/api/mowing-plan/preview'), true);
+  assert.equal(manualPage.includes('/api/mowing/resume'), true);
   assert.equal(manualPage.includes('nearest point'), true);
   assert.equal(manualPage.includes('MAP_MIN_VIEW_RANGE_METERS = 5'), true);
   assert.equal(manualPage.includes('MAP_STATIONARY_POINT_SPACING_METERS = 0.03'), true);

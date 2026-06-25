@@ -325,7 +325,7 @@ export const MOTOR_STALL_CONSECUTIVE_SAMPLES = 12;
 /**
  * Motor current threshold used as additional evidence for an obstruction.
  */
-export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.0;
+export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.3;
 
 /**
  * Grace period after a new motor command before stall detection begins.

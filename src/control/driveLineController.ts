@@ -81,6 +81,7 @@ import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 export interface DriveLineRequest extends DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
   readonly maxCrossTrackErrorMeters?: number;
+  readonly allowRotateToHeading?: boolean;
 }
 
 export interface DriveLineControllerOptions {
@@ -154,6 +155,7 @@ export class DriveLineController {
   private driveResolve: ((result: DriveResult) => void) | null = null;
   private cteSamples: Meters[] = [];
   private driveDirectionSign: 1 | -1 = 1;
+  private allowRotateToHeading = true;
 
   // Phase-1 instrumentation: per-run state populated when a drive starts
   // and consumed when the drive completes/aborts.  Null between drives.
@@ -538,6 +540,7 @@ export class DriveLineController {
       systemStop.clearStop("drive-line-execute");
       this.currentDrive = request;
       this.driveDirectionSign = request.driveDirectionSign ?? 1;
+      this.allowRotateToHeading = request.allowRotateToHeading ?? true;
       this.driveStartTime = this.nowMillis();
       this.cteSamples = [];
       this.brakeDecisionPoseQuality = "unknown";
@@ -625,6 +628,14 @@ export class DriveLineController {
     runLabel?: string;
     longHeadingLearningMode?: "standard" | "bias-only" | "gain-only";
   }): Promise<DriveResult[]> {
+    const explicitStartDistanceMeters = Number.isFinite(options?.startDistanceMeters)
+      ? (options?.startDistanceMeters as number)
+      : null;
+    const explicitMaxDistanceMeters = Number.isFinite(options?.maxDistanceMeters)
+      ? (options?.maxDistanceMeters as number)
+      : null;
+    const highestAvailableTrainingDistance =
+      this.getStraightLineTrainingDistances().at(-1) ?? DRIVE_SHORT_BUCKET_MAX_METERS;
     const targetXErrorMeters = options?.targetXErrorMeters ?? DRIVE_SHORT_TARGET_X_ERROR_METERS;
     const targetYErrorMeters = options?.targetYErrorMeters ?? DRIVE_SHORT_TARGET_Y_ERROR_METERS;
     const includeReverseLegs = options?.includeReverseLegs ?? true;
@@ -637,6 +648,11 @@ export class DriveLineController {
     const progressReporter = options?.progressReporter;
     const distancePlan = options?.distancePlan
       ? [...options.distancePlan]
+      : explicitStartDistanceMeters !== null &&
+          explicitMaxDistanceMeters !== null &&
+          Math.abs(explicitStartDistanceMeters - explicitMaxDistanceMeters) <= 1e-9 &&
+          explicitStartDistanceMeters > highestAvailableTrainingDistance + 1e-9
+        ? [explicitStartDistanceMeters]
       : this.buildStraightLineTrainingDistances(startDistanceMeters, maxDistanceMeters);
     const firstDistanceMeters = distancePlan[0] ?? startDistanceMeters;
     const lastDistanceMeters = distancePlan[distancePlan.length - 1] ?? maxDistanceMeters;
@@ -1221,12 +1237,20 @@ export class DriveLineController {
 
   private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number {
     const availableDistances = this.getStraightLineTrainingDistances();
+    const lowestDistance = availableDistances[0];
+    const highestDistance = availableDistances.at(-1) ?? DRIVE_SHORT_BUCKET_MAX_METERS;
     const requestedDistance = Number.isFinite(startDistanceMeters)
       ? (startDistanceMeters as number)
-      : availableDistances[0];
-    const boundedMaxDistance = Math.max(availableDistances[0], Math.min(availableDistances.at(-1) ?? DRIVE_SHORT_BUCKET_MAX_METERS, maxDistanceMeters));
-    const firstIncludedDistance = availableDistances.find((distance) => distance >= requestedDistance - 1e-9 && distance <= boundedMaxDistance + 1e-9);
-    return firstIncludedDistance ?? availableDistances[0];
+      : lowestDistance;
+    const boundedRequestedDistance = Math.max(lowestDistance, requestedDistance);
+    const boundedMaxDistance = Math.max(lowestDistance, maxDistanceMeters);
+    if (boundedRequestedDistance > highestDistance + 1e-9) {
+      return Math.min(boundedRequestedDistance, boundedMaxDistance);
+    }
+    const firstIncludedDistance = availableDistances.find(
+      (distance) => distance >= boundedRequestedDistance - 1e-9 && distance <= boundedMaxDistance + 1e-9,
+    );
+    return firstIncludedDistance ?? Math.min(boundedRequestedDistance, boundedMaxDistance);
   }
 
   private normalizeShortTrainingMaxDistanceMeters(maxDistanceMeters?: number, startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS): number {
@@ -1236,14 +1260,29 @@ export class DriveLineController {
       : (availableDistances.at(-1) ?? DRIVE_SHORT_BUCKET_MAX_METERS);
     const minimumDistance = Math.max(startDistanceMeters, availableDistances[0]);
     const eligibleDistances = availableDistances.filter((distance) => distance >= minimumDistance - 1e-9 && distance <= requestedDistance + 1e-9);
-    return eligibleDistances.at(-1) ?? Math.max(minimumDistance, availableDistances[0]);
+    return eligibleDistances.at(-1) ?? Math.max(minimumDistance, requestedDistance);
   }
 
   private buildStraightLineTrainingDistances(startDistanceMeters = DRIVE_SHORT_BUCKET_STEP_METERS, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number[] {
     const start = Math.max(DRIVE_SHORT_BUCKET_STEP_METERS, startDistanceMeters);
     const max = Math.max(start, maxDistanceMeters);
-    return this.getStraightLineTrainingDistances()
+    const plan = this.getStraightLineTrainingDistances()
       .filter((distance) => distance >= start - 1e-9 && distance <= max + 1e-9);
+
+    const appendIfMissing = (distance: number): void => {
+      if (!Number.isFinite(distance)) {
+        return;
+      }
+      if (plan.some((candidate) => Math.abs(candidate - distance) <= 1e-9)) {
+        return;
+      }
+      plan.push(distance);
+    };
+
+    appendIfMissing(start);
+    appendIfMissing(max);
+
+    return plan.sort((left, right) => left - right);
   }
 
   private getStraightLineTrainingDistances(): readonly number[] {
@@ -1276,6 +1315,7 @@ export class DriveLineController {
     const headingErrorDeg = Math.abs(headingDiff);
 
     if (
+      this.allowRotateToHeading &&
       headingErrorDeg >= DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG &&
       remainingAlongTrackDistance > DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS
     ) {

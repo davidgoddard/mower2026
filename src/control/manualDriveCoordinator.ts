@@ -71,6 +71,11 @@ export class ManualDriveCoordinator {
   private gentleHaltSentForCurrentLoss = false;
   private snapshotStaleSinceMillis: number | null = null;
   private gentleStopSentForCurrentStaleSnapshot = false;
+  private controllerEventsRegistered = false;
+  private readonly onControllerUpdate: (snapshot: HidGameControllerSnapshot) => void;
+  private readonly onControllerArm: () => void;
+  private readonly onControllerDisarm: () => void;
+  private readonly onControllerError: (error: unknown) => void;
 
   constructor(options: ManualDriveCoordinatorOptions) {
     this.logger = options.logger.child({ context: "control", source: "ManualDriveCoordinator" });
@@ -83,38 +88,7 @@ export class ManualDriveCoordinator {
     this.maxWheelOutputPercent = options.maxWheelOutputPercent ?? DRIVE_FULL_SPEED_COMMAND_DEFAULT;
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
-  }
-
-  start(): void {
-    if (this.running) {
-      return;
-    }
-
-    this.running = true;
-    this.registerControllerEvents();
-    this.hidController.start();
-    this.loopPromise = this.runLoop();
-    this.logger.transition("idle", "running", { controlIntervalMs: this.controlIntervalMs });
-  }
-
-  async stop(): Promise<void> {
-    if (!this.running) {
-      return;
-    }
-
-    this.running = false;
-    if (this.loopPromise) {
-      await this.loopPromise;
-      this.loopPromise = null;
-    }
-
-    this.hidController.close();
-    await this.disableManualDrive();
-    this.logger.transition("running", "stopped");
-  }
-
-  private registerControllerEvents(): void {
-    this.hidController.on("update", (snapshot: HidGameControllerSnapshot) => {
+    this.onControllerUpdate = (snapshot: HidGameControllerSnapshot) => {
       this.snapshot = {
         ...snapshot,
         lastUpdateMillis: snapshot.lastUpdateMillis > 0 ? snapshot.lastUpdateMillis : this.nowMillis(),
@@ -144,24 +118,71 @@ export class ManualDriveCoordinator {
         this.snapshotStaleSinceMillis = null;
         this.gentleStopSentForCurrentStaleSnapshot = false;
       }
-    });
-
-    this.hidController.on("right-top", () => {
+    };
+    this.onControllerArm = () => {
       systemStop.clearStop("manual-drive-armed");
       this.manualDriveEnabled = true;
       this.sensorController.beginMotionSession();
       this.logger.info("control.manual_drive.armed");
-    });
-
-    this.hidController.on("left-top", () => {
+    };
+    this.onControllerDisarm = () => {
       this.logger.info("control.manual_drive.disarmed");
       void this.disableManualDrive();
-    });
-
-    this.hidController.on("error", (error: unknown) => {
+    };
+    this.onControllerError = (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("control.manual_drive.controller_error", { error: message });
-    });
+    };
+  }
+
+  start(): void {
+    if (this.running) {
+      return;
+    }
+
+    this.running = true;
+    this.registerControllerEvents();
+    this.hidController.start();
+    this.loopPromise = this.runLoop();
+    this.logger.transition("idle", "running", { controlIntervalMs: this.controlIntervalMs });
+  }
+
+  async stop(): Promise<void> {
+    if (!this.running) {
+      return;
+    }
+
+    this.running = false;
+    this.unregisterControllerEvents();
+    this.hidController.close();
+    if (this.loopPromise) {
+      await this.loopPromise;
+      this.loopPromise = null;
+    }
+    await this.disableManualDrive();
+    this.logger.transition("running", "stopped");
+  }
+
+  private registerControllerEvents(): void {
+    if (this.controllerEventsRegistered) {
+      return;
+    }
+    this.controllerEventsRegistered = true;
+    this.hidController.on("update", this.onControllerUpdate);
+    this.hidController.on("right-top", this.onControllerArm);
+    this.hidController.on("left-top", this.onControllerDisarm);
+    this.hidController.on("error", this.onControllerError);
+  }
+
+  private unregisterControllerEvents(): void {
+    if (!this.controllerEventsRegistered) {
+      return;
+    }
+    this.controllerEventsRegistered = false;
+    this.hidController.off("update", this.onControllerUpdate);
+    this.hidController.off("right-top", this.onControllerArm);
+    this.hidController.off("left-top", this.onControllerDisarm);
+    this.hidController.off("error", this.onControllerError);
   }
 
   private async runLoop(): Promise<void> {
