@@ -5,6 +5,7 @@ import { createPose } from "../dist/geometry/positionTypes.js";
 import {
   computeContinuousPathBaseSpeed,
   computeContinuousPathWheelCommands,
+  limitContinuousWheelCommandChange,
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
 
@@ -158,4 +159,29 @@ test("computeContinuousPathBaseSpeed honors a higher minimum speed override", ()
 
   assert.equal(speed >= 0.6, true);
   assert.equal(speed <= 0.75, true);
+});
+
+
+test("limitContinuousWheelCommandChange slews abrupt speed changes", () => {
+  assert.equal(Math.abs(limitContinuousWheelCommandChange(0.8, 0.2, 0.1) - 0.7) < 1e-9, true);
+  assert.equal(Math.abs(limitContinuousWheelCommandChange(-0.4, 0.4, 0.1) + 0.3) < 1e-9, true);
+  assert.equal(limitContinuousWheelCommandChange(0.5, 0.55, 0.1), 0.55);
+});
+
+test("tight-arc pivot uses an exit margin to avoid pivot and arc chatter", () => {
+  const pose = createPose(0.9, 0, createInternalHeading(0), "gnss");
+  const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
+  const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
+  const lookaheadTarget = { xMeters: 1.966, yMeters: 0.259, capturedAt: 3 };
+  const options = { minimumSpeed: 0.6, pivotIfInnerWheelBelow: 0.3 };
+
+  const entering = computeContinuousPathWheelCommands(
+    pose, previousPoint, currentTarget, lookaheadTarget, 0.75, false, options,
+  );
+  const staying = computeContinuousPathWheelCommands(
+    pose, previousPoint, currentTarget, lookaheadTarget, 0.75, true, options,
+  );
+
+  assert.equal(entering.pivoting, false);
+  assert.equal(staying.pivoting, true);
 });

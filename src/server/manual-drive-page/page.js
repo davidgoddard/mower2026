@@ -111,7 +111,7 @@
     let selectedMowingPlanArea = '';
     let mapTransform = null;
     let headingDragStart = null;
-    let mowingActive = false;
+    let mowingStatusNeedsPolling = false;
     let pageStatePollTimer = null;
     let pageStatePollInFlight = false;
     let pageStatePollFailureCount = 0;
@@ -974,7 +974,10 @@
       resumeMowingBtn.style.display = canResume ? '' : 'none';
       resumeMowingBtn.disabled = !canResume;
       stopMowingBtn.style.display = '';
-      mowingActive = isRunning;
+      const isTerminal = status.phase === 'complete' || status.phase === 'stopped' || status.phase === 'error';
+      const terminalWithStableUi = status.phase === 'complete'
+        || ((status.phase === 'stopped' || status.phase === 'error') && Boolean(status.resumeAvailable));
+      mowingStatusNeedsPolling = isRunning || (isTerminal && !terminalWithStableUi);
     }
 
     async function pollMowingStatus() {
@@ -1035,7 +1038,7 @@
         await Promise.all([
           refreshPathRecordingStatus(),
           refreshAreaRecordingStatus(),
-          mowingActive ? pollMowingStatus() : Promise.resolve(),
+          mowingStatusNeedsPolling ? pollMowingStatus() : Promise.resolve(),
         ]);
         pageStatePollFailureCount = 0;
         if (!listsLoadedOnce || Date.now() - lastListRefreshAt >= LIST_REFRESH_MS) {

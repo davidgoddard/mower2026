@@ -282,9 +282,9 @@ export class DriveController {
    * Drive a single segment to a target position. Used by the obstruction-recovery
    * path to retrace recently completed targets in reverse.
    */
-  async driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<void> {
-      systemStop.clearStop("drive-segment-recovery");
-    await this.executeDrive({
+  async driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<DriveResult> {
+    systemStop.clearStop("drive-segment-recovery");
+    return this.executeDrive({
       targetPosition: createPosition(target.xMeters, target.yMeters),
       driveDirectionSign,
       alwaysTurnToFaceTarget: driveDirectionSign === 1,
@@ -302,22 +302,32 @@ export class DriveController {
    * fallback when no recent targets are available, to back the mower out of a
    * grass jam before the boundary follow restarts.
    */
-  async reverseForDuration(durationMs: number): Promise<void> {
+  async reverseForDuration(durationMs: number): Promise<{
+    readonly completed: boolean;
+    readonly startPosition: Position;
+    readonly finalPosition: Position;
+  }> {
     systemStop.clearStop("drive-retry-reverse");
     const reverseSpeed = -this.fullSpeedCommand;
+    const startPosition = this.poseFusion.getCurrentPose().position;
+    let completed = false;
     this.sensorController.beginMotionSession();
     try {
       await this.sensorController.setMotorWheelOutputs(reverseSpeed, reverseSpeed);
-      const completed = await this.sleepWithStopChecks(durationMs);
+      completed = await this.sleepWithStopChecks(durationMs);
       await this.sensorController.requestNeutralMotorOutputs();
-      if (!completed) {
-        return;
+      if (completed) {
+        const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
+        completed = await this.sleepWithStopChecks(2 * rampDownTime + this.settleTimeMs);
       }
-      const rampDownTime = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
-      await this.sleepWithStopChecks(2 * rampDownTime + this.settleTimeMs);
     } finally {
       this.sensorController.endMotionSession();
     }
+    return {
+      completed,
+      startPosition,
+      finalPosition: this.poseFusion.getCurrentPose().position,
+    };
   }
 
   /**

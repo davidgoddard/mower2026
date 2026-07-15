@@ -2,17 +2,17 @@
  * Retry Manager - Event-driven recovery system for obstructions during a
  * perimeter follow.
  *
- * High-current, stall, and wheel-slip events trigger the path-context retry: walk the
- * recent-target trail backward by reverse-driving each completed target until
- * a configured retreat distance is reached, then restart the boundary follow
- * from the new pose.
+ * High-current events trigger the path-context retry: walk the recent-target
+ * trail backward by reverse-driving each completed target until a configured
+ * retreat distance is reached, then restart the boundary follow from the new
+ * pose. Stall and wheel-slip events abort the active session.
  */
 
 import { EventEmitter } from "node:events";
 import { CheckpointStore } from "./checkpointStore.js";
 import { ObstructionEvent, RecoveryResult, OperationContext, Checkpoint } from "./retryTypes.js";
 import { LoggerScope } from "../logging/types.js";
-import { Pose, unwrapMeters } from "../geometry/positionTypes.js";
+import { Pose, Position, unwrapMeters } from "../geometry/positionTypes.js";
 import { PathPoint, RecentTargetSink } from "../pathfollowing/index.js";
 
 export interface RetryManagerOptions {
@@ -39,12 +39,21 @@ export interface RetryManagerDependencies {
      * recovery to retrace recently completed targets in reverse before
      * restarting the boundary follow.
      */
-    driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<void>;
+    driveSegment(target: { xMeters: number; yMeters: number }, driveDirectionSign: 1 | -1): Promise<{
+      readonly status: "success" | "error" | "stopped";
+      readonly startPosition: Position;
+      readonly finalPosition: Position;
+      readonly errorMessage?: string;
+    }>;
     /**
      * Reverse for a fixed duration. Used as the path-context fallback when no
      * recent targets are available (e.g. obstruction on the very first segment).
      */
-    reverseForDuration(durationMs: number): Promise<void>;
+    reverseForDuration(durationMs: number): Promise<{
+      readonly completed: boolean;
+      readonly startPosition: Position;
+      readonly finalPosition: Position;
+    }>;
   };
   /**
    * Restart a perimeter follow from the current pose using the recorded
@@ -58,6 +67,14 @@ export interface RetryManagerDependencies {
 const DEFAULT_PATH_RETRY_REVERSE_DISTANCE_METERS = 0.5;
 /** Cap on retained recent targets per path follow; bounded to keep the trail finite. */
 const RECENT_TARGET_TRAIL_LIMIT = 64;
+const MIN_RECOVERY_REVERSE_PROGRESS_METERS = 0.1;
+
+function positionDistance(start: Position, end: Position): number {
+  return Math.hypot(
+    unwrapMeters(end.xMeters) - unwrapMeters(start.xMeters),
+    unwrapMeters(end.yMeters) - unwrapMeters(start.yMeters),
+  );
+}
 
 export class RetryManager extends EventEmitter implements RecentTargetSink {
   private readonly maxRetries: number;
@@ -116,14 +133,25 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
   }
 
   async handleObstruction(event: ObstructionEvent): Promise<RecoveryResult> {
-    if (this.isRecovering) {
-      this.logger.warn("retry.already_recovering", { event });
-      return { success: false, attemptNumber: 0, error: "already_recovering" };
-    }
-
     if (!this.currentSessionId) {
       this.logger.error("retry.no_active_session", { event });
       return { success: false, attemptNumber: 0, error: "no_active_session" };
+    }
+
+    if (event.type !== "high_current") {
+      const attempts = this.retryCount.get(this.currentSessionId) || 0;
+      this.logger.error("retry.non_recoverable_obstruction", {
+        type: event.type,
+        context: event.context,
+        recovering: this.isRecovering,
+      });
+      await this.abortSession(`non_recoverable_${event.type}`);
+      return { success: false, attemptNumber: attempts, error: `non_recoverable_${event.type}` };
+    }
+
+    if (this.isRecovering) {
+      this.logger.warn("retry.already_recovering", { event });
+      return { success: false, attemptNumber: 0, error: "already_recovering" };
     }
 
     this.isRecovering = true;
@@ -184,15 +212,19 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
       this.emit("recovery_completed", { context: event.context, attemptNumber: attempts + 1 });
       return { success: true, attemptNumber: attempts + 1 };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error("retry.recovery_failed", {
         context: event.context,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
       });
       this.emit("recovery_failed", { context: event.context, error });
+      if (this.currentSessionId) {
+        await this.abortSession(`recovery_failed:${errorMessage}`);
+      }
       return {
         success: false,
         attemptNumber: attempts + 1,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
       };
     }
   }
@@ -227,16 +259,20 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
         accumulatedDistanceMeters: accumulatedDistance,
       });
 
-      await this.deps.driveController.driveSegment(
+      const reverseResult = await this.deps.driveController.driveSegment(
         { xMeters: previousTarget.xMeters, yMeters: previousTarget.yMeters },
         -1,
       );
+      if (reverseResult.status !== "success") {
+        throw new Error(reverseResult.errorMessage ?? `recovery_reverse_${reverseResult.status}`);
+      }
       await this.sleep(200);
 
-      accumulatedDistance += legDistance;
+      const actualLegDistance = positionDistance(reverseResult.startPosition, reverseResult.finalPosition);
+      accumulatedDistance += actualLegDistance;
       legsDriven += 1;
-      originX = previousTarget.xMeters;
-      originY = previousTarget.yMeters;
+      originX = unwrapMeters(reverseResult.finalPosition.xMeters);
+      originY = unwrapMeters(reverseResult.finalPosition.yMeters);
     }
 
     if (legsDriven === 0) {
@@ -248,7 +284,15 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
       this.logger.warn("retry.path_recovery.no_recent_targets", {
         durationMs: this.reverseDurationMs,
       });
-      await this.deps.driveController.reverseForDuration(this.reverseDurationMs);
+      const reverseResult = await this.deps.driveController.reverseForDuration(this.reverseDurationMs);
+      if (!reverseResult.completed) {
+        throw new Error("recovery_reverse_stopped");
+      }
+      const reverseProgressMeters = positionDistance(reverseResult.startPosition, reverseResult.finalPosition);
+      if (reverseProgressMeters < MIN_RECOVERY_REVERSE_PROGRESS_METERS) {
+        throw new Error("recovery_reverse_no_progress");
+      }
+      accumulatedDistance = reverseProgressMeters;
 
       const returnPose = this.deps.getCurrentPose();
       const returnOriginXMeters = unwrapMeters(returnPose.position.xMeters);
@@ -266,10 +310,17 @@ export class RetryManager extends EventEmitter implements RecentTargetSink {
         returnDistanceMeters,
       });
 
-      await this.deps.driveController.driveSegment(
+      const returnResult = await this.deps.driveController.driveSegment(
         { xMeters: obstructionXMeters, yMeters: obstructionYMeters },
         1,
       );
+      if (returnResult.status !== "success") {
+        throw new Error(returnResult.errorMessage ?? `recovery_return_${returnResult.status}`);
+      }
+    }
+
+    if (legsDriven > 0 && accumulatedDistance < Math.min(targetDistance, MIN_RECOVERY_REVERSE_PROGRESS_METERS)) {
+      throw new Error("recovery_reverse_no_progress");
     }
 
     await this.sleep(500);

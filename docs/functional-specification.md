@@ -524,7 +524,7 @@ There will also be a button to 'Verify'.
 The drive button shall immediately follow the stored path from the mower's current position.
 The verify button shall first execute a segment-style approach to about 10cm short of the nearest recorded point, then continue around the stored path until it returns to that join point. The 10cm standoff exists so the mower has body clearance to turn on the spot at arrival without fouling the recorded edge; it is not an inflation of the path itself.
 
-Stored obstacle and area perimeter traces shall use the continuous path follower so the mower stays in a smooth line-following mode once it has joined the perimeter. Verification, mowing first-encounter boundary traces, and multi-point perimeter-style inter-strip connectors shall all reuse that same continuous follower. Simple two-point standoff transfers may still use a direct straight-line drive.
+Stored obstacle and area perimeter traces shall use the continuous path follower so the mower stays in a smooth line-following mode once it has joined the perimeter. Wheel commands shall be rate-limited between control cycles, and pivot/arc mode shall use separate entry and exit thresholds, so controller corrections do not repeatedly alternate between fast, slow, and pivot outputs near a threshold. Verification, mowing first-encounter boundary traces, and multi-point perimeter-style inter-strip connectors shall all reuse that same continuous follower. Simple two-point standoff transfers may still use a direct straight-line drive.
 
 Before starting a perimeter follow, the runtime shall choose the nearest recorded perimeter point, turn to align tangentially with the selected travel direction, then re-evaluate the nearest join point from the post-turn pose while preserving that chosen direction. This prevents the mower from short-cutting the loop or jumping into the wrong lane after the alignment turn.
 
@@ -548,14 +548,14 @@ The mower has two current meters; one for each motor. The system shall classify 
 
 - **high_current** — either motor draws above the configured current threshold (initial value 2 A). This is treated as the mower hitting thick grass or a clump that the blades may yet cut through with another run-up.
 - **wheel_slip** — wheels are turning per encoder feedback but the fused position is effectively stationary.
-- **stall** — the position is stationary for the stall window while motors are engaged, and the encoders also show no meaningful progress.
+- **stall** — trusted position remains stationary for the stall window while motors are engaged. Encoder-stationary evidence is a fallback when trusted position is unavailable; spinning encoders do not override reliable evidence that the mower chassis has not moved.
 
 Only `high_current` events trigger a retry. `wheel_slip` and `stall` events shall stop the active operation and abort the session — the mower is assumed to be physically stuck.
 
 The high-current retry strategy depends on the active operation:
 
 - **Line driving**: reverse for the configured duration (initial 2 s, roughly half a metre at full speed), settle, then drive forward to the original target again.
-- **Path following / boundary tracing**: stop the segmented executor cleanly, then retrace the most recently completed targets backward — re-issuing each as a reverse-direction segment drive — until the cumulative reverse distance reaches the configured retreat distance (initial value 0.5 m). The mower travels rear-first along the line it just came in on rather than pivoting through the obstruction. Once clear, restart the same boundary follow; the segmented executor's nearest-target re-anchor logic resumes forward travel from wherever the mower is.
+- **Path following / boundary tracing**: stop the segmented executor cleanly, then retrace the most recently completed targets backward — re-issuing each as a reverse-direction segment drive — until measured reverse displacement reaches the configured retreat distance (initial value 0.5 m). Each reverse leg must report success. When no completed target is available, the timed reverse must complete and produce at least 10 cm of measured chassis displacement. A stopped reverse, a reverse with insufficient displacement, or a stall/wheel-slip event during recovery shall abort the session and shall not restart the boundary follow. Once clear, restart the same boundary follow; the executor resumes from the current location.
 - **Turn on the spot**: turn the opposite direction for the configured escape duration, then resume the original turn from the new heading. Angles must be managed so that the original target heading is still reached even after the back-up.
 
 If the same operation accumulates more than the configured maximum number of high-current retries (initial value 3) without making progress, the session shall be aborted and the motors powered off.
@@ -581,6 +581,8 @@ No mowing strip or connector segment shall bring the mower closer than 15 cm to 
 ### First-arrival boundary tracing
 
 The first time the mower reaches any boundary — whether the outer area perimeter or an obstacle perimeter — during a mowing session it must perform a complete boundary trace of that boundary before continuing with strip mowing.  This ensures a clean mowed edge is cut all the way around the area and around each obstacle, which the strip pattern alone would not achieve since strips stop short of the boundary by the standoff distance.
+
+When mowing stops or errors after an operation has begun, the Drive & Paths page shall offer a **Carry On Mowing** control. The saved state shall include the active operation and, for continuous boundary or connector following, the completed target index so resumption continues from the interrupted ordered path position rather than restarting at the first saved point. The control shall become available after the active executor has settled and shall remain available across process restarts while the saved state exists.
 
 The sequence on first arrival at a boundary is:
 

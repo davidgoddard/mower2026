@@ -27,6 +27,7 @@ export interface MowingResumeFollowOptions {
   readonly strictOrderedProgress?: boolean;
   readonly minimumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
+  readonly initialTargetIndex?: number;
 }
 
 export type MowingResumeOperation =

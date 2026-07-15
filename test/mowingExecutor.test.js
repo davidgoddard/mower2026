@@ -946,3 +946,136 @@ test("MowingExecutor can seed area tracing from the nearest strip-adjacent perim
     );
   }
 });
+
+test("MowingExecutor persists the completed waypoint index when a continuous follow is interrupted", async () => {
+  const savedStates = [];
+  const connector = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.2, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.4, yMeters: 0, capturedAt: 3 },
+    { xMeters: 0.6, yMeters: 0, capturedAt: 4 },
+  ];
+  const executor = new MowingExecutor({
+    areaName: "Back lawn",
+    plan: {
+      headingDeg: 90,
+      stripSpacingMeters: 0.3,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints: [],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive() { return { status: "success", maxCteMeters: 0 }; },
+    },
+    turnController: {
+      async executeTurn() { return { status: "success" }; },
+    },
+    poseFusion: {
+      getCurrentPose() { return createPose(0.3, 0, createInternalHeading(0), "gnss"); },
+    },
+    continuousPathFollower: {
+      async executePath() {
+        return {
+          completed: false,
+          reason: "user_stopped",
+          completedWaypoints: 2,
+          pointCount: connector.length,
+          algorithm: "continuous_path_follow",
+        };
+      },
+    },
+    logger: createLogger(),
+    updateResumeState(state) { savedStates.push(state); },
+  });
+
+  const result = await executor["followConnector"](connector, 0, {
+    stage: "strip_approach",
+    stripIndex: 1,
+  });
+
+  assert.equal(result.completed, false);
+  const saved = savedStates.at(-1);
+  assert.equal(saved.activeOperation.kind, "follow_path");
+  assert.equal(saved.activeOperation.followOptions.initialTargetIndex, 2);
+});
+
+test("MowingExecutor passes saved continuous-follow progress back to the follower on resume", async () => {
+  const pathPoints = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.2, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.4, yMeters: 0, capturedAt: 3 },
+    { xMeters: 0.6, yMeters: 0, capturedAt: 4 },
+  ];
+  const followCalls = [];
+  const plan = {
+    headingDeg: 90,
+    stripSpacingMeters: 0.3,
+    bladeWidthMeters: 0.4,
+    stripCount: 0,
+    strips: [],
+    connectors: [],
+  };
+  const resumeState = {
+    version: 1,
+    areaName: "Back lawn",
+    savedAt: Date.now(),
+    currentStripIndex: 0,
+    totalStrips: 0,
+    tracedBoundaryKeys: [],
+    plan,
+    areaPoints: [],
+    obstaclePointsArray: [],
+    initialEntryPlan: null,
+    activeOperation: {
+      kind: "follow_path",
+      phase: "following_connector",
+      stripIndex: 0,
+      pathPoints,
+      followOptions: {
+        loopPath: false,
+        strictOrderedProgress: true,
+        initialTargetIndex: 2,
+      },
+      errorCode: "connector_failed",
+      continuation: { stage: "complete", stripIndex: 0 },
+    },
+  };
+  const executor = new MowingExecutor({
+    areaName: "Back lawn",
+    plan,
+    areaPoints: [],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive() { return { status: "success", maxCteMeters: 0 }; },
+    },
+    turnController: {
+      async executeTurn() { return { status: "success" }; },
+    },
+    poseFusion: {
+      getCurrentPose() { return createPose(0.4, 0, createInternalHeading(0), "gnss"); },
+    },
+    continuousPathFollower: {
+      async executePath(points, options) {
+        followCalls.push({ points, options });
+        return {
+          completed: true,
+          reason: "reached_end",
+          completedWaypoints: points.length,
+          pointCount: points.length,
+          algorithm: "continuous_path_follow",
+        };
+      },
+    },
+    logger: createLogger(),
+    resumeState,
+  });
+
+  const status = await executor.execute();
+
+  assert.equal(status.phase, "complete");
+  assert.equal(followCalls.length, 1);
+  assert.equal(followCalls[0].options.initialTargetIndex, 2);
+});
