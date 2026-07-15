@@ -75,7 +75,7 @@ flowchart TD
 
     HeadCheck -->|First TRUSTED epoch<br/>+ GNSS heading present| Bootstrap[Bootstrap rebase:<br/>seed IMU = GNSS heading]
     HeadCheck -->|heading state = TRUSTED| RebaseTrusted[Rebase IMU = GNSS heading<br/>guarded by validator's<br/>≤5° IMU agreement check]
-    HeadCheck -->|Stationary override<br/>position TRUSTED, no motor<br/>command, wheels ≤1 cm/s,<br/>≤30° disagree| RebaseStat[Rebase IMU = GNSS heading<br/>recovers from drift while<br/>parked]
+    HeadCheck -->|Stationary override<br/>position TRUSTED, safe to rebase,<br/>5 intrinsically good headings<br/>regardless of disagreement| RebaseStat[Rebase IMU = GNSS heading<br/>recovers from drift while<br/>parked]
     HeadCheck -->|None| NoRebase[isUsingGnssHeading = false]
 
     Bootstrap --> ReanchorEnc
@@ -144,7 +144,7 @@ The IMU is the live heading source. GNSS only writes into the IMU on a rebase. T
 
 1. **Bootstrap**: first time we ever see a TRUSTED position with a heading present, seed the IMU from GNSS so subsequent IMU-agreement checks aren't deadlocked by an unknown initial offset.
 2. **Trusted-state rebase**: the heading state machine reports TRUSTED — the validator already verified the disagreement is ≤ 5°, so this is a small correction.
-3. **Stationary override**: position is TRUSTED, the sensor controller reports the rebase is safe (no active motor command and both measured wheel speeds ≤ **1 cm/s**), and the disagreement is ≤ **30°**. This recovers from accumulated IMU drift while the mower is parked. It's deliberately wider than the validator's 5° gate because the validator can never promote heading once disagreement has drifted past 5°. The "stationary" check uses measured wheel speed rather than IMU yaw rate so that gyro noise on a parked mower never holds rebases off — if the wheels aren't turning, the mower is not moving.
+3. **Stationary override**: position is TRUSTED, the sensor controller reports the rebase is safe, and five consecutive samples pass every GNSS heading check except IMU agreement. The IMU is then rebased regardless of disagreement angle. Fix quality, position accuracy, heading validity, heading accuracy, antenna baseline, and sample-to-sample heading stability must remain good throughout the dwell; any failure or unsafe/moving state resets it. This lets a parked mower recover from arbitrarily large IMU drift without allowing one questionable GNSS sample to overwrite the IMU.
 
 Every rebase also re-anchors the encoder-only diagnostic track and bumps DR confidence by 0.5.
 
@@ -223,7 +223,7 @@ A normal mowing session looks like this:
 2. **First few GNSS epochs.** Validator runs through its 3-epoch window. Position promotes to TRUSTED. Fused position snaps to GNSS, `quality = "gnss"`, encoder-only track is seeded from the same anchor.
 3. **First valid heading.** Bootstrap rebase fires once GNSS heading is present. IMU is seeded from GNSS — the only time GNSS heading writes the IMU without going through the 5° agreement gate.
 4. **Steady mowing under open sky.** Each TRUSTED GNSS sample snaps fused position to GNSS. Between samples (and on every encoder tick or IMU tick), the fused pose advances using IMU heading and encoder distance. Heading state machine remains TRUSTED, so each sample also pulls IMU back toward GNSS by the small validator-permitted step. `quality = "gnss"` throughout.
-5. **Stop and settle.** Motor commands quiesce and the measured wheel speeds drop below 1 cm/s. If the IMU has drifted but is still within 30° of a TRUSTED-position GNSS heading, the **stationary override** rebase corrects it. This is the path that prevents long-session yaw drift.
+5. **Stop and settle.** Once the sensor controller reports that heading rebasing is safe, five consecutive intrinsically good GNSS headings trigger the **stationary override** even if IMU drift is very large. This is the path that prevents the agreement gate from permanently blocking recovery.
 
 ---
 
@@ -268,7 +268,7 @@ A normal mowing session looks like this:
 - Heading state machine demotes after 40 consecutive samples. IMU is no longer being nudged.
 - Fused position still snaps to GNSS (position acceptance is independent).
 - The mower is now relying on IMU heading + GNSS position. CTE control still works; segment learning runs that need pose quality may be deferred by their callers.
-- Recovery requires either a full 5° re-agreement window to re-promote, or the operator stopping so the stationary override (≤ 30° tolerance) can rebase the IMU.
+- Recovery requires either a full 5° re-agreement window to re-promote, or the operator stopping so five consecutive intrinsically good GNSS headings can rebase the IMU regardless of disagreement.
 
 ### GNSS sample-to-sample teleport
 

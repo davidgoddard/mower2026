@@ -86,7 +86,7 @@ This document maps problem domains to candidate files removing the need for Code
   - maintains the latest IMU/GNSS/encoder-derived pose estimate
   - throttles downstream `poseUpdate` emissions so control consumers do not rerun on every upstream IMU/GNSS/encoder event burst
   - GNSS heading accuracy and fix quality drive IMU heading priming/rebasing; GNSS position accuracy is used separately for trusting x/y pose updates
-  - the first good GNSS heading primes the IMU immediately, then IMU remains the live heading reference with GNSS only nudging the IMU when the fix is good, the heading is stable, and the GNSS heading is already close to the current IMU heading
+  - the first good GNSS heading primes the IMU immediately, then IMU remains the live heading reference; normal GNSS nudges require close agreement, while five consecutive intrinsically good GNSS heading samples may rebase by any angle when the mower is stationary and safe to rebase
   - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, heading stability, and the current IMU/GNSS heading alignment gate all pass for the part of pose being updated
   - `getCurrentPose()` returns the latest fused pose without settling
 - `src/sensing/gnssValidator.ts`: GNSS sample acceptance / trust state machine
@@ -473,7 +473,7 @@ This document maps problem domains to candidate files removing the need for Code
   - maintains current position (X, Y meters) and heading (InternalHeading)
   - quality tracking: "gnss" (RTK fixed/float), "dead-reckoning", or "unknown"
   - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
-  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; after a zero-speed stop has persisted for long enough, a good GNSS heading may rebase the IMU again even if it is no longer close; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw.
+  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; while stationary and safe to rebase, five consecutive samples that pass all GNSS heading checks except IMU agreement rebase the IMU regardless of disagreement angle; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw.
   - exposes a primitive snapshot flag indicating whether GNSS heading is currently being used to rebase the IMU so the web UI can tint the widgets without re-deriving that state
   - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without 200Hz disk writes
   - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps

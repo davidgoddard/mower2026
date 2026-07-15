@@ -89,7 +89,7 @@ const DR_POSITION_SYNC_THRESHOLD_METERS = 0.5;
 // receiver-claimed sample age (which the validator handles via
 // sampleAgeMillis when present).
 const GNSS_STALE_TIMEOUT_MS = 2_000;
-const STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG = 30;
+const STATIONARY_HEADING_REBASE_QUALITY_EPOCHS = 5;
 
 const DEG_TO_RAD = Math.PI / 180;
 
@@ -177,6 +177,7 @@ export class PoseFusion extends EventEmitter {
   // sample drowns the disk and can starve the Pi.  Limit to one log per
   // second per stationary window.
   private lastStationaryOverrideLogAtMs: number | null = null;
+  private stationaryHeadingOverrideGoodEpochs = 0;
   /**
    * Distance between the most recent accepted GNSS sample and the fused
    * position at that moment.  Diagnostic only — no longer used for gating.
@@ -663,12 +664,20 @@ export class PoseFusion extends EventEmitter {
       ? null
       : Math.abs(unwrapRelativeAngle(headingDifference(this.currentHeading, event.heading)));
     const rebaseReadiness = this.sensorController.getHeadingRebaseReadiness();
+    const headingQualityPassedIgnoringImuAgreement =
+      event.heading !== null &&
+      validation.position === "TRUSTED" &&
+      validation.headingRejections.every((reason) => reason === "heading_disagrees_with_imu");
+    if (rebaseReadiness.safe && headingQualityPassedIgnoringImuAgreement) {
+      this.stationaryHeadingOverrideGoodEpochs += 1;
+    } else {
+      this.stationaryHeadingOverrideGoodEpochs = 0;
+    }
     const canStationaryOverrideRebase =
       event.heading !== null &&
       validation.position === "TRUSTED" &&
       rebaseReadiness.safe &&
-      headingDisagreementDeg !== null &&
-      headingDisagreementDeg <= STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG;
+      this.stationaryHeadingOverrideGoodEpochs >= STATIONARY_HEADING_REBASE_QUALITY_EPOCHS;
 
     if (canBootstrapHeadingFromGnss) {
       // Bootstrap: on first trusted GNSS epoch, seed IMU heading from GNSS so
@@ -686,7 +695,7 @@ export class PoseFusion extends EventEmitter {
       if (this.lastStationaryOverrideLogAtMs === null || nowMs - this.lastStationaryOverrideLogAtMs >= 1000) {
         this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
           disagreementDeg: headingDisagreementDeg,
-          maxOverrideDisagreementDeg: STATIONARY_HEADING_REBASE_OVERRIDE_MAX_DISAGREEMENT_DEG,
+          goodHeadingEpochs: this.stationaryHeadingOverrideGoodEpochs,
           leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
           rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
         });
@@ -744,6 +753,7 @@ export class PoseFusion extends EventEmitter {
     // immune to NTP wallclock steps mid-session.
     this.sensorController.setHeading(gnssHeading, null);
     this.currentHeading = gnssHeading;
+    this.stationaryHeadingOverrideGoodEpochs = 0;
 
     // Re-anchor encoder-only track to the freshly rebased heading and current
     // fused position.  This closes the previous DR segment cleanly and starts

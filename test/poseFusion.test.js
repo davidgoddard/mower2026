@@ -258,7 +258,7 @@ test("PoseFusion can apply a stationary-safe trusted GNSS heading update after b
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[0].arguments[0]), 10);
   assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 10);
 
-  emitGnssPosition(sensorController, {
+  emitRepeatedGnssPositions(sensorController, 5, {
     xMeters: 2,
     yMeters: 3,
     headingDeg: 20,
@@ -310,7 +310,7 @@ test("PoseFusion rebases from trusted GNSS when the controller reports a safe st
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[0].arguments[0]), 10);
 
   emitImuHeading(sensorController, 40, 5000);
-  emitGnssPosition(sensorController, {
+  emitRepeatedGnssPositions(sensorController, 5, {
     xMeters: 2,
     yMeters: 3,
     headingDeg: 65,
@@ -324,6 +324,88 @@ test("PoseFusion rebases from trusted GNSS when the controller reports a safe st
   assert.equal(sensorController.setHeading.mock.calls.length, 2);
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 65);
   assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 65);
+
+  await fusion.stop();
+});
+
+test("PoseFusion rebases after sustained good stationary GNSS regardless of IMU disagreement", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({
+    safe: true,
+    motorCommandActive: false,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
+    wheelsStationary: true,
+    maxStationaryTickDelta: 1,
+  });
+  const fusion = new PoseFusion({
+    sensorController,
+    logger: createMockLogger(),
+  });
+
+  await fusion.start();
+
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
+    headingDeg: 10,
+    timestampMillis: 1100,
+  });
+  assert.equal(sensorController.setHeading.mock.calls.length, 1);
+
+  emitImuHeading(sensorController, -170, 1900);
+  emitGnssPosition(sensorController, { headingDeg: 80, timestampMillis: 2000 });
+  emitRepeatedGnssPositions(sensorController, 4, {
+    headingDeg: 80,
+    timestampMillis: 2100,
+  });
+  assert.equal(sensorController.setHeading.mock.calls.length, 1);
+
+  emitGnssPosition(sensorController, { headingDeg: 80, timestampMillis: 2500 });
+  assert.equal(sensorController.setHeading.mock.calls.length, 2);
+  assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 80);
+  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 80);
+
+  await fusion.stop();
+});
+
+test("PoseFusion resets the stationary GNSS heading dwell when heading quality is poor", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  const fusion = new PoseFusion({
+    sensorController,
+    logger: createMockLogger(),
+  });
+
+  await fusion.start();
+
+  emitImuHeading(sensorController, 0, 1000);
+  emitRepeatedGnssPositions(sensorController, 3, {
+    headingDeg: 0,
+    timestampMillis: 1100,
+  });
+  assert.equal(sensorController.setHeading.mock.calls.length, 1);
+
+  emitImuHeading(sensorController, 90, 1900);
+  emitGnssPosition(sensorController, { headingDeg: -90, timestampMillis: 2000 });
+  emitRepeatedGnssPositions(sensorController, 4, {
+    headingDeg: -90,
+    timestampMillis: 2100,
+  });
+  emitGnssPosition(sensorController, {
+    headingDeg: -90,
+    headingAccuracyDeg: 4,
+    timestampMillis: 2500,
+  });
+  emitRepeatedGnssPositions(sensorController, 4, {
+    headingDeg: -90,
+    timestampMillis: 2600,
+  });
+  assert.equal(sensorController.setHeading.mock.calls.length, 1);
+
+  emitGnssPosition(sensorController, { headingDeg: -90, timestampMillis: 3000 });
+  assert.equal(sensorController.setHeading.mock.calls.length, 2);
 
   await fusion.stop();
 });
@@ -451,7 +533,7 @@ test("PoseFusion applies a stationary-safe trusted GNSS heading correction after
   assert.equal(sensorController.setHeading.mock.calls.length, 1);
 
   emitImuHeading(sensorController, 39, 3500);
-  emitGnssPosition(sensorController, {
+  emitRepeatedGnssPositions(sensorController, 5, {
     xMeters: 1,
     yMeters: 2,
     headingDeg: 49,
