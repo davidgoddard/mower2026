@@ -1550,8 +1550,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             });
           }
 
-          // Run in background; update shared status when done
-          mowingExecutor.execute().then((finalStatus) => {
+          // Run in background; update shared status when done. Release the
+          // executor reference after settlement so the saved operation can be resumed.
+          const activeMowingExecutor = mowingExecutor;
+          activeMowingExecutor.execute().then((finalStatus) => {
             mowingStatus = finalStatus;
           }).catch((error) => {
             const message = error instanceof Error ? error.message : String(error);
@@ -1559,9 +1561,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }).finally(() => {
             retryManager?.endSession();
             operationContextTracker?.clearContext();
+            if (mowingExecutor === activeMowingExecutor) {
+              mowingExecutor = null;
+            }
           });
 
-          mowingStatus = mowingExecutor.getStatus();
+          mowingStatus = activeMowingExecutor.getStatus();
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             started: true,
@@ -1645,7 +1650,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             });
           }
 
-          mowingExecutor.execute().then((finalStatus) => {
+          const activeMowingExecutor = mowingExecutor;
+          activeMowingExecutor.execute().then((finalStatus) => {
             mowingStatus = finalStatus;
           }).catch((error) => {
             const message = error instanceof Error ? error.message : String(error);
@@ -1659,9 +1665,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }).finally(() => {
             retryManager?.endSession();
             operationContextTracker?.clearContext();
+            if (mowingExecutor === activeMowingExecutor) {
+              mowingExecutor = null;
+            }
           });
 
-          mowingStatus = mowingExecutor.getStatus();
+          mowingStatus = activeMowingExecutor.getStatus();
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({
             started: true,

@@ -25,6 +25,8 @@ const CONTINUOUS_PIVOT_ENTER_HEADING_THRESHOLD_DEG = 100;
 const CONTINUOUS_PIVOT_EXIT_HEADING_THRESHOLD_DEG = 25;
 const CONTINUOUS_PIVOT_OUTPUT = 0.45;
 const CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG = 12;
+const CONTINUOUS_PIVOT_INNER_WHEEL_HYSTERESIS = 0.1;
+const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_CYCLE = 0.08;
 
 export interface ContinuousPathFollowerOptions {
   readonly sensorController: SensorController;
@@ -48,6 +50,8 @@ export interface ContinuousPathExecutionOptions {
   readonly pivotAtWaypointDistanceMeters?: number;
   readonly minimumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
+  /** Resume an interrupted ordered follow from this target index. */
+  readonly initialTargetIndex?: number;
 }
 
 export interface ContinuousPathFollowResult extends PathFollowResult {
@@ -87,9 +91,11 @@ export class ContinuousPathFollower {
       };
     }
 
-    let currentIndex = 0;
-    let preserveCurrentTargetAtPose = options.preserveFirstTargetAtPose ?? false;
+    let currentIndex = clampIndex(options.initialTargetIndex ?? 0, pathPoints.length);
+    let preserveCurrentTargetAtPose = currentIndex === 0 && (options.preserveFirstTargetAtPose ?? false);
     let pivoting = false;
+    let appliedLeftCommand = 0;
+    let appliedRightCommand = 0;
 
     this.sensorController.beginMotionSession();
     try {
@@ -128,7 +134,7 @@ export class ContinuousPathFollower {
         );
         currentIndex = Math.max(currentIndex, projection.segmentStartIndex + 1);
         const guidance = buildContinuousGuidance(pathPoints, cumulativeDistances, projection, parameters);
-        const commands = computeContinuousPathWheelCommands(
+        const requestedCommands = computeContinuousPathWheelCommands(
           pose,
           guidance.segmentStart,
           guidance.segmentEnd,
@@ -142,7 +148,9 @@ export class ContinuousPathFollower {
             pivotIfInnerWheelBelow: options.pivotIfInnerWheelBelow,
           },
         );
-        pivoting = commands.pivoting;
+        pivoting = requestedCommands.pivoting;
+        appliedLeftCommand = limitContinuousWheelCommandChange(appliedLeftCommand, requestedCommands.left);
+        appliedRightCommand = limitContinuousWheelCommandChange(appliedRightCommand, requestedCommands.right);
 
         this.logger.debug("continuous_path.control", {
           currentIndex,
@@ -152,11 +160,13 @@ export class ContinuousPathFollower {
           currentTargetY: guidance.segmentEnd.yMeters,
           lookaheadX: guidance.lookaheadTarget.xMeters,
           lookaheadY: guidance.lookaheadTarget.yMeters,
-          left: commands.left,
-          right: commands.right,
+          requestedLeft: requestedCommands.left,
+          requestedRight: requestedCommands.right,
+          left: appliedLeftCommand,
+          right: appliedRightCommand,
           pivoting,
         });
-        await this.sensorController.setMotorWheelOutputs(commands.left, commands.right);
+        await this.sensorController.setMotorWheelOutputs(appliedLeftCommand, appliedRightCommand);
         await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
       }
 
@@ -257,8 +267,11 @@ export function computeContinuousPathWheelCommands(
     -CONTINUOUS_MAX_TRIM,
     CONTINUOUS_MAX_TRIM,
   ));
+  const tightArcEnterThreshold = Math.max(0, options.pivotIfInnerWheelBelow ?? 0);
+  const tightArcExitThreshold = Math.min(1, tightArcEnterThreshold + CONTINUOUS_PIVOT_INNER_WHEEL_HYSTERESIS);
+  const tightArcThreshold = pivoting ? tightArcExitThreshold : tightArcEnterThreshold;
   const shouldPivotForTightArc = Number.isFinite(options.pivotIfInnerWheelBelow)
-    && predictedInnerWheelCommand < Math.max(0, options.pivotIfInnerWheelBelow ?? 0);
+    && predictedInnerWheelCommand < tightArcThreshold;
 
   const pivotThresholdDeg = pivoting
     ? CONTINUOUS_PIVOT_EXIT_HEADING_THRESHOLD_DEG
@@ -284,6 +297,15 @@ export function computeContinuousPathWheelCommands(
     right: clamp(adaptiveBaseSpeed + trim, -1, 1),
     pivoting: false,
   };
+}
+
+export function limitContinuousWheelCommandChange(
+  previousCommand: number,
+  requestedCommand: number,
+  maxDelta = CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_CYCLE,
+): number {
+  const boundedDelta = Math.max(0, maxDelta);
+  return clamp(requestedCommand, previousCommand - boundedDelta, previousCommand + boundedDelta);
 }
 
 export function computeContinuousPathBaseSpeed(
@@ -434,6 +456,16 @@ function pointToPosition(point: PathPoint): Position {
 
 function distance(a: PathPoint, b: PathPoint): number {
   return Math.hypot(a.xMeters - b.xMeters, a.yMeters - b.yMeters);
+}
+
+function clampIndex(index: number, pointCount: number): number {
+  if (pointCount <= 0) {
+    return 0;
+  }
+  if (!Number.isFinite(index)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(Math.trunc(index), pointCount - 1));
 }
 
 function clamp(value: number, min: number, max: number): number {

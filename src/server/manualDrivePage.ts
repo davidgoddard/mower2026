@@ -594,7 +594,7 @@ ${getAppDialogStyles()}
             <span>🌿</span> Mow Area
           </button>
           <button id="resumeMowingBtn" class="button button-primary" type="button" style="display:none">
-            <span>↻</span> Resume Mow
+            <span>↻</span> Carry On Mowing
           </button>
           <button id="stopMowingBtn" class="button button-danger" type="button">
             <span>⏹</span> Stop Mowing
@@ -1624,7 +1624,9 @@ ${getAppDialogScript()}
         if (response.ok) {
           const status = await response.json();
           updateMowingStatusUi(status);
-          if (status.phase === 'complete' || status.phase === 'stopped' || status.phase === 'error') {
+          const terminalWithStableUi = status.phase === 'complete'
+            || ((status.phase === 'stopped' || status.phase === 'error') && status.resumeAvailable);
+          if (terminalWithStableUi) {
             clearInterval(mowingStatusInterval);
             mowingStatusInterval = null;
           }

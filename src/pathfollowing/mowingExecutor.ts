@@ -557,6 +557,7 @@ export class MowingExecutor {
       ...operation.followOptions,
     });
     if (!result.completed) {
+      this.persistInterruptedFollowProgress(operation, result.completedWaypoints);
       if (result.reason === "user_stopped") {
         this.phase = "stopped";
         return null;
@@ -590,6 +591,25 @@ export class MowingExecutor {
       obstaclePointsArray: this.obstaclePointsArray.map((points) => [...points]),
       initialEntryPlan: this.selectedAreaStartAnchor?.entryPlan ?? this.initialEntryPlan,
       activeOperation: operation,
+    });
+  }
+
+  private persistInterruptedFollowProgress(
+    operation: Extract<MowingResumeOperation, { kind: "follow_path" }>,
+    completedWaypoints: number,
+  ): void {
+    const previousIndex = operation.followOptions.initialTargetIndex ?? 0;
+    const lastTargetIndex = Math.max(0, operation.pathPoints.length - 1);
+    const initialTargetIndex = Math.min(
+      lastTargetIndex,
+      Math.max(previousIndex, Number.isFinite(completedWaypoints) ? Math.trunc(completedWaypoints) : previousIndex),
+    );
+    this.persistResumeOperation({
+      ...operation,
+      followOptions: {
+        ...operation.followOptions,
+        initialTargetIndex,
+      },
     });
   }
 
@@ -724,7 +744,7 @@ export class MowingExecutor {
       return true;
     }
 
-    this.persistResumeOperation({
+    const followOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
       kind: "follow_path",
       phase: "tracing_boundary",
       stripIndex: resumeMeta.stripIndex,
@@ -739,7 +759,8 @@ export class MowingExecutor {
       errorCode: "boundary_trace_failed",
       continuation: resumeMeta.continuation,
       markBoundaryTraced: resumeMeta.markBoundaryTraced,
-    });
+    };
+    this.persistResumeOperation(followOperation);
     const followResult = await this.continuousPathFollower.executePath([...loopPoints], {
       parameters: this.parameters,
       preserveFirstTargetAtPose: true,
@@ -749,6 +770,7 @@ export class MowingExecutor {
       pivotIfInnerWheelBelow: 0.25,
     });
     if (!followResult.completed) {
+      this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);
       if (followResult.reason === "user_stopped") {
         this.phase = "stopped";
         return false;
@@ -809,7 +831,7 @@ export class MowingExecutor {
       };
     }
 
-    this.persistResumeOperation({
+    const followOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
       kind: "follow_path",
       phase: "following_connector",
       stripIndex,
@@ -820,7 +842,8 @@ export class MowingExecutor {
       },
       errorCode: "connector_failed",
       continuation,
-    });
+    };
+    this.persistResumeOperation(followOperation);
     const followResult = await this.continuousPathFollower.executePath(
       [...connector],
       {
@@ -832,6 +855,7 @@ export class MowingExecutor {
     if (followResult.completed) {
       return { completed: true, reason: "reached_end" };
     }
+    this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);
     return {
       completed: false,
       reason: followResult.reason === "user_stopped" ? "user_stopped" : "error",

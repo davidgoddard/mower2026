@@ -187,6 +187,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('id="mowingHeadingDeg"'), true);
   assert.equal(manualPage.includes('id="stripSpacingCm"'), true);
   assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
+  assert.equal(manualPage.includes('Carry On Mowing'), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="startAreaRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="stopPathBtn"'), true);

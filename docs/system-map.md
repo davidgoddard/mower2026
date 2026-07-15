@@ -206,12 +206,12 @@ This document maps problem domains to candidate files removing the need for Code
 ## Retry System (Obstruction Recovery)
 - `src/retry/retryManager.ts`: **EVENT-DRIVEN RECOVERY SYSTEM** - handles obstruction detection and context-aware recovery
   - subscribes to `obstructionDetected` events from sensor controller via the appServer wiring
-  - retry fires for `high_current`, `stall`, and `wheel_slip` events in path context
+  - retry fires only for `high_current` events; `stall` and `wheel_slip` stop and abort the active session
   - session tracking: max 3 recoverable-obstruction retry attempts per session before abort
   - implements `RecentTargetSink` so the segmented executor can record completed targets while a path follow runs; the path-context recovery walks that trail backward
   - context-aware recovery strategies:
     - **Line driving**: reverse 2 seconds (~half a metre at full speed), retry forward to original target
-    - **Path following / boundary tracing**: stop the segmented executor, retrace the most recently completed targets in reverse (rear-first via `DriveController.driveSegment(target, -1)`) until cumulative reverse travel reaches the configured retreat distance, then call `pathRestart(waypoints)` which re-runs the same boundary follow (the executor re-anchors to the nearest target on resume); when no recent targets exist yet, the fallback now reverses briefly and then drives a direct segment back to the recorded obstruction pose before restarting the perimeter, so that recovery leg is judged against its own line rather than the perimeter CTE. This recovery is now used for high-current grass jams, stall-detected grass-load cases, and wheel-slip detections
+    - **Path following / boundary tracing**: stop the segmented executor, retrace the most recently completed targets in reverse (rear-first via `DriveController.driveSegment(target, -1)`) until measured reverse travel reaches the configured retreat distance, then call `pathRestart(waypoints)` which re-runs the same boundary follow. Every recovery leg must return a successful drive result; the fallback timed reverse must complete and show at least 10 cm of physical displacement before the perimeter can restart. A stall or wheel-slip event during recovery aborts the session.
     - **Turn on spot**: escape turn opposite direction 2 seconds, retry original heading from the new pose
   - emergency abort: powers off motors after max retries exceeded
 - `src/retry/checkpointStore.ts`: checkpoint storage for recovery points
@@ -225,8 +225,8 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/retry/operationContextTracker.ts`: in-process holder for the active `OperationContext`. Perimeter routes and the mowing run set "path" while running; the obstruction-event handler reads this to decide whether to dispatch to recovery and which flow to use. Returns `null` when nothing is active so unrelated obstruction events are ignored.
 - Obstruction detection conditions (sensorController):
   - Motor current > 2A threshold (configurable) — triggers retry (high_current detection not yet implemented in firmware/sensor pipeline)
-  - Wheel slip: encoder movement but position stationary — now treated as retryable in mowing/path context
-  - Stall: position stationary for 1 second with motors engaged — now treated as retryable in mowing/path context, assuming likely grass-load resistance rather than a hard obstacle
+  - Wheel slip: encoder movement but position stationary — stops and aborts the active operation
+  - Stall: no physical position progress while a motion command remains active; encoder-stationary evidence is used as a fallback when trusted position is unavailable — stops and aborts the active operation
 - `src/server/appServer.ts` wiring:
   - constructs `OperationContextTracker`, `CheckpointStore`, and `RetryManager` after the drive/turn controllers
   - injects a `turn(angleDeg)` adapter that calls `turnController.executeTurn({ targetAngle, direction })`
@@ -235,6 +235,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `runSegmentedPerimeterFollow` helper wraps each perimeter-follow route (path drive/verify, area-perimeter drive/verify) with operation-context set/clear + retry session start/end + path checkpoint registration
   - area-perimeter save/drive/verify now reuse the same inward-safe smoothing + continuous-follow approach used by obstacle tracing, except the safe offset is inward rather than outward
   - mowing run wires `recentTargetSink: retryManager` into `MowingExecutor` and brackets the background execution with the same retry-session lifecycle
+  - releases the settled `MowingExecutor` reference after complete/stopped/error so `/api/mowing/status` can advertise the saved resume state; the Drive & Paths page continues polling until that terminal resume state is visible and presents a **Carry On Mowing** button
   - mowing start now seeds an initial path checkpoint with the area boundary itself, so a recoverable failure during the very first "join and trace the perimeter" phase can reverse and rejoin instead of aborting with `no_checkpoint`
 
 ## Path Following
@@ -267,7 +268,8 @@ This document maps problem domains to candidate files removing the need for Code
   - supports sharp-corner waypoint pivots: when close to a waypoint that implies a steep outgoing turn, it pivots to the new heading instead of trying to arc-cut outside the perimeter
   - supports a caller-supplied minimum trace speed so perimeter loops do not slow into near-stall commands
   - can also pivot when the requested arc would drive the inner wheel below a healthy floor, preventing long stall-prone crawl turns during perimeter tracing
-  - pivot/arc handoff uses hysteresis; once a pivot begins it now stays in pivot mode until heading error is much smaller, avoiding the repeated pivot-then-overshoot wiggle seen after sharp perimeter turns
+  - pivot/arc handoff uses hysteresis for both heading and the minimum-inner-wheel rule, avoiding repeated pivot/arc switching near the threshold
+  - applies a per-control-cycle wheel-command slew limit so curvature, heading, and CTE corrections change motor demand progressively instead of jumping between fast and slow outputs
   - drives saved or planned polylines using direct left/right wheel outputs instead of turn-drive-turn segments
   - mowing traces/connectors can enable strict ordered progress so nearby non-adjacent segments, including the closing leg back to the join point, cannot falsely jump the follower far ahead in the route
   - advances ordered path progress using the same passed-waypoint logic, then projects the mower onto the ordered polyline and picks lookahead by true forward arc-length progress instead of only waypoint index
@@ -306,8 +308,9 @@ This document maps problem domains to candidate files removing the need for Code
   - returns logical strip segments for canvas preview and future execution planning
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
   - persists exact in-progress mowing step state through the app-server callback so failed or stopped sessions can resume from the saved operation rather than rebuilding the strip plan from scratch
+  - when a continuous boundary or connector follow stops, saves the completed waypoint index and resumes from that ordered progress point rather than restarting the saved path at index zero
 - `src/pathfollowing/mowingResumeStore.ts`: JSON persistence for the saved mowing resume state
-  - stores the exact active mowing operation, traced-boundary progress, saved strip plan, and recorded area/obstacle geometry used by `/api/mowing/resume`
+  - stores the exact active mowing operation, continuous-follow target index, traced-boundary progress, saved strip plan, and recorded area/obstacle geometry used by `/api/mowing/resume`
   - on mow start, now tries to select a strip-adjacent area-perimeter anchor that is directly reachable without re-leaving the area after entry; when one is found it re-anchors the strip order to that perimeter point, drives to the associated inside standoff, traces the full area loop once, and then starts strip mowing from that same strip-adjacent point instead of re-planning again from the post-trace pose
   - that forced first area trace now injects the chosen strip-adjacent perimeter point into the traced loop itself and also refreshes the retry checkpoint with that ordered loop, so a stall during the first lap resumes on the same anchored perimeter order instead of falling back to a generic nearest-point boundary restart
   - initial area entry traces the full area perimeter before strip mowing begins; when no safe strip-adjacent area anchor can be chosen up front it falls back to re-anchoring strip order from the live post-trace pose
