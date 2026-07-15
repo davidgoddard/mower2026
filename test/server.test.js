@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PrimitivesStore, resolveServerPort, routeServerRequest } from '../dist/index.js';
-import { getManualDrivePageHtml } from '../dist/server/manualDrivePage.js';
+import { getManualDrivePageCss, getManualDrivePageHtml, getManualDrivePageJs } from '../dist/server/manualDrivePage.js';
 import { getTurnTuningPageHtml } from '../dist/server/turnTuningPage.js';
 import { getDriveTuningPageHtml } from '../dist/server/driveTuningPage.js';
 import { getSegmentTestingPageHtml } from '../dist/server/segmentTestingPage.js';
@@ -138,7 +138,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(drivePage.includes('start tuning'), true);
   assert.equal(drivePage.includes('Are you sure you want to reset drive learning parameters to defaults?'), true);
   assert.equal(drivePage.includes('/api/drive/reset-learning'), true);
-  assert.equal(drivePage.includes('cache: "no-store"'), true);
+  assert.equal(drivePage.includes('window.operatorPage.fetchJson("/api/drive/status?ts=" + Date.now())'), true);
   assert.equal(drivePage.includes('maxDistanceMeters: endAtMeters'), true);
   assert.equal(drivePage.includes('const maxDriveResultRows = 500;'), true);
   assert.equal(drivePage.includes('const driveResultRows = [];'), true);
@@ -180,7 +180,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(segmentPage.includes('Y Error (cm)</th>'), true);
   assert.equal(segmentPage.includes('formatCentimeters(item.cteMeters)'), true);
 
-  const manualPage = getManualDrivePageHtml();
+  const manualPageHtml = getManualDrivePageHtml();
+  const manualPage = manualPageHtml + getManualDrivePageCss() + getManualDrivePageJs();
   assert.equal(manualPage.includes('Drive & Paths'), true);
   assert.equal(manualPage.includes('id="mapCanvas"'), true);
   assert.equal(manualPage.includes('id="mowingPlanArea"'), true);
@@ -223,7 +224,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('setInterval(updateStatus, 500)'), false);
   assert.equal(manualPage.includes('setInterval(loadStoredPaths, 10000)'), false);
   assert.equal(manualPage.includes('setInterval(loadStoredAreaPerimeters, 10000)'), false);
-  assert.equal(manualPage.includes('Skipping stored path with invalid points'), true);
+  assert.equal(manualPage.includes('Skipping ${warningLabel} with invalid points:'), true);
   assert.equal(manualPage.includes("result.failedSegment?.errorMessage"), true);
   assert.equal(manualPage.includes('confirm('), false);
 
@@ -232,10 +233,10 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(deadReckoningPage.includes('id="arcSweepDegrees"'), true);
   assert.equal(deadReckoningPage.includes('Straight distance'), true);
   assert.equal(deadReckoningPage.includes('Arc sweep'), true);
-  assert.equal(deadReckoningPage.includes('body: JSON.stringify({ lineDistanceMeters, arcSweepDegrees })'), true);
+  assert.equal(deadReckoningPage.includes("window.operatorPage.postJson('/api/dead-reckoning/start', { lineDistanceMeters, arcSweepDegrees })"), true);
 
   const pathPage = renderPathTracingPage();
-  assert.equal(pathPage, manualPage);
+  assert.equal(pathPage, manualPageHtml);
 });
 
 test('launcher and systemd unit pin logs to the repo logs folder', async () => {

@@ -43,7 +43,7 @@ export function shapeAreaRecordedPath(points: PathPoint[]): PathPoint[] {
 export function buildAreaPerimeterGeometry(points: ReadonlyArray<PathPoint>): AreaPerimeterGeometry {
   const startedAtMs = Date.now();
   const rawPoints = closeLoopPoints(points);
-  const repairedRawPoints = repairClosureSeam(rawPoints);
+  const repairedRawPoints = hasExplicitClosure(points) ? rawPoints : repairClosureSeam(rawPoints);
   if (rawPoints.length <= 3) {
     return {
       rawPoints,
@@ -127,6 +127,10 @@ export function buildAreaPerimeterGeometry(points: ReadonlyArray<PathPoint>): Ar
       reducedInvalidSegmentCount: reduced.invalidSegmentCount,
     },
   };
+}
+
+function hasExplicitClosure(points: ReadonlyArray<PathPoint>): boolean {
+  return points.length > 1 && distance(points[0], points[points.length - 1]) <= 0.001;
 }
 
 function closeLoopPoints(points: ReadonlyArray<PathPoint>): PathPoint[] {
