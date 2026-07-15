@@ -634,12 +634,9 @@ export class DeadReckoningCalibrator {
       );
       this.logger.warn("dead_reckoning.arc_geometry_rejected", {
         direction,
-        imuHeadingChangeDeg,
-        leftDistanceMeters: leftDistance,
-        rightDistanceMeters: rightDistance,
+        reason: "dr_endpoint_error",
         wheelbaseMeters,
         drEndpointErrorMeters: drError,
-        maxDrEndpointErrorMeters: MAX_ARC_DR_ENDPOINT_ERROR_METERS,
       });
       return {
         ...phase,
@@ -654,12 +651,9 @@ export class DeadReckoningCalibrator {
       );
       this.logger.warn("dead_reckoning.arc_geometry_rejected", {
         direction,
-        imuHeadingChangeDeg,
-        leftDistanceMeters: leftDistance,
-        rightDistanceMeters: rightDistance,
+        reason: "arc_tracking_rms_error",
         wheelbaseMeters,
         arcTrackingRmsErrorFraction,
-        maxArcTrackingRmsErrorFraction: MAX_ARC_TRACKING_RMS_ERROR_FRACTION,
       });
       return {
         ...phase,
@@ -984,8 +978,8 @@ export class DeadReckoningCalibrator {
                 ? "no_good_gnss_anchor"
                 : "missing_heading",
               dwellMs: Date.now() - dwellStartMs,
-              anchor,
-              diagnostics,
+              fixType: anchor.fixType,
+              hasHeading: anchor.headingDeg !== null,
             });
             dwellStartMs = null;
             await this.sleep(100);
@@ -1014,13 +1008,7 @@ export class DeadReckoningCalibrator {
             blocker,
             usingGnssHeading: state.usingGnssHeading,
             quality: state.quality,
-            xMeters: state.xMeters,
-            yMeters: state.yMeters,
-            headingDeg: state.headingDeg,
             gnssPositionAgeMs: state.gnssPositionAgeMs,
-            gnss: diagnostics.gnss,
-            fused: diagnostics.fused,
-            encoder: diagnostics.encoder,
           });
           lastSettleBlocker = blocker;
         }
@@ -1033,8 +1021,8 @@ export class DeadReckoningCalibrator {
 
     this.logger.warn("dead_reckoning.pose_settle_timeout", {
       timeoutMs: this.poseSettleTimeoutMs,
+      lastSettleBlocker,
       poseFusion: this.poseFusion.getPrimitiveState(),
-      diagnostics: this.poseFusion.getDiagnosticSnapshot(),
     });
     return null;
   }

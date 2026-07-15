@@ -1,5 +1,6 @@
 import { startMowerServer, resolveServerPort } from "./appServer.js";
 import {
+  HTTP_SERVER_HOST_DEFAULT,
   HTTP_SERVER_PORT_DEFAULT,
   I2C_BUS_NUMBER_DEFAULT,
   I2C_ADDRESS_GNSS_DEFAULT,
@@ -13,12 +14,10 @@ import {
   MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
 } from "../constants.js";
 
-const CONTROL_HOST_DEFAULT = "127.0.0.1";
-
-const host = process.env.MOWER_CONTROL_HOST ?? process.env.MOWER_CORE_APP_HOST ?? CONTROL_HOST_DEFAULT;
+const host = process.env.MOWER_CONTROL_HOST ?? process.env.MOWER_CORE_APP_HOST ?? HTTP_SERVER_HOST_DEFAULT;
 const port = resolveServerPort(
   process.env.MOWER_CONTROL_PORT ?? process.env.MOWER_CORE_APP_PORT,
-  HTTP_SERVER_PORT_DEFAULT + 1,
+  HTTP_SERVER_PORT_DEFAULT,
 );
 const logDir = process.env.MOWER_LOG_DIR;
 const i2cBusNumber = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drive & Paths - Mower Control</title>
+__APP_DIALOG_STYLE_TAG__
+  <link rel="stylesheet" href="/manual-drive.css">
+</head>
+<body>
+  <div class="header">
+    <div class="header-content">
+      <div class="header-left">
+        <h1>🧭 Drive &amp; Paths</h1>
+        <p class="subtitle">Manual drive, live position tracking, and path recording in one place</p>
+      </div>
+      <a href="/" class="back-link">← Back to Dashboard</a>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="map-section">
+      <div class="section-title">Position Map (Last 10 Minutes + Stored Perimeters)</div>
+      <div class="map-controls">
+        <div class="input-group">
+          <label for="mowingPlanArea">Mowing Area</label>
+          <select id="mowingPlanArea"></select>
+        </div>
+        <div class="input-group">
+          <label for="mowingHeadingDeg">Strip Heading</label>
+          <input type="range" id="mowingHeadingDeg" min="0" max="179" step="1" value="135" />
+          <span class="map-control-value" id="mowingHeadingValue">135° NW-SE</span>
+        </div>
+        <div class="input-group">
+          <label for="stripSpacingCm">Strip Width (cm)</label>
+          <input type="number" id="stripSpacingCm" min="10" max="40" step="1" value="30" />
+        </div>
+        <button id="previewMowingPlanBtn" class="button button-primary" type="button">
+          <span>▦</span> Preview
+        </button>
+        <div style="display:flex;flex-direction:column;gap:0.5rem;align-items:stretch">
+          <button id="startMowingBtn" class="button button-success" type="button">
+            <span>🌿</span> Mow Area
+          </button>
+          <button id="resumeMowingBtn" class="button button-primary" type="button" style="display:none">
+            <span>↻</span> Resume Mow
+          </button>
+          <button id="stopMowingBtn" class="button button-danger" type="button">
+            <span>⏹</span> Stop Mowing
+          </button>
+        </div>
+      </div>
+      <div class="section-description" id="mowingPlanStatus">Select a mowing area to preview strips.</div>
+      <div id="mowingStatusBar" class="mowing-status-bar">
+        <div class="mowing-status-dot"></div>
+        <span id="mowingStatusText">Idle</span>
+      </div>
+      <canvas id="mapCanvas" width="1200" height="800"></canvas>
+      <div class="map-stats" id="mapStats">Waiting for position data...</div>
+    </div>
+
+    <div class="path-layout">
+        <div class="section">
+          <div class="section-title">Record New Obstacle Path</div>
+          <p class="section-description">
+            Record a path by manually driving or dragging the mower. Position samples are captured every 10cm of movement.
+          </p>
+
+          <div class="instructions">
+            <div class="instructions-title">How to Record</div>
+            <ol class="instructions-list">
+              <li>Enter a name for your path or keep the suggested obstacle name.</li>
+              <li>Click Start Recording and move the mower around the obstacle.</li>
+              <li>Click Stop &amp; Save when you have finished tracing the path.</li>
+            </ol>
+          </div>
+
+          <div class="controls">
+            <div class="input-group">
+              <label for="pathName">Path Name</label>
+              <input type="text" id="pathName" placeholder="e.g., Obstacle 1" />
+            </div>
+
+            <button id="startRecordingBtn" class="button button-success" type="button">
+              <span>⏺</span> Start Recording
+            </button>
+
+            <button id="stopRecordingBtn" class="button button-danger" type="button" disabled>
+              <span>⏹</span> Stop &amp; Save
+            </button>
+
+            <button id="cancelRecordingBtn" class="button button-secondary" type="button" disabled>
+              <span>✖</span> Cancel
+            </button>
+
+            <div id="recordingIndicator" class="recording-indicator">
+              <div class="recording-dot"></div>
+              <span>Recording...</span>
+            </div>
+          </div>
+
+          <div class="status-box">
+            <div class="status-row">
+              <span class="status-label">Status:</span>
+              <span class="status-value" id="recordingStatus">Ready</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">Points Captured:</span>
+              <span class="status-value" id="pointCount">0</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">Current Path:</span>
+              <span class="status-value" id="currentPathName">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Record New Mowing Area Perimeter</div>
+          <p class="section-description">
+            Record a named mowing area boundary by driving the mower around the outside edge. Position samples are captured every 10cm of movement.
+          </p>
+
+          <div class="controls">
+            <div class="input-group">
+              <label for="areaPerimeterName">Area Perimeter Name</label>
+              <input type="text" id="areaPerimeterName" placeholder="e.g., Front Lawn" />
+            </div>
+
+            <button id="startAreaRecordingBtn" class="button button-success" type="button">
+              <span>⏺</span> Start Recording
+            </button>
+
+            <button id="stopAreaRecordingBtn" class="button button-danger" type="button" disabled>
+              <span>⏹</span> Stop &amp; Save
+            </button>
+
+            <button id="cancelAreaRecordingBtn" class="button button-secondary" type="button" disabled>
+              <span>✖</span> Cancel
+            </button>
+
+            <div id="areaRecordingIndicator" class="recording-indicator">
+              <div class="recording-dot"></div>
+              <span>Recording...</span>
+            </div>
+          </div>
+
+          <div class="status-box">
+            <div class="status-row">
+              <span class="status-label">Status:</span>
+              <span class="status-value" id="areaRecordingStatus">Ready</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">Points Captured:</span>
+              <span class="status-value" id="areaPointCount">0</span>
+            </div>
+            <div class="status-row">
+              <span class="status-label">Current Perimeter:</span>
+              <span class="status-value" id="currentAreaPerimeterName">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Stored Obstacle Paths</div>
+          <p class="section-description">
+            Manage and execute recorded paths. Drive a path to follow it autonomously, or verify it by joining at the nearest point and looping back to that join point.
+          </p>
+
+          <div class="path-toolbar">
+            <button id="stopPathBtn" class="button button-danger" type="button" onclick="stopPathOperation()">
+              <span>⏹</span> STOP
+            </button>
+          </div>
+
+          <div id="pathsList" class="paths-list">
+            <div class="empty-state">
+              <div class="empty-state-icon">📭</div>
+              <div>No paths recorded yet</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Stored Mowing Area Perimeters</div>
+          <p class="section-description">
+            Manage mowing area boundaries. Drive starts from the nearest perimeter point in the direction the mower is facing; verify drives to the nearest point, turns to align, then follows the perimeter.
+          </p>
+
+          <div id="areaPerimetersList" class="paths-list">
+            <div class="empty-state">
+              <div class="empty-state-icon">📭</div>
+              <div>No mowing area perimeters recorded yet</div>
+            </div>
+          </div>
+        </div>
+    </div>
+  </div>
+
+
+__APP_DIALOG_HTML__
+
+__APP_DIALOG_SCRIPT_TAG__
+__OPERATOR_PAGE_COMMON_SCRIPT_TAG__
+  <script src="/manual-drive.js" defer></script>
+</body>
+</html>

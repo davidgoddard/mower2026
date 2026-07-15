@@ -18,14 +18,15 @@ function createRecorder(options = {}) {
   const poseFusion = new EventEmitter();
   let saved = null;
   const pathStore = {
-    async savePath(name, points) {
-      saved = { name, points };
+    async savePath(name, points, options = {}) {
+      saved = { name, points, mowingDefaults: options.mowingDefaults };
     },
     async loadPath(name) {
       return {
         name,
         points: saved?.points ?? [],
         createdAt: Date.now(),
+        mowingDefaults: saved?.mowingDefaults,
         metadata: {
           totalDistance: 0,
           pointCount: saved?.points.length ?? 0,
@@ -198,4 +199,29 @@ test('path recorder preserves stepped mowing-area edges when using area save pro
   assert.equal(saved.some((point) => point.yMeters < 0.5), true);
   assert.equal(saved.some((point) => point.xMeters > 4.5 && point.yMeters < 1.5), true);
   assert.equal(saved.some((point) => point.xMeters > 4.5 && point.yMeters > 2.5), true);
+});
+
+test('path recorder can save mowing defaults alongside an area perimeter', async () => {
+  const { recorder, poseFusion } = createRecorder({
+    saveProcessing: 'area_safe_smoothed',
+    maxSegmentDistanceMeters: 5,
+  });
+
+  recorder.startRecording('Rear Lawn');
+  poseFusion.emit('poseUpdate', pose(0, 0));
+  poseFusion.emit('poseUpdate', pose(1, 0));
+  poseFusion.emit('poseUpdate', pose(1, 1));
+  poseFusion.emit('poseUpdate', pose(0, 1));
+
+  const savedPath = await recorder.stopAndSave({
+    mowingDefaults: {
+      headingDeg: 135,
+      stripSpacingMeters: 0.3,
+    },
+  });
+
+  assert.deepEqual(savedPath.mowingDefaults, {
+    headingDeg: 135,
+    stripSpacingMeters: 0.3,
+  });
 });

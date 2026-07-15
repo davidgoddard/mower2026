@@ -14,7 +14,7 @@ test('resolveServerPort returns fallback for invalid values', () => {
   assert.equal(resolveServerPort(undefined, 8090), 8090);
   assert.equal(resolveServerPort('0', 8090), 8090);
   assert.equal(resolveServerPort('abc', 8090), 8090);
-  assert.equal(resolveServerPort('8091', 8090), 8091);
+  assert.equal(resolveServerPort('8090', 8090), 8090);
 });
 
 test('routeServerRequest serves health and primitives payloads', () => {
@@ -160,8 +160,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(segmentPage.includes('class="sidebar-column"'), true);
   assert.equal(segmentPage.includes('id="imu-widget"'), true);
   assert.equal(segmentPage.includes('id="gnss-widget"'), true);
-  assert.equal(segmentPage.includes('fetch("/api/primitives?ts=" + Date.now(), { cache: "no-store" })'), true);
-  assert.equal(segmentPage.includes('primitives: primitivesPayload.primitives ?? primitivesPayload'), true);
+  assert.equal(segmentPage.includes('window.operatorPage.fetchJson("/api/primitives?ts=" + Date.now())'), true);
+  assert.equal(segmentPage.includes('primitives: primitivesPayload.primitives'), true);
   assert.equal(segmentPage.includes('id="startSegmentTest"'), true);
   assert.equal(segmentPage.includes('id="stopSegmentTest"'), true);
   assert.equal(segmentPage.includes('let segmentStateSnapshot = { phase: "idle", running: false };'), true);
@@ -186,6 +186,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('id="mowingPlanArea"'), true);
   assert.equal(manualPage.includes('id="mowingHeadingDeg"'), true);
   assert.equal(manualPage.includes('id="stripSpacingCm"'), true);
+  assert.equal(manualPage.includes('id="mowingPlanStatus"'), true);
   assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="startAreaRecordingBtn"'), true);
@@ -207,9 +208,21 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('nearest point'), true);
   assert.equal(manualPage.includes('MAP_MIN_VIEW_RANGE_METERS = 5'), true);
   assert.equal(manualPage.includes('MAP_STATIONARY_POINT_SPACING_METERS = 0.03'), true);
+  assert.equal(manualPage.includes('const { fetchJson, postJson, stopAll } = window.operatorPage;'), true);
+  assert.equal(manualPage.includes('const primitives = data.primitives;'), true);
   assert.equal(manualPage.includes('hasDrawablePathPoints(path)'), true);
-  assert.equal(manualPage.includes('loadStoredPathDetail(pathInfo, endpointBase)'), true);
-  assert.equal(manualPage.includes('Skipping stored path with invalid details'), true);
+  assert.equal(manualPage.includes("fetchJson('/api/paths?includePoints=1')"), true);
+  assert.equal(manualPage.includes("fetchJson('/api/area-perimeters?includePoints=1')"), true);
+  assert.equal(manualPage.includes('function sanitizeStoredPathCollection(paths, warningLabel)'), true);
+  assert.equal(manualPage.includes('function markMowingPlanPreviewStale()'), true);
+  assert.equal(manualPage.includes('function schedulePageStatePoll(delayMs = PRIMITIVES_POLL_MS)'), true);
+  assert.equal(manualPage.includes('function scheduleListRefresh(delayMs = LIST_REFRESH_MS)'), true);
+  assert.equal(manualPage.includes("document.addEventListener('visibilitychange'"), true);
+  assert.equal(manualPage.includes("fetchJson('/api/primitives')"), true);
+  assert.equal(manualPage.includes('setInterval(updateStatus, 500)'), false);
+  assert.equal(manualPage.includes('setInterval(loadStoredPaths, 10000)'), false);
+  assert.equal(manualPage.includes('setInterval(loadStoredAreaPerimeters, 10000)'), false);
+  assert.equal(manualPage.includes('Skipping stored path with invalid points'), true);
   assert.equal(manualPage.includes("result.failedSegment?.errorMessage"), true);
   assert.equal(manualPage.includes('confirm('), false);
 

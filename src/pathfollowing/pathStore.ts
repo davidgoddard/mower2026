@@ -4,7 +4,7 @@
 
 import { readFile, readdir, unlink, access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { IPathStore, PathPoint, StoredPath } from "./pathFollowerApi.js";
+import { IPathStore, PathPoint, StoredMowingDefaults, StoredPath, StoredPathSaveOptions } from "./pathFollowerApi.js";
 import { LoggerScope } from "../logging/types.js";
 import { writeJsonFile } from "../config/jsonFileStore.js";
 
@@ -32,7 +32,7 @@ export class PathStore implements IPathStore {
     await mkdir(this.storageDirectory, { recursive: true });
   }
 
-  async savePath(name: string, points: PathPoint[]): Promise<void> {
+  async savePath(name: string, points: PathPoint[], options: StoredPathSaveOptions = {}): Promise<void> {
     // Defensive copy: caller may continue to mutate the passed array (the
     // recorder appends new points after stop), and the cached value would
     // otherwise alias their state.
@@ -41,6 +41,7 @@ export class PathStore implements IPathStore {
       name,
       points: snapshotPoints,
       createdAt: Date.now(),
+      mowingDefaults: normalizeStoredMowingDefaults(options.mowingDefaults),
       metadata: {
         totalDistance: this.calculateTotalDistance(snapshotPoints),
         pointCount: snapshotPoints.length,
@@ -184,6 +185,7 @@ export class PathStore implements IPathStore {
       name: typeof value.name === "string" ? value.name : "",
       points,
       createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
+      mowingDefaults: normalizeStoredMowingDefaults(value.mowingDefaults),
       metadata: {
         totalDistance: typeof metadata.totalDistance === "number"
           ? metadata.totalDistance
@@ -202,4 +204,20 @@ export class PathStore implements IPathStore {
     }
     return total;
   }
+}
+
+function normalizeStoredMowingDefaults(raw: unknown): StoredMowingDefaults | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+
+  const value = raw as Partial<StoredMowingDefaults>;
+  if (!Number.isFinite(value.headingDeg) || !Number.isFinite(value.stripSpacingMeters)) {
+    return undefined;
+  }
+
+  return {
+    headingDeg: Number(value.headingDeg),
+    stripSpacingMeters: Number(value.stripSpacingMeters),
+  };
 }

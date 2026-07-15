@@ -13,14 +13,24 @@ export interface PathPoint {
   readonly capturedAt: number;
 }
 
+export interface StoredMowingDefaults {
+  readonly headingDeg: number;
+  readonly stripSpacingMeters: number;
+}
+
 export interface StoredPath {
   readonly name: string;
   readonly points: PathPoint[];
   readonly createdAt: number;
+  readonly mowingDefaults?: StoredMowingDefaults;
   readonly metadata: {
     totalDistance: number;
     pointCount: number;
   };
+}
+
+export interface StoredPathSaveOptions {
+  readonly mowingDefaults?: StoredMowingDefaults;
 }
 
 /**
@@ -52,7 +62,7 @@ export interface PathRecorderOptions {
 
 export interface IPathRecorder {
   startRecording(pathName: string): void;
-  stopAndSave(): Promise<StoredPath>;
+  stopAndSave(options?: StoredPathSaveOptions): Promise<StoredPath>;
   cancel(): void;
   isRecording(): boolean;
   getPointCount(): number;
@@ -62,7 +72,7 @@ export interface IPathRecorder {
  * Path storage interface
  */
 export interface IPathStore {
-  savePath(name: string, points: PathPoint[]): Promise<void>;
+  savePath(name: string, points: PathPoint[], options?: StoredPathSaveOptions): Promise<void>;
   loadPath(name: string): Promise<StoredPath>;
   listPaths(): Promise<string[]>;
   deletePath(name: string): Promise<void>;

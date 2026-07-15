@@ -33,4 +33,5 @@
 - Current manual I2C exercisers depend on `i2c-bus`, which is not presently a safe choice for Node 22.
 - Use `nvm` to select Node 20 before running `npm install` or any manual hardware script.
 - Rebuild native dependencies whenever the Node major version changes.
-- The production launcher executes `dist/server/main.js`, which now supervises a public web process and a separate local control process (`dist/server/controlMain.js`), so `npm run build` is required before `npm run start` or `systemctl start mower`.
+- The production launcher executes `dist/server/main.js`, which now directly starts the single app/control HTTP server used by the operator pages and `/api/*`, so `npm run build` is required before `npm run start` or `systemctl start mower`.
+- When working from a workstation-mounted clone instead of `/home/mower/mower`, prefer the on-mower MCP server for `sync`, `build`, `test`, and log inspection. See [docs/mcp-server.md](mcp-server.md) for setup and usage.

@@ -1,4 +1,5 @@
 import { getSensorWidgetScriptTag, getSensorWidgetLayoutStyles } from "./liveSensorWidgets.js";
+import { getOperatorPageCommonScriptTag } from "./operatorPageCommon.js";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 
 /**
@@ -630,6 +631,7 @@ ${getAppDialogStyles()}
     }
   </style>
 ${getSensorWidgetScriptTag()}
+${getOperatorPageCommonScriptTag()}
 </head>
 <body>
   <div class="header">
@@ -1025,12 +1027,10 @@ ${getAppDialogScript()}
     // Update UI with status data
     async function updateStatus() {
       try {
-        const [turnResponse, primitivesResponse] = await Promise.all([
-          fetch('/api/turn/status'),
-          fetch('/api/primitives')
+        const [data, primitives] = await Promise.all([
+          window.operatorPage.fetchJson('/api/turn/status'),
+          window.operatorPage.fetchJson('/api/primitives')
         ]);
-        const data = await turnResponse.json();
-        const primitives = await primitivesResponse.json();
         updateSensorWidgets(primitives);
         turnStateSnapshot = data.state ?? { status: 'idle' };
         realPoseValidationSnapshot = data.realPoseValidation ?? null;
@@ -1142,11 +1142,7 @@ ${getAppDialogScript()}
 
       try {
         const angle = getRequestedStartAngle();
-        await fetch('/api/turn/execute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ angleDeg: angle, enableLearning: true })
-        });
+        await window.operatorPage.postJson('/api/turn/execute', { angleDeg: angle, enableLearning: true });
         await updateStatus();
       } catch (error) {
         alert('Failed to execute turn: ' + error.message);
@@ -1163,11 +1159,7 @@ ${getAppDialogScript()}
 
       try {
         const startAngleDeg = getRequestedStartAngle();
-        await fetch('/api/turn/train-large', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ iterations: 1, startAngleDeg })
-        });
+        await window.operatorPage.postJson('/api/turn/train-large', { iterations: 1, startAngleDeg });
         await updateStatus();
       } catch (error) {
         alert('Failed to train large angles: ' + error.message);
@@ -1184,11 +1176,7 @@ ${getAppDialogScript()}
 
       try {
         const startAngleDeg = getRequestedStartAngle();
-        await fetch('/api/turn/train-small', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targetErrorDeg: 2, startAngleDeg })
-        });
+        await window.operatorPage.postJson('/api/turn/train-small', { targetErrorDeg: 2, startAngleDeg });
         await updateStatus();
       } catch (error) {
         alert('Failed to train small angles: ' + error.message);
@@ -1205,11 +1193,7 @@ ${getAppDialogScript()}
 
       try {
         await updateStatus();
-        await fetch('/api/turn/train-real-pose', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ iterations: 20 })
-        });
+        await window.operatorPage.postJson('/api/turn/train-real-pose', { iterations: 20 });
         await updateStatus();
       } catch (error) {
         alert('Failed to validate real pose: ' + error.message);
@@ -1221,7 +1205,7 @@ ${getAppDialogScript()}
 
     document.getElementById('stopCurrentRun').addEventListener('click', async () => {
       try {
-        await fetch('/api/stop', { method: 'POST' });
+        await window.operatorPage.stopAll();
         await updateStatus();
       } catch (error) {
         alert('Failed to stop current run: ' + error.message);
@@ -1232,7 +1216,7 @@ ${getAppDialogScript()}
     document.getElementById('clearHistory').addEventListener('click', async () => {
       if (await window.appConfirm('Are you sure you want to clear all turn history?')) {
         try {
-          await fetch('/api/turn/clear-history', { method: 'POST' });
+          await window.operatorPage.postJson('/api/turn/clear-history', {});
           await updateStatus();
         } catch (error) {
           alert('Failed to clear history: ' + error.message);
@@ -1244,7 +1228,7 @@ ${getAppDialogScript()}
     document.getElementById('resetLearning').addEventListener('click', async () => {
       if (await window.appConfirm('Are you sure you want to reset turn learning parameters to defaults?')) {
         try {
-          await fetch('/api/turn/reset-learning', { method: 'POST' });
+          await window.operatorPage.postJson('/api/turn/reset-learning', {});
           await updateStatus();
         } catch (error) {
           alert('Failed to reset learning: ' + error.message);

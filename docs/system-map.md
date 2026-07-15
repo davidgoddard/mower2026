@@ -49,7 +49,11 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## UI Dialogs
 - `src/server/appDialogs.ts`: shared lightweight modal alert/confirm overlay used by operator pages.
-- `src/server/manualDrivePage.ts`: Drive & Paths UI with a lighter custom popup overlay for alerts.
+- `src/server/manualDrivePage.ts`: Drive & Paths page asset loader and HTML/CSS/JS assembly for the manual-drive UI.
+- `src/server/manual-drive-page/page.html`: Drive & Paths HTML shell.
+- `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling.
+- `src/server/manual-drive-page/page.js`: Drive & Paths browser logic for map drawing, mowing preview, recording, and path actions.
+  - area-perimeter saves include the current mowing strip heading and strip spacing, and selecting an area restores those saved defaults into the preview controls
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
 - `src/server/driveTuningPage.ts`: drive tuning UI uses the shared popup overlay for alerts.
   - staged tuning flow: short-distance brake/CTE learning, long heading-bias tuning, and long heading-gain tuning
@@ -240,6 +244,7 @@ This document maps problem domains to candidate files removing the need for Code
 ## Path Following
 - `src/pathfollowing/pathFollowerApi.ts`: **PATH FOLLOWING API** - shared types for recorded paths and path storage
   - `PathPoint`, `StoredPath`: shared geometry types
+  - `StoredPath` may include optional `mowingDefaults` for area-specific strip heading and strip spacing
   - `IPathRecorder`: interface for recording paths during manual driving
   - `IPathStore`: interface for persistent path storage
 - `src/pathfollowing/obstaclePathShaper.ts`: closed-loop path shaping for recorded perimeters
@@ -279,6 +284,7 @@ This document maps problem domains to candidate files removing the need for Code
   - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
   - in-memory caching for loaded paths
   - path metadata: total distance, point count, creation timestamp
+  - mowing area entries may also persist optional strip-heading / strip-spacing defaults alongside the geometry
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
   - records fused GNSS and dead-reckoning poses, ignores unknown-quality poses, and skips implausible segment jumps while keeping skip counts in the stop summary
   - always persists raw recorded points so future perimeter-shaping fixes can be applied at runtime without forcing an operator re-trace
@@ -294,6 +300,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/mowingPlanner.ts`: preview geometry for mowing-area strip plans
   - normalizes the requested mowing axis to 0-180 degrees because opposite directions produce the same strip layout
   - clips parallel strips to the selected mowing area perimeter using the requested strip spacing, defaulting to 30cm spacing for the 40cm blade
+  - stages preview generation as plan prep, obstacle-band filtering, strip interval clipping, traversal sequencing, and connector generation so the heavy preview work stays modular
   - selects the nearest obstacle-clear line-of-sight area perimeter entry point for mow-start entry planning
   - outside-area starts may join directly from outside so long as the approach only meets the area boundary at the chosen join and does not cross an obstacle; the "midpoint must stay inside" guard applies only when already inside the area
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
@@ -302,8 +309,15 @@ This document maps problem domains to candidate files removing the need for Code
   - sequences strips in locked normal-axis order and marks per-strip traversal direction for boustrophedon preview and execution
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
-  - traversal sequencing now lets adjacent strip ends compete with same-offset obstacle-split continuations and penalizes routed same-offset continuation, so an obstacle acts more like a divider than a cue to keep resuming the same lane around it
+  - traversal sequencing now treats obstacle-perimeter routing as an expensive last resort, so adjacent non-routed strip ends win whenever they are still reasonably competitive
+  - same-offset obstacle-split continuation carries an extra penalty on top of the general routed-obstacle cost, pushing isolated fragments behind locally adjacent mowable strips until the planner has effectively exhausted the nearby region
   - returns logical strip segments for canvas preview and future execution planning
+- `src/pathfollowing/experimentalAdaptiveAreaSmoothing.ts`: experimental adaptive low-pass area smoothing harness module
+  - resamples the recorded area loop, applies curvature-weighted smoothing, and iteratively blends failing points back toward the original geometry until they are inside and within the allowed deviation
+- `src/pathfollowing/areaPerimeterPathCleaner.ts`: production mowing-area perimeter cleanup now uses the adaptive smoother plus bounded-error reduction
+  - repairs rough non-corner closure seams first by blending about 1 metre of the tail/head neighbourhood into a tangent-aligned join, so start/end recording noise does not survive as a splice kink
+  - keeps adaptive smoothing within the configured 10cm raw-boundary deviation budget, then applies a tighter 5cm reduction bound when decimating the smoothed result
+  - emits raw, smoothed, reduced, and chosen outlines so the preview UI can compare the recorded perimeter against the production outline
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
   - persists exact in-progress mowing step state through the app-server callback so failed or stopped sessions can resume from the saved operation rather than rebuilding the strip plan from scratch
 - `src/pathfollowing/mowingResumeStore.ts`: JSON persistence for the saved mowing resume state
@@ -330,7 +344,10 @@ This document maps problem domains to candidate files removing the need for Code
   - keeps two-point connectors as direct line drives between standoff targets
   - starts an in-run area watchdog after the initial perimeter trace and requests an immediate stop if the mower drifts more than 5 cm outside the mowing area
   - stops the mowing workflow if a boundary trace does not complete successfully
-- `src/server/manualDrivePage.ts`: combined Drive & Paths UI
+- `src/server/manualDrivePage.ts`: combined Drive & Paths UI asset loader
+  - serves the HTML shell from `src/server/manual-drive-page/page.html`
+  - injects shared dialog markup/script/styles into the external page assets
+  - exposes the page-specific `/manual-drive.css` and `/manual-drive.js` assets through the server routes
   - live position map at the top of the page
   - manual-drive telemetry cards
   - path recording controls for named obstacle paths
@@ -371,6 +388,8 @@ This document maps problem domains to candidate files removing the need for Code
   - `POST /api/area-perimeter/verify` - drive to the nearest mowing area perimeter point, align, and follow it
   - `POST /api/area-perimeter/delete` - delete a stored mowing area perimeter
   - `POST /api/mowing-plan/preview` - generate a strip preview for a selected mowing area perimeter, heading, and strip spacing
+    - emits `mowing.preview_timing` with timing breakdowns for area load, area shaping, obstacle shaping, and plan generation
+    - returns raw, smoothed, and reduced area outlines plus area-geometry timings and per-stage mowing-plan timings for the preview canvas
   - subscribes to `poseUpdate` events from pose fusion
   - records position every 10cm (configurable distance threshold)
   - start/stop recording with named paths
@@ -468,13 +487,14 @@ This document maps problem domains to candidate files removing the need for Code
   - vehicle geometry helpers: body-frame offset translation and projection for GNSS control-point calibration
 
 ## Operation And Server Entry
-- `src/server/main.ts`: production supervisor entrypoint (compiled to `dist/server/main.js`).
-  - starts a lightweight public web process and a separate local-only control process, then waits for the control process to become healthy before exposing the public listener
-- `src/server/controlMain.ts`: control-process entrypoint for the hardware-facing runtime (compiled to `dist/server/controlMain.js`).
-- `src/server/webServer.ts`: public web server that serves operator pages and proxies `/api/*`, `/health`, and other non-page requests to the control process.
-- `src/server/appServer.ts`: control-process HTTP server bootstrapping, routing, and graceful shutdown.
-  - retains the hardware-facing routes, controller lifecycle wiring, and graceful-stop behavior for the control process
-  - still knows how to render pages, but the production public listener now serves those pages from the separate web process
+- `src/server/main.ts`: production entrypoint (compiled to `dist/server/main.js`).
+  - directly starts the single app/control HTTP server by delegating to `src/server/controlMain.ts`, so the operator pages and `/api/*` share one process and one port
+- `src/server/controlMain.ts`: hardware-facing runtime entrypoint (compiled to `dist/server/controlMain.js`).
+  - defaults to the single production app port (`8090`) when no explicit port env var is provided
+- `src/server/webServer.ts`: optional proxy-style web server that serves operator pages and proxies `/api/*`, `/health`, and other non-page requests to a separate control process; kept for non-production use only.
+- `src/server/appServer.ts`: app/control HTTP server bootstrapping, routing, and graceful shutdown.
+  - owns both the operator pages and the hardware-facing API routes in the production runtime
+  - serves shared browser assets including `/sensor-widgets.js` and `/operator-page-common.js`
   - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
@@ -494,6 +514,8 @@ This document maps problem domains to candidate files removing the need for Code
   - `getSensorWidgetScriptTag()`: returns `<script src="/sensor-widgets.js" defer></script>` for page `<head>`
   - `getSensorWidgetLayoutStyles()`: returns minimal layout CSS (flex/grid placement of the custom elements); contains no typography or colour rules so it cannot override component shadow CSS
   - used by: deadReckoningPage, driveTuningPage, homePage, segmentTestingPage, turnTuningPage
+- `src/server/operatorPageCommon.ts`: shared browser utility bundle for operator pages; served at `/operator-page-common.js`.
+  - centralises `window.operatorPage.fetchJson(...)`, `postJson(...)`, and `stopAll()` so operator pages share one fetch/error-handling contract
 - `src/server/primitivesStore.ts`: in-memory primitives state holder for the live web widgets.
   - primitives payload shape contains `imu`, `gnss`, `poseFusion`, and `motors` sections.
   - `poseFusion.usingGnssHeading` is the app-level flag consumed by the live widgets to show whether GNSS is currently rebasing the IMU heading.
@@ -526,9 +548,10 @@ This document maps problem domains to candidate files removing the need for Code
 - `tsconfig.json`: TypeScript compiler and project type-check settings.
 - `src/index.ts`: main module exports including heading type system for external consumers.
 - `test/index.test.js`: basic runtime module tests including heading normalization.
+- `scripts/run-area-smoothing-harness.mjs`: local/manual harness that loads an area perimeter, runs the experimental adaptive smoother, prints stats, and writes an SVG overlay for visual inspection.
 
 ## Remote Tooling — On-Mower MCP Server
-- `docs/mcp-server.md`: usage guide and operator/workstation setup. **Required reading**; see [CLAUDE.md](../CLAUDE.md).
-- `tools/mcp-server/server.js`: HTTP MCP server that runs on the mower. Exposes four tools to Claude Code on the dev workstation: `getLatestLogs(n)`, `build` (`npm run build`), `test` (`npm run test`), `sync` (`git fetch --all --prune` + `git pull --ff-only`). Bearer-token auth, stateless streamable-HTTP transport, per-request server/transport pair.
+- `docs/mcp-server.md`: usage guide and operator/workstation setup for Codex and Claude Code. **Required reading** when remote on-mower verification is needed.
+- `tools/mcp-server/server.js`: HTTP MCP server that runs on the mower. Exposes workstation-agent tools for remote verification and diagnosis: `getLatestLogs(...)` with optional regex filtering, `readFile(...)` for bounded remote file inspection, `build`, `test` (including narrowed test-file / test-name runs and optional saved output), and `sync` (`git fetch --all --prune` + `git pull --ff-only`). Bearer-token auth, stateless streamable-HTTP transport, per-request server/transport pair.
 - `tools/mcp-server/package.json`: isolated dependency manifest for the server (`@modelcontextprotocol/sdk`, `zod`); kept separate from runtime dependencies so the mower app's `node_modules` is not affected.
 - `systemd/mower-mcp.service.template`: systemd unit template; reads `MOWER_MCP_TOKEN` from `/etc/mower-mcp.env` and runs the server as the `mower` user on port 8765 by default.

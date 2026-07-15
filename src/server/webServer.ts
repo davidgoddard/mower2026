@@ -4,9 +4,10 @@ import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
 import { getSegmentTestingPageHtml } from "./segmentTestingPage.js";
 import { renderPathTracingPage } from "./pathTracingPage.js";
-import { getManualDrivePageHtml } from "./manualDrivePage.js";
+import { getManualDrivePageCss, getManualDrivePageHtml, getManualDrivePageJs } from "./manualDrivePage.js";
 import { getDeadReckoningPageHtml } from "./deadReckoningPage.js";
 import { SENSOR_WIDGETS_JS } from "./liveSensorWidgets.js";
+import { OPERATOR_PAGE_COMMON_JS } from "./operatorPageCommon.js";
 
 export interface StartMowerWebServerOptions {
   host?: string;
@@ -59,6 +60,14 @@ function writeHtml(response: ServerResponse, html: string): void {
     "Cache-Control": "no-store",
   });
   response.end(html);
+}
+
+function writeTextAsset(response: ServerResponse, contentType: string, body: string): void {
+  response.writeHead(200, {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store",
+  });
+  response.end(body);
 }
 
 function writeStaticWidgetBundle(response: ServerResponse): void {
@@ -127,6 +136,21 @@ export async function startMowerWebServer(options: StartMowerWebServerOptions): 
 
     if (method === "GET" && requestUrl.pathname === "/sensor-widgets.js") {
       writeStaticWidgetBundle(response);
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/manual-drive.css") {
+      writeTextAsset(response, "text/css; charset=utf-8", getManualDrivePageCss());
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/manual-drive.js") {
+      writeTextAsset(response, "application/javascript; charset=utf-8", getManualDrivePageJs());
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/operator-page-common.js") {
+      writeTextAsset(response, "application/javascript; charset=utf-8", OPERATOR_PAGE_COMMON_JS);
       return;
     }
 

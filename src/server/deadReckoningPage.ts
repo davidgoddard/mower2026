@@ -1,4 +1,5 @@
 import { getSensorWidgetScriptTag, getSensorWidgetLayoutStyles } from "./liveSensorWidgets.js";
+import { getOperatorPageCommonScriptTag } from "./operatorPageCommon.js";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 
 
@@ -530,6 +531,7 @@ ${getAppDialogStyles()}
       }
     </style>
 ${getSensorWidgetScriptTag()}
+${getOperatorPageCommonScriptTag()}
   </head>
   <body>
     <div class="header">
@@ -1051,13 +1053,13 @@ ${getAppDialogScript()}
       let calibrationRunning = false;
 
       async function fetchStatus() {
-        const [statusRes, primitivesRes] = await Promise.all([
-          fetch('/api/dead-reckoning/status?ts=' + Date.now(), { cache: 'no-store' }),
-          fetch('/api/primitives'),
+        const [status, primitives] = await Promise.all([
+          window.operatorPage.fetchJson('/api/dead-reckoning/status?ts=' + Date.now()),
+          window.operatorPage.fetchJson('/api/primitives'),
         ]);
         return {
-          status: await statusRes.json(),
-          primitives: await primitivesRes.json(),
+          status,
+          primitives,
         };
       }
 
@@ -1148,15 +1150,7 @@ ${getAppDialogScript()}
             await appAlert('Please enter a valid arc sweep between 20° and 90°.');
             return;
           }
-          const res = await fetch('/api/dead-reckoning/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lineDistanceMeters, arcSweepDegrees }),
-          });
-          if (!res.ok) {
-            const err = await res.json();
-            await appAlert('Failed to start: ' + (err.error || res.statusText));
-          }
+          await window.operatorPage.postJson('/api/dead-reckoning/start', { lineDistanceMeters, arcSweepDegrees });
           await update();
         } catch (err) {
           document.getElementById('startBtn').disabled = false;
@@ -1168,11 +1162,7 @@ ${getAppDialogScript()}
 
       document.getElementById('stopBtn').addEventListener('click', async () => {
         try {
-          await fetch('/api/stop', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
+          await window.operatorPage.stopAll();
           await update();
         } catch (err) {
           console.error('Stop failed:', err);
@@ -1191,15 +1181,8 @@ ${getAppDialogScript()}
           const body = c.leftMetersPerTick !== null
             ? { leftMetersPerTick: c.leftMetersPerTick, rightMetersPerTick: c.rightMetersPerTick, wheelbaseMeters: c.wheelbaseMeters }
             : { encoderMetersPerTick: c.encoderMetersPerTick };
-          const res = await fetch('/api/dead-reckoning/apply', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            await appAlert('Failed to apply: ' + (data.error || res.statusText));
-          } else {
+          const data = await window.operatorPage.postJson('/api/dead-reckoning/apply', body);
+          {
             const note = data.leftMetersPerTick !== undefined
               ? \`Saved! L:\${data.leftMetersPerTick.toFixed(6)} R:\${data.rightMetersPerTick.toFixed(6)} wb:\${data.wheelbaseMeters.toFixed(4)}m\`
               : \`Saved! \${data.encoderMetersPerTick.toFixed(6)} m/tick\`;
@@ -1251,8 +1234,7 @@ ${getAppDialogScript()}
       }
 
       async function fetchPoseSnapshot() {
-        const res = await fetch('/api/primitives', { cache: 'no-store' });
-        const data = await res.json();
+        const data = await window.operatorPage.fetchJson('/api/primitives');
         return readPoseSnapshot(data);
       }
 
@@ -1347,22 +1329,13 @@ ${getAppDialogScript()}
 
         let driveResult = null;
         try {
-          const res = await fetch('/api/drive/execute', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              targetX,
-              targetY,
-              learningEnabled: false,
-            }),
+          driveResult = await window.operatorPage.postJson('/api/drive/execute', {
+            targetX,
+            targetY,
+            learningEnabled: false,
           });
-          driveResult = await res.json();
-          if (!res.ok) {
-            setMoveStatus('Drive failed: ' + (driveResult?.error || res.statusText), 'error');
-            return;
-          }
         } catch (err) {
-          setMoveStatus('Network error during drive: ' + err.message, 'error');
+          setMoveStatus('Drive failed: ' + err.message, 'error');
           return;
         } finally {
           moveRunning = false;
@@ -1404,11 +1377,7 @@ ${getAppDialogScript()}
 
       document.getElementById('moveStopBtn').addEventListener('click', async () => {
         try {
-          await fetch('/api/stop', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
+          await window.operatorPage.stopAll();
           setMoveStatus('Stop requested.', 'error');
         } catch (err) {
           setMoveStatus('Failed to send stop: ' + err.message, 'error');

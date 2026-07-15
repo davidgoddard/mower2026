@@ -1,4 +1,5 @@
 import { getSensorWidgetScriptTag, getSensorWidgetLayoutStyles } from "./liveSensorWidgets.js";
+import { getOperatorPageCommonScriptTag } from "./operatorPageCommon.js";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 
 /**
@@ -382,6 +383,7 @@ ${getAppDialogStyles()}
       }
     </style>
 ${getSensorWidgetScriptTag()}
+${getOperatorPageCommonScriptTag()}
   </head>
   <body>
     <div class="header">
@@ -672,15 +674,13 @@ ${getAppDialogScript()}
       }
 
       async function fetchStatus() {
-        const [statusResponse, primitivesResponse] = await Promise.all([
-          fetch("/api/drive/status?ts=" + Date.now(), {
-            cache: "no-store",
-          }),
-          fetch("/api/primitives")
+        const [status, primitives] = await Promise.all([
+          window.operatorPage.fetchJson("/api/drive/status?ts=" + Date.now()),
+          window.operatorPage.fetchJson("/api/primitives")
         ]);
         return {
-          status: await statusResponse.json(),
-          primitives: await primitivesResponse.json(),
+          status,
+          primitives,
         };
       }
 
@@ -752,15 +752,7 @@ ${getAppDialogScript()}
       }
 
       async function postAction(action, body = {}) {
-        const response = await fetch("/api/drive/" + action, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!response.ok) {
-          throw new Error(await response.text());
-        }
-        return response.json();
+        return window.operatorPage.postJson("/api/drive/" + action, body);
       }
 
       document.getElementById("startDriveTuning").addEventListener("click", async () => {
@@ -821,7 +813,7 @@ ${getAppDialogScript()}
 
       document.getElementById("stopDriveTuning").addEventListener("click", async () => {
         try {
-          await fetch("/api/stop", { method: "POST" });
+          await window.operatorPage.stopAll();
           await update();
         } catch (error) {
           alert("Failed to stop drive tuning: " + (error instanceof Error ? error.message : String(error)));
@@ -831,7 +823,7 @@ ${getAppDialogScript()}
       document.getElementById("resetDriveLearning").addEventListener("click", async () => {
         if (await window.appConfirm("Are you sure you want to reset drive learning parameters to defaults?")) {
           try {
-            await fetch("/api/drive/reset-learning", { method: "POST" });
+            await window.operatorPage.postJson("/api/drive/reset-learning", {});
             await update();
           } catch (error) {
             alert("Failed to reset drive learning: " + (error instanceof Error ? error.message : String(error)));

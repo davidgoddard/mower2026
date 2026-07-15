@@ -1,4 +1,5 @@
 import { getSensorWidgetScriptTag, getSensorWidgetLayoutStyles } from "./liveSensorWidgets.js";
+import { getOperatorPageCommonScriptTag } from "./operatorPageCommon.js";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 
 /**
@@ -530,6 +531,7 @@ ${getAppDialogStyles()}
       }
     </style>
 ${getSensorWidgetScriptTag()}
+${getOperatorPageCommonScriptTag()}
   </head>
   <body>
     <div class="header">
@@ -725,14 +727,13 @@ ${getAppDialogScript()}
       }
 
       async function fetchStatus() {
-        const [statusResponse, primitivesResponse] = await Promise.all([
-          fetch("/api/segment/status?ts=" + Date.now(), { cache: "no-store" }),
-          fetch("/api/primitives?ts=" + Date.now(), { cache: "no-store" }),
+        const [status, primitivesPayload] = await Promise.all([
+          window.operatorPage.fetchJson("/api/segment/status?ts=" + Date.now()),
+          window.operatorPage.fetchJson("/api/primitives?ts=" + Date.now()),
         ]);
-        const primitivesPayload = await primitivesResponse.json();
         return {
-          status: await statusResponse.json(),
-          primitives: primitivesPayload.primitives ?? primitivesPayload,
+          status,
+          primitives: primitivesPayload.primitives,
         };
       }
 
@@ -845,15 +846,7 @@ ${getAppDialogScript()}
       }
 
       async function postAction(action, body = {}) {
-        const response = await fetch("/api/segment/" + action, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!response.ok) {
-          throw new Error(await response.text());
-        }
-        return response.json();
+        return window.operatorPage.postJson("/api/segment/" + action, body);
       }
 
       document.getElementById("startSegmentTest").addEventListener("click", async () => {
@@ -876,7 +869,7 @@ ${getAppDialogScript()}
 
       document.getElementById("stopSegmentTest").addEventListener("click", async () => {
         try {
-          await fetch("/api/stop", { method: "POST" });
+          await window.operatorPage.stopAll();
           await update();
         } catch (error) {
           alert("Failed to stop segment testing: " + (error instanceof Error ? error.message : String(error)));

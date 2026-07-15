@@ -1,0 +1,1420 @@
+    const $ = (id) => document.getElementById(id);
+    const { fetchJson, postJson, stopAll } = window.operatorPage;
+
+    function format(value, decimals = 2) {
+      return Number(value).toFixed(decimals);
+    }
+
+    function jsString(value) {
+      return JSON.stringify(String(value));
+    }
+
+    function htmlAttribute(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function normalizeAxisHeading(headingDeg) {
+      const normalized = ((Number(headingDeg) % 180) + 180) % 180;
+      return Number.isFinite(normalized) ? normalized : 0;
+    }
+
+    function describeHeading(headingDeg) {
+      const normalized = normalizeAxisHeading(headingDeg);
+      if (normalized >= 112.5 && normalized < 157.5) {
+        return 'NW-SE';
+      }
+      if (normalized >= 67.5 && normalized < 112.5) {
+        return 'N-S';
+      }
+      if (normalized >= 22.5 && normalized < 67.5) {
+        return 'NE-SW';
+      }
+      return 'E-W';
+    }
+
+    const MOWING_HEADING_STORAGE_KEY = 'manualDrivePage.mowingHeadingDeg';
+    const DEFAULT_STRIP_SPACING_CM = 30;
+    function loadStoredMowingHeading() {
+      try {
+        return window.localStorage.getItem(MOWING_HEADING_STORAGE_KEY);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function storeMowingHeading(headingDeg) {
+      try {
+        window.localStorage.setItem(MOWING_HEADING_STORAGE_KEY, String(Math.round(normalizeAxisHeading(headingDeg))));
+      } catch (_error) {
+        // Ignore storage failures; the page still works without persistence.
+      }
+    }
+
+    function updateHeadingLabel() {
+      const heading = normalizeAxisHeading(mowingHeadingInput.value);
+      mowingHeadingValue.textContent = `${Math.round(heading)}° ${describeHeading(heading)}`;
+    }
+
+    function setMowingHeading(headingDeg) {
+      const heading = Math.round(normalizeAxisHeading(headingDeg));
+      mowingHeadingInput.value = String(heading);
+      storeMowingHeading(heading);
+      updateHeadingLabel();
+      markMowingPlanPreviewStale();
+    }
+
+    function getStoredAreaPerimeterByName(areaName) {
+      return storedAreaPerimeters.find((path) => path.name === areaName) ?? null;
+    }
+
+    function applyAreaMowingDefaults(areaName) {
+      const area = getStoredAreaPerimeterByName(areaName);
+      const defaults = area?.mowingDefaults;
+      if (!defaults) {
+        return false;
+      }
+
+      if (Number.isFinite(defaults.headingDeg)) {
+        mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(defaults.headingDeg)));
+        storeMowingHeading(mowingHeadingInput.value);
+        updateHeadingLabel();
+      }
+      if (Number.isFinite(defaults.stripSpacingMeters) && defaults.stripSpacingMeters > 0) {
+        stripSpacingInput.value = String(Math.round(defaults.stripSpacingMeters * 100));
+      }
+      return true;
+    }
+
+    // Position history tracking
+    const positionHistory = [];
+    const MAX_HISTORY_MS = 10 * 60 * 1000; // 10 minutes
+    const MAP_MIN_VIEW_RANGE_METERS = 5;
+    const MAP_STATIONARY_POINT_SPACING_METERS = 0.03;
+    const MAP_HISTORY_RESET_DISTANCE_METERS = 2.0;
+    const canvas = $("mapCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // Path recording / management state
+    let recording = false;
+    let currentPathName = '';
+    let pointCount = 0;
+    let storedPaths = [];
+    let areaRecording = false;
+    let currentAreaPerimeterName = '';
+    let areaPointCount = 0;
+    let storedAreaPerimeters = [];
+    let mowingPlanPreview = null;
+    let selectedMowingPlanArea = '';
+    let mapTransform = null;
+    let headingDragStart = null;
+    let mowingActive = false;
+    let pageStatePollTimer = null;
+    let pageStatePollInFlight = false;
+    let pageStatePollFailureCount = 0;
+    let listRefreshTimer = null;
+    let listRefreshInFlight = false;
+    let lastListRefreshAt = 0;
+    let listsLoadedOnce = false;
+    let pathRecordingStatusInFlight = false;
+    let areaRecordingStatusInFlight = false;
+    let mowingStatusInFlight = false;
+
+    const PRIMITIVES_POLL_MS = 1000;
+    const LIST_REFRESH_MS = 30000;
+    const FAILURE_BACKOFF_MS = 5000;
+
+    // Elements
+    const pathNameInput = $("pathName");
+    const startRecordingBtn = $("startRecordingBtn");
+    const stopRecordingBtn = $("stopRecordingBtn");
+    const cancelRecordingBtn = $("cancelRecordingBtn");
+    const recordingIndicator = $("recordingIndicator");
+    const recordingStatusEl = $("recordingStatus");
+    const pointCountEl = $("pointCount");
+    const currentPathNameEl = $("currentPathName");
+    const pathsListEl = $("pathsList");
+    const areaPerimeterNameInput = $("areaPerimeterName");
+    const startAreaRecordingBtn = $("startAreaRecordingBtn");
+    const stopAreaRecordingBtn = $("stopAreaRecordingBtn");
+    const cancelAreaRecordingBtn = $("cancelAreaRecordingBtn");
+    const areaRecordingIndicator = $("areaRecordingIndicator");
+    const areaRecordingStatusEl = $("areaRecordingStatus");
+    const areaPointCountEl = $("areaPointCount");
+    const currentAreaPerimeterNameEl = $("currentAreaPerimeterName");
+    const areaPerimetersListEl = $("areaPerimetersList");
+    const mowingPlanAreaSelect = $("mowingPlanArea");
+    const mowingPlanStatusEl = $("mowingPlanStatus");
+    const mowingHeadingInput = $("mowingHeadingDeg");
+    const mowingHeadingValue = $("mowingHeadingValue");
+    const stripSpacingInput = $("stripSpacingCm");
+    const previewMowingPlanBtn = $("previewMowingPlanBtn");
+    const resumeMowingBtn = $("resumeMowingBtn");
+
+    function addPositionToHistory(x, y, heading, timestamp) {
+      const previous = positionHistory[positionHistory.length - 1];
+      if (previous) {
+        const movementMeters = Math.hypot(x - previous.x, y - previous.y);
+        if (movementMeters > MAP_HISTORY_RESET_DISTANCE_METERS) {
+          positionHistory.length = 0;
+          positionHistory.push({ x, y, heading, timestamp });
+          return;
+        }
+        if (movementMeters < MAP_STATIONARY_POINT_SPACING_METERS) {
+          positionHistory[positionHistory.length - 1] = { x, y, heading, timestamp };
+          return;
+        }
+      }
+
+      positionHistory.push({ x, y, heading, timestamp });
+
+      // Remove old points beyond 10 minutes
+      const cutoff = timestamp - MAX_HISTORY_MS;
+      while (positionHistory.length > 0 && positionHistory[0].timestamp < cutoff) {
+        positionHistory.shift();
+      }
+    }
+
+    function drawMap() {
+      if (positionHistory.length === 0 && storedPaths.length === 0 && storedAreaPerimeters.length === 0) {
+        ctx.fillStyle = "#f3f4f6";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        $("mapStats").textContent = "Waiting for position data...";
+        return;
+      }
+
+      const width = canvas.width;
+      const height = canvas.height;
+      const padding = 60;
+
+      // Clear canvas
+      ctx.fillStyle = "#f3f4f6";
+      ctx.fillRect(0, 0, width, height);
+
+      // Find bounds (include position history and stored paths)
+      let minX = Infinity, maxX = -Infinity;
+      let minY = Infinity, maxY = -Infinity;
+
+      for (const pos of positionHistory) {
+        minX = Math.min(minX, pos.x);
+        maxX = Math.max(maxX, pos.x);
+        minY = Math.min(minY, pos.y);
+        maxY = Math.max(maxY, pos.y);
+      }
+
+      for (const path of storedPaths) {
+        for (const point of path.points) {
+          minX = Math.min(minX, point.xMeters);
+          maxX = Math.max(maxX, point.xMeters);
+          minY = Math.min(minY, point.yMeters);
+          maxY = Math.max(maxY, point.yMeters);
+        }
+      }
+
+      for (const path of storedAreaPerimeters) {
+        for (const point of path.points) {
+          minX = Math.min(minX, point.xMeters);
+          maxX = Math.max(maxX, point.xMeters);
+          minY = Math.min(minY, point.yMeters);
+          maxY = Math.max(maxY, point.yMeters);
+        }
+      }
+
+      // Keep stationary GNSS jitter from zooming the map into centimetres.
+      const rawRangeX = maxX - minX;
+      const rawRangeY = maxY - minY;
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const viewRangeX = Math.max(rawRangeX, MAP_MIN_VIEW_RANGE_METERS);
+      const viewRangeY = Math.max(rawRangeY, MAP_MIN_VIEW_RANGE_METERS);
+      minX = centerX - (viewRangeX / 2);
+      maxX = centerX + (viewRangeX / 2);
+      minY = centerY - (viewRangeY / 2);
+      maxY = centerY + (viewRangeY / 2);
+
+      // Add padding to bounds
+      const rangeX = maxX - minX;
+      const rangeY = maxY - minY;
+      minX -= rangeX * 0.1;
+      maxX += rangeX * 0.1;
+      minY -= rangeY * 0.1;
+      maxY += rangeY * 0.1;
+
+      // Calculate scale to fit canvas
+      const scaleX = (width - 2 * padding) / (maxX - minX);
+      const scaleY = (height - 2 * padding) / (maxY - minY);
+      const scale = Math.min(scaleX, scaleY);
+
+      // Transform functions
+      const toCanvasX = (x) => padding + (x - minX) * scale;
+      const toCanvasY = (y) => height - padding - (y - minY) * scale;
+      mapTransform = {
+        minX,
+        minY,
+        scale,
+        padding,
+        width,
+        height,
+        toCanvasX,
+        toCanvasY,
+        toWorldX: (x) => minX + ((x - padding) / scale),
+        toWorldY: (y) => minY + ((height - padding - y) / scale),
+      };
+
+      // Draw grid
+      ctx.strokeStyle = "#e5e7eb";
+      ctx.lineWidth = 1;
+      const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(rangeX, rangeY) / 5)));
+
+      for (let x = Math.floor(minX / gridSize) * gridSize; x <= maxX; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(toCanvasX(x), padding);
+        ctx.lineTo(toCanvasX(x), height - padding);
+        ctx.stroke();
+      }
+      for (let y = Math.floor(minY / gridSize) * gridSize; y <= maxY; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(padding, toCanvasY(y));
+        ctx.lineTo(width - padding, toCanvasY(y));
+        ctx.stroke();
+      }
+
+      // Draw axes labels
+      ctx.fillStyle = "#6b7280";
+      ctx.font = "12px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("X (meters)", width / 2, height - 10);
+      ctx.save();
+      ctx.translate(15, height / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText("Y (meters)", 0, 0);
+      ctx.restore();
+
+      // Draw stored paths first (underneath)
+      const pathColors = [
+        'rgba(16, 185, 129, 0.4)', // green
+        'rgba(245, 158, 11, 0.4)',  // amber
+        'rgba(139, 92, 246, 0.4)',  // purple
+        'rgba(236, 72, 153, 0.4)',  // pink
+        'rgba(14, 165, 233, 0.4)',  // sky
+      ];
+
+      storedPaths.forEach((path, pathIndex) => {
+        const color = pathColors[pathIndex % pathColors.length];
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+
+        ctx.beginPath();
+        for (let i = 0; i < path.points.length; i++) {
+          const point = path.points[i];
+          const x = toCanvasX(point.xMeters);
+          const y = toCanvasY(point.yMeters);
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+
+        // Draw path name at start point
+        if (path.points.length > 0) {
+          const startPoint = path.points[0];
+          const sx = toCanvasX(startPoint.xMeters);
+          const sy = toCanvasY(startPoint.yMeters);
+
+          ctx.fillStyle = color.replace('0.4', '0.9');
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 3;
+          ctx.font = 'bold 14px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.strokeText(path.name, sx, sy - 10);
+          ctx.fillText(path.name, sx, sy - 10);
+
+          // Draw start marker
+          ctx.fillStyle = color.replace('0.4', '0.8');
+          ctx.beginPath();
+          ctx.arc(sx, sy, 6, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      });
+
+      const selectedAreaName = mowingPlanPreview?.areaName || selectedMowingPlanArea;
+      const perimeterColors = {
+        selected: 'rgba(37, 99, 235, 0.92)',
+        background: 'rgba(148, 163, 184, 0.22)',
+        backgroundText: 'rgba(100, 116, 139, 0.5)',
+      };
+
+      storedAreaPerimeters.forEach((path) => {
+        const isSelected = path.name === selectedAreaName;
+        const previewOwnsSelectedOutline = isSelected && mowingPlanPreview && Array.isArray(mowingPlanPreview.rawAreaPoints);
+        if (previewOwnsSelectedOutline) {
+          return;
+        }
+        const color = isSelected ? perimeterColors.selected : perimeterColors.background;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isSelected ? 5 : 3;
+
+        ctx.beginPath();
+        for (let i = 0; i < path.points.length; i++) {
+          const point = path.points[i];
+          const x = toCanvasX(point.xMeters);
+          const y = toCanvasY(point.yMeters);
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        if (path.points.length > 2) {
+          ctx.closePath();
+        }
+        ctx.stroke();
+
+        if (path.points.length > 0) {
+          const startPoint = path.points[0];
+          const sx = toCanvasX(startPoint.xMeters);
+          const sy = toCanvasY(startPoint.yMeters);
+
+          ctx.fillStyle = isSelected ? color : perimeterColors.backgroundText;
+          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(255,255,255,0.45)';
+          ctx.lineWidth = isSelected ? 3 : 2;
+          ctx.font = isSelected ? 'bold 14px sans-serif' : '12px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.strokeText(path.name, sx, sy + 10);
+          ctx.fillText(path.name, sx, sy + 10);
+        }
+      });
+
+      drawMowingPlanPreview(toCanvasX, toCanvasY);
+
+      if (positionHistory.length > 0) {
+        // Draw trail with fading (on top of stored paths)
+        const now = positionHistory[positionHistory.length - 1].timestamp;
+        ctx.lineWidth = 3;
+
+        for (let i = 1; i < positionHistory.length; i++) {
+          const prev = positionHistory[i - 1];
+          const curr = positionHistory[i];
+          const age = now - curr.timestamp;
+          const opacity = 1 - (age / MAX_HISTORY_MS);
+
+          ctx.strokeStyle = `rgba(37, 99, 235, ${opacity * 0.6})`;
+          ctx.beginPath();
+          ctx.moveTo(toCanvasX(prev.x), toCanvasY(prev.y));
+          ctx.lineTo(toCanvasX(curr.x), toCanvasY(curr.y));
+          ctx.stroke();
+        }
+
+        // Draw current position as arrow
+        const current = positionHistory[positionHistory.length - 1];
+        const cx = toCanvasX(current.x);
+        const cy = toCanvasY(current.y);
+        const headingRad = (current.heading * Math.PI) / 180;
+        const arrowSize = 20;
+
+        ctx.fillStyle = "#2563eb";
+        ctx.strokeStyle = "#1e3a8a";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(
+          cx + Math.cos(headingRad) * arrowSize,
+          cy - Math.sin(headingRad) * arrowSize
+        );
+        ctx.lineTo(
+          cx + Math.cos(headingRad + 2.6) * arrowSize * 0.6,
+          cy - Math.sin(headingRad + 2.6) * arrowSize * 0.6
+        );
+        ctx.lineTo(cx, cy);
+        ctx.lineTo(
+          cx + Math.cos(headingRad - 2.6) * arrowSize * 0.6,
+          cy - Math.sin(headingRad - 2.6) * arrowSize * 0.6
+        );
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Update stats
+        const distance = Math.max(rawRangeX, rawRangeY);
+        const stripText = mowingPlanPreview ? buildPreviewStatsSuffix() : '';
+        $("mapStats").textContent = `${positionHistory.length} points | movement: ${format(distance, 2)}m | view: ${format(Math.max(rangeX, rangeY), 2)}m | scale: ${format(1/scale, 3)}m/px | current: (${format(current.x, 2)}, ${format(current.y, 2)})${stripText}`;
+      } else {
+        const storedCount = storedPaths.length + storedAreaPerimeters.length;
+        const stripText = mowingPlanPreview ? buildPreviewStatsSuffix() : '';
+        $("mapStats").textContent = `${storedCount} stored perimeter${storedCount === 1 ? '' : 's'} | scale: ${format(1/scale, 3)}m/px${stripText}`;
+      }
+    }
+
+    function drawMowingPlanPreview(toCanvasX, toCanvasY) {
+      if (!mowingPlanPreview || !Array.isArray(mowingPlanPreview.strips)) {
+        return;
+      }
+
+      ctx.save();
+      drawPreviewAreaGeometry(toCanvasX, toCanvasY);
+      ctx.strokeStyle = 'rgba(17, 24, 39, 0.32)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([10, 6]);
+
+      mowingPlanPreview.strips.forEach((strip) => {
+        const traversalStart = strip.traversalReversed ? strip.end : strip.start;
+        const traversalEnd = strip.traversalReversed ? strip.start : strip.end;
+        const startX = toCanvasX(traversalStart.xMeters);
+        const startY = toCanvasY(traversalStart.yMeters);
+        const endX = toCanvasX(traversalEnd.xMeters);
+        const endY = toCanvasY(traversalEnd.yMeters);
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+      });
+
+      ctx.strokeStyle = 'rgba(220, 38, 38, 0.75)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 5]);
+      (mowingPlanPreview.connectors ?? []).forEach((connector) => {
+        if (!Array.isArray(connector) || connector.length < 2) {
+          return;
+        }
+
+        ctx.beginPath();
+        connector.forEach((point, pointIndex) => {
+          const x = toCanvasX(point.xMeters);
+          const y = toCanvasY(point.yMeters);
+          if (pointIndex === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        });
+        ctx.stroke();
+      });
+
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(17, 24, 39, 0.9)';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(
+        `${mowingPlanPreview.stripCount} strips @ ${Math.round(mowingPlanPreview.stripSpacingMeters * 100)}cm`,
+        72,
+        72,
+      );
+      if (mowingPlanPreview.areaGeometryStats) {
+        ctx.fillText(
+          `area pts raw/smooth/reduced: ${mowingPlanPreview.areaGeometryStats.rawPointCount}/${mowingPlanPreview.areaGeometryStats.smoothedPointCount}/${mowingPlanPreview.areaGeometryStats.reducedPointCount}`,
+          72,
+          92,
+        );
+        ctx.fillText(
+          'boundary overlay: raw blue | smoothed green | reduced orange',
+          72,
+          112,
+        );
+      }
+      if (mowingPlanPreview.planPerformance) {
+        ctx.fillText(
+          `plan ms prep/strip/seq/conn: ${mowingPlanPreview.planPerformance.prepareMs}/${mowingPlanPreview.planPerformance.stripBuildMs}/${mowingPlanPreview.planPerformance.sequenceMs}/${mowingPlanPreview.planPerformance.connectorBuildMs}`,
+          72,
+          132,
+        );
+      }
+      ctx.restore();
+    }
+
+    function drawPreviewAreaGeometry(toCanvasX, toCanvasY) {
+      drawPreviewPolyline(mowingPlanPreview.rawAreaPoints, toCanvasX, toCanvasY, {
+        strokeStyle: 'rgba(30, 64, 175, 0.95)',
+        lineWidth: 2,
+        lineDash: [],
+      });
+      drawPreviewPolyline(mowingPlanPreview.smoothedAreaPoints, toCanvasX, toCanvasY, {
+        strokeStyle: 'rgba(5, 150, 105, 0.95)',
+        lineWidth: 2,
+        lineDash: [],
+      });
+      drawPreviewPolyline(mowingPlanPreview.reducedAreaPoints, toCanvasX, toCanvasY, {
+        strokeStyle: 'rgba(221, 107, 32, 0.88)',
+        lineWidth: 3,
+        lineDash: [5, 4],
+      });
+    }
+
+    function drawPreviewPolyline(points, toCanvasX, toCanvasY, style) {
+      if (!Array.isArray(points) || points.length < 2) {
+        return;
+      }
+      ctx.save();
+      ctx.strokeStyle = style.strokeStyle;
+      ctx.lineWidth = style.lineWidth;
+      ctx.setLineDash(style.lineDash);
+      ctx.beginPath();
+      points.forEach((point, pointIndex) => {
+        const x = toCanvasX(point.xMeters);
+        const y = toCanvasY(point.yMeters);
+        if (pointIndex === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      if (points.length > 2) {
+        ctx.closePath();
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function buildPreviewStatsSuffix() {
+      const parts = [`strips: ${mowingPlanPreview.stripCount}`];
+      if (mowingPlanPreview.areaGeometryStats) {
+        parts.push(`area pts ${mowingPlanPreview.areaGeometryStats.rawPointCount}/${mowingPlanPreview.areaGeometryStats.smoothedPointCount}/${mowingPlanPreview.areaGeometryStats.reducedPointCount}`);
+      }
+      if (mowingPlanPreview.areaGeometryTiming) {
+        parts.push(`smooth ${mowingPlanPreview.areaGeometryTiming.smoothingMs}ms`);
+        parts.push(`reduce ${mowingPlanPreview.areaGeometryTiming.reductionMs}ms`);
+        parts.push(`area ${mowingPlanPreview.areaGeometryTiming.totalMs}ms`);
+      }
+      if (mowingPlanPreview.planPerformance) {
+        parts.push(`prep ${mowingPlanPreview.planPerformance.prepareMs}ms`);
+        parts.push(`strip ${mowingPlanPreview.planPerformance.stripBuildMs}ms`);
+        parts.push(`seq ${mowingPlanPreview.planPerformance.sequenceMs}ms`);
+        parts.push(`conn ${mowingPlanPreview.planPerformance.connectorBuildMs}ms`);
+      }
+      return ` | ${parts.join(' | ')}`;
+    }
+
+    function hasDrawablePathPoints(path) {
+      return Array.isArray(path?.points)
+        && path.points.length > 0
+        && path.points.every((point) =>
+          Number.isFinite(point?.xMeters) && Number.isFinite(point?.yMeters)
+        );
+    }
+
+    // Track which path names have already produced a "skipped" warning so the
+    // 10s poll doesn't spam DevTools every cycle with the same diagnostic.
+    const skippedPathWarnings = new Set();
+    function warnSkippedPath(name, message, detail) {
+      if (skippedPathWarnings.has(name)) {
+        return;
+      }
+      skippedPathWarnings.add(name);
+      console.warn(message, detail);
+    }
+
+    function sanitizeStoredPathCollection(paths, warningLabel) {
+      return (Array.isArray(paths) ? paths : []).filter((pathInfo, index) => {
+        const pathName = pathInfo?.name;
+        if (typeof pathName !== 'string' || pathName.length === 0) {
+          warnSkippedPath(`__missing_name__:${warningLabel}:${index}`, `Skipping ${warningLabel} with missing name:`, pathInfo);
+          return false;
+        }
+        if (!hasDrawablePathPoints(pathInfo)) {
+          warnSkippedPath(pathName, `Skipping ${warningLabel} with invalid points:`, pathInfo);
+          return false;
+        }
+        return true;
+      });
+    }
+
+    async function loadStoredPaths() {
+      try {
+        const data = await fetchJson('/api/paths?includePoints=1');
+        storedPaths = sanitizeStoredPathCollection(data.paths, 'stored path');
+        renderPaths();
+        drawMap();
+      } catch (error) {
+        console.error('Failed to load stored paths:', error);
+      }
+    }
+
+    async function loadStoredAreaPerimeters() {
+      try {
+        const data = await fetchJson('/api/area-perimeters?includePoints=1');
+        storedAreaPerimeters = sanitizeStoredPathCollection(data.paths, 'stored area perimeter');
+        renderAreaPerimeters();
+        renderMowingPlanAreaOptions();
+        drawMap();
+      } catch (error) {
+        console.error('Failed to load stored area perimeters:', error);
+      }
+    }
+
+    function renderMowingPlanAreaOptions() {
+      const previousSelection = selectedMowingPlanArea || mowingPlanAreaSelect.value;
+      mowingPlanAreaSelect.innerHTML = storedAreaPerimeters.map((path) => {
+        const selected = path.name === previousSelection ? ' selected' : '';
+        return `<option value="${htmlAttribute(path.name)}"${selected}>${htmlAttribute(path.name)}</option>`;
+      }).join('');
+
+      if (storedAreaPerimeters.length === 0) {
+        mowingPlanAreaSelect.innerHTML = '<option value="">No mowing areas</option>';
+        mowingPlanPreview = null;
+        selectedMowingPlanArea = '';
+        mowingPlanStatusEl.textContent = 'No mowing areas available.';
+        return;
+      }
+
+      selectedMowingPlanArea = mowingPlanAreaSelect.value || storedAreaPerimeters[0].name;
+      mowingPlanAreaSelect.value = selectedMowingPlanArea;
+      applyAreaMowingDefaults(selectedMowingPlanArea);
+      mowingPlanStatusEl.textContent = `Selected area: ${selectedMowingPlanArea}. Click Preview to inspect the plan.`;
+    }
+
+    function markMowingPlanPreviewStale() {
+      mowingPlanPreview = null;
+      const areaName = mowingPlanAreaSelect.value;
+      if (!areaName) {
+        mowingPlanStatusEl.textContent = 'Choose a mowing area and a valid strip spacing to preview strips.';
+        drawMap();
+        return;
+      }
+      mowingPlanStatusEl.textContent = `Selected area: ${areaName}. Click Preview to inspect the plan.`;
+      drawMap();
+    }
+
+    async function requestMowingPlanPreview() {
+      const areaName = mowingPlanAreaSelect.value;
+      const headingDeg = normalizeAxisHeading(mowingHeadingInput.value);
+      const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
+
+      if (!areaName || !Number.isFinite(stripSpacingMeters) || stripSpacingMeters <= 0) {
+        mowingPlanPreview = null;
+        mowingPlanStatusEl.textContent = 'Choose a mowing area and a valid strip spacing to preview strips.';
+        drawMap();
+        return;
+      }
+
+      selectedMowingPlanArea = areaName;
+      mowingPlanStatusEl.textContent = `Generating preview for ${areaName}...`;
+      try {
+        const result = await postJson('/api/mowing-plan/preview', {
+          areaName,
+          headingDeg,
+          stripSpacingMeters,
+        });
+
+        mowingPlanPreview = result;
+        const stats = result.areaGeometryStats;
+        const timing = result.areaGeometryTiming;
+        const planPerformance = result.planPerformance;
+        const areaDetail = stats
+          ? ` raw/smoothed/reduced ${stats.rawPointCount}/${stats.smoothedPointCount}/${stats.reducedPointCount}`
+          : '';
+        const timingDetail = timing
+          ? ` | smooth ${timing.smoothingMs}ms | reduce ${timing.reductionMs}ms`
+          : '';
+        const planDetail = planPerformance
+          ? ` | prep ${planPerformance.prepareMs}ms | strips ${planPerformance.stripBuildMs}ms | sequence ${planPerformance.sequenceMs}ms | connectors ${planPerformance.connectorBuildMs}ms`
+          : '';
+        mowingPlanStatusEl.textContent = `${result.stripCount} strips ready for ${areaName}.${areaDetail}${timingDetail}${planDetail}`;
+        drawMap();
+      } catch (error) {
+        mowingPlanPreview = null;
+        mowingPlanStatusEl.textContent = `Preview failed for ${areaName}: ${error.message}`;
+        drawMap();
+        console.error('Failed to preview mowing plan:', error);
+      }
+    }
+
+    function getNextPathName() {
+      const obstaclePattern = /^Obstacle (\d+)$/;
+      let maxNum = 0;
+
+      storedPaths.forEach((path) => {
+        const match = path.name?.match(obstaclePattern);
+        if (match) {
+          maxNum = Math.max(maxNum, parseInt(match[1], 10));
+        }
+      });
+
+      return `Obstacle ${maxNum + 1}`;
+    }
+
+    function getNextAreaPerimeterName() {
+      const areaPattern = /^Mowing Area (\d+)$/;
+      let maxNum = 0;
+
+      storedAreaPerimeters.forEach((path) => {
+        const match = path.name?.match(areaPattern);
+        if (match) {
+          maxNum = Math.max(maxNum, parseInt(match[1], 10));
+        }
+      });
+
+      return `Mowing Area ${maxNum + 1}`;
+    }
+
+    function updateRecordingUi() {
+      startRecordingBtn.disabled = recording;
+      stopRecordingBtn.disabled = !recording;
+      cancelRecordingBtn.disabled = !recording;
+      pathNameInput.disabled = recording;
+      startAreaRecordingBtn.disabled = recording || areaRecording;
+
+      if (recording) {
+        recordingIndicator.classList.add('active');
+        recordingStatusEl.textContent = 'Recording';
+        recordingStatusEl.style.color = 'var(--danger-color)';
+        currentPathNameEl.textContent = currentPathName;
+      } else {
+        recordingIndicator.classList.remove('active');
+        recordingStatusEl.textContent = 'Ready';
+        recordingStatusEl.style.color = 'var(--success-color)';
+        currentPathNameEl.textContent = '—';
+      }
+
+      pointCountEl.textContent = String(pointCount);
+    }
+
+    function updateAreaRecordingUi() {
+      startAreaRecordingBtn.disabled = recording || areaRecording;
+      stopAreaRecordingBtn.disabled = !areaRecording;
+      cancelAreaRecordingBtn.disabled = !areaRecording;
+      areaPerimeterNameInput.disabled = areaRecording;
+      startRecordingBtn.disabled = recording || areaRecording;
+
+      if (areaRecording) {
+        areaRecordingIndicator.classList.add('active');
+        areaRecordingStatusEl.textContent = 'Recording';
+        areaRecordingStatusEl.style.color = 'var(--danger-color)';
+        currentAreaPerimeterNameEl.textContent = currentAreaPerimeterName;
+      } else {
+        areaRecordingIndicator.classList.remove('active');
+        areaRecordingStatusEl.textContent = 'Ready';
+        areaRecordingStatusEl.style.color = 'var(--success-color)';
+        currentAreaPerimeterNameEl.textContent = '—';
+      }
+
+      areaPointCountEl.textContent = String(areaPointCount);
+    }
+
+    function renderPaths() {
+      if (storedPaths.length === 0) {
+        pathsListEl.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">📭</div>
+            <div>No paths recorded yet</div>
+          </div>
+        `;
+        return;
+      }
+
+      pathsListEl.innerHTML = storedPaths.map((path) => {
+        const pointTotal = path.points?.length ?? path.pointCount ?? 0;
+        const totalDistance = path.metadata?.totalDistance ?? 0;
+        const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
+
+        return `
+          <div class="path-item">
+            <div class="path-info">
+              <div class="path-name">${path.name}</div>
+              <div class="path-meta">
+                ${pointTotal} points • ${totalDistance.toFixed(1)}m total distance
+                • Created ${createdAt}
+              </div>
+            </div>
+            <div class="path-actions">
+              <button class="button button-primary button-small" type="button" onclick="drivePath(${htmlAttribute(jsString(path.name))})">
+                <span>▶️</span> Drive
+              </button>
+              <button class="button button-success button-small" type="button" onclick="verifyPath(${htmlAttribute(jsString(path.name))})">
+                <span>✓</span> Verify
+              </button>
+              <button class="button button-danger button-small" type="button" onclick="deletePath(${htmlAttribute(jsString(path.name))})">
+                <span>🗑️</span> Delete
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderAreaPerimeters() {
+      if (storedAreaPerimeters.length === 0) {
+        areaPerimetersListEl.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">📭</div>
+            <div>No mowing area perimeters recorded yet</div>
+          </div>
+        `;
+        return;
+      }
+
+      areaPerimetersListEl.innerHTML = storedAreaPerimeters.map((path) => {
+        const pointTotal = path.points?.length ?? path.pointCount ?? 0;
+        const totalDistance = path.metadata?.totalDistance ?? 0;
+        const createdAt = path.createdAt ? new Date(path.createdAt).toLocaleString() : 'Unknown';
+
+        return `
+          <div class="path-item">
+            <div class="path-info">
+              <div class="path-name">${path.name}</div>
+              <div class="path-meta">
+                ${pointTotal} points • ${totalDistance.toFixed(1)}m perimeter
+                • Created ${createdAt}
+              </div>
+            </div>
+            <div class="path-actions">
+              <button class="button button-primary button-small" type="button" onclick="driveAreaPerimeter(${htmlAttribute(jsString(path.name))})">
+                <span>▶️</span> Drive
+              </button>
+              <button class="button button-success button-small" type="button" onclick="verifyAreaPerimeter(${htmlAttribute(jsString(path.name))})">
+                <span>✓</span> Verify
+              </button>
+              <button class="button button-danger button-small" type="button" onclick="deleteAreaPerimeter(${htmlAttribute(jsString(path.name))})">
+                <span>🗑️</span> Delete
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function schedulePageStatePoll(delayMs = PRIMITIVES_POLL_MS) {
+      if (pageStatePollTimer !== null) {
+        window.clearTimeout(pageStatePollTimer);
+      }
+      pageStatePollTimer = window.setTimeout(runPageStatePoll, delayMs);
+    }
+
+    function stopPageStatePoll() {
+      if (pageStatePollTimer !== null) {
+        window.clearTimeout(pageStatePollTimer);
+        pageStatePollTimer = null;
+      }
+    }
+
+    function scheduleListRefresh(delayMs = LIST_REFRESH_MS) {
+      if (listRefreshTimer !== null) {
+        window.clearTimeout(listRefreshTimer);
+      }
+      listRefreshTimer = window.setTimeout(runListRefresh, delayMs);
+    }
+
+    function stopListRefresh() {
+      if (listRefreshTimer !== null) {
+        window.clearTimeout(listRefreshTimer);
+        listRefreshTimer = null;
+      }
+    }
+
+    async function refreshPathRecordingStatus() {
+      if (!recording || pathRecordingStatusInFlight) {
+        return;
+      }
+      pathRecordingStatusInFlight = true;
+      try {
+        const status = await fetchJson('/api/path/record/status');
+        pointCount = status.pointCount ?? 0;
+        updateRecordingUi();
+      } catch (error) {
+        console.error('Failed to fetch recording status:', error);
+      } finally {
+        pathRecordingStatusInFlight = false;
+      }
+    }
+
+    async function refreshAreaRecordingStatus() {
+      if (!areaRecording || areaRecordingStatusInFlight) {
+        return;
+      }
+      areaRecordingStatusInFlight = true;
+      try {
+        const status = await fetchJson('/api/area-perimeter/record/status');
+        areaPointCount = status.pointCount ?? 0;
+        updateAreaRecordingUi();
+      } catch (error) {
+        console.error('Failed to fetch area perimeter recording status:', error);
+      } finally {
+        areaRecordingStatusInFlight = false;
+      }
+    }
+
+    const startMowingBtn = $("startMowingBtn");
+    const stopMowingBtn = $("stopMowingBtn");
+    const mowingStatusBar = $("mowingStatusBar");
+    const mowingStatusText = $("mowingStatusText");
+
+    const MOWING_PHASE_LABELS = {
+      idle: 'Idle',
+      approaching_area_perimeter: 'Approaching area perimeter',
+      approaching_strip: 'Approaching strip',
+      tracing_boundary: 'Tracing boundary',
+      mowing_strip: 'Mowing strip',
+      following_connector: 'Following connector',
+      complete: 'Complete',
+      stopped: 'Stopped',
+      error: 'Error',
+    };
+
+    function updateMowingStatusUi(status) {
+      const active = status.phase !== 'idle';
+      mowingStatusBar.classList.toggle('active', active);
+      mowingStatusBar.classList.toggle('error', status.phase === 'error');
+      mowingStatusBar.classList.toggle('complete', status.phase === 'complete' || status.phase === 'stopped');
+
+      const phaseLabel = MOWING_PHASE_LABELS[status.phase] ?? status.phase;
+      const stripInfo = status.totalStrips > 0
+        ? ` — strip ${status.currentStripIndex + 1}/${status.totalStrips}`
+        : '';
+      const errorInfo = status.error ? ` (${status.error})` : '';
+      mowingStatusText.textContent = `${phaseLabel}${stripInfo}${errorInfo}`;
+
+      const isRunning = status.phase !== 'idle' && status.phase !== 'complete' && status.phase !== 'stopped' && status.phase !== 'error';
+      startMowingBtn.style.display = isRunning ? 'none' : '';
+      const canResume = !isRunning && Boolean(status.resumeAvailable);
+      resumeMowingBtn.style.display = canResume ? '' : 'none';
+      resumeMowingBtn.disabled = !canResume;
+      stopMowingBtn.style.display = '';
+      mowingActive = isRunning;
+    }
+
+    async function pollMowingStatus() {
+      if (mowingStatusInFlight) {
+        return;
+      }
+      mowingStatusInFlight = true;
+      try {
+        const status = await fetchJson('/api/mowing/status');
+        updateMowingStatusUi(status);
+      } catch (error) {
+        console.error('Failed to poll mowing status:', error);
+      } finally {
+        mowingStatusInFlight = false;
+      }
+    }
+
+    async function runListRefresh() {
+      if (document.hidden || listRefreshInFlight) {
+        scheduleListRefresh();
+        return;
+      }
+      listRefreshInFlight = true;
+      try {
+        await Promise.all([
+          loadStoredPaths(),
+          loadStoredAreaPerimeters(),
+        ]);
+        listsLoadedOnce = true;
+        lastListRefreshAt = Date.now();
+      } catch (_error) {
+        // Individual list loaders already log their failures.
+      } finally {
+        listRefreshInFlight = false;
+        scheduleListRefresh();
+      }
+    }
+
+    async function ensureListsLoaded() {
+      if (listsLoadedOnce || listRefreshInFlight) {
+        return;
+      }
+      await runListRefresh();
+    }
+
+    async function runPageStatePoll() {
+      if (document.hidden) {
+        schedulePageStatePoll(PRIMITIVES_POLL_MS);
+        return;
+      }
+      if (pageStatePollInFlight) {
+        schedulePageStatePoll(PRIMITIVES_POLL_MS);
+        return;
+      }
+      pageStatePollInFlight = true;
+      try {
+        await updateStatus();
+        await Promise.all([
+          refreshPathRecordingStatus(),
+          refreshAreaRecordingStatus(),
+          mowingActive ? pollMowingStatus() : Promise.resolve(),
+        ]);
+        pageStatePollFailureCount = 0;
+        if (!listsLoadedOnce || Date.now() - lastListRefreshAt >= LIST_REFRESH_MS) {
+          await ensureListsLoaded();
+        }
+        schedulePageStatePoll(PRIMITIVES_POLL_MS);
+      } catch (_error) {
+        pageStatePollFailureCount += 1;
+        schedulePageStatePoll(Math.min(FAILURE_BACKOFF_MS * pageStatePollFailureCount, 30000));
+      } finally {
+        pageStatePollInFlight = false;
+      }
+    }
+
+    startMowingBtn.addEventListener('click', async () => {
+      const areaName = mowingPlanAreaSelect.value;
+      if (!areaName) {
+        alert('Please select a mowing area first.');
+        return;
+      }
+      if (recording || areaRecording) {
+        alert('Stop recording before starting mowing.');
+        return;
+      }
+
+      const headingDeg = normalizeAxisHeading(mowingHeadingInput.value);
+      const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
+
+      try {
+        const result = await postJson('/api/mowing/start', { areaName, headingDeg, stripSpacingMeters });
+
+        updateMowingStatusUi({ phase: 'approaching_area_perimeter', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
+        schedulePageStatePoll(0);
+      } catch (error) {
+        alert('Failed to start mowing: ' + error.message);
+      }
+    });
+
+    resumeMowingBtn.addEventListener('click', async () => {
+      try {
+        const result = await postJson('/api/mowing/resume', {});
+
+        updateMowingStatusUi({
+          phase: 'approaching_strip',
+          currentStripIndex: result.currentStripIndex ?? 0,
+          totalStrips: result.stripCount ?? 0,
+          tracedBoundaryCount: 0,
+          resumeAvailable: false,
+        });
+        schedulePageStatePoll(0);
+      } catch (error) {
+        alert('Failed to resume mowing: ' + error.message);
+      }
+    });
+
+    stopMowingBtn.addEventListener('click', async () => {
+      try {
+        await stopAll();
+      } catch (error) {
+        alert('Failed to stop mowing: ' + error.message);
+      }
+    });
+
+    startRecordingBtn.addEventListener('click', async () => {
+      const pathName = pathNameInput.value.trim() || getNextPathName();
+
+      try {
+        await postJson('/api/path/record/start', { pathName });
+
+        recording = true;
+        currentPathName = pathName;
+        pointCount = 0;
+        updateRecordingUi();
+        schedulePageStatePoll(0);
+      } catch (error) {
+        alert('Failed to start recording: ' + error.message);
+      }
+    });
+
+    stopRecordingBtn.addEventListener('click', async () => {
+      try {
+        const result = await postJson('/api/path/record/stop', {});
+        recording = false;
+        currentPathName = '';
+        pointCount = 0;
+        pathNameInput.value = '';
+        updateRecordingUi();
+        await loadStoredPaths();
+        lastListRefreshAt = Date.now();
+        listsLoadedOnce = true;
+        pathNameInput.value = getNextPathName();
+
+        const savedPointCount = result.pointCount ?? result.metadata?.pointCount ?? 0;
+        alert(`Path saved: ${result.name}\n${savedPointCount} points recorded`);
+      } catch (error) {
+        alert('Failed to save path: ' + error.message);
+      }
+    });
+
+    cancelRecordingBtn.addEventListener('click', async () => {
+      try {
+        await postJson('/api/path/record/cancel', {});
+
+        recording = false;
+        currentPathName = '';
+        pointCount = 0;
+        updateRecordingUi();
+      } catch (error) {
+        alert('Failed to cancel recording: ' + error.message);
+      }
+    });
+
+    startAreaRecordingBtn.addEventListener('click', async () => {
+      const pathName = areaPerimeterNameInput.value.trim() || getNextAreaPerimeterName();
+
+      try {
+        await postJson('/api/area-perimeter/record/start', { pathName });
+
+        areaRecording = true;
+        currentAreaPerimeterName = pathName;
+        areaPointCount = 0;
+        updateRecordingUi();
+        updateAreaRecordingUi();
+        schedulePageStatePoll(0);
+      } catch (error) {
+        alert('Failed to start area perimeter recording: ' + error.message);
+      }
+    });
+
+    stopAreaRecordingBtn.addEventListener('click', async () => {
+      try {
+        const result = await postJson('/api/area-perimeter/record/stop', {
+          headingDeg: normalizeAxisHeading(mowingHeadingInput.value),
+          stripSpacingMeters: Number(stripSpacingInput.value) / 100,
+        });
+        areaRecording = false;
+        currentAreaPerimeterName = '';
+        areaPointCount = 0;
+        areaPerimeterNameInput.value = '';
+        updateRecordingUi();
+        updateAreaRecordingUi();
+        await loadStoredAreaPerimeters();
+        lastListRefreshAt = Date.now();
+        listsLoadedOnce = true;
+        areaPerimeterNameInput.value = getNextAreaPerimeterName();
+        selectedMowingPlanArea = result.name;
+        mowingPlanAreaSelect.value = result.name;
+        applyAreaMowingDefaults(result.name);
+        markMowingPlanPreviewStale();
+
+        const savedPointCount = result.pointCount ?? result.metadata?.pointCount ?? 0;
+        alert(`Area perimeter saved: ${result.name}\n${savedPointCount} points recorded`);
+      } catch (error) {
+        alert('Failed to save area perimeter: ' + error.message);
+      }
+    });
+
+    cancelAreaRecordingBtn.addEventListener('click', async () => {
+      try {
+        await postJson('/api/area-perimeter/record/cancel', {});
+
+        areaRecording = false;
+        currentAreaPerimeterName = '';
+        areaPointCount = 0;
+        updateRecordingUi();
+        updateAreaRecordingUi();
+      } catch (error) {
+        alert('Failed to cancel area perimeter recording: ' + error.message);
+      }
+    });
+
+    mowingPlanAreaSelect.addEventListener('change', () => {
+      selectedMowingPlanArea = mowingPlanAreaSelect.value;
+      applyAreaMowingDefaults(selectedMowingPlanArea);
+      markMowingPlanPreviewStale();
+    });
+
+    mowingHeadingInput.addEventListener('input', () => {
+      storeMowingHeading(mowingHeadingInput.value);
+      updateHeadingLabel();
+      markMowingPlanPreviewStale();
+    });
+
+    stripSpacingInput.addEventListener('change', () => {
+      markMowingPlanPreviewStale();
+    });
+
+    previewMowingPlanBtn.addEventListener('click', () => {
+      requestMowingPlanPreview();
+    });
+
+    canvas.addEventListener('mousedown', (event) => {
+      if (!mapTransform) {
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const canvasX = (event.clientX - rect.left) * scaleX;
+      const canvasY = (event.clientY - rect.top) * scaleY;
+      headingDragStart = {
+        x: mapTransform.toWorldX(canvasX),
+        y: mapTransform.toWorldY(canvasY),
+      };
+    });
+
+    canvas.addEventListener('mouseup', (event) => {
+      if (!mapTransform || !headingDragStart) {
+        headingDragStart = null;
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const canvasX = (event.clientX - rect.left) * scaleX;
+      const canvasY = (event.clientY - rect.top) * scaleY;
+      const worldX = mapTransform.toWorldX(canvasX);
+      const worldY = mapTransform.toWorldY(canvasY);
+      const dx = worldX - headingDragStart.x;
+      const dy = worldY - headingDragStart.y;
+      headingDragStart = null;
+
+      if (Math.hypot(dx, dy) < 0.05) {
+        return;
+      }
+
+      setMowingHeading((Math.atan2(dy, dx) * 180) / Math.PI);
+    });
+
+    window.drivePath = async function(pathName) {
+      if (recording || areaRecording) {
+        alert('Stop recording before starting a path drive.');
+        return;
+      }
+
+      await runPathAction(pathName, '/api/path/drive', 'drive', 'Path drive complete');
+    };
+
+    window.verifyPath = async function(pathName) {
+      if (recording || areaRecording) {
+        alert('Stop recording before starting a path verification run.');
+        return;
+      }
+
+      await runPathAction(pathName, '/api/path/verify', 'verify', 'Path verification complete');
+    };
+
+    window.driveAreaPerimeter = async function(pathName) {
+      if (recording || areaRecording) {
+        alert('Stop recording before starting an area perimeter drive.');
+        return;
+      }
+
+      await runPathAction(pathName, '/api/area-perimeter/drive', 'drive area perimeter', 'Area perimeter drive complete');
+    };
+
+    window.verifyAreaPerimeter = async function(pathName) {
+      if (recording || areaRecording) {
+        alert('Stop recording before starting an area perimeter verification run.');
+        return;
+      }
+
+      await runPathAction(pathName, '/api/area-perimeter/verify', 'verify area perimeter', 'Area perimeter verification complete');
+    };
+
+    async function runPathAction(pathName, endpoint, actionName, successLabel) {
+      try {
+        const result = await postJson(endpoint, { pathName });
+
+        const failureDetail = result.error || result.failedSegment?.errorMessage || result.reason || 'unknown';
+        const reason = result.completed ? '' : `\nReason: ${failureDetail}`;
+        alert(`${successLabel}: ${pathName}${reason}`);
+      } catch (error) {
+        alert(`Failed to ${actionName} path: ${error.message}`);
+      }
+    }
+
+    window.stopPathOperation = async function() {
+      try {
+        await stopAll();
+
+        alert('Path stop requested.');
+      } catch (error) {
+        alert('Failed to stop path operation: ' + error.message);
+      }
+    };
+
+    window.deletePath = async function(pathName) {
+      try {
+        await postJson('/api/path/delete', { pathName });
+
+        await loadStoredPaths();
+        lastListRefreshAt = Date.now();
+        listsLoadedOnce = true;
+        pathNameInput.value = getNextPathName();
+      } catch (error) {
+        alert('Failed to delete path: ' + error.message);
+      }
+    };
+
+    window.deleteAreaPerimeter = async function(pathName) {
+      try {
+        await postJson('/api/area-perimeter/delete', { pathName });
+
+        await loadStoredAreaPerimeters();
+        lastListRefreshAt = Date.now();
+        listsLoadedOnce = true;
+        areaPerimeterNameInput.value = getNextAreaPerimeterName();
+        markMowingPlanPreviewStale();
+      } catch (error) {
+        alert('Failed to delete area perimeter: ' + error.message);
+      }
+    };
+
+    async function updateStatus() {
+      try {
+        const data = await fetchJson('/api/primitives');
+        const primitives = data.primitives;
+
+        if (primitives.poseFusion && primitives.poseFusion.status === 'ok') {
+          const pose = primitives.poseFusion;
+          $("mapStats").textContent = `Pose: ${format(pose.headingDeg, 1)}° | quality: ${pose.quality}`;
+          if (pose.xMeters != null && pose.yMeters != null) {
+            addPositionToHistory(
+              pose.xMeters,
+              pose.yMeters,
+              pose.headingDeg,
+              Date.now()
+            );
+            drawMap();
+          }
+        } else {
+          $("mapStats").textContent = primitives.poseFusion?.error || 'No data';
+        }
+
+      } catch (error) {
+        console.error('Failed to update status:', error);
+        throw error;
+      }
+    }
+
+    stripSpacingInput.value = String(DEFAULT_STRIP_SPACING_CM);
+    const storedMowingHeading = loadStoredMowingHeading();
+    if (storedMowingHeading !== null) {
+      mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(storedMowingHeading)));
+    }
+
+    updateRecordingUi();
+    updateAreaRecordingUi();
+    updateHeadingLabel();
+
+    Promise.all([
+      loadStoredPaths(),
+      loadStoredAreaPerimeters(),
+      pollMowingStatus(),
+    ]).then(() => {
+      listsLoadedOnce = true;
+      lastListRefreshAt = Date.now();
+      if (!recording) {
+        pathNameInput.value = getNextPathName();
+      }
+      if (!areaRecording) {
+        areaPerimeterNameInput.value = getNextAreaPerimeterName();
+      }
+      updateRecordingUi();
+      updateAreaRecordingUi();
+      markMowingPlanPreviewStale();
+      scheduleListRefresh();
+      schedulePageStatePoll(0);
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopPageStatePoll();
+        stopListRefresh();
+        return;
+      }
+      schedulePageStatePoll(0);
+      scheduleListRefresh(0);
+    });

@@ -22,6 +22,7 @@ export interface MowingPlan {
   readonly stripCount: number;
   readonly strips: MowingStrip[];
   readonly connectors: PathPoint[][];
+  readonly performance?: MowingPlanPerformance;
 }
 
 export interface MowingPlanOptions {
@@ -56,6 +57,8 @@ const DEFAULT_BLADE_WIDTH_METERS = 0.4;
 const EPSILON = 1e-9;
 const MOWN_STRIP_CROSSING_PENALTY = 10;
 const INITIAL_ENTRY_CORNER_CLEARANCE_METERS = 0.3;
+const ROUTED_OBSTACLE_PENALTY = 2;
+const ROUTED_OBSTACLE_PREFERENCE_MARGIN = 0.75;
 const SAME_OFFSET_ROUTED_OBSTACLE_PENALTY = 5;
 
 interface Vector {
@@ -79,7 +82,157 @@ interface TraversalStep {
   readonly reversed: boolean;
 }
 
+interface PreparedObstacle {
+  readonly obstacleIndex: number;
+  readonly polygon: Vector[];
+  readonly minOffset: number;
+  readonly maxOffset: number;
+}
+
+interface PreparedMowingPlanBuild {
+  readonly headingDeg: number;
+  readonly stripSpacingMeters: number;
+  readonly bladeWidthMeters: number;
+  readonly mowingStandoffMeters: number;
+  readonly polygon: Vector[];
+  readonly direction: Vector;
+  readonly normal: Vector;
+  readonly maxOffset: number;
+  readonly firstOffset: number;
+  readonly obstacles: PreparedObstacle[];
+}
+
+export interface MowingPlanPerformance {
+  readonly prepareMs: number;
+  readonly stripBuildMs: number;
+  readonly sequenceMs: number;
+  readonly connectorBuildMs: number;
+  readonly totalMs: number;
+  readonly polygonPointCount: number;
+  readonly obstacleCount: number;
+  readonly obstaclePointCount: number;
+  readonly stripOffsetCount: number;
+  readonly stripCount: number;
+  readonly connectorCount: number;
+  readonly traversalCandidateEvaluations: number;
+  readonly traversalConnectorPathEvaluations: number;
+  readonly routedCandidateCount: number;
+  readonly routedConnectorCount: number;
+}
+
+interface TraversalEvaluation {
+  readonly step: TraversalStep;
+  readonly connectorPath: Vector[];
+  readonly cost: number;
+  readonly requiresObstacleRouting: boolean;
+}
+
+interface SequenceStripsResult {
+  readonly traversal: TraversalStep[];
+  readonly performance: Pick<
+    MowingPlanPerformance,
+    "traversalCandidateEvaluations"
+    | "traversalConnectorPathEvaluations"
+    | "routedCandidateCount"
+  >;
+}
+
 export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions): MowingPlan {
+  const startedAtMs = Date.now();
+  const prepareStartedAtMs = startedAtMs;
+  const prepared = prepareMowingPlanBuild(points, options);
+  const prepareMs = Date.now() - prepareStartedAtMs;
+  const {
+    headingDeg,
+    stripSpacingMeters,
+    bladeWidthMeters,
+    mowingStandoffMeters,
+    polygon,
+    direction,
+    normal,
+    maxOffset,
+    firstOffset,
+    obstacles,
+  } = prepared;
+  if (polygon.length < 3) {
+    return {
+      headingDeg,
+      stripSpacingMeters,
+      bladeWidthMeters,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+      performance: {
+        prepareMs,
+        stripBuildMs: 0,
+        sequenceMs: 0,
+        connectorBuildMs: 0,
+        totalMs: Date.now() - startedAtMs,
+        polygonPointCount: polygon.length,
+        obstacleCount: obstacles.length,
+        obstaclePointCount: obstacles.reduce((sum, obstacle) => sum + obstacle.polygon.length, 0),
+        stripOffsetCount: 0,
+        stripCount: 0,
+        connectorCount: 0,
+        traversalCandidateEvaluations: 0,
+        traversalConnectorPathEvaluations: 0,
+        routedCandidateCount: 0,
+        routedConnectorCount: 0,
+      },
+    };
+  }
+
+  const stripBuildStartedAtMs = Date.now();
+  const strips = buildStripGeometry(polygon, direction, normal, firstOffset, maxOffset, stripSpacingMeters, obstacles);
+  const stripBuildMs = Date.now() - stripBuildStartedAtMs;
+
+  const obstaclePolygons = obstacles.map((obstacle) => obstacle.polygon);
+  const sequenceStartedAtMs = Date.now();
+  const sequencing = sequenceStripsForMowing(strips, direction, obstaclePolygons);
+  const reanchoredTraversal = reanchorTraversalToPreferredStart(
+    sequencing.traversal,
+    options.preferredStartPoint,
+  );
+  const sequenceMs = Date.now() - sequenceStartedAtMs;
+  const sequencedStrips = reanchoredTraversal.map((step, index) => ({
+    ...step.strip,
+    sequenceIndex: index,
+    traversalReversed: step.reversed,
+  }));
+  const connectorBuildStartedAtMs = Date.now();
+  const connectors = buildStripConnectors(reanchoredTraversal, polygon, obstaclePolygons, mowingStandoffMeters);
+  const connectorBuildMs = Date.now() - connectorBuildStartedAtMs;
+  const stripOffsetCount = countStripOffsets(firstOffset, maxOffset, stripSpacingMeters);
+  const routedConnectorCount = connectors.filter((connector) => connector.length > 2).length;
+
+  return {
+    headingDeg,
+    stripSpacingMeters,
+    bladeWidthMeters,
+    stripCount: sequencedStrips.length,
+    strips: sequencedStrips,
+    connectors,
+    performance: {
+      prepareMs,
+      stripBuildMs,
+      sequenceMs,
+      connectorBuildMs,
+      totalMs: Date.now() - startedAtMs,
+      polygonPointCount: polygon.length,
+      obstacleCount: obstacles.length,
+      obstaclePointCount: obstacles.reduce((sum, obstacle) => sum + obstacle.polygon.length, 0),
+      stripOffsetCount,
+      stripCount: sequencedStrips.length,
+      connectorCount: connectors.length,
+      traversalCandidateEvaluations: sequencing.performance.traversalCandidateEvaluations,
+      traversalConnectorPathEvaluations: sequencing.performance.traversalConnectorPathEvaluations,
+      routedCandidateCount: sequencing.performance.routedCandidateCount,
+      routedConnectorCount,
+    },
+  };
+}
+
+function prepareMowingPlanBuild(points: PathPoint[], options: MowingPlanOptions): PreparedMowingPlanBuild {
   const stripSpacingMeters = options.stripSpacingMeters ?? DEFAULT_STRIP_SPACING_METERS;
   const bladeWidthMeters = options.bladeWidthMeters ?? DEFAULT_BLADE_WIDTH_METERS;
   const mowingStandoffMeters = options.mowingStandoffMeters ?? DEFAULT_PATH_FOLLOWING_PARAMETERS.mowingStandoffMeters;
@@ -91,91 +244,123 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
   }
 
   const polygon = normalizePolygon(points);
-  if (polygon.length < 3) {
-    return {
-      headingDeg: normalizeAxisHeading(options.headingDeg),
-      stripSpacingMeters,
-      bladeWidthMeters,
-      stripCount: 0,
-      strips: [],
-      connectors: [],
-    };
-  }
-
   const headingDeg = normalizeAxisHeading(options.headingDeg);
   const headingRadians = (headingDeg * Math.PI) / 180;
   const direction = { x: Math.cos(headingRadians), y: Math.sin(headingRadians) };
   const normal = { x: -direction.y, y: direction.x };
   const projectedOffsets = polygon.map((point) => dot(point, normal));
-  const minOffset = Math.min(...projectedOffsets);
-  const maxOffset = Math.max(...projectedOffsets);
+  const minOffset = projectedOffsets.length > 0 ? Math.min(...projectedOffsets) : 0;
+  const maxOffset = projectedOffsets.length > 0 ? Math.max(...projectedOffsets) : 0;
   const firstOffset = Math.ceil((minOffset - EPSILON) / stripSpacingMeters) * stripSpacingMeters;
-  const obstacles = (options.obstacles ?? [])
-    .map((obstacle, obstacleIndex) => ({
-      obstacleIndex,
-      polygon: normalizePolygon(obstacle),
-    }))
-    .filter((obstacle) => obstacle.polygon.length >= 3);
+  const obstacles = prepareObstacles(options.obstacles ?? [], normal);
+
+  return {
+    headingDeg,
+    stripSpacingMeters,
+    bladeWidthMeters,
+    mowingStandoffMeters,
+    polygon,
+    direction,
+    normal,
+    maxOffset,
+    firstOffset,
+    obstacles,
+  };
+}
+
+function prepareObstacles(
+  obstacles: ReadonlyArray<ReadonlyArray<PathPoint>>,
+  normal: Vector,
+): PreparedObstacle[] {
+  return obstacles
+    .map((obstacle, obstacleIndex) => {
+      const polygon = normalizePolygon(obstacle);
+      if (polygon.length < 3) {
+        return null;
+      }
+      const offsets = polygon.map((point) => dot(point, normal));
+      return {
+        obstacleIndex,
+        polygon,
+        minOffset: Math.min(...offsets),
+        maxOffset: Math.max(...offsets),
+      };
+    })
+    .filter((obstacle): obstacle is PreparedObstacle => obstacle !== null);
+}
+
+function buildStripGeometry(
+  polygon: Vector[],
+  direction: Vector,
+  normal: Vector,
+  firstOffset: number,
+  maxOffset: number,
+  stripSpacingMeters: number,
+  obstacles: ReadonlyArray<PreparedObstacle>,
+): MowingStrip[] {
   const strips: MowingStrip[] = [];
 
   for (let offset = firstOffset; offset <= maxOffset + EPSILON; offset += stripSpacingMeters) {
     const areaIntervals = buildLineIntervals(polygon, direction, normal, offset, { kind: "area" });
-    const obstacleIntervals = obstacles.flatMap((obstacle) => buildLineIntervals(
+    const obstacleIntervals = buildObstacleIntervalsForOffset(obstacles, direction, normal, offset);
+    const clearIntervals = areaIntervals.flatMap((interval) => subtractIntervals(interval, obstacleIntervals));
+
+    for (const interval of clearIntervals) {
+      const strip = buildStripFromInterval(interval, offset, strips.length);
+      if (strip) {
+        strips.push(strip);
+      }
+    }
+  }
+
+  return strips;
+}
+
+function buildObstacleIntervalsForOffset(
+  obstacles: ReadonlyArray<PreparedObstacle>,
+  direction: Vector,
+  normal: Vector,
+  offset: number,
+): Interval[] {
+  return obstacles
+    .filter((obstacle) => obstacleMayIntersectOffset(obstacle, offset))
+    .flatMap((obstacle) => buildLineIntervals(
       obstacle.polygon,
       direction,
       normal,
       offset,
       { kind: "obstacle", obstacleIndex: obstacle.obstacleIndex },
     ));
-    const clearIntervals = areaIntervals.flatMap((interval) => subtractIntervals(interval, obstacleIntervals));
+}
 
-    for (const interval of clearIntervals) {
-      const start = interval.start;
-      const end = interval.end;
-      if (distance(start.point, end.point) <= EPSILON) {
-        continue;
-      }
+function obstacleMayIntersectOffset(obstacle: PreparedObstacle, offset: number): boolean {
+  return offset >= obstacle.minOffset - EPSILON && offset <= obstacle.maxOffset + EPSILON;
+}
 
-      const capturedAt = Date.now();
-      strips.push({
-        start: {
-          xMeters: start.point.x,
-          yMeters: start.point.y,
-          capturedAt,
-        },
-        end: {
-          xMeters: end.point.x,
-          yMeters: end.point.y,
-          capturedAt,
-        },
-        startBoundary: start.boundary,
-        endBoundary: end.boundary,
-        centerOffsetMeters: offset,
-        sequenceIndex: strips.length,
-        traversalReversed: false,
-      });
-    }
+function buildStripFromInterval(interval: Interval, offset: number, sequenceIndex: number): MowingStrip | null {
+  const start = interval.start;
+  const end = interval.end;
+  if (distance(start.point, end.point) <= EPSILON) {
+    return null;
   }
 
-  const obstaclePolygons = obstacles.map((obstacle) => obstacle.polygon);
-  const traversal = reanchorTraversalToPreferredStart(
-    sequenceStripsForMowing(strips, direction, obstaclePolygons),
-    options.preferredStartPoint,
-  );
-  const sequencedStrips = traversal.map((step, index) => ({
-    ...step.strip,
-    sequenceIndex: index,
-    traversalReversed: step.reversed,
-  }));
-  const connectors = buildStripConnectors(traversal, polygon, obstaclePolygons, mowingStandoffMeters);
-
+  const capturedAt = Date.now();
   return {
-    headingDeg,
-    stripSpacingMeters,
-    bladeWidthMeters,
-    stripCount: sequencedStrips.length,
-    strips: sequencedStrips,
-    connectors,
+    start: {
+      xMeters: start.point.x,
+      yMeters: start.point.y,
+      capturedAt,
+    },
+    end: {
+      xMeters: end.point.x,
+      yMeters: end.point.y,
+      capturedAt,
+    },
+    startBoundary: start.boundary,
+    endBoundary: end.boundary,
+    centerOffsetMeters: offset,
+    sequenceIndex,
+    traversalReversed: false,
   };
 }
 
@@ -391,16 +576,26 @@ function sequenceStripsForMowing(
   strips: MowingStrip[],
   direction: Vector,
   obstacles: Vector[][],
-): TraversalStep[] {
+): SequenceStripsResult {
   const offsets = [...new Set(strips.map((strip) => strip.centerOffsetMeters))].sort((a, b) => a - b);
   const remaining = strips.slice();
   const traversal: TraversalStep[] = [];
   const mownCrossings = new Map<MowingStrip, number>();
+  let traversalCandidateEvaluations = 0;
+  let traversalConnectorPathEvaluations = 0;
+  let routedCandidateCount = 0;
   let currentPoint: Vector | null = null;
   let lockedOffsetDirection: -1 | 1 | null = null;
 
   if (remaining.length === 0) {
-    return traversal;
+    return {
+      traversal,
+      performance: {
+        traversalCandidateEvaluations,
+        traversalConnectorPathEvaluations,
+        routedCandidateCount,
+      },
+    };
   }
 
   const firstOffset = offsets[0];
@@ -415,14 +610,19 @@ function sequenceStripsForMowing(
   while (remaining.length > 0 && currentPoint !== null) {
     const currentOffset = traversal[traversal.length - 1].strip.centerOffsetMeters;
     const candidates = selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
-    const bestStep = chooseBestTraversalStep(candidates, currentPoint, currentOffset, direction, obstacles, mownCrossings);
-    const nextStrip = bestStep.strip;
+    const bestEvaluation = chooseBestTraversalStep(candidates, currentPoint, currentOffset, direction, obstacles, mownCrossings);
+    traversalCandidateEvaluations += candidates.length * 2;
+    traversalConnectorPathEvaluations += candidates.length * 2;
+    if (bestEvaluation.requiresObstacleRouting) {
+      routedCandidateCount += 1;
+    }
+    const nextStrip = bestEvaluation.step.strip;
     const nextOffsetDelta = nextStrip.centerOffsetMeters - currentOffset;
     if (lockedOffsetDirection === null && Math.abs(nextOffsetDelta) > EPSILON) {
       lockedOffsetDirection = nextOffsetDelta > 0 ? 1 : -1;
     }
 
-    const connectorPath = buildConnectorVectors(currentPoint, stripTraversalStart(nextStrip, bestStep.reversed), obstacles);
+    const connectorPath = bestEvaluation.connectorPath;
     for (const [strip, count] of mownCrossings) {
       const stripStart = { x: strip.start.xMeters, y: strip.start.yMeters };
       const stripEnd = { x: strip.end.xMeters, y: strip.end.yMeters };
@@ -434,13 +634,20 @@ function sequenceStripsForMowing(
       }
     }
 
-    traversal.push(bestStep);
+    traversal.push(bestEvaluation.step);
     mownCrossings.set(nextStrip, 0);
-    currentPoint = stripTraversalEnd(nextStrip, bestStep.reversed);
+    currentPoint = stripTraversalEnd(nextStrip, bestEvaluation.step.reversed);
     removeStrip(remaining, nextStrip);
   }
 
-  return traversal;
+  return {
+    traversal,
+    performance: {
+      traversalCandidateEvaluations,
+      traversalConnectorPathEvaluations,
+      routedCandidateCount,
+    },
+  };
 }
 
 function chooseFirstTraversalStep(candidates: MowingStrip[], direction: Vector): TraversalStep {
@@ -498,32 +705,82 @@ function chooseBestTraversalStep(
   direction: Vector,
   obstacles: Vector[][],
   mownCrossings: ReadonlyMap<MowingStrip, number>,
-): TraversalStep {
-  let bestStep: TraversalStep | null = null;
-  let bestCost = Infinity;
+): TraversalEvaluation {
+  let bestEvaluation: TraversalEvaluation | null = null;
 
   for (const candidate of candidates) {
     for (const reversed of [false, true] as const) {
       const candidateStart = stripTraversalStart(candidate, reversed);
-      const cost = traversalCandidateCost(
+      const evaluation = evaluateTraversalCandidate(
         currentPoint,
         candidateStart,
         currentOffset,
         candidate.centerOffsetMeters,
         obstacles,
         mownCrossings,
+        candidate,
+        reversed,
       );
-      if (cost < bestCost - EPSILON || (Math.abs(cost - bestCost) <= EPSILON && (!bestStep || preferCandidate(candidate, reversed, bestStep.strip, bestStep.reversed, direction)))) {
-        bestStep = { strip: candidate, reversed };
-        bestCost = cost;
+      if (
+        !bestEvaluation
+        || isBetterTraversalEvaluation(
+          evaluation,
+          bestEvaluation,
+          candidate,
+          reversed,
+          bestEvaluation.step.strip,
+          bestEvaluation.step.reversed,
+          direction,
+        )
+      ) {
+        bestEvaluation = evaluation;
       }
     }
   }
 
-  if (!bestStep) {
+  if (!bestEvaluation) {
     throw new Error("mowing_plan_has_no_next_strip");
   }
-  return bestStep;
+  return bestEvaluation;
+}
+
+function isBetterTraversalEvaluation(
+  candidateEvaluation: TraversalEvaluation,
+  bestEvaluation: TraversalEvaluation,
+  candidate: MowingStrip,
+  reversed: boolean,
+  currentBest: MowingStrip,
+  currentBestReversed: boolean,
+  direction: Vector,
+): boolean {
+  const costDelta = candidateEvaluation.cost - bestEvaluation.cost;
+  if (costDelta < -EPSILON) {
+    if (
+      candidateEvaluation.requiresObstacleRouting
+      && !bestEvaluation.requiresObstacleRouting
+      && costDelta > -ROUTED_OBSTACLE_PREFERENCE_MARGIN
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  if (costDelta > EPSILON) {
+    if (
+      !candidateEvaluation.requiresObstacleRouting
+      && bestEvaluation.requiresObstacleRouting
+      && costDelta < ROUTED_OBSTACLE_PREFERENCE_MARGIN
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  if (candidateEvaluation.requiresObstacleRouting !== bestEvaluation.requiresObstacleRouting) {
+    return !candidateEvaluation.requiresObstacleRouting;
+  }
+
+  return preferCandidate(candidate, reversed, currentBest, currentBestReversed, direction);
 }
 
 function reanchorTraversalToPreferredStart(
@@ -598,28 +855,75 @@ function buildStripConnectors(
     const nextStartBoundary = stripTraversalStartBoundary(traversal[index + 1].strip, traversal[index + 1].reversed);
     const currentEndStandoff = stripTraversalEndStandoff(traversal[index].strip, traversal[index].reversed, mowingStandoffMeters);
     const nextStartStandoff = stripTraversalStartStandoff(traversal[index + 1].strip, traversal[index + 1].reversed, mowingStandoffMeters);
-
-    if (sameBoundary(currentEndBoundary, nextStartBoundary)) {
-      connectors.push(buildBoundaryStandoffConnector(
-        currentEnd,
-        nextStart,
-        currentEndStandoff,
-        nextStartStandoff,
-        boundaryPolygon(currentEndBoundary, areaPolygon, obstacles),
-        currentEndBoundary,
-      ));
-      continue;
-    }
-
-    const routedObstacle = obstacles.find((obstacle) => segmentIntersectsPolygon(currentEndStandoff, nextStartStandoff, obstacle));
-    if (routedObstacle) {
-      connectors.push(buildObstaclePerimeterConnector(currentEndStandoff, nextStartStandoff, routedObstacle, mowingStandoffMeters));
-    } else {
-      connectors.push([toPathPoint(currentEndStandoff), toPathPoint(nextStartStandoff)]);
-    }
+    connectors.push(buildSafeStripConnector(
+      currentEnd,
+      nextStart,
+      currentEndBoundary,
+      nextStartBoundary,
+      currentEndStandoff,
+      nextStartStandoff,
+      areaPolygon,
+      obstacles,
+      mowingStandoffMeters,
+    ));
   }
 
   return connectors;
+}
+
+function buildSafeStripConnector(
+  currentEnd: Vector,
+  nextStart: Vector,
+  currentEndBoundary: MowingBoundaryReference,
+  nextStartBoundary: MowingBoundaryReference,
+  currentEndStandoff: Vector,
+  nextStartStandoff: Vector,
+  areaPolygon: Vector[],
+  obstacles: Vector[][],
+  mowingStandoffMeters: number,
+): PathPoint[] {
+  if (sameBoundary(currentEndBoundary, nextStartBoundary)) {
+    return buildBoundaryStandoffConnector(
+      currentEnd,
+      nextStart,
+      currentEndStandoff,
+      nextStartStandoff,
+      boundaryPolygon(currentEndBoundary, areaPolygon, obstacles),
+      currentEndBoundary,
+    );
+  }
+
+  const directConnector = [currentEndStandoff, nextStartStandoff];
+  if (pathStaysWithinAreaAndAvoidsObstacles(directConnector, areaPolygon, obstacles)) {
+    return directConnector.map(toPathPoint);
+  }
+
+  const routedObstacle = obstacles.find((obstacle) => segmentIntersectsPolygon(currentEndStandoff, nextStartStandoff, obstacle));
+  if (routedObstacle) {
+    const obstacleConnector = buildObstaclePerimeterConnector(
+      currentEndStandoff,
+      nextStartStandoff,
+      routedObstacle,
+      mowingStandoffMeters,
+    );
+    const obstacleConnectorVectors = obstacleConnector.map((point) => ({ x: point.xMeters, y: point.yMeters }));
+    if (pathStaysWithinAreaAndAvoidsObstacles(obstacleConnectorVectors, areaPolygon, obstacles, routedObstacle)) {
+      return obstacleConnector;
+    }
+  }
+
+  const areaBoundaryConnector = buildAreaBoundaryConnectorBetweenStandoffs(
+    currentEndStandoff,
+    nextStartStandoff,
+    areaPolygon,
+    mowingStandoffMeters,
+  );
+  const areaBoundaryConnectorVectors = areaBoundaryConnector.map((point) => ({ x: point.xMeters, y: point.yMeters }));
+  if (pathStaysWithinAreaAndAvoidsObstacles(areaBoundaryConnectorVectors, areaPolygon, obstacles)) {
+    return areaBoundaryConnector;
+  }
+
+  return areaBoundaryConnector;
 }
 
 function stripTraversalStart(strip: MowingStrip, reversed: boolean): Vector {
@@ -724,6 +1028,26 @@ function buildObstaclePerimeterConnector(from: Vector, to: Vector, obstacle: Vec
   return chosen.map(toPathPoint);
 }
 
+function buildAreaBoundaryConnectorBetweenStandoffs(
+  fromStandoff: Vector,
+  toStandoff: Vector,
+  areaPolygon: Vector[],
+  standoffMeters: number,
+): PathPoint[] {
+  const offsetArea = buildOffsetBoundaryVertices(areaPolygon, { kind: "area" }, standoffMeters);
+  if (offsetArea.length < 3) {
+    return [toPathPoint(fromStandoff), toPathPoint(toStandoff)];
+  }
+
+  const fromIndex = findNearestVertexIndex(offsetArea, fromStandoff);
+  const toIndex = findNearestVertexIndex(offsetArea, toStandoff);
+  const forward = [fromStandoff, ...walkObstacleVertices(offsetArea, fromIndex, toIndex, 1), toStandoff];
+  const reverse = [fromStandoff, ...walkObstacleVertices(offsetArea, fromIndex, toIndex, -1), toStandoff];
+  const chosen = pathLength(forward) <= pathLength(reverse) ? forward : reverse;
+
+  return chosen.map(toPathPoint);
+}
+
 function walkObstacleVertices(obstacle: Vector[], fromIndex: number, toIndex: number, direction: 1 | -1): Vector[] {
   const vertices: Vector[] = [];
   let index = fromIndex;
@@ -758,6 +1082,59 @@ function walkBoundaryVertices(offsetVertices: Vector[], fromSegmentIndex: number
   }
 
   return vertices;
+}
+
+function pathStaysWithinAreaAndAvoidsObstacles(
+  points: Vector[],
+  areaPolygon: Vector[],
+  obstacles: Vector[][],
+  ignoredObstacle?: Vector[],
+): boolean {
+  for (let index = 1; index < points.length; index += 1) {
+    if (!segmentStaysWithinArea(points[index - 1], points[index], areaPolygon)) {
+      return false;
+    }
+    for (const obstacle of obstacles) {
+      if (obstacle === ignoredObstacle) {
+        continue;
+      }
+      if (segmentIntersectsPolygon(points[index - 1], points[index], obstacle)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function segmentStaysWithinArea(start: Vector, end: Vector, areaPolygon: Vector[]): boolean {
+  if (!pointInPolygonOrOnBoundary(start, areaPolygon) || !pointInPolygonOrOnBoundary(end, areaPolygon)) {
+    return false;
+  }
+
+  const segmentLength = distance(start, end);
+  const steps = Math.max(1, Math.ceil(segmentLength / 0.1));
+  for (let step = 0; step <= steps; step += 1) {
+    const point = interpolateVector(start, end, step / steps);
+    if (!pointInPolygonOrOnBoundary(point, areaPolygon)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pointInPolygonOrOnBoundary(point: Vector, polygon: Vector[]): boolean {
+  return pointOnPolygonBoundary(point, polygon) || pointInPolygon(point, polygon);
+}
+
+function pointOnPolygonBoundary(point: Vector, polygon: Vector[]): boolean {
+  for (let index = 0; index < polygon.length; index += 1) {
+    const current = polygon[index];
+    const next = polygon[(index + 1) % polygon.length];
+    if (pointToSegmentDistance(point, current, next) <= 0.01) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function findNearestVertexIndex(points: Vector[], target: Vector): number {
@@ -980,24 +1357,16 @@ function mownCrossingPenalty(connectorPath: Vector[], mownCrossings: ReadonlyMap
   return penalty;
 }
 
-function connectorCost(from: Vector, to: Vector, obstacles: Vector[][], mownCrossings: ReadonlyMap<MowingStrip, number>): number {
-  const path = buildConnectorVectors(from, to, obstacles);
-  let total = 0;
-  for (let index = 1; index < path.length; index += 1) {
-    total += distance(path[index - 1], path[index]);
-  }
-  total += mownCrossingPenalty(path, mownCrossings);
-  return total;
-}
-
-function traversalCandidateCost(
+function evaluateTraversalCandidate(
   from: Vector,
   to: Vector,
   currentOffset: number,
   candidateOffset: number,
   obstacles: Vector[][],
   mownCrossings: ReadonlyMap<MowingStrip, number>,
-): number {
+  strip: MowingStrip,
+  reversed: boolean,
+): TraversalEvaluation {
   const path = buildConnectorVectors(from, to, obstacles);
   let total = 0;
   for (let index = 1; index < path.length; index += 1) {
@@ -1007,11 +1376,22 @@ function traversalCandidateCost(
 
   const isSameOffset = Math.abs(candidateOffset - currentOffset) <= EPSILON;
   const requiresObstacleRouting = path.length > 2;
+  if (requiresObstacleRouting) {
+    total += ROUTED_OBSTACLE_PENALTY;
+  }
   if (isSameOffset && requiresObstacleRouting) {
     total += SAME_OFFSET_ROUTED_OBSTACLE_PENALTY;
   }
 
-  return total;
+  return {
+    step: {
+      strip,
+      reversed,
+    },
+    connectorPath: path,
+    cost: total,
+    requiresObstacleRouting,
+  };
 }
 
 function preferCandidate(
@@ -1100,6 +1480,13 @@ function midpoint(a: Vector, b: Vector): Vector {
   };
 }
 
+function interpolateVector(start: Vector, end: Vector, t: number): Vector {
+  return {
+    x: start.x + ((end.x - start.x) * t),
+    y: start.y + ((end.y - start.y) * t),
+  };
+}
+
 function toPathPoint(point: Vector): PathPoint {
   return {
     xMeters: point.x,
@@ -1124,6 +1511,13 @@ function addUniqueIntersection(
 
 function dot(a: Vector, b: Vector): number {
   return (a.x * b.x) + (a.y * b.y);
+}
+
+function countStripOffsets(firstOffset: number, maxOffset: number, stripSpacingMeters: number): number {
+  if (maxOffset + EPSILON < firstOffset) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(((maxOffset - firstOffset) / stripSpacingMeters) + EPSILON) + 1);
 }
 
 function normalise(v: Vector): Vector {

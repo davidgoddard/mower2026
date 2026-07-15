@@ -2,7 +2,7 @@
  * Path Recorder - Records paths during manual driving or dragging
  */
 
-import { IPathRecorder, PathRecorderOptions, PathPoint, StoredPath, IPathStore } from "./pathFollowerApi.js";
+import { IPathRecorder, PathRecorderOptions, PathPoint, StoredPath, IPathStore, StoredPathSaveOptions } from "./pathFollowerApi.js";
 import { Pose } from "../geometry/positionTypes.js";
 import { unwrapMeters } from "../geometry/positionTypes.js";
 import { LoggerScope } from "../logging/types.js";
@@ -63,7 +63,7 @@ export class PathRecorder implements IPathRecorder {
     });
   }
 
-  async stopAndSave(): Promise<StoredPath> {
+  async stopAndSave(options: StoredPathSaveOptions = {}): Promise<StoredPath> {
     if (!this.recording) {
       throw new Error("Not currently recording");
     }
@@ -88,7 +88,7 @@ export class PathRecorder implements IPathRecorder {
     const pointsToSave = this.currentPath.slice();
 
     // Save path
-    await this.deps.pathStore.savePath(this.currentPathName, pointsToSave);
+    await this.deps.pathStore.savePath(this.currentPathName, pointsToSave, options);
 
     // Load and return the saved path
     const savedPath = await this.deps.pathStore.loadPath(this.currentPathName);

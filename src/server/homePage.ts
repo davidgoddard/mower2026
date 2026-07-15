@@ -1,4 +1,5 @@
 import { getSensorWidgetScriptTag, getSensorWidgetLayoutStyles } from "./liveSensorWidgets.js";
+import { getOperatorPageCommonScriptTag } from "./operatorPageCommon.js";
 
 
 export function renderHomePage(): string {
@@ -597,6 +598,7 @@ ${getSensorWidgetLayoutStyles()}
       }
     </style>
 ${getSensorWidgetScriptTag()}
+${getOperatorPageCommonScriptTag()}
   </head>
   <body>
     <div class="header">
@@ -773,8 +775,8 @@ ${getSensorWidgetScriptTag()}
       async function updateDashboard() {
         try {
           const [primitives, health] = await Promise.all([
-            fetch('/api/primitives').then(r => r.json()),
-            fetch('/health').then(r => r.json())
+            window.operatorPage.fetchJson('/api/primitives'),
+            window.operatorPage.fetchJson('/health')
           ]);
 
           // Update IMU + GNSS widgets

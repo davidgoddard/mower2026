@@ -10,6 +10,64 @@ const square = [
   { xMeters: 0, yMeters: 0, capturedAt: 5 },
 ];
 
+function samplePathStaysInsidePolygon(points, polygon, stepMeters = 0.05) {
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const segmentLength = Math.hypot(end.xMeters - start.xMeters, end.yMeters - start.yMeters);
+    const steps = Math.max(1, Math.ceil(segmentLength / stepMeters));
+    for (let step = 0; step <= steps; step += 1) {
+      const t = step / steps;
+      const point = {
+        x: start.xMeters + ((end.xMeters - start.xMeters) * t),
+        y: start.yMeters + ((end.yMeters - start.yMeters) * t),
+      };
+      assert.equal(pointInPolygonOrOnBoundary(point, polygon), true, `connector sample left area at (${point.x.toFixed(2)}, ${point.y.toFixed(2)})`);
+    }
+  }
+}
+
+function pointInPolygonOrOnBoundary(point, polygon) {
+  return pointOnPolygonBoundary(point, polygon) || pointInPolygon(point, polygon);
+}
+
+function pointOnPolygonBoundary(point, polygon) {
+  for (let index = 0; index < polygon.length - 1; index += 1) {
+    if (pointToSegmentDistance(point, polygon[index], polygon[index + 1]) <= 0.01) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index, index += 1) {
+    const current = polygon[index];
+    const prior = polygon[previous];
+    const intersects = ((current.yMeters > point.y) !== (prior.yMeters > point.y))
+      && (point.x < (((prior.xMeters - current.xMeters) * (point.y - current.yMeters)) / (prior.yMeters - current.yMeters)) + current.xMeters);
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function pointToSegmentDistance(point, start, end) {
+  const dx = end.xMeters - start.xMeters;
+  const dy = end.yMeters - start.yMeters;
+  const lengthSquared = (dx * dx) + (dy * dy);
+  if (lengthSquared <= 1e-9) {
+    return Math.hypot(point.x - start.xMeters, point.y - start.yMeters);
+  }
+  const t = Math.max(0, Math.min(1, (((point.x - start.xMeters) * dx) + ((point.y - start.yMeters) * dy)) / lengthSquared));
+  return Math.hypot(
+    point.x - (start.xMeters + (dx * t)),
+    point.y - (start.yMeters + (dy * t)),
+  );
+}
+
 test("buildMowingPlan clips 30cm strips to a square perimeter", () => {
   const plan = buildMowingPlan(square, {
     headingDeg: 0,
@@ -34,6 +92,11 @@ test("buildMowingPlan clips 30cm strips to a square perimeter", () => {
       [0, 0.9, 1, 0.9],
     ],
   );
+  assert.ok(plan.performance);
+  assert.equal(plan.performance.stripCount, plan.stripCount);
+  assert.equal(plan.performance.connectorCount, plan.connectors.length);
+  assert.ok(plan.performance.totalMs >= 0);
+  assert.ok(plan.performance.sequenceMs >= 0);
 });
 
 test("buildMowingPlan rotates strip direction with heading", () => {
@@ -108,6 +171,30 @@ test("buildMowingPlan pairs multiple intersections for concave perimeters", () =
   ]);
 });
 
+test("buildMowingPlan keeps preview connectors inside a concave mowing area", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 5, yMeters: 0, capturedAt: 2 },
+    { xMeters: 5, yMeters: 5, capturedAt: 3 },
+    { xMeters: 3.5, yMeters: 5, capturedAt: 4 },
+    { xMeters: 3.5, yMeters: 1.5, capturedAt: 5 },
+    { xMeters: 1.5, yMeters: 1.5, capturedAt: 6 },
+    { xMeters: 1.5, yMeters: 5, capturedAt: 7 },
+    { xMeters: 0, yMeters: 5, capturedAt: 8 },
+    { xMeters: 0, yMeters: 0, capturedAt: 9 },
+  ];
+
+  const plan = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 0.5,
+  });
+
+  assert.ok(plan.connectors.length > 0);
+  for (const connector of plan.connectors) {
+    samplePathStaysInsidePolygon(connector, area);
+  }
+});
+
 test("buildMowingPlan removes strip sections inside obstacle perimeters", () => {
   const area = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -144,6 +231,51 @@ test("buildMowingPlan removes strip sections inside obstacle perimeters", () => 
     [2.5, 4],
   ]);
   assert.equal(plan.connectors.some((connector) => connector.length > 2), true);
+});
+
+test("buildMowingPlan ignores obstacles that do not overlap the active strip offsets", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 4, yMeters: 2, capturedAt: 3 },
+    { xMeters: 0, yMeters: 2, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const farObstacle = [
+    { xMeters: 10, yMeters: 10, capturedAt: 6 },
+    { xMeters: 11, yMeters: 10, capturedAt: 7 },
+    { xMeters: 11, yMeters: 11, capturedAt: 8 },
+    { xMeters: 10, yMeters: 11, capturedAt: 9 },
+    { xMeters: 10, yMeters: 10, capturedAt: 10 },
+  ];
+
+  const withoutObstacle = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 1,
+  });
+  const withFarObstacle = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 1,
+    obstacles: [farObstacle],
+  });
+
+  assert.equal(withFarObstacle.stripCount, withoutObstacle.stripCount);
+  assert.deepEqual(
+    withFarObstacle.strips.map((strip) => [
+      Number(strip.start.xMeters.toFixed(2)),
+      Number(strip.start.yMeters.toFixed(2)),
+      Number(strip.end.xMeters.toFixed(2)),
+      Number(strip.end.yMeters.toFixed(2)),
+      Number(strip.centerOffsetMeters.toFixed(2)),
+    ]),
+    withoutObstacle.strips.map((strip) => [
+      Number(strip.start.xMeters.toFixed(2)),
+      Number(strip.start.yMeters.toFixed(2)),
+      Number(strip.end.xMeters.toFixed(2)),
+      Number(strip.end.yMeters.toFixed(2)),
+      Number(strip.centerOffsetMeters.toFixed(2)),
+    ]),
+  );
 });
 
 test("normalizeAxisHeading treats opposite directions as the same strip axis", () => {
@@ -270,6 +402,18 @@ test("buildMowingPlan prefers adjacent strips over routed same-offset continuati
       true,
     );
   }
+
+  const offsets = plan.strips.map((strip) => Number(strip.centerOffsetMeters.toFixed(6)));
+  const duplicateOffsetIndex = offsets.findIndex((offset, index) => offsets.indexOf(offset) !== index);
+  assert.notEqual(duplicateOffsetIndex, -1, "expected an isolated region to force a later return to a prior offset");
+
+  const seenBeforeDuplicate = new Set(offsets.slice(0, duplicateOffsetIndex));
+  const uniqueOffsets = new Set(offsets);
+  assert.equal(
+    seenBeforeDuplicate.size,
+    uniqueOffsets.size,
+    "planner should exhaust the locally adjacent non-routed offsets before returning around the obstacle to a deferred fragment",
+  );
 });
 
 test("buildMowingPlan reanchors strip order around the preferred perimeter start point", () => {
