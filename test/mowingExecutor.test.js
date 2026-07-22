@@ -97,6 +97,85 @@ test("MowingExecutor traces the full boundary back to the original encounter poi
   assert.equal(traversedPoints.some(([x, y]) => x === 0 && y === 1), true);
 });
 
+test("MowingExecutor can skip the initial area perimeter trace and begin strip mowing from the perimeter", async () => {
+  const areaPoints = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const plan = {
+    headingDeg: 90,
+    stripSpacingMeters: 0.3,
+    bladeWidthMeters: 0.4,
+    stripCount: 1,
+    strips: [
+      {
+        start: { xMeters: 0, yMeters: 0, capturedAt: 10 },
+        end: { xMeters: 0, yMeters: 1, capturedAt: 11 },
+        startBoundary: { kind: "area" },
+        endBoundary: { kind: "area" },
+        centerOffsetMeters: 0,
+        sequenceIndex: 0,
+        traversalReversed: false,
+      },
+    ],
+    connectors: [],
+  };
+
+  const driveTargets = [];
+  const driveController = {
+    async executeDrive(options) {
+      driveTargets.push([options.targetPosition.xMeters, options.targetPosition.yMeters]);
+      return { status: "success", maxCteMeters: 0 };
+    },
+  };
+  const turnCalls = [];
+  const turnController = {
+    async executeTurn(request) {
+      turnCalls.push(request);
+      return { status: "success" };
+    },
+  };
+  const poses = [
+    createPose(0.1, -0.2, createInternalHeading(0), "gnss"),
+    createPose(0.92, 0.08, createInternalHeading(0), "gnss"),
+    createPose(0.92, 0.08, createInternalHeading(90), "gnss"),
+    createPose(1, 0, createInternalHeading(90), "gnss"),
+  ];
+  const poseFusion = {
+    getCurrentPose() {
+      return poses.shift() ?? createPose(1, 0, createInternalHeading(90), "gnss");
+    },
+  };
+  const followCalls = [];
+  const continuousPathFollower = {
+    async executePath(pathPoints, options) {
+      followCalls.push({ pathPoints, options });
+      return { completed: true, reason: "reached_end" };
+    },
+  };
+
+  const executor = new MowingExecutor({
+    plan,
+    areaPoints,
+    obstaclePointsArray: [],
+    driveController,
+    turnController,
+    poseFusion,
+    continuousPathFollower,
+    logger: createLogger(),
+    skipInitialBoundaryTrace: true,
+  });
+
+  const status = await executor.execute();
+
+  assert.equal(status.phase, "complete");
+  assert.equal(followCalls.length, 0);
+  assert.equal(driveTargets.length >= 1, true);
+});
+
 test("MowingExecutor turns toward the 50cm-ahead perimeter lead target and follows in one continuous run", async () => {
   const areaPoints = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -274,7 +353,7 @@ test("MowingExecutor follows multi-point connectors with the continuous follower
   assert.equal(followCalls.at(-1).options.strictOrderedProgress, true);
 });
 
-test("MowingExecutor uses a direct lane transfer when no obstacle blocks the next strip", async () => {
+test("MowingExecutor executes a planner-approved two-point connector as a direct transfer", async () => {
   const driveTargets = [];
   const driveController = {
     async executeDrive(options) {
@@ -352,7 +431,10 @@ test("MowingExecutor uses a direct lane transfer when no obstacle blocks the nex
     logger: createLogger(),
   });
 
-  const result = await executor["followDirectLaneTransfer"](1, 0.85, 0, {
+  const result = await executor["followConnector"]([
+    { xMeters: 0.5, yMeters: 0.85, capturedAt: 20 },
+    { xMeters: 1, yMeters: 0.85, capturedAt: 21 },
+  ], 0, {
     stage: "strip_approach",
     stripIndex: 1,
   });
@@ -360,51 +442,6 @@ test("MowingExecutor uses a direct lane transfer when no obstacle blocks the nex
   assert.equal(result.completed, true);
   assert.deepEqual(driveTargets, [[1, 0.85]]);
   assert.equal(followCalls.length, 0);
-});
-
-test("MowingExecutor keeps routed connector following when an obstacle blocks direct transfer", async () => {
-  const poseFusion = {
-    getCurrentPose() {
-      return createPose(0, 0, createInternalHeading(0), "gnss");
-    },
-  };
-  const executor = new MowingExecutor({
-    plan: {
-      headingDeg: 90,
-      stripSpacingMeters: 0.3,
-      bladeWidthMeters: 0.4,
-      stripCount: 0,
-      strips: [],
-      connectors: [],
-    },
-    areaPoints: [],
-    obstaclePointsArray: [[
-      { xMeters: 0.4, yMeters: -0.2, capturedAt: 1 },
-      { xMeters: 0.6, yMeters: -0.2, capturedAt: 2 },
-      { xMeters: 0.6, yMeters: 0.2, capturedAt: 3 },
-      { xMeters: 0.4, yMeters: 0.2, capturedAt: 4 },
-      { xMeters: 0.4, yMeters: -0.2, capturedAt: 5 },
-    ]],
-    driveController: {
-      async executeDrive() {
-        return { status: "success", maxCteMeters: 0 };
-      },
-    },
-    turnController: {
-      async executeTurn() {
-        return { status: "success" };
-      },
-    },
-    poseFusion,
-    continuousPathFollower: {
-      async executePath() {
-        return { completed: true, reason: "reached_end" };
-      },
-    },
-    logger: createLogger(),
-  });
-
-  assert.equal(executor["shouldUseDirectLaneTransfer"](1, 0), false);
 });
 
 test("MowingExecutor skips tiny direct connector corrections when already at the target", async () => {

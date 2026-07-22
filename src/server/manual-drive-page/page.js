@@ -939,6 +939,7 @@
     }
 
     const startMowingBtn = $("startMowingBtn");
+    const startMowingNoPerimeterBtn = $("startMowingNoPerimeterBtn");
     const stopMowingBtn = $("stopMowingBtn");
     const mowingStatusBar = $("mowingStatusBar");
     const mowingStatusText = $("mowingStatusText");
@@ -970,6 +971,7 @@
 
       const isRunning = status.phase !== 'idle' && status.phase !== 'complete' && status.phase !== 'stopped' && status.phase !== 'error';
       startMowingBtn.style.display = isRunning ? 'none' : '';
+      startMowingNoPerimeterBtn.style.display = isRunning ? 'none' : '';
       const canResume = !isRunning && Boolean(status.resumeAvailable);
       resumeMowingBtn.style.display = canResume ? '' : 'none';
       resumeMowingBtn.disabled = !canResume;
@@ -1053,7 +1055,7 @@
       }
     }
 
-    startMowingBtn.addEventListener('click', async () => {
+    async function startMowing(skipInitialBoundaryTrace) {
       const areaName = mowingPlanAreaSelect.value;
       if (!areaName) {
         alert('Please select a mowing area first.');
@@ -1068,13 +1070,26 @@
       const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
 
       try {
-        const result = await postJson('/api/mowing/start', { areaName, headingDeg, stripSpacingMeters });
+        const result = await postJson('/api/mowing/start', {
+          areaName,
+          headingDeg,
+          stripSpacingMeters,
+          skipInitialBoundaryTrace: Boolean(skipInitialBoundaryTrace),
+        });
 
         updateMowingStatusUi({ phase: 'approaching_area_perimeter', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
         schedulePageStatePoll(0);
       } catch (error) {
         alert('Failed to start mowing: ' + error.message);
       }
+    }
+
+    startMowingBtn.addEventListener('click', async () => {
+      await startMowing(false);
+    });
+
+    startMowingNoPerimeterBtn.addEventListener('click', async () => {
+      await startMowing(true);
     });
 
     resumeMowingBtn.addEventListener('click', async () => {

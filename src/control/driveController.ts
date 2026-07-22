@@ -58,8 +58,6 @@ import {
 import { systemStop } from "./systemStop.js";
 import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
 
-const DRIVE_SHORT_HOP_SKIP_TURN_DISTANCE_METERS = 0.15;
-
 export interface DriveControllerOptions {
   sensorController: SensorController;
   poseFusion: PoseFusion;
@@ -180,12 +178,14 @@ export class DriveController {
           : addRelativeAngle(angleToTarget, createRelativeAngle(180));
         const headingError = headingDifference(this.driveStartHeading, desiredHeading);
         const headingErrorDeg = Math.abs(unwrapRelativeAngle(headingError));
-        const shouldSkipInitialTurn = request.skipInitialTurn === true
-          || (!request.alwaysTurnToFaceTarget
-          && targetDistanceMeters <= DRIVE_SHORT_HOP_SKIP_TURN_DISTANCE_METERS);
+        // Segment drives are deliberately turn-then-drive operations, including
+        // short hops. Curved motion belongs to the continuous perimeter/path
+        // follower; skipping a large alignment turn here can send a short drive
+        // a long way in the wrong direction before position error converges.
+        const shouldSkipInitialTurn = request.skipInitialTurn === true;
 
         if (shouldSkipInitialTurn) {
-          this.logger.info("drive.short_hop_skip_turn", {
+          this.logger.info("drive.initial_turn_skipped", {
             targetDistanceMeters,
             headingErrorDeg,
             driveDirectionSign,

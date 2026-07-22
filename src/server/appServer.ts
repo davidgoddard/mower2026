@@ -491,6 +491,34 @@ function buildCorsHeaders(request: IncomingMessage): Record<string, string> {
   };
 }
 
+export function describeFatalReason(reason: unknown): { message: string; stack?: string; name?: string } {
+  if (reason instanceof Error) {
+    return {
+      message: reason.message,
+      stack: reason.stack,
+      name: reason.name,
+    };
+  }
+
+  if (typeof reason === "string") {
+    return { message: reason };
+  }
+
+  if (reason === null) {
+    return { message: "null" };
+  }
+
+  if (reason === undefined) {
+    return { message: "undefined" };
+  }
+
+  try {
+    return { message: JSON.stringify(reason) ?? String(reason) };
+  } catch {
+    return { message: String(reason) };
+  }
+}
+
 export async function startMowerServer(options: StartMowerServerOptions = {}): Promise<RunningMowerServer> {
   const appName = options.appName ?? "mower-core";
   const host = options.host ?? "0.0.0.0";
@@ -506,6 +534,49 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     minLevel: "info",
   });
   systemStop.configureLogger(logger.child({ context: "control", source: "SystemStop" }));
+
+  let fatalHandlerInstalled = true;
+  const handleFatalError = async (reason: unknown, eventName: "uncaughtException" | "unhandledRejection"): Promise<never> => {
+    const fatal = describeFatalReason(reason);
+    logger.error("app.fatal_exception", {
+      eventName,
+      reason: fatal.message,
+      name: fatal.name,
+      stack: fatal.stack,
+      sessionLogPath: logger.sessionLogPath,
+    });
+
+    try {
+      await requestEmergencyStop(`fatal_${eventName}`);
+    } catch (stopError) {
+      console.error("mower-core failed to stop motors after fatal error", stopError);
+    }
+
+    try {
+      await logger.flush();
+    } catch (flushError) {
+      console.error("mower-core failed to flush fatal error log", flushError);
+    }
+
+    try {
+      await logger.close();
+    } catch (closeError) {
+      console.error("mower-core failed to close fatal error log", closeError);
+    }
+
+    process.exit(1);
+  };
+
+  const fatalExceptionHandler = (error: Error): void => {
+    void handleFatalError(error, "uncaughtException");
+  };
+
+  const fatalRejectionHandler = (reason: unknown): void => {
+    void handleFatalError(reason, "unhandledRejection");
+  };
+
+  process.on("uncaughtException", fatalExceptionHandler);
+  process.on("unhandledRejection", fatalRejectionHandler);
 
   const requestLogger = logger.child({ context: "http", source: "HttpRouter" });
   let sensorGateway: SensorHardwareGateway | null = null;
@@ -561,7 +632,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     }
     void (state
       ? mowingResumeStore.saveState(state)
-      : mowingResumeStore.clear());
+      : mowingResumeStore.clear()).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("mowing_resume.persist_failed", {
+          error: message,
+          operation: state ? "save" : "clear",
+        });
+      });
   }
 
   /**
@@ -1544,6 +1621,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const areaName = typeof data.areaName === "string" ? data.areaName.trim() : "";
           const headingDeg = Number(data.headingDeg);
           const stripSpacingMeters = data.stripSpacingMeters === undefined ? undefined : Number(data.stripSpacingMeters);
+          const skipInitialBoundaryTrace = data.skipInitialBoundaryTrace === true;
           if (areaName.length === 0) {
             throw new BadRequestError("area_name_required");
           }
@@ -1599,6 +1677,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             areaName,
             plan,
             initialEntryPlan,
+            skipInitialBoundaryTrace,
             areaPoints: shapedAreaPoints,
             obstaclePointsArray,
             driveController,
@@ -1669,6 +1748,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           response.end(encodeJson({
             started: true,
             areaName,
+            skipInitialBoundaryTrace,
             stripCount: plan.strips.length,
             initialEntry: {
               xMeters: initialEntryPlan.entryPoint.xMeters,
@@ -2441,6 +2521,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
       state = "stopping";
       logger.transition("running", "stopping");
+
+      if (fatalHandlerInstalled) {
+        process.off("uncaughtException", fatalExceptionHandler);
+        process.off("unhandledRejection", fatalRejectionHandler);
+        fatalHandlerInstalled = false;
+      }
 
       await new Promise<void>((resolve, reject) => {
         server.close((error: Error | undefined) => {

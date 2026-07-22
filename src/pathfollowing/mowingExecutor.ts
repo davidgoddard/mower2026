@@ -37,6 +37,7 @@ export interface MowingExecutorOptions {
   readonly areaName?: string;
   readonly plan: MowingPlan;
   readonly initialEntryPlan?: MowingInitialEntryPlan;
+  readonly skipInitialBoundaryTrace?: boolean;
   readonly areaPoints: ReadonlyArray<PathPoint>;
   readonly obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
   readonly driveController: DriveController;
@@ -80,6 +81,7 @@ export class MowingExecutor {
   private readonly continuousPathFollower: ContinuousPathFollower;
   private readonly logger: LoggerScope;
   private readonly parameters: PathFollowingParameters;
+  private readonly skipInitialBoundaryTrace: boolean;
   private readonly standoff: number;
   private readonly recentTargetSink: RecentTargetSink | undefined;
   private readonly updateRecoveryCheckpoint: ((waypoints: PathPoint[]) => void) | undefined;
@@ -106,6 +108,7 @@ export class MowingExecutor {
     this.continuousPathFollower = options.continuousPathFollower;
     this.logger = options.logger;
     this.parameters = options.parameters ?? DEFAULT_PATH_FOLLOWING_PARAMETERS;
+    this.skipInitialBoundaryTrace = options.skipInitialBoundaryTrace ?? false;
     this.standoff = this.parameters.mowingStandoffMeters;
     this.recentTargetSink = options.recentTargetSink;
     this.updateRecoveryCheckpoint = options.updateRecoveryCheckpoint;
@@ -151,6 +154,9 @@ export class MowingExecutor {
         this.reanchorPlanToCurrentPose();
       } else {
         this.currentStripIndex = 0;
+      }
+      if (this.skipInitialBoundaryTrace) {
+        this.tracedBoundaries.add("area");
       }
       this.startAreaEscapeMonitor();
       const outsideAreaStatus = this.buildOutsideAreaStatus();
@@ -230,7 +236,9 @@ export class MowingExecutor {
       targetX: approachX,
       targetY: approachY,
       errorCode: "initial_entry_failed",
-      continuation: { stage: "initial_boundary_trace", stripIndex: 0 },
+      continuation: this.skipInitialBoundaryTrace
+        ? { stage: "strip_approach", stripIndex: 0 }
+        : { stage: "initial_boundary_trace", stripIndex: 0 },
     });
     if (!this.isNearCurrentPose(approachX, approachY)) {
       const approachResult = await this.driveController.executeDrive({
@@ -260,19 +268,27 @@ export class MowingExecutor {
       return this.getStatus();
     }
 
-    const traceResult = await this.traceBoundary("area", entryPlan.entryPoint, {
-      stripIndex: 0,
-      continuation: { stage: "strip_approach", stripIndex: 0 },
-      markBoundaryTraced: "area",
-    });
-    if (!traceResult) {
-      return this.getStatus();
+    if (!this.skipInitialBoundaryTrace) {
+      const traceResult = await this.traceBoundary("area", entryPlan.entryPoint, {
+        stripIndex: 0,
+        continuation: { stage: "strip_approach", stripIndex: 0 },
+        markBoundaryTraced: "area",
+      });
+      if (!traceResult) {
+        return this.getStatus();
+      }
+      this.tracedBoundaries.add("area");
+      this.logger.info("mowing.initial_entry.done", {
+        tracedBoundary: "area",
+        segmentIndex: entryPlan.segmentIndex,
+      });
+      return null;
     }
 
-    this.tracedBoundaries.add("area");
     this.logger.info("mowing.initial_entry.done", {
       tracedBoundary: "area",
       segmentIndex: entryPlan.segmentIndex,
+      skippedBoundaryTrace: true,
     });
     return null;
   }
@@ -484,21 +500,11 @@ export class MowingExecutor {
       }
 
       if (stage === "connector_follow" && !isLastStrip) {
-        const nextStrip = this.plan.strips[index + 1];
         const connector = this.plan.connectors[index];
-        const nextStripStart = nextStrip.traversalReversed ? nextStrip.end : nextStrip.start;
-        const nextStripEnd = nextStrip.traversalReversed ? nextStrip.start : nextStrip.end;
-        const nextDir = normalise({
-          x: nextStripEnd.xMeters - nextStripStart.xMeters,
-          y: nextStripEnd.yMeters - nextStripStart.yMeters,
-        });
-        const nextEntryStandoff = offsetPoint(nextStripStart, nextDir, this.standoff);
         const transitionContinuation = { stage: "strip_approach" as const, stripIndex: index + 1 };
-        const transitionResult = this.shouldUseDirectLaneTransfer(nextEntryStandoff.x, nextEntryStandoff.y)
-          ? await this.followDirectLaneTransfer(nextEntryStandoff.x, nextEntryStandoff.y, index, transitionContinuation)
-          : connector && connector.length >= 2
-            ? await this.followConnector(connector, index, transitionContinuation)
-            : { completed: true as const, reason: "reached_end" as const };
+        const transitionResult = connector && connector.length >= 2
+          ? await this.followConnector(connector, index, transitionContinuation)
+          : { completed: true as const, reason: "reached_end" as const };
         if (transitionResult) {
           this.phase = "following_connector";
           if (!transitionResult.completed) {
@@ -881,67 +887,12 @@ export class MowingExecutor {
     return boundary.kind === "area" ? "area" : `obstacle:${boundary.obstacleIndex}`;
   }
 
-  private shouldUseDirectLaneTransfer(targetX: number, targetY: number): boolean {
-    const pose = this.poseFusion.getCurrentPose();
-    return !this.segmentIntersectsAnyObstacle(
-      pose.position.xMeters,
-      pose.position.yMeters,
-      targetX,
-      targetY,
-    );
-  }
-
-  private async followDirectLaneTransfer(
-    targetX: number,
-    targetY: number,
-    stripIndex: number,
-    continuation: MowingResumeContinuation,
-  ): Promise<{
-    readonly completed: boolean;
-    readonly reason: "reached_end" | "user_stopped" | "error";
-    readonly error?: string;
-  }> {
-    this.persistResumeOperation({
-      kind: "drive",
-      phase: "following_connector",
-      stripIndex,
-      targetX,
-      targetY,
-      errorCode: "connector_failed",
-      continuation,
-    });
-    if (this.isNearCurrentPose(targetX, targetY)) {
-      return { completed: true, reason: "reached_end" };
-    }
-
-    const driveResult = await this.driveController.executeDrive({
-      targetPosition: createPosition(targetX, targetY),
-      learningEnabled: true,
-    });
-    if (driveResult.status === "success") {
-      return { completed: true, reason: "reached_end" };
-    }
-    return {
-      completed: false,
-      reason: driveResult.status === "stopped" ? "user_stopped" : "error",
-      error: driveResult.errorMessage,
-    };
-  }
-
   private isNearCurrentPose(x: number, y: number, toleranceMeters: number = MOWING_TARGET_REACHED_TOLERANCE_METERS): boolean {
     const pose = this.poseFusion.getCurrentPose();
     return Math.hypot(
       pose.position.xMeters - x,
       pose.position.yMeters - y,
     ) <= toleranceMeters;
-  }
-
-  private segmentIntersectsAnyObstacle(startX: number, startY: number, endX: number, endY: number): boolean {
-    return this.obstaclePointsArray.some((obstacle) => segmentIntersectsPolygon(
-      { x: startX, y: startY },
-      { x: endX, y: endY },
-      normalizePolygon(obstacle),
-    ));
   }
 
   private reanchorPlanToCurrentPose(): void {

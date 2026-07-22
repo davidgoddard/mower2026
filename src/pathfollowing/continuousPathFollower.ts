@@ -18,6 +18,7 @@ const CONTINUOUS_TRACE_SPEED_HEADING_GAIN = 0.003;
 const CONTINUOUS_TRACE_SPEED_CTE_GAIN = 0.9;
 const CONTINUOUS_LOOKAHEAD_MIN_METERS = 0.25;
 const CONTINUOUS_LOOKAHEAD_MAX_METERS = 0.6;
+const CONTINUOUS_CORNER_LOOKAHEAD_LIMIT_DEG = 20;
 const CONTINUOUS_CTE_GAIN = 1.8;
 const CONTINUOUS_HEADING_GAIN = 0.02;
 const CONTINUOUS_MAX_TRIM = 0.55;
@@ -214,6 +215,9 @@ export function selectContinuousLookaheadTargetIndex(
   );
   const targetDistance = cumulativeDistances[clampedStartIndex] + lookaheadMeters;
   for (let index = clampedStartIndex; index < points.length; index += 1) {
+    if (index > clampedStartIndex && isProtectedContinuousCorner(points, index)) {
+      return index;
+    }
     if (cumulativeDistances[index] >= targetDistance) {
       return index;
     }
@@ -407,13 +411,53 @@ function buildContinuousGuidance(
     CONTINUOUS_LOOKAHEAD_MIN_METERS,
     Math.min(CONTINUOUS_LOOKAHEAD_MAX_METERS, parameters.segmentedDriveMaxSegmentLengthMeters),
   );
-  const targetDistance = projection.distanceAlongPathMeters + lookaheadMeters;
+  const unrestrictedTargetDistance = projection.distanceAlongPathMeters + lookaheadMeters;
+  const protectedCornerDistance = findNextProtectedContinuousCornerDistance(
+    points,
+    cumulativeDistances,
+    segmentStartIndex + 1,
+    unrestrictedTargetDistance,
+  );
+  const targetDistance = protectedCornerDistance ?? unrestrictedTargetDistance;
   const lookaheadTarget = interpolatePathPointAtDistance(points, cumulativeDistances, targetDistance);
   return {
     segmentStart,
     segmentEnd,
     lookaheadTarget,
   };
+}
+
+function findNextProtectedContinuousCornerDistance(
+  points: PathPoint[],
+  cumulativeDistances: number[],
+  firstVertexIndex: number,
+  targetDistanceMeters: number,
+): number | null {
+  for (let index = Math.max(1, firstVertexIndex); index < points.length - 1; index += 1) {
+    if (cumulativeDistances[index] > targetDistanceMeters) {
+      break;
+    }
+    if (isProtectedContinuousCorner(points, index)) {
+      return cumulativeDistances[index];
+    }
+  }
+  return null;
+}
+
+function isProtectedContinuousCorner(points: PathPoint[], vertexIndex: number): boolean {
+  if (vertexIndex <= 0 || vertexIndex >= points.length - 1) {
+    return false;
+  }
+  const incomingHeading = angleTo(
+    pointToPosition(points[vertexIndex - 1]),
+    pointToPosition(points[vertexIndex]),
+  );
+  const outgoingHeading = angleTo(
+    pointToPosition(points[vertexIndex]),
+    pointToPosition(points[vertexIndex + 1]),
+  );
+  return Math.abs(unwrapRelativeAngle(headingDifference(incomingHeading, outgoingHeading)))
+    >= CONTINUOUS_CORNER_LOOKAHEAD_LIMIT_DEG;
 }
 
 function interpolatePathPointAtDistance(

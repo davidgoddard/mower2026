@@ -54,6 +54,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling.
 - `src/server/manual-drive-page/page.js`: Drive & Paths browser logic for map drawing, mowing preview, recording, and path actions.
   - area-perimeter saves include the current mowing strip heading and strip spacing, and selecting an area restores those saved defaults into the preview controls
+  - the mowing controls also expose a perimeter-entry start path that skips the initial area loop trace and goes straight into the first strip
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
 - `src/server/driveTuningPage.ts`: drive tuning UI uses the shared popup overlay for alerts.
   - staged tuning flow: short-distance brake/CTE learning, long heading-bias tuning, and long heading-gain tuning
@@ -172,7 +173,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/driveController.ts`: segment drive controller that turns to face the target and then delegates straight-line travel
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
-  - skips the initial pivot for very short non-forced hops (15 cm or less) so tiny pose corrections do not degrade into turn-drive-turn startup dithering
+  - short and long point-to-point segments use the same turn-then-straight rule; only an explicit caller request may skip the initial pivot
   - delegates to line controller immediately after the turn, then records successful segment history
   - `getCurrentPose()` exposes the live fused pose for higher-level path executors that need to re-evaluate progress between segment drives
   - stop requests are unconditional: they are awaited through both the turn phase and the line-drive phase when active, and still issue an immediate stop command even when no drive is currently active
@@ -269,6 +270,7 @@ This document maps problem domains to candidate files removing the need for Code
   - callers that already chose a specific join point can preserve that target order while still dropping any first target that is already within the minimum segment distance of the mower
   - drives targets with the calibrated segment drive controller and aborts when segment CTE exceeds the configured threshold
 - `src/pathfollowing/continuousPathFollower.ts`: continuous forward follower for smooth perimeter traces and multi-point lane connectors
+  - caps lookahead at meaningful polyline corners while retaining multi-point lookahead across gentle curves, preventing unnecessary corner cutting without turning smooth obstacle loops into stop-turn-drive paths
   - supports ordered-progress protection so projection stays on the local segment window instead of jumping ahead to a later non-adjacent segment
   - supports sharp-corner waypoint pivots: when close to a waypoint that implies a steep outgoing turn, it pivots to the new heading instead of trying to arc-cut outside the perimeter
   - supports a caller-supplied minimum trace speed so perimeter loops do not slow into near-stall commands
@@ -322,9 +324,12 @@ This document maps problem domains to candidate files removing the need for Code
   - emits raw, smoothed, reduced, and chosen outlines so the preview UI can compare the recorded perimeter against the production outline
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
   - persists exact in-progress mowing step state through the app-server callback so failed or stopped sessions can resume from the saved operation rather than rebuilding the strip plan from scratch
+  - executes the planner-provided inter-strip connector without replacing a validated perimeter route at runtime; planner-approved two-point connectors use direct line drive and multi-point perimeter connectors use continuous following
   - when a continuous boundary or connector follow stops, saves the completed waypoint index and resumes from that ordered progress point rather than restarting the saved path at index zero
 - `src/pathfollowing/mowingResumeStore.ts`: JSON persistence for the saved mowing resume state
   - stores the exact active mowing operation, continuous-follow target index, traced-boundary progress, saved strip plan, and recorded area/obstacle geometry used by `/api/mowing/resume`
+  - serializes save and clear requests through one ordered promise queue, preventing rapid progress checkpoints from racing each other or an initial clear
+  - uses the shared collision-proof atomic JSON writer; app-server persistence failures are logged as `mowing_resume.persist_failed` and do not terminate active motor control
   - on mow start, now tries to select a strip-adjacent area-perimeter anchor that is directly reachable without re-leaving the area after entry; when one is found it re-anchors the strip order to that perimeter point, drives to the associated inside standoff, traces the full area loop once, and then starts strip mowing from that same strip-adjacent point instead of re-planning again from the post-trace pose
   - that forced first area trace now injects the chosen strip-adjacent perimeter point into the traced loop itself and also refreshes the retry checkpoint with that ordered loop, so a stall during the first lap resumes on the same anchored perimeter order instead of falling back to a generic nearest-point boundary restart
   - initial area entry traces the full area perimeter before strip mowing begins; when no safe strip-adjacent area anchor can be chosen up front it falls back to re-anchoring strip order from the live post-trace pose
@@ -445,7 +450,7 @@ This document maps problem domains to candidate files removing the need for Code
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
   - motor API: `setMotorWheelOutputs(...)` sends the desired wheel pair through the normal I2C queue, `stopMotors()` issues a ramped zero-output stop with the drive still enabled so the ESP32 honours the configured deceleration profile, and `emergencyStopMotors()` issues a hard H-bridge disable for the operator stop button / stall detection / watchdog only; unchanged motor commands are suppressed and the ESP32 latches the last accepted command until a newer one arrives
-  - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress
+  - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress; pivot-to-translation and translation-to-pivot command changes restart that observation window
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU
   - `GnssPositionUpdateEvent`: position, heading, fix quality from GNSS

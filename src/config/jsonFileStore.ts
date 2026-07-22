@@ -1,5 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+
+let temporaryFileSequence = 0;
 
 export async function readJsonFile(path: string): Promise<unknown> {
   const content = await readFile(path, "utf8");
@@ -14,9 +16,19 @@ export async function readJsonFile(path: string): Promise<unknown> {
 export async function writeJsonFile(path: string, value: unknown): Promise<void> {
   const dir = dirname(path);
   await mkdir(dir, { recursive: true });
-  const tmpPath = `${path}.tmp`;
-  await writeFile(tmpPath, JSON.stringify(value, null, 2), "utf8");
-  await rename(tmpPath, path);
+  const tmpPath = `${path}.tmp-${process.pid}-${temporaryFileSequence++}`;
+  try {
+    await writeFile(tmpPath, JSON.stringify(value, null, 2), "utf8");
+    await rename(tmpPath, path);
+  } finally {
+    try {
+      await unlink(tmpPath);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+    }
+  }
 }
 
 /**

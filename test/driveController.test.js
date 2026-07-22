@@ -322,7 +322,7 @@ describe("DriveController", () => {
     assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
   });
 
-  it("skips the initial pivot for a short hop even when heading error is large", async () => {
+  it("pivots before a short hop when heading error is large", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
@@ -352,7 +352,7 @@ describe("DriveController", () => {
     });
 
     assert.equal(result.status, "success");
-    assert.equal(mockTurn.executeTurn.mock.calls.length, 0);
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 

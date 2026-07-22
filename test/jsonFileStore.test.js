@@ -61,6 +61,18 @@ test("writeJsonFile overwrites existing files atomically from a caller's perspec
   });
 });
 
+test("writeJsonFile supports concurrent writes to the same path", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "file.json");
+    const values = Array.from({ length: 20 }, (_, v) => ({ v }));
+
+    await Promise.all(values.map((value) => writeJsonFile(path, value)));
+
+    const value = await readJsonFile(path);
+    assert.ok(values.some((candidate) => candidate.v === value.v));
+  });
+});
+
 test("writeJsonFile then readJsonFile round-trips deeply nested structures", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "deep.json");

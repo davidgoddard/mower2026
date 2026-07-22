@@ -86,6 +86,20 @@ interface SensorControllerOptions {
   maxLoopCount?: number;
 }
 
+function classifyStallCommandMotion(
+  leftWheelOutputPercent: number,
+  rightWheelOutputPercent: number,
+): "translation" | "pivot" | null {
+  const leftSign = Math.sign(leftWheelOutputPercent);
+  const rightSign = Math.sign(rightWheelOutputPercent);
+  if (leftSign === 0 && rightSign === 0) {
+    return null;
+  }
+  return leftSign !== 0 && rightSign !== 0 && leftSign !== rightSign
+    ? "pivot"
+    : "translation";
+}
+
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -171,6 +185,7 @@ export class SensorController extends EventEmitter {
   private latestGnssAccuracyMeters: number | null = null;
   private stallMotionAnchorPosition: Position | null = null;
   private stallMotionAnchorSinceMillis: number | null = null;
+  private stallCommandMotionKind: "translation" | "pivot" | null = null;
   private stallDetectionSamples = 0;
   private stallDetectionLatched = false;
 
@@ -235,6 +250,7 @@ export class SensorController extends EventEmitter {
     systemStop.clearStop("sensor-controller-start");
     this.lastMotorCommand = null;
     this.motorCommandActiveSinceMillis = null;
+    this.stallCommandMotionKind = null;
     this.motorZeroCommandSinceMillis = null;
     this.motorStoppedSinceMillis = null;
     this.motionSessionDepth = 0;
@@ -388,6 +404,13 @@ export class SensorController extends EventEmitter {
       this.lastMotorCommand.rightWheelOutputPercent === 0;
     const wasMotionCommand = this.isMotorCommandMotion(this.lastMotorCommand);
     const isZeroCommand = normalizedLeftWheelOutputPercent === 0 && normalizedRightWheelOutputPercent === 0;
+    const commandMotionKind = classifyStallCommandMotion(
+      normalizedLeftWheelOutputPercent,
+      normalizedRightWheelOutputPercent,
+    );
+    const motionKindChanged = commandMotionKind !== null
+      && this.stallCommandMotionKind !== null
+      && commandMotionKind !== this.stallCommandMotionKind;
 
     // Log only on a meaningful transition — motion start, stop, or sign change.
     // Per-tick PWM is captured by the drive heartbeat so this avoids drowning the log.
@@ -412,7 +435,7 @@ export class SensorController extends EventEmitter {
       leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
       rightWheelOutputPercent: normalizedRightWheelOutputPercent,
     };
-    if (isActiveCommand && !wasActiveCommand) {
+    if (isActiveCommand && (!wasActiveCommand || motionKindChanged)) {
       this.motorCommandActiveSinceMillis = this.nowMillis();
       this.stallMotionAnchorPosition = this.latestGnssPosition;
       this.stallMotionAnchorSinceMillis = this.stallMotionAnchorPosition !== null ? this.nowMillis() : null;
@@ -425,6 +448,7 @@ export class SensorController extends EventEmitter {
       this.stallDetectionSamples = 0;
       this.stallDetectionLatched = false;
     }
+    this.stallCommandMotionKind = isActiveCommand ? commandMotionKind : null;
     if (isZeroCommand && !wasZeroCommand) {
       this.motorZeroCommandSinceMillis = this.nowMillis();
       if (wasMotionCommand) {
@@ -1237,6 +1261,7 @@ export class SensorController extends EventEmitter {
       this.recordImuMotionStopSummary("gentle_stop_command");
     }
     this.motorCommandActiveSinceMillis = null;
+    this.stallCommandMotionKind = null;
     this.stallMotionAnchorPosition = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
@@ -1266,6 +1291,7 @@ export class SensorController extends EventEmitter {
       this.recordImuMotionStopSummary("disable_motors_command");
     }
     this.motorCommandActiveSinceMillis = null;
+    this.stallCommandMotionKind = null;
     this.stallMotionAnchorPosition = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;

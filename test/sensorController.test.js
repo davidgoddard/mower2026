@@ -28,6 +28,46 @@ async function withTempDir(run) {
   }
 }
 
+test('SensorController restarts the stall window when pivoting changes to translation', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+    let now = 100;
+    const controller = new SensorController({
+      logger,
+      primitivesStore: new PrimitivesStore(),
+      gateway: {
+        async initialise() {},
+        async readImu() { return { timestampMillis: now, angularVelocity: { zDegreesPerSecond: 0 } }; },
+        async readGnss() { return null; },
+        async readMotorFeedback() { return null; },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => now,
+    });
+
+    await controller.setMotorWheelOutputs(-0.6, 0.6);
+    assert.equal(controller.motorCommandActiveSinceMillis, 100);
+
+    now = 3_000;
+    await controller.setMotorWheelOutputs(-0.5, 0.7);
+    assert.equal(controller.motorCommandActiveSinceMillis, 100);
+
+    now = 3_100;
+    await controller.setMotorWheelOutputs(0.5, 0.7);
+    assert.equal(controller.motorCommandActiveSinceMillis, 3_100);
+
+    await logger.close();
+  });
+});
+
 test('SensorController polls IMU and stores latest integrated heading state', async () => {
   await withTempDir(async (dir) => {
       const logger = await SessionLogger.create({

@@ -39,6 +39,29 @@ test("selectContinuousLookaheadTargetIndex chooses a forward point beyond the cu
   assert.equal(targetIndex >= 2, true);
 });
 
+test("selectContinuousLookaheadTargetIndex does not look across a meaningful corner", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.2, yMeters: 0, capturedAt: 3 },
+    { xMeters: 0.2, yMeters: 0.2, capturedAt: 4 },
+  ];
+
+  assert.equal(selectContinuousLookaheadTargetIndex(points, 0, TEST_PARAMETERS), 2);
+});
+
+test("selectContinuousLookaheadTargetIndex keeps lookahead across gentle curve points", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.2, yMeters: 0.015, capturedAt: 3 },
+    { xMeters: 0.3, yMeters: 0.045, capturedAt: 4 },
+    { xMeters: 0.4, yMeters: 0.09, capturedAt: 5 },
+  ];
+
+  assert.equal(selectContinuousLookaheadTargetIndex(points, 0, TEST_PARAMETERS) > 2, true);
+});
+
 test("computeContinuousPathWheelCommands steers right when lookahead lies to the right of heading", () => {
   const pose = createPose(0, 0, createInternalHeading(0), "gnss");
   const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };

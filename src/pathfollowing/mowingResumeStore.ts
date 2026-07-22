@@ -80,6 +80,7 @@ export interface MowingResumeStoreOptions {
 export class MowingResumeStore {
   private readonly filePath: string;
   private readonly logger: LoggerScope;
+  private pendingOperation: Promise<void> = Promise.resolve();
 
   constructor(options: MowingResumeStoreOptions) {
     this.filePath = options.filePath;
@@ -106,21 +107,33 @@ export class MowingResumeStore {
   }
 
   async saveState(state: MowingResumeState): Promise<void> {
-    await writeJsonFile(this.filePath, state);
-    this.logger.info("mowing_resume.saved", {
-      areaName: state.areaName,
-      stripIndex: state.currentStripIndex,
-      operationKind: state.activeOperation.kind,
+    return this.enqueue(async () => {
+      await writeJsonFile(this.filePath, state);
+      this.logger.info("mowing_resume.saved", {
+        areaName: state.areaName,
+        stripIndex: state.currentStripIndex,
+        operationKind: state.activeOperation.kind,
+      });
     });
   }
 
   async clear(): Promise<void> {
-    try {
-      await unlink(this.filePath);
-      this.logger.info("mowing_resume.cleared", { filePath: this.filePath });
-    } catch {
-      return;
-    }
+    return this.enqueue(async () => {
+      try {
+        await unlink(this.filePath);
+        this.logger.info("mowing_resume.cleared", { filePath: this.filePath });
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+          throw error;
+        }
+      }
+    });
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const result = this.pendingOperation.then(operation);
+    this.pendingOperation = result.catch(() => undefined);
+    return result;
   }
 
   private normalizeState(raw: unknown): MowingResumeState | null {

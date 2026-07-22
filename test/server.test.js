@@ -188,6 +188,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('id="mowingHeadingDeg"'), true);
   assert.equal(manualPage.includes('id="stripSpacingCm"'), true);
   assert.equal(manualPage.includes('id="mowingPlanStatus"'), true);
+  assert.equal(manualPage.includes('id="startMowingNoPerimeterBtn"'), true);
+  assert.equal(manualPage.includes('Mow From Perimeter'), true);
   assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
   assert.equal(manualPage.includes('Carry On Mowing'), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
@@ -207,6 +209,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);
   assert.equal(manualPage.includes('/api/mowing-plan/preview'), true);
   assert.equal(manualPage.includes('/api/mowing/resume'), true);
+  assert.equal(manualPage.includes('skipInitialBoundaryTrace: Boolean(skipInitialBoundaryTrace)'), true);
   assert.equal(manualPage.includes('nearest point'), true);
   assert.equal(manualPage.includes('MAP_MIN_VIEW_RANGE_METERS = 5'), true);
   assert.equal(manualPage.includes('MAP_STATIONARY_POINT_SPACING_METERS = 0.03'), true);

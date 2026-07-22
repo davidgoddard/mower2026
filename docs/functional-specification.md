@@ -66,6 +66,7 @@ The system shall:
 - the drive tuning page shall let the operator choose a starting distance, defaulting to 50cm, so already-learned shorter buckets can be skipped during a session
 - the drive tuning page shall train the fixed short-bucket distances through 100cm and then longer forward/reverse-brake sample distances at 200, 300 and 400cm
 - the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, average CTE, maximum CTE, X error, and Y error
+- the Drive & Paths page shall provide a second mowing start action that drives to the selected area perimeter and then begins the first strip nearest that perimeter without tracing the outer perimeter first
 - derive mowing patterns that avoid obstacles and ensure the least number of strips are mowed filling the mowing area with strips that are spaced at 3/4 of the cutting width.
 
 ## Operation
@@ -109,6 +110,10 @@ The system shall maintain a global stop state that can be raised by:
 
 When stop is set:
 - all active loops shall check the stop state and return or exit promptly
+
+Before the application exits for an uncaught exception or unhandled rejection, it shall latch the global stop and issue an immediate motor emergency-stop command.
+
+Mowing resume checkpoints shall be persisted in request order using atomic replacement. Rapid checkpoint updates and clear/save transitions shall not share a temporary filename, corrupt the canonical resume file, or terminate active control when persistence fails.
 - every motor command written after that point shall carry the stop-disabled flag so no later command can accidentally re-enable drive while the stop latch remains set
 - the sensor controller loop shall continue to send zero wheel speed commands while the current operation remains active
 - the motor disable shall be asserted only when the active user-requested operation ends
@@ -263,6 +268,8 @@ Motor feedback shall include, at minimum:
 - motor current for both wheels
 
 The sensor controller shall detect likely obstructions/stalls from its latest motor feedback, the current motor command and the latest pose estimate. When the motors are commanded to move but the mower makes no meaningful positional progress over a short grace-adjusted observation window, the controller shall emit an obstruction event, request a global stop and log the condition once.
+
+The stall observation window shall restart whenever commanded motion changes between an in-place pivot and translational driving. Intentional lack of GNSS position change during a pivot must not consume the observation window subsequently used to judge forward or reverse progress.
 
 The ESP32 motor node shall send raw encoder pulse deltas and PWM/current telemetry only.
 The Pi-side sensor controller shall convert encoder deltas into wheel speed estimates using the persisted encoder calibration.
@@ -524,7 +531,9 @@ There will also be a button to 'Verify'.
 The drive button shall immediately follow the stored path from the mower's current position.
 The verify button shall first execute a segment-style approach to about 10cm short of the nearest recorded point, then continue around the stored path until it returns to that join point. The 10cm standoff exists so the mower has body clearance to turn on the spot at arrival without fouling the recorded edge; it is not an inflation of the path itself.
 
-Stored obstacle and area perimeter traces shall use the continuous path follower so the mower stays in a smooth line-following mode once it has joined the perimeter. Wheel commands shall be rate-limited between control cycles, and pivot/arc mode shall use separate entry and exit thresholds, so controller corrections do not repeatedly alternate between fast, slow, and pivot outputs near a threshold. Verification, mowing first-encounter boundary traces, and multi-point perimeter-style inter-strip connectors shall all reuse that same continuous follower. Simple two-point standoff transfers may still use a direct straight-line drive.
+Stored obstacle and area perimeter traces shall use the continuous path follower so the mower stays in a smooth line-following mode once it has joined the perimeter. Wheel commands shall be rate-limited between control cycles, and pivot/arc mode shall use separate entry and exit thresholds, so controller corrections do not repeatedly alternate between fast, slow, and pivot outputs near a threshold. Verification, mowing first-encounter boundary traces, and multi-point perimeter-style inter-strip connectors shall all reuse that same continuous follower. Simple two-point standoff transfers validated by the planner as remaining inside the area and clear of obstacles may still use a direct straight-line drive; execution shall not replace a planner-provided multi-point connector with a direct transfer.
+
+Ordinary point-to-point segment drives, including short hops, shall turn in place when alignment exceeds the normal turn threshold and then drive a straight line. Curved driving is reserved for continuous perimeter and obstacle-path following. Continuous lookahead may span gentle successive curve points, but shall stop at a meaningful recorded corner so the controller neither rounds an obstacle corner nor cuts across an area boundary unnecessarily.
 
 Before starting a perimeter follow, the runtime shall choose the nearest recorded perimeter point, turn to align tangentially with the selected travel direction, then re-evaluate the nearest join point from the post-turn pose while preserving that chosen direction. This prevents the mower from short-cutting the loop or jumping into the wrong lane after the alignment turn.
 
