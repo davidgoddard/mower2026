@@ -283,6 +283,7 @@ This document maps problem domains to candidate files removing the need for Code
   - mowing traces/connectors can enable strict ordered progress so nearby non-adjacent segments, including the closing leg back to the join point, cannot falsely jump the follower far ahead in the route
   - advances ordered path progress using the same passed-waypoint logic, then projects the mower onto the ordered polyline and picks lookahead by true forward arc-length progress instead of only waypoint index
   - continuously steers by combining cross-track error against the current projected segment with heading-to-lookahead error
+  - mowing execution bypasses continuous following for connectors up to 1m when a direct segment is obstacle-clear and stays within the area's 25cm outside allowance, using the segment controller's pivot-then-straight behavior instead
   - closed-loop obstacle verify enables the start-target progression mode so the follower can leave the preserved join point after tangential departure instead of repeatedly steering back into a tight local loop
   - adaptively reduces forward speed on tighter local path curvature, larger live heading error, and larger live cross-track error, while allowing broader smoother perimeters to run faster
   - can pivot in place only as a fallback for very large heading errors and now uses pivot-entry / pivot-exit hysteresis so it does not flap between arc-drive and pivot-turn modes
@@ -343,7 +344,7 @@ This document maps problem domains to candidate files removing the need for Code
   - perimeter tracing now uses a less aggressive tight-arc pivot fallback threshold so, after a corner, it prefers to settle onto the new edge instead of repeatedly flapping between pivot and arc drive
   - mowing-area perimeter tracing now follows the recorded area boundary verbatim at runtime rather than passing it through the obstacle/area shaper, so corner logic sees the operator-drawn perimeter instead of a synthetic convex/smoothed substitute
   - after an explicit perimeter corner turn, it now follows a short committed capture run on the outgoing recorded edge before continuing the main continuous follow, reducing the pivot/arc dithering that used to stall mid-perimeter
-  - includes a 5 cm outside-area watchdog that stops the mow if the pose escapes beyond the saved area boundary
+  - includes a 25 cm outside-area watchdog that stops the mow if the pose escapes beyond the saved area boundary
   - if the mower starts outside the area, adjusts the perimeter-entry approach target so the staging point lies inside the recorded area before tracing begins
   - skips the initial perimeter-entry drive when the live pose is already within the same small "close enough" tolerance of the staging point, preventing large corrective turns for a few centimetres of error
   - approaches the planned line-of-sight area perimeter standoff point before strip mowing
@@ -356,7 +357,7 @@ This document maps problem domains to candidate files removing the need for Code
   - only falls back to routed connector following when a direct transfer line is blocked by an obstacle
   - skips approach / strip / direct-connector micro-corrections when the live pose is already within 10 cm of the target, avoiding large turns for effectively completed 5 cm moves
   - keeps two-point connectors as direct line drives between standoff targets
-  - starts an in-run area watchdog after the initial perimeter trace and requests an immediate stop if the mower drifts more than 5 cm outside the mowing area
+  - starts an in-run area watchdog after the initial perimeter trace and requests an immediate stop if the mower drifts more than 25 cm outside the mowing area
   - stops the mowing workflow if a boundary trace does not complete successfully
 - `src/server/manualDrivePage.ts`: combined Drive & Paths UI asset loader
   - serves the HTML shell from `src/server/manual-drive-page/page.html`

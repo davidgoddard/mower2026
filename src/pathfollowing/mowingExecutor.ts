@@ -65,11 +65,14 @@ interface AreaStartAnchorPlan {
   readonly preferredStartPoint: { xMeters: number; yMeters: number };
 }
 
-const AREA_ESCAPE_STOP_DISTANCE_METERS = 0.15;
+const AREA_ESCAPE_STOP_DISTANCE_METERS = 0.25;
 const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
 const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
+const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
+const SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS = 0.25;
+const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
@@ -828,8 +831,15 @@ export class MowingExecutor {
       return { completed: true, reason: "reached_end" };
     }
 
-    if (connector.length === 2) {
-      const target = connector[connector.length - 1];
+    const target = connector[connector.length - 1];
+    const useDirectDrive = connector.length === 2 || this.canUseDirectShortConnector(target);
+    if (useDirectDrive) {
+      this.logger.info("mowing.connector.direct_drive", {
+        stripIndex,
+        connectorPointCount: connector.length,
+        targetX: target.xMeters,
+        targetY: target.yMeters,
+      });
       this.persistResumeOperation({
         kind: "drive",
         phase: "following_connector",
@@ -886,6 +896,41 @@ export class MowingExecutor {
       reason: followResult.reason === "user_stopped" ? "user_stopped" : "error",
       error: followResult.error,
     };
+  }
+
+  private canUseDirectShortConnector(target: PathPoint): boolean {
+    if (this.areaPoints.length < 3) {
+      return false;
+    }
+
+    const pose = this.poseFusion.getCurrentPose();
+    const start = { x: pose.position.xMeters, y: pose.position.yMeters };
+    const end = { x: target.xMeters, y: target.yMeters };
+    const directDistanceMeters = Math.hypot(end.x - start.x, end.y - start.y);
+    if (directDistanceMeters > SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS) {
+      return false;
+    }
+
+    const sampleCount = Math.max(1, Math.ceil(
+      directDistanceMeters / SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS,
+    ));
+    for (let index = 0; index <= sampleCount; index += 1) {
+      const fraction = index / sampleCount;
+      const x = start.x + ((end.x - start.x) * fraction);
+      const y = start.y + ((end.y - start.y) * fraction);
+      if (outsideDistanceFromAreaMeters(x, y, this.areaPoints) > SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS) {
+        return false;
+      }
+      if (this.obstaclePointsArray.some((obstacle) => pointInPolygon(x, y, obstacle))) {
+        return false;
+      }
+    }
+
+    return !this.obstaclePointsArray.some((obstacle) => segmentIntersectsPolygon(
+      start,
+      end,
+      normalizePolygon(obstacle),
+    ));
   }
 
   private async turnToHeading(targetHeadingDeg: number): Promise<void> {

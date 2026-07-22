@@ -301,7 +301,7 @@ test("MowingExecutor turns toward the 50cm-ahead perimeter lead target and follo
   assert.equal(followCalls[0].pathPoints[0].yMeters >= 0, true);
 });
 
-test("MowingExecutor follows multi-point connectors with the continuous follower", async () => {
+test("MowingExecutor follows longer multi-point connectors with the continuous follower", async () => {
   const areaPoints = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 2, yMeters: 0, capturedAt: 2 },
@@ -325,19 +325,19 @@ test("MowingExecutor follows multi-point connectors with the continuous follower
         traversalReversed: false,
       },
       {
-        start: { xMeters: 1, yMeters: 1, capturedAt: 12 },
-        end: { xMeters: 1, yMeters: 0, capturedAt: 13 },
+        start: { xMeters: 1.8, yMeters: 1, capturedAt: 12 },
+        end: { xMeters: 1.8, yMeters: 0, capturedAt: 13 },
         startBoundary: { kind: "area" },
         endBoundary: { kind: "area" },
-        centerOffsetMeters: 1,
+        centerOffsetMeters: 1.8,
         sequenceIndex: 1,
         traversalReversed: false,
       },
     ],
     connectors: [[
       { xMeters: 0.5, yMeters: 0.85, capturedAt: 20 },
-      { xMeters: 0.75, yMeters: 0.95, capturedAt: 21 },
-      { xMeters: 1, yMeters: 0.85, capturedAt: 22 },
+      { xMeters: 1.15, yMeters: 0.95, capturedAt: 21 },
+      { xMeters: 1.8, yMeters: 0.85, capturedAt: 22 },
     ]],
   };
 
@@ -398,7 +398,7 @@ test("MowingExecutor follows multi-point connectors with the continuous follower
   assert.equal(followCalls.at(-1).options.strictOrderedProgress, true);
 });
 
-test("MowingExecutor executes a planner-approved two-point connector as a direct transfer", async () => {
+test("MowingExecutor simplifies a safe short multi-point connector to a direct transfer", async () => {
   const driveTargets = [];
   const driveController = {
     async executeDrive(options) {
@@ -411,14 +411,9 @@ test("MowingExecutor executes a planner-approved two-point connector as a direct
       return { status: "success" };
     },
   };
-  const poses = [
-    createPose(0.1, 0.1, createInternalHeading(90), "gnss"),
-    createPose(0.1, 0.1, createInternalHeading(90), "gnss"),
-    createPose(0.5, 0.85, createInternalHeading(90), "gnss"),
-  ];
   const poseFusion = {
     getCurrentPose() {
-      return poses[0] ?? createPose(0.5, 0.85, createInternalHeading(90), "gnss");
+      return createPose(0.5, 0.85, createInternalHeading(90), "gnss");
     },
   };
   const followCalls = [];
@@ -478,7 +473,8 @@ test("MowingExecutor executes a planner-approved two-point connector as a direct
 
   const result = await executor["followConnector"]([
     { xMeters: 0.5, yMeters: 0.85, capturedAt: 20 },
-    { xMeters: 1, yMeters: 0.85, capturedAt: 21 },
+    { xMeters: 0.75, yMeters: 0.95, capturedAt: 21 },
+    { xMeters: 1, yMeters: 0.85, capturedAt: 22 },
   ], 0, {
     stage: "strip_approach",
     stripIndex: 1,
@@ -487,6 +483,65 @@ test("MowingExecutor executes a planner-approved two-point connector as a direct
   assert.equal(result.completed, true);
   assert.deepEqual(driveTargets, [[1, 0.85]]);
   assert.equal(followCalls.length, 0);
+});
+
+test("MowingExecutor retains a routed short connector when the direct segment crosses an obstacle", async () => {
+  const followCalls = [];
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 0,
+      stripSpacingMeters: 0.3,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 2, yMeters: 0, capturedAt: 2 },
+      { xMeters: 2, yMeters: 2, capturedAt: 3 },
+      { xMeters: 0, yMeters: 2, capturedAt: 4 },
+    ],
+    obstaclePointsArray: [[
+      { xMeters: 0.7, yMeters: 0.7, capturedAt: 5 },
+      { xMeters: 0.9, yMeters: 0.7, capturedAt: 6 },
+      { xMeters: 0.9, yMeters: 1.0, capturedAt: 7 },
+      { xMeters: 0.7, yMeters: 1.0, capturedAt: 8 },
+    ]],
+    driveController: {
+      async executeDrive() {
+        assert.fail("unsafe direct connector must not use segment drive");
+      },
+    },
+    turnController: {
+      async executeTurn() { return { status: "success" }; },
+    },
+    poseFusion: {
+      getCurrentPose() { return createPose(0.5, 0.85, createInternalHeading(0), "gnss"); },
+    },
+    continuousPathFollower: {
+      async executePath(pathPoints, options) {
+        followCalls.push({ pathPoints, options });
+        return { completed: true, reason: "reached_end" };
+      },
+    },
+    logger: createLogger(),
+  });
+
+  const connector = [
+    { xMeters: 0.5, yMeters: 0.85, capturedAt: 10 },
+    { xMeters: 0.5, yMeters: 1.2, capturedAt: 11 },
+    { xMeters: 1.0, yMeters: 1.2, capturedAt: 12 },
+    { xMeters: 1.0, yMeters: 0.85, capturedAt: 13 },
+  ];
+  const result = await executor["followConnector"](connector, 0, {
+    stage: "strip_approach",
+    stripIndex: 1,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(followCalls.length, 1);
+  assert.deepEqual(followCalls[0].pathPoints, connector);
 });
 
 test("MowingExecutor skips tiny direct connector corrections when already at the target", async () => {
