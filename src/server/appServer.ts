@@ -21,6 +21,7 @@ import { ImuCalibration } from "../config/imuCalibration.js";
 import { PoseCalibration } from "../config/poseCalibration.js";
 import { GeometryCalibration } from "../config/geometryCalibration.js";
 import { PathFollowingConfig, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
+import { LearningPolicyConfig } from "../config/learningPolicyConfig.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -597,6 +598,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let poseCalibration: PoseCalibration | null = null;
   let geometryCalibration: GeometryCalibration | null = null;
   let pathFollowingConfig: PathFollowingConfig | null = null;
+  const learningPolicy = new LearningPolicyConfig({ logger });
   let pathStore: PathStore | null = null;
   let areaPerimeterStore: PathStore | null = null;
   let pathRecorder: PathRecorder | null = null;
@@ -1638,6 +1640,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             response.end(encodeJson({ error: "path_recording_active" }));
             return;
           }
+          const mowingStartPose = poseFusion.getCurrentPose();
+          if (mowingStartPose.quality !== "gnss") {
+            systemStop.requestStop("mowing", "poor_gnss");
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "poor_gnss", poseQuality: mowingStartPose.quality }));
+            return;
+          }
 
           const area = await areaPerimeterStore.loadPath(areaName);
           const areaGeometry = buildAreaPerimeterGeometry(area.points);
@@ -1769,6 +1778,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           if (!mowingResumeState) {
             response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
             response.end(encodeJson({ error: "mowing_resume_unavailable" }));
+            return;
+          }
+          const mowingResumePose = poseFusion.getCurrentPose();
+          if (mowingResumePose.quality !== "gnss") {
+            systemStop.requestStop("mowing", "poor_gnss");
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({ error: "poor_gnss", poseQuality: mowingResumePose.quality }));
             return;
           }
 
@@ -2216,6 +2232,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     response.writeHead(routed.statusCode, { ...corsHeaders, "Content-Type": routed.contentType });
     response.end(routed.body);
   });
+  await learningPolicy.load();
+
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -2365,6 +2383,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       learningModel: turnLearningModel,
       motorCalibration: motorCalibration!,
       maxWheelOutputPercent: options.maxWheelOutputPercent ?? MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
+      learningPolicy,
     });
 
     // Initialize pose fusion
@@ -2421,6 +2440,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       learningModel: driveLearningModel,
       motorCalibration: motorCalibration!,
       runRecordWriter: new RunRecordWriter({ logger }),
+      learningPolicy,
     });
 
     driveController = new DriveController({

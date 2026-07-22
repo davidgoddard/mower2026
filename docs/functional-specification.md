@@ -581,6 +581,10 @@ The mowing planner divides a recorded area perimeter into a set of parallel mowi
 
 Once all strips are computed the planner sequences them for the shortest total travel path.  The first strip is chosen at the lowest normal-axis offset and entered from the end with the highest projection along the mowing direction.  After the first transition the planner records which side of the area (which normal-axis direction) it advanced toward and locks that crossing direction in for the remainder of the plan.  Subsequent strip choices prefer candidates that continue in the same crossing direction; only if no same-direction strip is reachable (for example an island of unmown ground on the far side of an obstacle) will the planner cross back.
 
+Mowing start and resume require a fused pose whose quality is `gnss`. If GNSS is unusable at start, mowing shall remain stopped with reason `poor_gnss`. If pose quality remains below `gnss` for 2 seconds during mowing, the runtime shall request a global stop with the same reason. Brief validator transitions shorter than that debounce do not stop an otherwise healthy mow. This gate applies to autonomous mowing only.
+
+Drive and turn learning shall obey `config/learning-policy.json`. The default `training_only` mode permits parameter updates only for dedicated web tuning and validation sessions; ordinary mowing, path driving, retries, and ad-hoc movement shall use the learned parameters without modifying them. An explicit `always` mode may enable operational learning for controlled experiments.
+
 Within each strip the mower always enters at one end and exits at the other, giving a boustrophedon (back-and-forth) pattern across the area.  Where two candidate strips have equal connector cost, the planner prefers the strip with the smallest offset difference from the current strip (i.e. the immediately adjacent strip) to avoid skipping over uncut ground.
 
 ### Boundary standoff distance

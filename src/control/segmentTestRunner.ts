@@ -350,6 +350,7 @@ export class SegmentTestRunner {
       driveResult = await this.driveController.executeDrive({
         targetPosition: targetPose.position,
         learningEnabled: true,
+        learningSource: "training",
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

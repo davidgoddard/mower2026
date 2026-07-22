@@ -107,6 +107,7 @@ export class TurnValidationRunner {
           targetAngle,
           direction: unwrapRelativeAngle(targetAngle) >= 0 ? "ccw" : "cw",
           learningEnabled: true,
+          learningSource: "training",
         });
 
         const endPose = this.poseProvider();

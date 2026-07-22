@@ -323,9 +323,13 @@ This document maps problem domains to candidate files removing the need for Code
   - keeps adaptive smoothing within the configured 10cm raw-boundary deviation budget, then applies a tighter 5cm reduction bound when decimating the smoothed result
   - emits raw, smoothed, reduced, and chosen outlines so the preview UI can compare the recorded perimeter against the production outline
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
+  - gates start/resume on GNSS-quality fused pose and stops an active mow as `poor_gnss` after a 2-second sustained GNSS-quality loss
   - persists exact in-progress mowing step state through the app-server callback so failed or stopped sessions can resume from the saved operation rather than rebuilding the strip plan from scratch
   - executes the planner-provided inter-strip connector without replacing a validated perimeter route at runtime; planner-approved two-point connectors use direct line drive and multi-point perimeter connectors use continuous following
   - when a continuous boundary or connector follow stops, saves the completed waypoint index and resumes from that ordered progress point rather than restarting the saved path at index zero
+- `src/server/appServer.ts`: mowing start/resume HTTP handlers reject requests with `409 poor_gnss` before creating an executor when the current fused pose is not GNSS quality
+- `src/config/learningPolicyConfig.ts` and `config/learning-policy.json`: shared persisted `training_only`/`always` policy enforced inside drive and turn controllers; production defaults to training-only learning
+  - dedicated drive/segment and turn-validation/training runners label their controller requests as `training`; unlabeled requests are treated as ordinary operations
 - `src/pathfollowing/mowingResumeStore.ts`: JSON persistence for the saved mowing resume state
   - stores the exact active mowing operation, continuous-follow target index, traced-boundary progress, saved strip plan, and recorded area/obstacle geometry used by `/api/mowing/resume`
   - serializes save and clear requests through one ordered promise queue, preventing rapid progress checkpoints from racing each other or an initial clear

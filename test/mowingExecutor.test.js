@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { MowingExecutor } from "../dist/pathfollowing/mowingExecutor.js";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPose } from "../dist/geometry/positionTypes.js";
+import { systemStop } from "../dist/control/systemStop.js";
 
 function createLogger() {
   return {
@@ -11,6 +12,50 @@ function createLogger() {
     error() {},
   };
 }
+
+test("MowingExecutor refuses to start without GNSS-quality pose", async () => {
+  systemStop.clearStop("poor-gnss-start-test");
+  try {
+    let driveCalls = 0;
+    const executor = new MowingExecutor({
+      plan: {
+        headingDeg: 0,
+        stripSpacingMeters: 0.3,
+        bladeWidthMeters: 0.4,
+        stripCount: 0,
+        strips: [],
+        connectors: [],
+      },
+      areaPoints: [],
+      obstaclePointsArray: [],
+      driveController: {
+        async executeDrive() {
+          driveCalls += 1;
+          return { status: "success", maxCteMeters: 0 };
+        },
+      },
+      turnController: { async executeTurn() { return { status: "success" }; } },
+      poseFusion: {
+        getCurrentPose() {
+          return createPose(0, 0, createInternalHeading(0), "dead-reckoning");
+        },
+      },
+      continuousPathFollower: {
+        async executePath() { return { completed: true, reason: "reached_end" }; },
+      },
+      logger: createLogger(),
+    });
+
+    const status = await executor.execute();
+
+    assert.equal(status.phase, "stopped");
+    assert.equal(status.error, "poor_gnss");
+    assert.equal(systemStop.snapshot().reason, "poor_gnss");
+    assert.equal(driveCalls, 0);
+  } finally {
+    systemStop.clearStop("poor-gnss-start-test-cleanup");
+  }
+});
 
 test("MowingExecutor traces the full boundary back to the original encounter point", async () => {
   const areaPoints = [

@@ -77,6 +77,7 @@ import {
 
 import { systemStop } from "./systemStop.js";
 import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
+import type { LearningPolicy } from "../config/learningPolicyConfig.js";
 
 export interface DriveLineRequest extends DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
@@ -100,6 +101,7 @@ export interface DriveLineControllerOptions {
    * Drives never fail if the writer fails — instrumentation is best-effort.
    */
   runRecordWriter?: RunRecordWriter;
+  learningPolicy?: LearningPolicy;
 }
 
 interface RunInstrumentation {
@@ -133,6 +135,7 @@ export class DriveLineController {
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly runRecordWriter: RunRecordWriter | null;
+  private readonly learningPolicy: LearningPolicy | null;
 
   private status: DriveStatus = "idle";
   private currentDrive: DriveLineRequest | null = null;
@@ -175,6 +178,7 @@ export class DriveLineController {
     this.nowMillis = options.nowMillis ?? (() => Date.now());
     this.sleep = options.sleep ?? defaultSleep;
     this.runRecordWriter = options.runRecordWriter ?? null;
+    this.learningPolicy = options.learningPolicy ?? null;
 
     this.onPoseUpdate = this.onPoseUpdate.bind(this);
   }
@@ -861,6 +865,7 @@ export class DriveLineController {
           const result = await this.executeLineDrive({
             targetPosition,
             learningEnabled: true,
+            learningSource: "training",
             driveDirectionSign: directionSign,
             learningDistanceClass: DRIVE_LONG_SAMPLE_DISTANCES_METERS.includes(distanceMeters as typeof DRIVE_LONG_SAMPLE_DISTANCES_METERS[number])
               ? "long"
@@ -1527,6 +1532,8 @@ export class DriveLineController {
       let learnSkipReason: string | undefined;
       if (this.currentDrive?.learningEnabled === false) {
         learnSkipReason = "learning_disabled";
+      } else if (!(this.learningPolicy?.allows(this.currentDrive?.learningSource) ?? true)) {
+        learnSkipReason = "learning_policy_training_only";
       } else {
         // Pose-quality gate covers anchor / brake-decision / settled.  All
         // three must be GNSS-quality, otherwise the brake timing taught to

@@ -3,10 +3,12 @@
  */
 
 import { Position, Meters } from "../geometry/positionTypes.js";
+import type { LearningSource } from "../config/learningPolicyConfig.js";
 
 export interface DriveRequest {
   readonly targetPosition: Position;
-  readonly learningEnabled?: boolean; // Default true
+  readonly learningEnabled?: boolean; // Eligible by default; shared policy still decides whether this source may learn.
+  readonly learningSource?: LearningSource;
   readonly maxCrossTrackErrorMeters?: number;
   readonly alwaysTurnToFaceTarget?: boolean; // When true, always pivot to face the target regardless of heading error magnitude
   /**

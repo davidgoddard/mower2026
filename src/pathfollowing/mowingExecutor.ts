@@ -56,6 +56,8 @@ export interface MowingExecutorOptions {
   readonly updateRecoveryCheckpoint?: (waypoints: PathPoint[]) => void;
   readonly updateResumeState?: (state: MowingResumeState | null) => void;
   readonly resumeState?: MowingResumeState | null;
+  /** Test override; production allows brief validator state transitions. */
+  readonly gnssLossGraceMs?: number;
 }
 
 interface AreaStartAnchorPlan {
@@ -65,6 +67,8 @@ interface AreaStartAnchorPlan {
 
 const AREA_ESCAPE_STOP_DISTANCE_METERS = 0.15;
 const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
+const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
+const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
 const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
@@ -87,13 +91,16 @@ export class MowingExecutor {
   private readonly updateRecoveryCheckpoint: ((waypoints: PathPoint[]) => void) | undefined;
   private readonly updateResumeState: ((state: MowingResumeState | null) => void) | undefined;
   private readonly resumeState: MowingResumeState | null;
+  private readonly gnssLossGraceMs: number;
 
   private phase: MowingPhase = "idle";
   private currentStripIndex: number = 0;
   private tracedBoundaries: Set<string> = new Set();
   private stopRequested: boolean = false;
   private areaEscapeMonitor: NodeJS.Timeout | null = null;
+  private gnssSafetyMonitor: NodeJS.Timeout | null = null;
   private outsideAreaViolationMessage: string | null = null;
+  private poorGnssViolation = false;
   private selectedAreaStartAnchor: AreaStartAnchorPlan | null = null;
 
   constructor(options: MowingExecutorOptions) {
@@ -114,6 +121,7 @@ export class MowingExecutor {
     this.updateRecoveryCheckpoint = options.updateRecoveryCheckpoint;
     this.updateResumeState = options.updateResumeState;
     this.resumeState = options.resumeState ?? null;
+    this.gnssLossGraceMs = Math.max(0, options.gnssLossGraceMs ?? MOWING_GNSS_LOSS_GRACE_MS);
   }
 
   getStatus(): MowingStatus {
@@ -122,6 +130,7 @@ export class MowingExecutor {
       currentStripIndex: this.currentStripIndex,
       totalStrips: this.plan.strips.length,
       tracedBoundaryCount: this.tracedBoundaries.size,
+      ...(this.poorGnssViolation ? { error: "poor_gnss" } : {}),
     };
   }
 
@@ -135,9 +144,18 @@ export class MowingExecutor {
       ? new Set(this.resumeState.tracedBoundaryKeys)
       : new Set();
     this.outsideAreaViolationMessage = null;
+    this.poorGnssViolation = false;
     this.selectedAreaStartAnchor = null;
     this.stopAreaEscapeMonitor();
+    this.stopGnssSafetyMonitor();
     this.logger.info("mowing.execute.start", { stripCount: this.plan.strips.length });
+
+    if (this.poseFusion.getCurrentPose().quality !== "gnss") {
+      this.requestPoorGnssStop("start");
+      this.phase = "stopped";
+      return this.getStatus();
+    }
+    this.startGnssSafetyMonitor();
 
     try {
       if (this.resumeState) {
@@ -172,6 +190,7 @@ export class MowingExecutor {
       return { ...this.getStatus(), error: message };
     } finally {
       this.stopAreaEscapeMonitor();
+      this.stopGnssSafetyMonitor();
     }
   }
 
@@ -1233,6 +1252,48 @@ export class MowingExecutor {
     }
     clearInterval(this.areaEscapeMonitor);
     this.areaEscapeMonitor = null;
+  }
+
+  private startGnssSafetyMonitor(): void {
+    this.stopGnssSafetyMonitor();
+    let poorGnssSinceMillis: number | null = null;
+    this.gnssSafetyMonitor = setInterval(() => {
+      if (this.poorGnssViolation || this.stopRequested || systemStop.isStopped()) {
+        return;
+      }
+      if (this.poseFusion.getCurrentPose().quality === "gnss") {
+        poorGnssSinceMillis = null;
+        return;
+      }
+      const nowMillis = Date.now();
+      poorGnssSinceMillis ??= nowMillis;
+      if (nowMillis - poorGnssSinceMillis < this.gnssLossGraceMs) {
+        return;
+      }
+      this.requestPoorGnssStop("active_mow");
+    }, MOWING_GNSS_CHECK_INTERVAL_MS);
+    this.gnssSafetyMonitor.unref?.();
+  }
+
+  private stopGnssSafetyMonitor(): void {
+    if (!this.gnssSafetyMonitor) {
+      return;
+    }
+    clearInterval(this.gnssSafetyMonitor);
+    this.gnssSafetyMonitor = null;
+  }
+
+  private requestPoorGnssStop(stage: "start" | "active_mow"): void {
+    if (this.poorGnssViolation) {
+      return;
+    }
+    this.poorGnssViolation = true;
+    this.logger.warn("mowing.poor_gnss", {
+      stage,
+      poseQuality: this.poseFusion.getCurrentPose().quality,
+      graceMs: stage === "start" ? 0 : this.gnssLossGraceMs,
+    });
+    systemStop.requestStop("mowing", "poor_gnss");
   }
 
   private buildOutsideAreaStatus(): MowingStatus | null {

@@ -35,6 +35,7 @@ import {
 import { SENSOR_EVENTS, ImuHeadingUpdateEvent } from "../sensing/sensorEvents.js";
 import { systemStop } from "./systemStop.js";
 import { defaultSleep, sleepWithStopChecks } from "./sleep.js";
+import type { LearningPolicy } from "../config/learningPolicyConfig.js";
 
 export interface TurnControllerOptions {
   sensorController: SensorController;
@@ -51,6 +52,7 @@ export interface TurnControllerOptions {
    * `TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS`.
    */
   headingUpdateWatchdogTimeoutMs?: number;
+  learningPolicy?: LearningPolicy;
 }
 
 export class TurnController {
@@ -63,6 +65,7 @@ export class TurnController {
   private readonly nowMillis: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly headingUpdateWatchdogTimeoutMs: number;
+  private readonly learningPolicy: LearningPolicy | null;
   private headingUpdateWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   private status: TurnStatus = "idle";
@@ -97,6 +100,7 @@ export class TurnController {
     this.sleep = options.sleep ?? defaultSleep;
     this.headingUpdateWatchdogTimeoutMs =
       options.headingUpdateWatchdogTimeoutMs ?? TURN_HEADING_UPDATE_WATCHDOG_TIMEOUT_MS;
+    this.learningPolicy = options.learningPolicy ?? null;
 
     // Bind event handler to maintain 'this' context
     this.onHeadingUpdate = this.onHeadingUpdate.bind(this);
@@ -425,7 +429,8 @@ export class TurnController {
       });
 
       // 10. LEARNING - Update model if enabled
-      if (request.learningEnabled !== false) {
+      const learningAllowedByPolicy = this.learningPolicy?.allows(request.learningSource) ?? true;
+      if (request.learningEnabled !== false && learningAllowedByPolicy) {
         this.status = "learning";
         await this.learningModel.updateFromTurn({
           requestedAngle: request.targetAngle,
@@ -436,6 +441,10 @@ export class TurnController {
           brakeTimeUsedMs: this.turnBrakeTimeMs ?? undefined,
           brakeRateUsedDegPerMs: this.brakeRateUsedDegPerMs ?? undefined,
           direction: request.direction,
+        });
+      } else if (request.learningEnabled !== false && !learningAllowedByPolicy) {
+        this.logger.info("turn.learning.skipped_policy", {
+          learningSource: request.learningSource ?? "operation",
         });
       }
 
@@ -595,6 +604,7 @@ export class TurnController {
                 targetAngle: createRelativeAngle(angleDeg),
                 direction: angleDeg > 0 ? "ccw" : "cw",
                 learningEnabled: true,
+                learningSource: "training",
               });
               results.push(result);
 
@@ -673,6 +683,7 @@ export class TurnController {
               targetAngle: createRelativeAngle(angleDeg),
               direction: angleDeg > 0 ? "ccw" : "cw",
               learningEnabled: true,
+              learningSource: "training",
             });
             results.push(angleResult);
 

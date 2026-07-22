@@ -3,6 +3,7 @@
  */
 
 import { RelativeAngle } from "../geometry/headingTypes.js";
+import type { LearningSource } from "../config/learningPolicyConfig.js";
 
 export type TurnDirection = "ccw" | "cw";
 
@@ -19,7 +20,9 @@ export type TurnStatus =
 export interface TurnRequest {
   readonly targetAngle: RelativeAngle;
   readonly direction: TurnDirection;
+  /** Eligible by default; shared policy still decides whether this source may learn. */
   readonly learningEnabled?: boolean;
+  readonly learningSource?: LearningSource;
   /** Optional per-turn output scale [0..1] applied to maxWheelOutputPercent. */
   readonly wheelOutputScale?: number;
 }

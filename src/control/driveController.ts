@@ -207,6 +207,7 @@ export class DriveController {
             targetAngle: headingError,
             direction: unwrapRelativeAngle(headingError) > 0 ? "ccw" : "cw",
             learningEnabled: true,
+            learningSource: request.learningSource,
           });
         }
 
@@ -215,6 +216,7 @@ export class DriveController {
         const lineResult = await this.lineDriveController.executeLineDrive({
           targetPosition: request.targetPosition,
           learningEnabled: request.learningEnabled,
+          learningSource: request.learningSource,
           driveDirectionSign,
           maxCrossTrackErrorMeters: request.maxCrossTrackErrorMeters,
           allowRotateToHeading: request.skipInitialTurn !== true,
@@ -460,6 +462,7 @@ export class DriveController {
       const result = await this.executeDrive({
         targetPosition: targetWaypoint.position,
         learningEnabled: true,
+        learningSource: "training",
       });
 
       results.push(result);
@@ -831,6 +834,7 @@ export class DriveController {
           const result = await this.executeDrive({
             targetPosition,
             learningEnabled: true,
+            learningSource: "training",
           });
 
           const segmentResult: SegmentTrainingResult = {
