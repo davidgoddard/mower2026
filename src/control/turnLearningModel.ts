@@ -28,9 +28,16 @@ const SMALL_TURN_BUCKET_STEP_DEG = 3;
 const SMALL_TURN_BUCKET_MAX_DEG = 60;
 const SMALL_TURN_BUCKET_COUNT = SMALL_TURN_BUCKET_MAX_DEG / SMALL_TURN_BUCKET_STEP_DEG;
 const SMALL_TURN_BUCKET_TRAINING_TOLERANCE_DEG = 0.1;
-const SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG = 45;
 const SMALL_TURN_MIN_BRAKE_TIME_MS = 60;
 const SMALL_TURN_MAX_BRAKE_TIME_MS = 2400;
+// Seeded from the July 2026 small-turn tuning runs through 30 degrees. The 6 degree
+// CCW samples were excluded because their near-zero reverse movement was reported
+// as almost 360 degrees. Values above 30 degrees conservatively extrapolate the
+// observed upper-range slope until those buckets have dedicated training data.
+const SMALL_TURN_DEFAULT_BRAKE_TIMES_MS = [
+  230, 320, 410, 470, 505, 550, 610, 675, 715, 785,
+  840, 895, 950, 1005, 1060, 1115, 1170, 1225, 1280, 1335,
+];
 
 const LARGE_TURN_BUCKET_STEP_DEG = 10;
 const LARGE_TURN_BUCKET_TRAINING_TOLERANCE_DEG = 0.1;
@@ -128,11 +135,12 @@ export class TurnLearningModel {
 
   async updateFromTurn(result: TurnLearningInput): Promise<void> {
     const requestedAbs = Math.abs(unwrapRelativeAngle(result.requestedAngle));
-    const achievedAbs = result.achievedAngleUnwrappedDeg !== undefined
-      ? Math.abs(result.achievedAngleUnwrappedDeg)
-      : Math.abs(unwrapRelativeAngle(result.achievedAngle));
 
     if (requestedAbs <= this.parameters.smallAngleThresholdDeg) {
+      // A small turn cannot legitimately wrap through 360 degrees. Use the
+      // normalized result so a tiny movement in the opposite direction cannot
+      // be learned as a near-complete revolution.
+      const achievedAbs = Math.abs(unwrapRelativeAngle(result.achievedAngle));
       const bucketAngleDeg = this.getSmallTurnBucketAngle(requestedAbs);
       if (!this.isNearSmallTurnBucket(requestedAbs, bucketAngleDeg)) {
         this.logger.info("turn.learning.skipped_small_non_bucket", {
@@ -184,6 +192,10 @@ export class TurnLearningModel {
       await this.saveParameters();
       return;
     }
+
+    const achievedAbs = result.achievedAngleUnwrappedDeg !== undefined
+      ? Math.abs(result.achievedAngleUnwrappedDeg)
+      : Math.abs(unwrapRelativeAngle(result.achievedAngle));
 
     const bucketAngleDeg = this.getLargeTurnBucketAngle(requestedAbs);
     if (!this.isNearLargeTurnBucket(requestedAbs, bucketAngleDeg)) {
@@ -391,12 +403,12 @@ export class TurnLearningModel {
         smallTurnBrakeTimesCcwMs: this.normalizeNumericArray(
           raw.smallTurnBrakeTimesCcwMs,
           SMALL_TURN_BUCKET_COUNT,
-          SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG * SMALL_TURN_BUCKET_STEP_DEG,
+          SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
         ),
         smallTurnBrakeTimesCwMs: this.normalizeNumericArray(
           raw.smallTurnBrakeTimesCwMs,
           SMALL_TURN_BUCKET_COUNT,
-          SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG * SMALL_TURN_BUCKET_STEP_DEG,
+          SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
         ),
         smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, 0),
         smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, 0),
@@ -429,12 +441,12 @@ export class TurnLearningModel {
         smallTurnBrakeTimesCcwMs: this.normalizeNumericArray(
           raw.smallTurnBrakeTimesCcwMs,
           SMALL_TURN_BUCKET_COUNT,
-          SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG * SMALL_TURN_BUCKET_STEP_DEG,
+          SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
         ),
         smallTurnBrakeTimesCwMs: this.normalizeNumericArray(
           raw.smallTurnBrakeTimesCwMs,
           SMALL_TURN_BUCKET_COUNT,
-          SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG * SMALL_TURN_BUCKET_STEP_DEG,
+          SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
         ),
         smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, 0),
         smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, 0),
@@ -630,10 +642,8 @@ export class TurnLearningModel {
   }
 
   private getDefaultSmallTurnBrakeTimeMs(bucketAngleDeg: number): number {
-    return Math.max(
-      SMALL_TURN_MIN_BRAKE_TIME_MS,
-      Math.min(SMALL_TURN_MAX_BRAKE_TIME_MS, bucketAngleDeg * SMALL_TURN_DEFAULT_BRAKE_MS_PER_DEG),
-    );
+    const bucketIndex = this.getSmallTurnBucketIndex(bucketAngleDeg);
+    return SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[bucketIndex];
   }
 
   private convertLegacyLargeBrakeTimesToScalars(value: unknown): number[] {

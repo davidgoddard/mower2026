@@ -132,6 +132,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
   - small-angle learning uses 3° timeout buckets up to the configured small-angle threshold, meaning each bucket learns how many milliseconds from turn start the mower should keep driving before commanding stop; intermediate requested angles interpolate between neighboring bucket times for prediction only, and learning only writes back when the requested angle is effectively on a real bucket
+  - default small-angle timeout buckets are seeded from clean tuning results through 30° and conservatively extrapolated above 30°; small-turn learning uses normalized achieved angle so tiny reverse movement cannot be mistaken for a near-360° overshoot
   - large-angle learning uses independent 10° angular-rate scalar buckets per direction above the small-angle threshold; each scalar multiplies the live angular rate to predict remaining coast, and intermediate requested angles interpolate between neighboring bucket scalars for prediction only while learning only writes back when the requested angle is effectively on a real bucket
   - JSON persistence at `config/turn-learning-parameters.json`
 - `src/control/turnControllerTypes.ts`: turn controller type definitions

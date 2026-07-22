@@ -479,6 +479,14 @@ describe("TurnLearningModel", () => {
     assert.equal(params.parameters[0].requestedAngleDeg, 70);
     assert.equal(params.parameters[0].direction, "ccw");
     assert.equal(typeof params.parameters[0].brakeScalarMs, "number");
+    assert.deepEqual(
+      params.smallTurnBuckets.slice(0, 10).map((bucket) => bucket.brakeTimeCcwMs),
+      [230, 320, 410, 470, 505, 550, 610, 675, 715, 785],
+    );
+    assert.deepEqual(
+      params.smallTurnBuckets.map((bucket) => bucket.brakeTimeCwMs),
+      params.smallTurnBuckets.map((bucket) => bucket.brakeTimeCcwMs),
+    );
   });
 
   it("returns interpolated large-angle brake scalar for requested turn", () => {
@@ -676,6 +684,38 @@ describe("TurnLearningModel", () => {
       assert.ok(persistedBucket);
       assert.equal(persistedBucket.sampleCountCcw, updatedBucket.sampleCountCcw);
       assert.equal(persistedBucket.brakeTimeCcwMs, updatedBucket.brakeTimeCcwMs);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat a tiny reverse small turn as a near-360-degree overshoot", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-small-wrap-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const model = new TurnLearningModel({ logger: mockLogger, parametersPath });
+      await model.loadParameters();
+      const before = model.getParameters();
+      const startBucket = before.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 6);
+      assert.ok(startBucket);
+
+      await model.updateFromTurn({
+        requestedAngle: createRelativeAngle(6),
+        achievedAngle: createRelativeAngle(-0.1),
+        achievedAngleUnwrappedDeg: 359.9,
+        errorAngle: createRelativeAngle(-6.1),
+        brakeDistanceUsed: createRelativeAngle(0),
+        brakeTimeUsedMs: startBucket.brakeTimeCcwMs,
+        direction: "ccw",
+      });
+
+      const after = model.getParameters();
+      const updatedBucket = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 6);
+      assert.ok(updatedBucket);
+      assert.equal(updatedBucket.brakeTimeCcwMs > startBucket.brakeTimeCcwMs, true);
+      assert.equal(updatedBucket.sampleCountCcw, startBucket.sampleCountCcw + 1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
