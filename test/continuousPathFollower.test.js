@@ -3,12 +3,23 @@ import assert from "node:assert/strict";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPose } from "../dist/geometry/positionTypes.js";
 import {
+  buildCommittedCornerCaptureTarget,
   capContinuousWheelCommands,
   computeContinuousPathBaseSpeed,
   computeContinuousPathWheelCommands,
   limitContinuousWheelCommandChange,
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
+
+test("buildCommittedCornerCaptureTarget locks capture to the outgoing edge", () => {
+  const target = buildCommittedCornerCaptureTarget(
+    { xMeters: 1, yMeters: 1, capturedAt: 1 },
+    { xMeters: 1, yMeters: 2, capturedAt: 2 },
+  );
+
+  assert.equal(target.xMeters, 1);
+  assert.equal(target.yMeters, 1.4);
+});
 
 test("capContinuousWheelCommands preserves curvature while limiting the peak wheel output", () => {
   const capped = capContinuousWheelCommands({ left: 0.4, right: 1, pivoting: false }, 0.65);
