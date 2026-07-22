@@ -7,9 +7,64 @@ import {
   capContinuousWheelCommands,
   computeContinuousPathBaseSpeed,
   computeContinuousPathWheelCommands,
+  ContinuousPathFollower,
   limitContinuousWheelCommandChange,
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
+
+test("continuous follower locks one recovery segment through pivot and capture", async () => {
+  const poses = [
+    createPose(0, 0, createInternalHeading(180), "gnss"),
+    createPose(0, 0, createInternalHeading(180), "gnss"),
+    createPose(0, 0, createInternalHeading(0), "gnss"),
+    createPose(0.5, 0, createInternalHeading(0), "gnss"),
+    createPose(2, 0, createInternalHeading(0), "gnss"),
+  ];
+  let poseIndex = 0;
+  const commands = [];
+  const events = [];
+  const follower = new ContinuousPathFollower({
+    poseFusion: {
+      getCurrentPose: () => poses[Math.min(poseIndex++, poses.length - 1)],
+    },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async (left, right) => commands.push({ left, right }),
+      requestNeutralMotorOutputs: async () => {},
+    },
+    logger: {
+      info: (message, data) => events.push({ message, data }),
+      debug: () => {},
+    },
+    sleep: async () => {},
+    baseSpeed: 0.65,
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 2, yMeters: 0, capturedAt: 3 },
+  ], {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+    pivotIfInnerWheelBelow: 0.25,
+    minimumSpeed: 0.65,
+    maximumSpeed: 0.65,
+  });
+
+  assert.equal(result.completed, true);
+  assert.deepEqual(events.map((event) => event.message), [
+    "continuous_path.recovery_align_started",
+    "continuous_path.recovery_capture_started",
+    "continuous_path.recovery_capture_completed",
+  ]);
+  const pivotCommands = commands.filter(({ left, right }) => left * right < 0);
+  assert.equal(pivotCommands.length > 0, true);
+  assert.equal(pivotCommands.every(({ left, right }) => Math.sign(left) === -Math.sign(right)), true);
+  assert.equal(new Set(pivotCommands.map(({ left }) => Math.sign(left))).size, 1);
+});
 
 test("buildCommittedCornerCaptureTarget locks capture to the outgoing edge", () => {
   const target = buildCommittedCornerCaptureTarget(
