@@ -38,6 +38,7 @@ const SMALL_TURN_DEFAULT_BRAKE_TIMES_MS = [
   230, 320, 410, 470, 505, 550, 610, 675, 715, 785,
   840, 895, 950, 1005, 1060, 1115, 1170, 1225, 1280, 1335,
 ];
+const TURN_LEARNING_PARAMETERS_VERSION = 6;
 
 const LARGE_TURN_BUCKET_STEP_DEG = 10;
 const LARGE_TURN_BUCKET_TRAINING_TOLERANCE_DEG = 0.1;
@@ -378,8 +379,9 @@ export class TurnLearningModel {
       && this.isNumericArray(raw.largeTurnBrakeScalarsCcwMs)
       && this.isNumericArray(raw.largeTurnBrakeScalarsCwMs)
     ) {
+      const sourceVersion = this.readNumber(raw.version, 5);
       return {
-        version: this.readNumber(raw.version, 5),
+        version: TURN_LEARNING_PARAMETERS_VERSION,
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
         smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
         smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -400,15 +402,15 @@ export class TurnLearningModel {
         largeTurnSampleCountsCw: this.normalizeNumericArray(raw.largeTurnSampleCountsCw, LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCcwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCcwDeg, LARGE_TURN_BUCKET_COUNT, 0),
         largeTurnLastErrorsCwDeg: this.normalizeNumericArray(raw.largeTurnLastErrorsCwDeg, LARGE_TURN_BUCKET_COUNT, 0),
-        smallTurnBrakeTimesCcwMs: this.normalizeNumericArray(
+        smallTurnBrakeTimesCcwMs: this.normalizeSmallTurnBrakeTimes(
           raw.smallTurnBrakeTimesCcwMs,
-          SMALL_TURN_BUCKET_COUNT,
-          SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
+          raw.smallTurnSampleCountsCcw,
+          sourceVersion,
         ),
-        smallTurnBrakeTimesCwMs: this.normalizeNumericArray(
+        smallTurnBrakeTimesCwMs: this.normalizeSmallTurnBrakeTimes(
           raw.smallTurnBrakeTimesCwMs,
-          SMALL_TURN_BUCKET_COUNT,
-          SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
+          raw.smallTurnSampleCountsCw,
+          sourceVersion,
         ),
         smallTurnSampleCountsCcw: this.normalizeNumericArray(raw.smallTurnSampleCountsCcw, SMALL_TURN_BUCKET_COUNT, 0),
         smallTurnSampleCountsCw: this.normalizeNumericArray(raw.smallTurnSampleCountsCw, SMALL_TURN_BUCKET_COUNT, 0),
@@ -425,7 +427,7 @@ export class TurnLearningModel {
       && this.isNumericArray(raw.largeTurnBrakeTimesCwMs)
     ) {
       return {
-        version: 5,
+        version: TURN_LEARNING_PARAMETERS_VERSION,
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
         smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
         smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -469,7 +471,7 @@ export class TurnLearningModel {
     if (typeof raw.largeTurnBrakeCcwDeg === "number" && typeof raw.largeTurnBrakeCwDeg === "number") {
       const legacy = raw as LegacyTurnLearningParametersV2;
       return {
-        version: 5,
+        version: TURN_LEARNING_PARAMETERS_VERSION,
         smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
         smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
         smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -532,7 +534,7 @@ export class TurnLearningModel {
     const smallTurnLastErrorCwDeg = this.createNumericArray(SMALL_TURN_BUCKET_COUNT, overrides.lastSmallErrorCwDeg ?? 0);
 
     return {
-      version: 5,
+      version: TURN_LEARNING_PARAMETERS_VERSION,
       smallAngleThresholdDeg: TURN_SMALL_ANGLE_THRESHOLD_DEG,
       smallTurnBucketStepDeg: SMALL_TURN_BUCKET_STEP_DEG,
       smallTurnMaxAngleDeg: SMALL_TURN_BUCKET_MAX_DEG,
@@ -577,6 +579,26 @@ export class TurnLearningModel {
       items.push(fallback);
     }
     return items;
+  }
+
+  private normalizeSmallTurnBrakeTimes(
+    value: unknown,
+    sampleCountsValue: unknown,
+    sourceVersion: number,
+  ): number[] {
+    const times = this.normalizeNumericArray(
+      value,
+      SMALL_TURN_BUCKET_COUNT,
+      SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[0],
+    );
+    if (sourceVersion >= TURN_LEARNING_PARAMETERS_VERSION) {
+      return times;
+    }
+
+    const sampleCounts = this.normalizeNumericArray(sampleCountsValue, SMALL_TURN_BUCKET_COUNT, 0);
+    return times.map((timeMs, index) => (
+      sampleCounts[index] > 0 ? timeMs : SMALL_TURN_DEFAULT_BRAKE_TIMES_MS[index]
+    ));
   }
 
   private isNumericArray(value: unknown): value is number[] {

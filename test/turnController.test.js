@@ -474,7 +474,7 @@ describe("TurnLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 5);
+    assert.equal(params.version, 6);
     assert.equal(params.parameters.length > 0, true);
     assert.equal(params.parameters[0].requestedAngleDeg, 70);
     assert.equal(params.parameters[0].direction, "ccw");
@@ -497,6 +497,49 @@ describe("TurnLearningModel", () => {
 
     const brakeScalarMs = model.getLargeTurnBrakeScalarMs("ccw", 90);
     assert.equal(brakeScalarMs > 0, true);
+  });
+
+  it("migrates only untrained legacy small-turn buckets to calibrated defaults", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-default-migration-"));
+    const parametersPath = join(dir, "turn-learning.json");
+
+    try {
+      const oldDefaults = Array.from({ length: 20 }, (_, index) => (index + 1) * 135);
+      const ccwCounts = Array.from({ length: 20 }, () => 0);
+      ccwCounts[10] = 4;
+      await writeFile(parametersPath, JSON.stringify({
+        version: 5,
+        smallTurnBrakeTimesCcwMs: oldDefaults,
+        smallTurnBrakeTimesCwMs: oldDefaults,
+        smallTurnSampleCountsCcw: ccwCounts,
+        smallTurnSampleCountsCw: Array.from({ length: 20 }, () => 0),
+        smallTurnLastErrorCcwDeg: Array.from({ length: 20 }, () => 0),
+        smallTurnLastErrorCwDeg: Array.from({ length: 20 }, () => 0),
+        largeTurnBrakeScalarsCcwMs: Array.from({ length: 12 }, () => 90),
+        largeTurnBrakeScalarsCwMs: Array.from({ length: 12 }, () => 90),
+        largeTurnSampleCountsCcw: Array.from({ length: 12 }, () => 0),
+        largeTurnSampleCountsCw: Array.from({ length: 12 }, () => 0),
+        largeTurnLastErrorsCcwDeg: Array.from({ length: 12 }, () => 0),
+        largeTurnLastErrorsCwDeg: Array.from({ length: 12 }, () => 0),
+      }), "utf-8");
+
+      const model = new TurnLearningModel({ logger: mockLogger, parametersPath });
+      await model.loadParameters();
+      const params = model.getParameters();
+      const ccw33 = params.smallTurnBuckets.find((bucket) => bucket.bucketAngleDeg === 33);
+      const cw33 = params.smallTurnBuckets.find((bucket) => bucket.bucketAngleDeg === 33);
+      const ccw36 = params.smallTurnBuckets.find((bucket) => bucket.bucketAngleDeg === 36);
+      assert.ok(ccw33);
+      assert.ok(cw33);
+      assert.ok(ccw36);
+      assert.equal(params.version, 6);
+      assert.equal(ccw33.brakeTimeCcwMs, 1485);
+      assert.equal(cw33.brakeTimeCwMs, 840);
+      assert.equal(ccw36.brakeTimeCcwMs, 895);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("returns no brake angle for small-angle timeout buckets", () => {
@@ -523,7 +566,7 @@ describe("TurnLearningModel", () => {
         parametersPath,
       });
       await writeFile(parametersPath, JSON.stringify({
-        version: 5,
+        version: 6,
         smallAngleThresholdDeg: 60,
         smallTurnBucketStepDeg: 3,
         smallTurnMaxAngleDeg: 60,
@@ -565,7 +608,7 @@ describe("TurnLearningModel", () => {
         parametersPath,
       });
       await writeFile(parametersPath, JSON.stringify({
-        version: 5,
+        version: 6,
         smallAngleThresholdDeg: 60,
         smallTurnBucketStepDeg: 3,
         smallTurnMaxAngleDeg: 60,

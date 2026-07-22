@@ -27,6 +27,7 @@ The Turn Controller is a supervised self-learning component responsible for exec
 ### Special Considerations
 - **Small angle challenge**: For turns up to ~60°, the learned brake fraction must vary by angle bucket so each turn size gets a closer brake point
 - **Small-angle defaults**: Timeout buckets are seeded from tuning results through 30° (with the unmeasured 3° bucket estimated at 230ms and the measured curve reaching 785ms at 30°), then conservatively extrapolated to 60°. Small turns use normalized achieved angle for learning because they cannot legitimately wrap through 360°.
+- **Default migration**: Loading a parameter file from before the calibrated timeout curve replaces only zero-sample small-turn buckets. Buckets containing training samples retain their learned direction-specific values.
 - **Motor engagement**: Even for small angles, motors must engage to initiate movement
 - **Ramp-down time**: Motors have asymmetric ramp rates (460ms up, 700ms down per hardware docs)
 
