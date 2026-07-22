@@ -3,11 +3,20 @@ import assert from "node:assert/strict";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPose } from "../dist/geometry/positionTypes.js";
 import {
+  capContinuousWheelCommands,
   computeContinuousPathBaseSpeed,
   computeContinuousPathWheelCommands,
   limitContinuousWheelCommandChange,
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
+
+test("capContinuousWheelCommands preserves curvature while limiting the peak wheel output", () => {
+  const capped = capContinuousWheelCommands({ left: 0.4, right: 1, pivoting: false }, 0.65);
+
+  assert.equal(capped.right, 0.65);
+  assert.equal(Math.abs(capped.left - 0.26) < 1e-9, true);
+  assert.equal(capped.pivoting, false);
+});
 
 const TEST_PARAMETERS = {
   version: 3,

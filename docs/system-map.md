@@ -278,6 +278,7 @@ This document maps problem domains to candidate files removing the need for Code
   - supports a caller-supplied minimum trace speed so perimeter loops do not slow into near-stall commands
   - can also pivot when the requested arc would drive the inner wheel below a healthy floor, preventing long stall-prone crawl turns during perimeter tracing
   - pivot/arc handoff uses hysteresis for both heading and the minimum-inner-wheel rule, avoiding repeated pivot/arc switching near the threshold
+  - perimeter traces and routed perimeter connectors use a steady 65% speed cap, pivot at meaningful 20° corners within 30cm of the waypoint, and persist those execution settings across mowing resume
   - applies a per-control-cycle wheel-command slew limit so curvature, heading, and CTE corrections change motor demand progressively instead of jumping between fast and slow outputs
   - drives saved or planned polylines using direct left/right wheel outputs instead of turn-drive-turn segments
   - mowing traces/connectors can enable strict ordered progress so nearby non-adjacent segments, including the closing leg back to the join point, cannot falsely jump the follower far ahead in the route

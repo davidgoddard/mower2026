@@ -50,6 +50,7 @@ export interface ContinuousPathExecutionOptions {
   readonly pivotAtWaypointTurnDeg?: number;
   readonly pivotAtWaypointDistanceMeters?: number;
   readonly minimumSpeed?: number;
+  readonly maximumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
   /** Resume an interrupted ordered follow from this target index. */
   readonly initialTargetIndex?: number;
@@ -135,12 +136,16 @@ export class ContinuousPathFollower {
         );
         currentIndex = Math.max(currentIndex, projection.segmentStartIndex + 1);
         const guidance = buildContinuousGuidance(pathPoints, cumulativeDistances, projection, parameters);
-        const requestedCommands = computeContinuousPathWheelCommands(
+        const executionBaseSpeed = Math.max(
+          0.2,
+          Math.min(this.baseSpeed, options.maximumSpeed ?? this.baseSpeed),
+        );
+        const computedCommands = computeContinuousPathWheelCommands(
           pose,
           guidance.segmentStart,
           guidance.segmentEnd,
           guidance.lookaheadTarget,
-          this.baseSpeed,
+          executionBaseSpeed,
           pivoting,
           {
             pivotAtWaypointTurnDeg: options.pivotAtWaypointTurnDeg,
@@ -148,6 +153,10 @@ export class ContinuousPathFollower {
             minimumSpeed: options.minimumSpeed,
             pivotIfInnerWheelBelow: options.pivotIfInnerWheelBelow,
           },
+        );
+        const requestedCommands = capContinuousWheelCommands(
+          computedCommands,
+          options.maximumSpeed,
         );
         pivoting = requestedCommands.pivoting;
         appliedLeftCommand = limitContinuousWheelCommandChange(appliedLeftCommand, requestedCommands.left);
@@ -310,6 +319,26 @@ export function limitContinuousWheelCommandChange(
 ): number {
   const boundedDelta = Math.max(0, maxDelta);
   return clamp(requestedCommand, previousCommand - boundedDelta, previousCommand + boundedDelta);
+}
+
+export function capContinuousWheelCommands(
+  commands: { readonly left: number; readonly right: number; readonly pivoting: boolean },
+  maximumOutput?: number,
+): { readonly left: number; readonly right: number; readonly pivoting: boolean } {
+  if (!Number.isFinite(maximumOutput)) {
+    return commands;
+  }
+  const cap = Math.max(0.2, Math.min(1, Math.abs(maximumOutput ?? 1)));
+  const peak = Math.max(Math.abs(commands.left), Math.abs(commands.right));
+  if (peak <= cap) {
+    return commands;
+  }
+  const scale = cap / peak;
+  return {
+    left: commands.left * scale,
+    right: commands.right * scale,
+    pivoting: commands.pivoting,
+  };
 }
 
 export function computeContinuousPathBaseSpeed(

@@ -73,6 +73,10 @@ const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
 const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
 const SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS = 0.25;
 const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
+const PERIMETER_FOLLOW_SPEED = 0.65;
+const PERIMETER_CORNER_PIVOT_DEG = 20;
+const PERIMETER_CORNER_PIVOT_DISTANCE_METERS = 0.3;
+const PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.25;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
@@ -580,12 +584,23 @@ export class MowingExecutor {
 
     this.phase = operation.phase;
     this.updateRecoveryCheckpoint?.(operation.pathPoints);
+    const resumedFollowOptions = {
+      pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+      pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+      minimumSpeed: PERIMETER_FOLLOW_SPEED,
+      maximumSpeed: PERIMETER_FOLLOW_SPEED,
+      pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+      ...operation.followOptions,
+    };
     const result = await this.continuousPathFollower.executePath([...operation.pathPoints], {
       parameters: this.parameters,
-      ...operation.followOptions,
+      ...resumedFollowOptions,
     });
     if (!result.completed) {
-      this.persistInterruptedFollowProgress(operation, result.completedWaypoints);
+      this.persistInterruptedFollowProgress({
+        ...operation,
+        followOptions: resumedFollowOptions,
+      }, result.completedWaypoints);
       if (result.reason === "user_stopped") {
         this.phase = "stopped";
         return null;
@@ -781,8 +796,11 @@ export class MowingExecutor {
         preserveFirstTargetAtPose: true,
         loopPath: false,
         strictOrderedProgress: true,
-        minimumSpeed: 0.68,
-        pivotIfInnerWheelBelow: 0.25,
+        pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+        pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+        minimumSpeed: PERIMETER_FOLLOW_SPEED,
+        maximumSpeed: PERIMETER_FOLLOW_SPEED,
+        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
       },
       errorCode: "boundary_trace_failed",
       continuation: resumeMeta.continuation,
@@ -794,8 +812,11 @@ export class MowingExecutor {
       preserveFirstTargetAtPose: true,
       loopPath: false,
       strictOrderedProgress: true,
-      minimumSpeed: 0.68,
-      pivotIfInnerWheelBelow: 0.25,
+      pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+      pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+      minimumSpeed: PERIMETER_FOLLOW_SPEED,
+      maximumSpeed: PERIMETER_FOLLOW_SPEED,
+      pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
     });
     if (!followResult.completed) {
       this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);
@@ -874,6 +895,11 @@ export class MowingExecutor {
       followOptions: {
         loopPath: false,
         strictOrderedProgress: true,
+        pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+        pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+        minimumSpeed: PERIMETER_FOLLOW_SPEED,
+        maximumSpeed: PERIMETER_FOLLOW_SPEED,
+        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
       },
       errorCode: "connector_failed",
       continuation,
@@ -885,6 +911,11 @@ export class MowingExecutor {
         parameters: this.parameters,
         loopPath: false,
         strictOrderedProgress: true,
+        pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+        pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+        minimumSpeed: PERIMETER_FOLLOW_SPEED,
+        maximumSpeed: PERIMETER_FOLLOW_SPEED,
+        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
       },
     );
     if (followResult.completed) {

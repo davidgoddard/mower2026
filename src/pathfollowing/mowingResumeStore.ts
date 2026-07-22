@@ -25,7 +25,10 @@ export interface MowingResumeFollowOptions {
   readonly loopPath: boolean;
   readonly preserveFirstTargetAtPose?: boolean;
   readonly strictOrderedProgress?: boolean;
+  readonly pivotAtWaypointTurnDeg?: number;
+  readonly pivotAtWaypointDistanceMeters?: number;
   readonly minimumSpeed?: number;
+  readonly maximumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
   readonly initialTargetIndex?: number;
 }

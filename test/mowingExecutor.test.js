@@ -132,7 +132,10 @@ test("MowingExecutor traces the full boundary back to the original encounter poi
   assert.equal(followCalls.length >= 1, true);
   assert.equal(followCalls[0].options.loopPath, false);
   assert.equal(followCalls[0].options.strictOrderedProgress, true);
-  assert.equal(followCalls[0].options.minimumSpeed, 0.68);
+  assert.equal(followCalls[0].options.pivotAtWaypointTurnDeg, 20);
+  assert.equal(followCalls[0].options.pivotAtWaypointDistanceMeters, 0.3);
+  assert.equal(followCalls[0].options.minimumSpeed, 0.65);
+  assert.equal(followCalls[0].options.maximumSpeed, 0.65);
   assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.25);
   assert.equal(turnCalls.length >= 1, true);
   const traversedPoints = followCalls.flatMap((call) => call.pathPoints.map((point) => [point.xMeters, point.yMeters]));
@@ -396,6 +399,11 @@ test("MowingExecutor follows longer multi-point connectors with the continuous f
   assert.equal(followCalls.at(-1).pathPoints[0].yMeters, 0.85);
   assert.equal(followCalls.at(-1).options.loopPath, false);
   assert.equal(followCalls.at(-1).options.strictOrderedProgress, true);
+  assert.equal(followCalls.at(-1).options.pivotAtWaypointTurnDeg, 20);
+  assert.equal(followCalls.at(-1).options.pivotAtWaypointDistanceMeters, 0.3);
+  assert.equal(followCalls.at(-1).options.minimumSpeed, 0.65);
+  assert.equal(followCalls.at(-1).options.maximumSpeed, 0.65);
+  assert.equal(followCalls.at(-1).options.pivotIfInnerWheelBelow, 0.25);
 });
 
 test("MowingExecutor simplifies a safe short multi-point connector to a direct transfer", async () => {
@@ -1137,6 +1145,11 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
   const saved = savedStates.at(-1);
   assert.equal(saved.activeOperation.kind, "follow_path");
   assert.equal(saved.activeOperation.followOptions.initialTargetIndex, 2);
+  assert.equal(saved.activeOperation.followOptions.pivotAtWaypointTurnDeg, 20);
+  assert.equal(saved.activeOperation.followOptions.pivotAtWaypointDistanceMeters, 0.3);
+  assert.equal(saved.activeOperation.followOptions.minimumSpeed, 0.65);
+  assert.equal(saved.activeOperation.followOptions.maximumSpeed, 0.65);
+  assert.equal(saved.activeOperation.followOptions.pivotIfInnerWheelBelow, 0.25);
 });
 
 test("MowingExecutor passes saved continuous-follow progress back to the follower on resume", async () => {
@@ -1215,4 +1228,9 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
   assert.equal(status.phase, "complete");
   assert.equal(followCalls.length, 1);
   assert.equal(followCalls[0].options.initialTargetIndex, 2);
+  assert.equal(followCalls[0].options.pivotAtWaypointTurnDeg, 20);
+  assert.equal(followCalls[0].options.pivotAtWaypointDistanceMeters, 0.3);
+  assert.equal(followCalls[0].options.minimumSpeed, 0.65);
+  assert.equal(followCalls[0].options.maximumSpeed, 0.65);
+  assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.25);
 });
