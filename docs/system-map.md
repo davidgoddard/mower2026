@@ -79,8 +79,9 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
+  - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
-- `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control; meaningful corners and general tight-arc recovery both lock one segment and pivot direction through alignment and a forward capture before projection may select another segment.
+- `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control; meaningful corners and general tight-arc recovery both lock one segment and pivot direction through alignment and a forward capture before projection may select another segment. Finite boundary loops may complete near their final target once ordered progress reaches it, avoiding unusably short closing chords, and all commitment transitions yield to sensor/stop processing.
 
 ## Pose Fusion
 - `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.

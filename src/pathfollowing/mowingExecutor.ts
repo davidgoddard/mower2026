@@ -73,10 +73,10 @@ const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
 const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
 const SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS = 0.25;
 const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
-const PERIMETER_FOLLOW_SPEED = 0.65;
+const PERIMETER_FOLLOW_SPEED = 0.75;
 const PERIMETER_CORNER_PIVOT_DEG = 20;
 const PERIMETER_CORNER_PIVOT_DISTANCE_METERS = 0.15;
-const PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.25;
+const PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.4;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
@@ -436,6 +436,10 @@ export class MowingExecutor {
             return this.getStatus();
           }
           this.tracedBoundaries.add(startBoundaryKey);
+          const approachStatus = await this.approachStripEntryAfterBoundaryTrace(index, entryStandoff);
+          if (approachStatus) {
+            return approachStatus;
+          }
         }
         stage = "strip_turn";
       }
@@ -585,12 +589,15 @@ export class MowingExecutor {
     this.phase = operation.phase;
     this.updateRecoveryCheckpoint?.(operation.pathPoints);
     const resumedFollowOptions = {
+      ...operation.followOptions,
       pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
       pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
       minimumSpeed: PERIMETER_FOLLOW_SPEED,
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
       pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
-      ...operation.followOptions,
+      ...(operation.phase === "tracing_boundary"
+        ? { completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters }
+        : {}),
     };
     const result = await this.continuousPathFollower.executePath([...operation.pathPoints], {
       parameters: this.parameters,
@@ -610,8 +617,67 @@ export class MowingExecutor {
     }
     if (operation.markBoundaryTraced) {
       this.tracedBoundaries.add(operation.markBoundaryTraced);
+      if (operation.continuation.stage === "strip_turn") {
+        const strip = this.plan.strips[operation.continuation.stripIndex];
+        if (!strip) {
+          this.phase = "error";
+          return null;
+        }
+        const stripStart = strip.traversalReversed ? strip.end : strip.start;
+        const stripEnd = strip.traversalReversed ? strip.start : strip.end;
+        const direction = normalise({
+          x: stripEnd.xMeters - stripStart.xMeters,
+          y: stripEnd.yMeters - stripStart.yMeters,
+        });
+        const entryStandoff = offsetPoint(stripStart, direction, this.standoff);
+        const approachStatus = await this.approachStripEntryAfterBoundaryTrace(
+          operation.continuation.stripIndex,
+          entryStandoff,
+        );
+        if (approachStatus) {
+          return null;
+        }
+      }
     }
     return operation.continuation;
+  }
+
+  private async approachStripEntryAfterBoundaryTrace(
+    stripIndex: number,
+    entryStandoff: { x: number; y: number },
+  ): Promise<MowingStatus | null> {
+    this.phase = "approaching_strip";
+    this.persistResumeOperation({
+      kind: "drive",
+      phase: "approaching_strip",
+      stripIndex,
+      targetX: entryStandoff.x,
+      targetY: entryStandoff.y,
+      errorCode: "post_boundary_approach_failed",
+      continuation: { stage: "strip_turn", stripIndex },
+    });
+    this.logger.info("mowing.trace_boundary.rejoin_strip", {
+      stripIndex,
+      targetX: entryStandoff.x,
+      targetY: entryStandoff.y,
+    });
+    if (this.isNearCurrentPose(entryStandoff.x, entryStandoff.y)) {
+      return null;
+    }
+
+    const result = await this.driveController.executeDrive({
+      targetPosition: createPosition(entryStandoff.x, entryStandoff.y),
+      learningEnabled: true,
+    });
+    if (result.status === "success") {
+      return null;
+    }
+    if (result.status === "stopped") {
+      this.phase = "stopped";
+      return this.getStatus();
+    }
+    this.phase = "error";
+    return { ...this.getStatus(), error: `post_boundary_approach_failed:${result.status}` };
   }
 
   private completeMowing(): MowingStatus {
@@ -801,6 +867,7 @@ export class MowingExecutor {
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
         pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
       },
       errorCode: "boundary_trace_failed",
       continuation: resumeMeta.continuation,
@@ -817,6 +884,7 @@ export class MowingExecutor {
       minimumSpeed: PERIMETER_FOLLOW_SPEED,
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
       pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+      completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
     });
     if (!followResult.completed) {
       this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);

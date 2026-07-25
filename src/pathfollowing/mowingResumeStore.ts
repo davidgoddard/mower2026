@@ -30,6 +30,7 @@ export interface MowingResumeFollowOptions {
   readonly minimumSpeed?: number;
   readonly maximumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
+  readonly completionToleranceMeters?: number;
   readonly initialTargetIndex?: number;
 }
 

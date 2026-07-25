@@ -66,6 +66,45 @@ test("continuous follower locks one recovery segment through pivot and capture",
   assert.equal(new Set(pivotCommands.map(({ left }) => Math.sign(left))).size, 1);
 });
 
+test("continuous follower completes a perimeter near its final target without entering final recovery", async () => {
+  const commands = [];
+  const events = [];
+  const follower = new ContinuousPathFollower({
+    poseFusion: {
+      getCurrentPose: () => createPose(0.12, 0.08, createInternalHeading(180), "gnss"),
+    },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async (left, right) => commands.push({ left, right }),
+      requestNeutralMotorOutputs: async () => {},
+    },
+    logger: {
+      info: (message, data) => events.push({ message, data }),
+      debug: () => {},
+    },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 1, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 1, capturedAt: 2 },
+    { xMeters: 0, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 0, capturedAt: 4 },
+  ], {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 3,
+    completionToleranceMeters: 0.35,
+    pivotIfInnerWheelBelow: 0.4,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(commands.length, 0);
+  assert.equal(events.some(({ message }) => message === "continuous_path.completion_proximity_reached"), true);
+  assert.equal(events.some(({ message }) => message === "continuous_path.recovery_align_started"), false);
+});
+
 test("buildCommittedCornerCaptureTarget locks capture to the outgoing edge", () => {
   const target = buildCommittedCornerCaptureTarget(
     { xMeters: 1, yMeters: 1, capturedAt: 1 },

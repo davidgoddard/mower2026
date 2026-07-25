@@ -53,6 +53,13 @@ export interface ContinuousPathExecutionOptions {
   readonly minimumSpeed?: number;
   readonly maximumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
+  /**
+   * Finish an ordered finite path once its final target is active and the
+   * mower is back within this distance of that target. Intended for complete
+   * perimeter loops whose final recorded chord may be much shorter than the
+   * vehicle can usefully follow.
+   */
+  readonly completionToleranceMeters?: number;
   /** Resume an interrupted ordered follow from this target index. */
   readonly initialTargetIndex?: number;
 }
@@ -129,6 +136,21 @@ export class ContinuousPathFollower {
         }
 
         const pose = this.poseFusion.getCurrentPose();
+        const completionToleranceMeters = options.completionToleranceMeters;
+        if (
+          Number.isFinite(completionToleranceMeters)
+          && currentIndex >= pathPoints.length - 1
+          && distanceFromPoseToPoint(pose, pathPoints[pathPoints.length - 1])
+            <= Math.max(0, completionToleranceMeters ?? 0)
+        ) {
+          this.logger.info("continuous_path.completion_proximity_reached", {
+            currentIndex,
+            finalTargetIndex: pathPoints.length - 1,
+            distanceMeters: distanceFromPoseToPoint(pose, pathPoints[pathPoints.length - 1]),
+            toleranceMeters: completionToleranceMeters,
+          });
+          break;
+        }
         if (segmentCommitment !== null) {
           const commitment = segmentCommitment;
           const segmentHeading = angleTo(
@@ -171,6 +193,7 @@ export class ContinuousPathFollower {
               currentIndex = Math.max(currentIndex, commitment.segmentStartIndex + 1);
               segmentCommitment = null;
               pivoting = false;
+              await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
               continue;
             }
             committedCommands = computeContinuousPathWheelCommands(
@@ -232,6 +255,7 @@ export class ContinuousPathFollower {
             captureTargetX: segmentCommitment.captureTarget.xMeters,
             captureTargetY: segmentCommitment.captureTarget.yMeters,
           });
+          await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
           continue;
         }
 
@@ -275,6 +299,7 @@ export class ContinuousPathFollower {
             captureTargetX: segmentCommitment.captureTarget.xMeters,
             captureTargetY: segmentCommitment.captureTarget.yMeters,
           });
+          await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
           continue;
         }
         pivoting = requestedCommands.pivoting;
