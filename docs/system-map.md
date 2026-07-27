@@ -82,6 +82,7 @@ This document maps problem domains to candidate files removing the need for Code
   - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
 - `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control; meaningful corners and general tight-arc recovery both lock one segment and pivot direction through alignment and a forward capture before projection may select another segment. Finite boundary loops may complete near their final target once ordered progress reaches it, avoiding unusably short closing chords, and all commitment transitions yield to sensor/stop processing.
+- `src/pathfollowing/pathPrimitiveFitter.ts`: greedily fits each smoothed execution path into the furthest valid straight chord or consistently turning circular arc within the configured simplification tolerance; straights win equal-distance votes, sharp/inconsistent turns stop fitting, straight spans collapse to endpoints, and arc samples are projected onto the fitted circle before the continuous follower runs.
 
 ## Pose Fusion
 - `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.
@@ -280,7 +281,7 @@ This document maps problem domains to candidate files removing the need for Code
   - supports a caller-supplied minimum trace speed so perimeter loops do not slow into near-stall commands
   - can also pivot when the requested arc would drive the inner wheel below a healthy floor, preventing long stall-prone crawl turns during perimeter tracing
   - pivot/arc handoff uses hysteresis for both heading and the minimum-inner-wheel rule, avoiding repeated pivot/arc switching near the threshold
-  - perimeter traces and routed perimeter connectors use a steady 65% speed cap, approach within 15cm of meaningful 20° corners, lock and align to the outgoing edge, then complete a committed straight capture of up to 40cm before ordinary projection resumes; execution settings persist across mowing resume
+  - perimeter traces and routed perimeter connectors use a steady 75% speed cap, approach within 15cm of meaningful 20° corners, lock and align to the outgoing edge, then complete a committed straight capture of up to 40cm before ordinary projection resumes; execution settings persist across mowing resume
   - applies a per-control-cycle wheel-command slew limit so curvature, heading, and CTE corrections change motor demand progressively instead of jumping between fast and slow outputs
   - drives saved or planned polylines using direct left/right wheel outputs instead of turn-drive-turn segments
   - mowing traces/connectors can enable strict ordered progress so nearby non-adjacent segments, including the closing leg back to the join point, cannot falsely jump the follower far ahead in the route
@@ -331,7 +332,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/mowingExecutor.ts`: mowing execution workflow
   - gates start/resume on GNSS-quality fused pose and stops an active mow as `poor_gnss` after a 2-second sustained GNSS-quality loss
   - persists exact in-progress mowing step state through the app-server callback so failed or stopped sessions can resume from the saved operation rather than rebuilding the strip plan from scratch
-  - executes the planner-provided inter-strip connector without replacing a validated perimeter route at runtime; planner-approved two-point connectors use direct line drive and multi-point perimeter connectors use continuous following
+  - executes the planner-provided inter-strip connector without replacing its route; planner-approved two-point connectors use direct line drive, while multi-point perimeter connectors are first fitted into longest-valid straight/arc primitives and then use continuous following over that committed geometry
   - when a continuous boundary or connector follow stops, saves the completed waypoint index and resumes from that ordered progress point rather than restarting the saved path at index zero
 - `src/server/appServer.ts`: mowing start/resume HTTP handlers reject requests with `409 poor_gnss` before creating an executor when the current fused pose is not GNSS quality
 - `src/config/learningPolicyConfig.ts` and `config/learning-policy.json`: shared persisted `training_only`/`always` policy enforced inside drive and turn controllers; production defaults to training-only learning

@@ -1174,8 +1174,8 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
         return {
           completed: false,
           reason: "user_stopped",
-          completedWaypoints: 2,
-          pointCount: connector.length,
+          completedWaypoints: 1,
+          pointCount: 2,
           algorithm: "continuous_path_follow",
         };
       },
@@ -1192,7 +1192,8 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
   assert.equal(result.completed, false);
   const saved = savedStates.at(-1);
   assert.equal(saved.activeOperation.kind, "follow_path");
-  assert.equal(saved.activeOperation.followOptions.initialTargetIndex, 2);
+  assert.equal(saved.activeOperation.pathPoints.length, 2);
+  assert.equal(saved.activeOperation.followOptions.initialTargetIndex, 1);
   assert.equal(saved.activeOperation.followOptions.pivotAtWaypointTurnDeg, 20);
   assert.equal(saved.activeOperation.followOptions.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(saved.activeOperation.followOptions.minimumSpeed, 0.75);

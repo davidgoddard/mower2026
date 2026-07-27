@@ -3,6 +3,7 @@ import { ContinuousPathFollower } from "./continuousPathFollower.js";
 import { buildMowingPlan, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
 import type { MowingResumeContinuation, MowingResumeOperation, MowingResumeState, MowingResumeStage } from "./mowingResumeStore.js";
 import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan } from "./pathVerification.js";
+import { fitPathToStraightAndArcPrimitives } from "./pathPrimitiveFitter.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
@@ -852,12 +853,25 @@ export class MowingExecutor {
     if (loopPoints.length < 2) {
       return true;
     }
+    const fittedLoop = fitPathToStraightAndArcPrimitives(
+      loopPoints,
+      this.parameters.segmentedDriveSimplificationToleranceMeters,
+      this.parameters.segmentedDriveMaxVertexTurnDeg,
+    );
+    const executionLoopPoints = fittedLoop.points.length >= 2 ? fittedLoop.points : loopPoints;
+    this.logger.info("mowing.trace_boundary.primitives_fitted", {
+      boundary: boundaryKey,
+      inputPointCount: loopPoints.length,
+      executionPointCount: executionLoopPoints.length,
+      straightCount: fittedLoop.primitives.filter((primitive) => primitive.kind === "straight").length,
+      arcCount: fittedLoop.primitives.filter((primitive) => primitive.kind === "arc").length,
+    });
 
     const followOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
       kind: "follow_path",
       phase: "tracing_boundary",
       stripIndex: resumeMeta.stripIndex,
-      pathPoints: [...loopPoints],
+      pathPoints: [...executionLoopPoints],
       followOptions: {
         preserveFirstTargetAtPose: true,
         loopPath: false,
@@ -874,7 +888,7 @@ export class MowingExecutor {
       markBoundaryTraced: resumeMeta.markBoundaryTraced,
     };
     this.persistResumeOperation(followOperation);
-    const followResult = await this.continuousPathFollower.executePath([...loopPoints], {
+    const followResult = await this.continuousPathFollower.executePath([...executionLoopPoints], {
       parameters: this.parameters,
       preserveFirstTargetAtPose: true,
       loopPath: false,
@@ -955,11 +969,24 @@ export class MowingExecutor {
       };
     }
 
+    const fittedConnector = fitPathToStraightAndArcPrimitives(
+      connector,
+      this.parameters.segmentedDriveSimplificationToleranceMeters,
+      this.parameters.segmentedDriveMaxVertexTurnDeg,
+    );
+    const executionConnector = fittedConnector.points.length >= 2 ? fittedConnector.points : [...connector];
+    this.logger.info("mowing.connector.primitives_fitted", {
+      stripIndex,
+      inputPointCount: connector.length,
+      executionPointCount: executionConnector.length,
+      straightCount: fittedConnector.primitives.filter((primitive) => primitive.kind === "straight").length,
+      arcCount: fittedConnector.primitives.filter((primitive) => primitive.kind === "arc").length,
+    });
     const followOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
       kind: "follow_path",
       phase: "following_connector",
       stripIndex,
-      pathPoints: [...connector],
+      pathPoints: [...executionConnector],
       followOptions: {
         loopPath: false,
         strictOrderedProgress: true,
@@ -974,7 +1001,7 @@ export class MowingExecutor {
     };
     this.persistResumeOperation(followOperation);
     const followResult = await this.continuousPathFollower.executePath(
-      [...connector],
+      [...executionConnector],
       {
         parameters: this.parameters,
         loopPath: false,
