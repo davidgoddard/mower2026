@@ -643,7 +643,7 @@ ${getOperatorPageCommonScriptTag()}
         <span class="status-dot"></span>
         <span>Idle</span>
       </div>
-      <a href="/" class="back-link">← Back to Dashboard</a>
+      <a href="/dashboard" class="back-link">← Back to Dashboard</a>
     </div>
   </div>
 

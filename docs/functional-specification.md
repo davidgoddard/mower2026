@@ -175,9 +175,11 @@ A HID games controller interface shall be supported for manual driving.
 
 The web page must remain responsive at all times
 
-#### Dashboard Home Page
+#### Drive & Paths Home Page
 
-The web page home page provides a real-time dashboard view showing the current state of all sensors with graphical and numerical displays:
+The root web page shall be the Drive & Paths operating page. Its header shall contain compact live representations of the IMU, GNSS and motor-odometry widgets. Selecting any compact widget shall open the expanded dashboard at `/dashboard`.
+
+The expanded dashboard provides a real-time view showing the current state of all sensors with graphical and numerical displays:
 
 **IMU Widget:**
 - Compass display showing heading (navigation convention: 0° = north, clockwise positive)
@@ -267,9 +269,9 @@ Motor feedback shall include, at minimum:
 - watchdog health and fault flags
 - motor current for both wheels
 
-The sensor controller shall detect likely obstructions/stalls from its latest motor feedback, the current motor command and the latest pose estimate. When the motors are commanded to move but the mower makes no meaningful positional progress over a short grace-adjusted observation window, the controller shall emit an obstruction event, request a global stop and log the condition once.
+The sensor controller shall detect likely obstructions/stalls from its latest motor feedback, the current motor command and the latest pose estimate. During translational driving, commanded motion must produce meaningful trusted-GNSS positional progress over a short grace-adjusted observation window. During an in-place pivot, commanded motion must instead produce meaningful IMU heading change. Motor current of at least 2.8 A sustained for approximately two seconds is independently sufficient stall evidence; it must fall below 2.6 A to clear that observation, preventing threshold chatter. On a confirmed stall, the controller shall emit an obstruction event, request a global stop and log the condition once.
 
-The stall observation window shall restart whenever commanded motion changes between an in-place pivot and translational driving. Intentional lack of GNSS position change during a pivot must not consume the observation window subsequently used to judge forward or reverse progress.
+The stall observation window shall restart whenever commanded motion changes between an in-place pivot and translational driving. Pivot progress shall be measured from IMU heading change rather than GNSS position. Forward or reverse progress shall be measured from trusted GNSS position; encoder movement alone must not hide a chassis that is stationary because its wheels are slipping.
 
 The ESP32 motor node shall send raw encoder pulse deltas and PWM/current telemetry only.
 The Pi-side sensor controller shall convert encoder deltas into wheel speed estimates using the persisted encoder calibration.
@@ -511,7 +513,7 @@ A path driving component is required which will take an array of path points whi
 The user will be able to use manual driving or simply dragging the mower around an obstacle. The position part only is obtained and logged every time it moves more than 10cm.
 Path and area-perimeter recording shall accept fused GNSS and dead-reckoning poses from pose fusion, shall ignore unknown-quality poses, and shall reject implausible jumps between consecutive recorded points, so degraded positioning cannot write large spikes into saved boundaries.
 
-The web page will offer a button to open a combined drive-and-paths page for this purpose, with the live manual-drive canvas at the top and the path recording and management controls alongside it.  
+The root web page is the combined Drive & Paths page for this purpose, with the live manual-drive canvas at the top and the path recording and management controls alongside it.
 
 A path will be associated with a name which will default to 'Obstacle N' where N is an increasing number based on already stored obstacles.  The user can add new names. For any name, the user can erase which removes it completely or they can 'record' in which case it starts capturing the path as the user moves/drives the mower. And a 'stop and save' button which will persist the array of positions against the name.
 
@@ -557,7 +559,7 @@ The mower has two current meters; one for each motor. The system shall classify 
 
 - **high_current** — either motor draws above the configured current threshold (initial value 2 A). This is treated as the mower hitting thick grass or a clump that the blades may yet cut through with another run-up.
 - **wheel_slip** — wheels are turning per encoder feedback but the fused position is effectively stationary.
-- **stall** — trusted position remains stationary for the stall window while motors are engaged. Encoder-stationary evidence is a fallback when trusted position is unavailable; spinning encoders do not override reliable evidence that the mower chassis has not moved.
+- **stall** — trusted GNSS position remains stationary during translational driving, IMU heading remains stationary during a pivot, or motor current remains high while motion is commanded. Encoder-stationary evidence is a fallback when the motion-specific reference is unavailable; spinning encoders do not by themselves prove chassis progress.
 
 Only `high_current` events trigger a retry. `wheel_slip` and `stall` events shall stop the active operation and abort the session — the mower is assumed to be physically stuck.
 

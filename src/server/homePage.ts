@@ -620,7 +620,7 @@ ${getOperatorPageCommonScriptTag()}
             <span class="nav-button-icon">🧭</span>
             <span>Segment Testing</span>
           </a>
-          <a href="/manual-drive" class="nav-button" title="Manual drive, live position tracking, and stored path management">
+          <a href="/" class="nav-button" title="Manual drive, live position tracking, and stored path management">
             <span class="nav-button-icon">🧭</span>
             <span>Drive &amp; Paths</span>
           </a>

@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getAppDialogHtml, getAppDialogScript, getAppDialogStyles } from "./appDialogs.js";
 import { getOperatorPageCommonScriptTag } from "./operatorPageCommon.js";
+import { getSensorWidgetScriptTag } from "./liveSensorWidgets.js";
 
 const MANUAL_DRIVE_ASSET_DIR_CANDIDATES = [
   resolve(process.cwd(), "src/server/manual-drive-page"),
@@ -46,6 +47,7 @@ export function getManualDrivePageHtml(): string {
     "__APP_DIALOG_HTML__": getAppDialogHtml(),
     "__APP_DIALOG_SCRIPT_TAG__": `<script>\n${getAppDialogScript()}\n</script>`,
     "__OPERATOR_PAGE_COMMON_SCRIPT_TAG__": getOperatorPageCommonScriptTag(),
+    "__SENSOR_WIDGET_SCRIPT_TAG__": getSensorWidgetScriptTag(),
   });
 }
 

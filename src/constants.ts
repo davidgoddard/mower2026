@@ -310,6 +310,12 @@ export const MOTOR_STALL_GNSS_ACCURACY_MAX_METERS = 0.1;
 export const MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS = 0.1;
 
 /**
+ * Minimum IMU heading change required over the stall observation window while
+ * an in-place pivot is commanded.
+ */
+export const MOTOR_STALL_HEADING_DELTA_THRESHOLD_DEG = 5;
+
+/**
  * Observation window used to judge whether commanded motion is actually producing progress.
  */
 export const MOTOR_STALL_OBSERVATION_WINDOW_MS = 4000;
@@ -323,9 +329,16 @@ export const MOTOR_STALL_OBSERVATION_WINDOW_MS = 4000;
 export const MOTOR_STALL_CONSECUTIVE_SAMPLES = 12;
 
 /**
- * Motor current threshold used as additional evidence for an obstruction.
+ * Motor current thresholds used as independent obstruction evidence.
+ * The lower clear threshold provides hysteresis around the trip point.
  */
-export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.3;
+export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.8;
+export const MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS = 2.6;
+
+/**
+ * Number of consecutive 50ms motor samples required at high current.
+ */
+export const MOTOR_STALL_HIGH_CURRENT_CONSECUTIVE_SAMPLES = 40;
 
 /**
  * Grace period after a new motor command before stall detection begins.

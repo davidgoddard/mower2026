@@ -483,6 +483,34 @@ test("buildMowingPlan reanchors with a consistent traversal after choosing the o
   );
 });
 
+test("buildMowingPlan resequences locally from a preferred middle start without an edge-wrap connector", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 8, yMeters: 0, capturedAt: 2 },
+    { xMeters: 8, yMeters: 4, capturedAt: 3 },
+    { xMeters: 0, yMeters: 4, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const plan = buildMowingPlan(area, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.5,
+    preferredStartPoint: { xMeters: 4, yMeters: 0 },
+  });
+
+  assert.ok(plan.stripCount > 10);
+  const connectorDistances = plan.connectors.map((connector) => {
+    let total = 0;
+    for (let index = 1; index < connector.length; index += 1) {
+      total += Math.hypot(
+        connector[index].xMeters - connector[index - 1].xMeters,
+        connector[index].yMeters - connector[index - 1].yMeters,
+      );
+    }
+    return total;
+  });
+  assert.ok(Math.max(...connectorDistances) < 3);
+});
+
 test("buildMowingInitialEntryPlan selects nearest projected area perimeter point", () => {
   const area = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },

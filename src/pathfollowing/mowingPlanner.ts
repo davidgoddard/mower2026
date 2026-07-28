@@ -188,11 +188,13 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
 
   const obstaclePolygons = obstacles.map((obstacle) => obstacle.polygon);
   const sequenceStartedAtMs = Date.now();
-  const sequencing = sequenceStripsForMowing(strips, direction, obstaclePolygons);
-  const reanchoredTraversal = reanchorTraversalToPreferredStart(
-    sequencing.traversal,
+  const sequencing = sequenceStripsForMowing(
+    strips,
+    direction,
+    obstaclePolygons,
     options.preferredStartPoint,
   );
+  const reanchoredTraversal = sequencing.traversal;
   const sequenceMs = Date.now() - sequenceStartedAtMs;
   const sequencedStrips = reanchoredTraversal.map((step, index) => ({
     ...step.strip,
@@ -576,6 +578,7 @@ function sequenceStripsForMowing(
   strips: MowingStrip[],
   direction: Vector,
   obstacles: Vector[][],
+  preferredStartPoint?: MowingInitialEntryPosition,
 ): SequenceStripsResult {
   const offsets = [...new Set(strips.map((strip) => strip.centerOffsetMeters))].sort((a, b) => a - b);
   const remaining = strips.slice();
@@ -598,9 +601,12 @@ function sequenceStripsForMowing(
     };
   }
 
-  const firstOffset = offsets[0];
-  const firstCandidates = remaining.filter((strip) => Math.abs(strip.centerOffsetMeters - firstOffset) <= EPSILON);
-  const firstStep = chooseFirstTraversalStep(firstCandidates, direction);
+  const firstStep = preferredStartPoint
+    ? chooseNearestTraversalStep(remaining, preferredStartPoint)
+    : chooseFirstTraversalStep(
+      remaining.filter((strip) => Math.abs(strip.centerOffsetMeters - offsets[0]) <= EPSILON),
+      direction,
+    );
   const firstStrip = firstStep.strip;
   traversal.push(firstStep);
   removeStrip(remaining, firstStrip);
@@ -609,7 +615,9 @@ function sequenceStripsForMowing(
 
   while (remaining.length > 0 && currentPoint !== null) {
     const currentOffset = traversal[traversal.length - 1].strip.centerOffsetMeters;
-    const candidates = selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
+    const candidates = preferredStartPoint
+      ? selectNearestTraversalCandidates(remaining, currentPoint)
+      : selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
     const bestEvaluation = chooseBestTraversalStep(candidates, currentPoint, currentOffset, direction, obstacles, mownCrossings);
     traversalCandidateEvaluations += candidates.length * 2;
     traversalConnectorPathEvaluations += candidates.length * 2;
@@ -648,6 +656,49 @@ function sequenceStripsForMowing(
       routedCandidateCount,
     },
   };
+}
+
+function chooseNearestTraversalStep(
+  candidates: MowingStrip[],
+  preferredStartPoint: MowingInitialEntryPosition,
+): TraversalStep {
+  if (!Number.isFinite(preferredStartPoint.xMeters) || !Number.isFinite(preferredStartPoint.yMeters)) {
+    throw new Error("preferred_start_point_must_be_finite");
+  }
+  const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
+  let bestStep: TraversalStep | null = null;
+  let bestDistance = Infinity;
+  for (const candidate of candidates) {
+    for (const reversed of [false, true] as const) {
+      const candidateDistance = distance(preferred, stripTraversalStart(candidate, reversed));
+      if (candidateDistance < bestDistance - EPSILON) {
+        bestDistance = candidateDistance;
+        bestStep = { strip: candidate, reversed };
+      }
+    }
+  }
+  if (!bestStep) {
+    throw new Error("mowing_plan_has_no_first_strip");
+  }
+  return bestStep;
+}
+
+function selectNearestTraversalCandidates(
+  remaining: MowingStrip[],
+  currentPoint: Vector,
+): MowingStrip[] {
+  const candidateLimit = 12;
+  return remaining
+    .map((strip) => ({
+      strip,
+      distance: Math.min(
+        distance(currentPoint, stripTraversalStart(strip, false)),
+        distance(currentPoint, stripTraversalStart(strip, true)),
+      ),
+    }))
+    .sort((left, right) => left.distance - right.distance || left.strip.sequenceIndex - right.strip.sequenceIndex)
+    .slice(0, candidateLimit)
+    .map(({ strip }) => strip);
 }
 
 function chooseFirstTraversalStep(candidates: MowingStrip[], direction: Vector): TraversalStep {
@@ -781,63 +832,6 @@ function isBetterTraversalEvaluation(
   }
 
   return preferCandidate(candidate, reversed, currentBest, currentBestReversed, direction);
-}
-
-function reanchorTraversalToPreferredStart(
-  traversal: TraversalStep[],
-  preferredStartPoint: MowingInitialEntryPosition | undefined,
-): TraversalStep[] {
-  if (!preferredStartPoint || traversal.length <= 1) {
-    return traversal;
-  }
-  if (!Number.isFinite(preferredStartPoint.xMeters) || !Number.isFinite(preferredStartPoint.yMeters)) {
-    throw new Error("preferred_start_point_must_be_finite");
-  }
-
-  const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
-  let bestTraversal = traversal;
-  let bestDistance = Infinity;
-
-  const candidateTraversals = buildPreferredStartTraversalCandidates(traversal);
-  for (const candidate of candidateTraversals) {
-    const firstStep = candidate[0];
-    if (!firstStep) {
-      continue;
-    }
-    const start = stripTraversalStart(firstStep.strip, firstStep.reversed);
-    const currentDistance = distance(preferred, start);
-    if (currentDistance < bestDistance - EPSILON) {
-      bestDistance = currentDistance;
-      bestTraversal = candidate;
-    }
-  }
-
-  return bestTraversal;
-}
-
-function buildPreferredStartTraversalCandidates(traversal: TraversalStep[]): TraversalStep[][] {
-  if (traversal.length === 0) {
-    return [];
-  }
-
-  const forwardCandidates: TraversalStep[][] = [];
-  for (let index = 0; index < traversal.length; index += 1) {
-    forwardCandidates.push(traversal.slice(index).concat(traversal.slice(0, index)));
-  }
-
-  const reversedTraversal = traversal
-    .slice()
-    .reverse()
-    .map((step) => ({
-      ...step,
-      reversed: !step.reversed,
-    }));
-  const reverseCandidates: TraversalStep[][] = [];
-  for (let index = 0; index < reversedTraversal.length; index += 1) {
-    reverseCandidates.push(reversedTraversal.slice(index).concat(reversedTraversal.slice(0, index)));
-  }
-
-  return [...forwardCandidates, ...reverseCandidates];
 }
 
 function buildStripConnectors(

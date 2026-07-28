@@ -23,7 +23,8 @@ export interface RunningMowerWebServer {
 }
 
 const PAGE_RENDERERS = new Map<string, () => string>([
-  ["/", renderHomePage],
+  ["/", getManualDrivePageHtml],
+  ["/dashboard", renderHomePage],
   ["/turn-tuning", getTurnTuningPageHtml],
   ["/drive-tuning", getDriveTuningPageHtml],
   ["/segment-testing", getSegmentTestingPageHtml],

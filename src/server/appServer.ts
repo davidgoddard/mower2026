@@ -281,6 +281,15 @@ export function routeServerRequest(
     return {
       statusCode: 200,
       contentType: "text/html; charset=utf-8",
+      body: getManualDrivePageHtml(),
+      logNotFound: false,
+    };
+  }
+
+  if (method === "GET" && pathname === "/dashboard") {
+    return {
+      statusCode: 200,
+      contentType: "text/html; charset=utf-8",
       body: renderHomePage(),
       logNotFound: false,
     };

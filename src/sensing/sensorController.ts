@@ -34,9 +34,12 @@ import {
   MOTOR_STALL_ENCODER_DELTA_THRESHOLD,
   MOTOR_STALL_GNSS_ACCURACY_MAX_METERS,
   MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS,
+  MOTOR_STALL_HEADING_DELTA_THRESHOLD_DEG,
   MOTOR_STALL_OBSERVATION_WINDOW_MS,
   MOTOR_STALL_CONSECUTIVE_SAMPLES,
   MOTOR_STALL_CURRENT_THRESHOLD_AMPS,
+  MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS,
+  MOTOR_STALL_HIGH_CURRENT_CONSECUTIVE_SAMPLES,
   MOTOR_STALL_STARTUP_GRACE_MS,
   MOTOR_OUTPUT_DEADBAND_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
@@ -184,9 +187,11 @@ export class SensorController extends EventEmitter {
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
   private stallMotionAnchorPosition: Position | null = null;
+  private stallMotionAnchorHeading: InternalHeading | null = null;
   private stallMotionAnchorSinceMillis: number | null = null;
   private stallCommandMotionKind: "translation" | "pivot" | null = null;
   private stallDetectionSamples = 0;
+  private stallHighCurrentSamples = 0;
   private stallDetectionLatched = false;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
@@ -260,8 +265,10 @@ export class SensorController extends EventEmitter {
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
     this.stallMotionAnchorPosition = null;
+    this.stallMotionAnchorHeading = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
+    this.stallHighCurrentSamples = 0;
     this.stallDetectionLatched = false;
     this.imuBiasAutoRecalibratedForCurrentStop = false;
     this.primitivesStore.update({
@@ -438,14 +445,18 @@ export class SensorController extends EventEmitter {
     if (isActiveCommand && (!wasActiveCommand || motionKindChanged)) {
       this.motorCommandActiveSinceMillis = this.nowMillis();
       this.stallMotionAnchorPosition = this.latestGnssPosition;
-      this.stallMotionAnchorSinceMillis = this.stallMotionAnchorPosition !== null ? this.nowMillis() : null;
+      this.stallMotionAnchorHeading = this.imuHeading;
+      this.stallMotionAnchorSinceMillis = this.nowMillis();
       this.stallDetectionSamples = 0;
+      this.stallHighCurrentSamples = 0;
       this.stallDetectionLatched = false;
     } else if (!isActiveCommand) {
       this.motorCommandActiveSinceMillis = null;
       this.stallMotionAnchorPosition = null;
+      this.stallMotionAnchorHeading = null;
       this.stallMotionAnchorSinceMillis = null;
       this.stallDetectionSamples = 0;
+      this.stallHighCurrentSamples = 0;
       this.stallDetectionLatched = false;
     }
     this.stallCommandMotionKind = isActiveCommand ? commandMotionKind : null;
@@ -1028,7 +1039,11 @@ export class SensorController extends EventEmitter {
       this.latestGnssPosition = adjustedPosition;
       this.latestGnssAccuracyMeters = sample.positionAccuracyMeters;
 
-      if (this.motorCommandActiveSinceMillis !== null && this.stallMotionAnchorPosition === null) {
+      if (
+        this.motorCommandActiveSinceMillis !== null &&
+        this.stallCommandMotionKind === "translation" &&
+        this.stallMotionAnchorPosition === null
+      ) {
         this.stallMotionAnchorPosition = this.latestGnssPosition;
         this.stallMotionAnchorSinceMillis = this.nowMillis();
       }
@@ -1130,6 +1145,7 @@ export class SensorController extends EventEmitter {
   ): void {
     if (systemStop.isStopped()) {
       this.stallDetectionSamples = 0;
+      this.stallHighCurrentSamples = 0;
       this.stallDetectionLatched = false;
       return;
     }
@@ -1150,45 +1166,75 @@ export class SensorController extends EventEmitter {
     const rightCommandActive = rightCommand >= MOTOR_STALL_COMMAND_THRESHOLD_PERCENT;
     const commandActive = leftCommandActive || rightCommandActive;
 
-    let positionStationary = false;
-    if (
-      this.latestGnssPosition !== null &&
-      this.stallMotionAnchorPosition !== null &&
-      this.stallMotionAnchorSinceMillis !== null &&
-      this.latestGnssAccuracyMeters !== null &&
-      this.latestGnssAccuracyMeters <= MOTOR_STALL_GNSS_ACCURACY_MAX_METERS
-    ) {
-      const movementSinceAnchor = distanceBetween(this.stallMotionAnchorPosition, this.latestGnssPosition);
-      if (movementSinceAnchor >= MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS) {
-        this.stallMotionAnchorPosition = this.latestGnssPosition;
-        this.stallMotionAnchorSinceMillis = this.nowMillis();
-        this.stallDetectionSamples = 0;
-        this.stallDetectionLatched = false;
-        return;
-      }
-
-      if (this.nowMillis() - this.stallMotionAnchorSinceMillis < MOTOR_STALL_OBSERVATION_WINDOW_MS) {
-        return;
-      }
-
-      positionStationary = true;
-    }
-
     const encoderStationaryFallback =
       Math.abs(leftEncoderDelta) <= MOTOR_STALL_ENCODER_DELTA_THRESHOLD &&
       Math.abs(rightEncoderDelta) <= MOTOR_STALL_ENCODER_DELTA_THRESHOLD;
 
-    const currentHigh =
+    const currentAboveTrip =
       (leftMotorCurrentAmps !== null && leftMotorCurrentAmps >= MOTOR_STALL_CURRENT_THRESHOLD_AMPS) ||
-      (rightMotorCurrentAmps !== null && rightMotorCurrentAmps >= MOTOR_STALL_CURRENT_THRESHOLD_AMPS) ||
-      faultFlags !== 0;
+      (rightMotorCurrentAmps !== null && rightMotorCurrentAmps >= MOTOR_STALL_CURRENT_THRESHOLD_AMPS);
+    const currentBelowClear =
+      (leftMotorCurrentAmps === null || leftMotorCurrentAmps <= MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS) &&
+      (rightMotorCurrentAmps === null || rightMotorCurrentAmps <= MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS);
+    if (commandActive && currentAboveTrip) {
+      this.stallHighCurrentSamples += 1;
+    } else if (!commandActive || currentBelowClear) {
+      this.stallHighCurrentSamples = 0;
+    }
+    const currentHigh = this.stallHighCurrentSamples >= MOTOR_STALL_HIGH_CURRENT_CONSECUTIVE_SAMPLES;
 
-    const stationary = commandActive && (positionStationary || encoderStationaryFallback);
+    let progressMissing = false;
+    if (commandActive && !currentHigh && this.stallMotionAnchorSinceMillis !== null) {
+      if (this.stallCommandMotionKind === "pivot" && this.stallMotionAnchorHeading !== null) {
+        const headingChangeDeg = Math.abs(unwrapRelativeAngle(
+          headingDifference(this.imuHeading, this.stallMotionAnchorHeading),
+        ));
+        if (headingChangeDeg >= MOTOR_STALL_HEADING_DELTA_THRESHOLD_DEG) {
+          this.stallMotionAnchorHeading = this.imuHeading;
+          this.stallMotionAnchorSinceMillis = this.nowMillis();
+          this.stallDetectionSamples = 0;
+          this.stallDetectionLatched = false;
+          return;
+        }
+        if (this.nowMillis() - this.stallMotionAnchorSinceMillis < MOTOR_STALL_OBSERVATION_WINDOW_MS) {
+          return;
+        }
+        progressMissing = true;
+      } else if (
+        this.stallCommandMotionKind === "translation" &&
+        this.latestGnssPosition !== null &&
+        this.stallMotionAnchorPosition !== null &&
+        this.latestGnssAccuracyMeters !== null &&
+        this.latestGnssAccuracyMeters <= MOTOR_STALL_GNSS_ACCURACY_MAX_METERS
+      ) {
+        const movementSinceAnchor = distanceBetween(this.stallMotionAnchorPosition, this.latestGnssPosition);
+        if (movementSinceAnchor >= MOTOR_STALL_POSITION_DELTA_THRESHOLD_METERS) {
+          this.stallMotionAnchorPosition = this.latestGnssPosition;
+          this.stallMotionAnchorSinceMillis = this.nowMillis();
+          this.stallDetectionSamples = 0;
+          this.stallDetectionLatched = false;
+          return;
+        }
+        if (this.nowMillis() - this.stallMotionAnchorSinceMillis < MOTOR_STALL_OBSERVATION_WINDOW_MS) {
+          return;
+        }
+        progressMissing = true;
+      } else {
+        progressMissing = encoderStationaryFallback;
+      }
+    }
+
+    const stationary = commandActive && (faultFlags !== 0 || currentHigh || progressMissing);
 
     if (!stationary) {
       this.stallDetectionSamples = 0;
       this.stallDetectionLatched = false;
-      if (commandActive && this.stallMotionAnchorPosition === null && this.latestGnssPosition !== null) {
+      if (
+        commandActive &&
+        this.stallCommandMotionKind === "translation" &&
+        this.stallMotionAnchorPosition === null &&
+        this.latestGnssPosition !== null
+      ) {
         this.stallMotionAnchorPosition = this.latestGnssPosition;
         this.stallMotionAnchorSinceMillis = this.nowMillis();
       }
@@ -1221,6 +1267,9 @@ export class SensorController extends EventEmitter {
       leftMotorCurrentAmps,
       rightMotorCurrentAmps,
       faultFlags,
+      motionKind: this.stallCommandMotionKind,
+      currentHigh,
+      highCurrentSamples: this.stallHighCurrentSamples,
       consecutiveSamples: this.stallDetectionSamples,
     });
 
@@ -1263,8 +1312,10 @@ export class SensorController extends EventEmitter {
     this.motorCommandActiveSinceMillis = null;
     this.stallCommandMotionKind = null;
     this.stallMotionAnchorPosition = null;
+    this.stallMotionAnchorHeading = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
+    this.stallHighCurrentSamples = 0;
     this.stallDetectionLatched = false;
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
@@ -1293,8 +1344,10 @@ export class SensorController extends EventEmitter {
     this.motorCommandActiveSinceMillis = null;
     this.stallCommandMotionKind = null;
     this.stallMotionAnchorPosition = null;
+    this.stallMotionAnchorHeading = null;
     this.stallMotionAnchorSinceMillis = null;
     this.stallDetectionSamples = 0;
+    this.stallHighCurrentSamples = 0;
     this.stallDetectionLatched = false;
 
     await this.gateway.stopMotors();

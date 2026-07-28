@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Drive & Paths - Mower Control</title>
 __APP_DIALOG_STYLE_TAG__
+  __SENSOR_WIDGET_SCRIPT_TAG__
   <link rel="stylesheet" href="/manual-drive.css">
 </head>
 <body>
@@ -14,7 +15,23 @@ __APP_DIALOG_STYLE_TAG__
         <h1>🧭 Drive &amp; Paths</h1>
         <p class="subtitle">Manual drive, live position tracking, and path recording in one place</p>
       </div>
-      <a href="/" class="back-link">← Back to Dashboard</a>
+      <nav class="mini-widget-strip" aria-label="Open full system dashboard">
+        <a href="/dashboard" class="mini-widget-link" aria-label="Open full IMU dashboard">
+          <span class="mini-widget-content">
+            <imu-sensor-widget id="mini-imu-widget"></imu-sensor-widget>
+          </span>
+        </a>
+        <a href="/dashboard" class="mini-widget-link" aria-label="Open full GNSS dashboard">
+          <span class="mini-widget-content">
+            <gnss-position-widget id="mini-gnss-widget"></gnss-position-widget>
+          </span>
+        </a>
+        <a href="/dashboard" class="mini-widget-link" aria-label="Open full odometry dashboard">
+          <span class="mini-widget-content">
+            <motor-odometry-widget id="mini-motor-odometry-widget"></motor-odometry-widget>
+          </span>
+        </a>
+      </nav>
     </div>
   </div>
 

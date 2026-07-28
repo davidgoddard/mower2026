@@ -38,22 +38,24 @@ test('routeServerRequest serves health and primitives payloads', () => {
   assert.equal(typeof primitivesPayload.primitives.motors, 'object');
 });
 
-test('routeServerRequest serves tabbed home page and 404 responses', () => {
+test('routeServerRequest serves Drive & Paths as home, dashboard expansion, and 404 responses', () => {
   const primitives = new PrimitivesStore();
 
   const homeRoute = routeServerRequest('GET', '/', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(homeRoute.statusCode, 200);
   assert.equal(homeRoute.contentType.startsWith('text/html'), true);
-  assert.equal(homeRoute.body.includes('Drive &amp; Paths'), true);
-  assert.equal(homeRoute.body.includes('Path Tracing'), false);
-  assert.equal(homeRoute.body.includes('Manual Drive'), false);
-  assert.equal(homeRoute.body.includes('Segment Testing'), true);
-  assert.equal(homeRoute.body.includes('GNSS Satellites History (last hour)'), false);
-  assert.equal(homeRoute.body.includes('GNSS Fix State History (last hour)'), false);
-  assert.equal(homeRoute.body.includes('id="gnss-sat-warning"'), true);
-  assert.equal(homeRoute.body.includes('Heading History (last hour)'), false);
-  assert.equal(homeRoute.body.includes('Position Accuracy History (last hour)'), false);
-  assert.equal(homeRoute.body.includes('id="gnss-accuracy"'), false);
+  assert.equal(homeRoute.body.includes('Drive & Paths'), true);
+  assert.equal(homeRoute.body.includes('id="mapCanvas"'), true);
+  assert.equal(homeRoute.body.includes('id="mini-imu-widget"'), true);
+  assert.equal(homeRoute.body.includes('id="mini-gnss-widget"'), true);
+  assert.equal(homeRoute.body.includes('id="mini-motor-odometry-widget"'), true);
+  assert.equal(homeRoute.body.includes('href="/dashboard"'), true);
+
+  const dashboardRoute = routeServerRequest('GET', '/dashboard', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
+  assert.equal(dashboardRoute.statusCode, 200);
+  assert.equal(dashboardRoute.body.includes('Mower Control Dashboard'), true);
+  assert.equal(dashboardRoute.body.includes('Segment Testing'), true);
+  assert.equal(dashboardRoute.body.includes('id="gnss-sat-warning"'), true);
 
   const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(manualRoute.statusCode, 200);

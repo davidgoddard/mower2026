@@ -540,7 +540,7 @@ ${getOperatorPageCommonScriptTag()}
           <div class="header-title">Segment Testing</div>
           <div class="header-subtitle">Collect 7 rough waypoints, then run segment turn-and-drive tests using the live pose path.</div>
         </div>
-        <a class="back-link" href="/">← Back to Dashboard</a>
+        <a class="back-link" href="/dashboard">← Back to Dashboard</a>
       </div>
     </div>
 

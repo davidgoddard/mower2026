@@ -48,11 +48,13 @@ This document maps problem domains to candidate files removing the need for Code
 - `test/logger.test.js`: logger unit tests (local timestamp format, scope, transitions, retention).
 
 ## UI Dialogs
+- `src/server/homePage.ts`: full expanded sensor/control dashboard served at `/dashboard`; the root route now serves Drive & Paths.
 - `src/server/appDialogs.ts`: shared lightweight modal alert/confirm overlay used by operator pages.
 - `src/server/manualDrivePage.ts`: Drive & Paths page asset loader and HTML/CSS/JS assembly for the manual-drive UI.
 - `src/server/manual-drive-page/page.html`: Drive & Paths HTML shell.
 - `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling.
 - `src/server/manual-drive-page/page.js`: Drive & Paths browser logic for map drawing, mowing preview, recording, and path actions.
+  - served as the `/` home screen (and at `/manual-drive`) with compact live IMU, GNSS, and motor-odometry widgets linking to `/dashboard`
   - area-perimeter saves include the current mowing strip heading and strip spacing, and selecting an area restores those saved defaults into the preview controls
   - the mowing controls also expose a perimeter-entry start path that skips the initial area loop trace and goes straight into the first strip
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
@@ -68,6 +70,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/sensing/sensorController.ts`: sensor loop stop checks and stop-command keepalive while stopped.
   - every wheel-output write merges the current global stop latch into the motor payload enable/disable flag, so once stop is raised no later command can re-enable drive until a new user-requested session clears the latch
   - neutral stop requests while `systemStop` is latched must resend disabled motor frames rather than zero-speed enabled frames, so the ESP32 keeps seeing a hard stop and never resumes on a stale command
+  - stall progress is motion-specific: trusted GNSS displacement for translation and IMU heading change for pivots; encoder rotation alone does not prove chassis progress, while at least 2.8 A sustained for roughly two seconds is independently sufficient to stop, with 2.6 A clear hysteresis
   - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
   - live HID input while manual drive is armed clears a latched global stop so the operator can consciously recover from a stall/stop during manual manoeuvring
@@ -316,8 +319,8 @@ This document maps problem domains to candidate files removing the need for Code
   - outside-area starts may join directly from outside so long as the approach only meets the area boundary at the chosen join and does not cross an obstacle; the "midpoint must stay inside" guard applies only when already inside the area
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
-  - can re-anchor strip traversal around a preferred perimeter start point so mowing resumes near the entry location and still covers every strip; re-anchoring now evaluates whole consistent traversal candidates in both forward and reverse overall order instead of flipping only the first strip end
-  - sequences strips in locked normal-axis order and marks per-strip traversal direction for boustrophedon preview and execution
+  - when a preferred perimeter start is supplied, starts at its nearest strip end and builds a fresh traversal from there using a bounded set of the nearest remaining strip candidates; it does not rotate an edge-origin sequence and therefore avoids an artificial far-edge wrap while nearer strips remain
+  - without a preferred start, sequences strips in locked normal-axis order; both modes mark per-strip traversal direction for boustrophedon preview and execution
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
   - traversal sequencing now treats obstacle-perimeter routing as an expensive last resort, so adjacent non-routed strip ends win whenever they are still reasonably competitive
@@ -365,7 +368,7 @@ This document maps problem domains to candidate files removing the need for Code
   - stops the mowing workflow if a boundary trace does not complete successfully
 - `src/server/manualDrivePage.ts`: combined Drive & Paths UI asset loader
   - serves the HTML shell from `src/server/manual-drive-page/page.html`
-  - injects shared dialog markup/script/styles into the external page assets
+  - injects shared dialog markup/script/styles and the sensor-widget bundle into the external page assets
   - exposes the page-specific `/manual-drive.css` and `/manual-drive.js` assets through the server routes
   - live position map at the top of the page
   - manual-drive telemetry cards
@@ -377,7 +380,7 @@ This document maps problem domains to candidate files removing the need for Code
   - canvas map overlays generated mowing strips and obstacle-aware connectors for the selected area
   - stored path and area-perimeter detail loads are skipped individually if invalid so one bad/missing file does not suppress all overlays
   - prominent stop button for path following aborts
-- `src/server/pathTracingPage.ts`: legacy wrapper that serves the combined Drive & Paths page
+- `src/server/pathTracingPage.ts`: route wrapper that serves the combined Drive & Paths page
 - Path tracing server behavior:
   - drive immediately follows the stored path from the current position via the segmented executor
   - verify first executes a segment-style approach to about 10cm short of the nearest point on the stored path
@@ -517,7 +520,7 @@ This document maps problem domains to candidate files removing the need for Code
   - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
-- `src/server/homePage.ts`: minimal tabbed UI page with a Drive & Paths tab and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
+- `src/server/homePage.ts`: expanded dashboard served at `/dashboard`, including navigation to Drive & Paths and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
 - `src/server/deadReckoningPage.ts`: dead-reckoning arc-calibration page — three-phase calibration procedure UI (straight line, forward CW arc, forward CCW arc); live IMU, GNSS, and motor-odometry widgets in a scaled row across the top; controls panel and a 45°-step test-moves panel side-by-side beneath; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
   - Test-moves panel: 8 directional buttons (1 m at 45° increments) drive the mower to `current GNSS pose + Δ` via `POST /api/drive/execute` with learning disabled, snapshot pose before and after each move, and tabulate GNSS-measured Δx/Δy/Δheading vs encoder-DR Δx/Δy/Δheading plus their differences for direct comparison of motor-encoder dead-reckoning fidelity.
 - `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.

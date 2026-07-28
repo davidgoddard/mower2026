@@ -1374,6 +1374,41 @@
       try {
         const data = await fetchJson('/api/primitives');
         const primitives = data.primitives;
+        const imu = primitives.imu || {};
+        const gnss = primitives.gnss || {};
+        const poseFusion = primitives.poseFusion || {};
+        const imuWidget = $("mini-imu-widget");
+        const gnssWidget = $("mini-gnss-widget");
+        const motorOdoWidget = $("mini-motor-odometry-widget");
+
+        if (imuWidget) {
+          imuWidget.setAttribute('status', imu.status || 'idle');
+          if (imu.error != null) imuWidget.setAttribute('error', imu.error);
+          if (imu.headingDeg != null) imuWidget.setAttribute('heading-deg', imu.headingDeg);
+          if (imu.pitchDeg != null) imuWidget.setAttribute('pitch-deg', imu.pitchDeg);
+          if (imu.rollDeg != null) imuWidget.setAttribute('roll-deg', imu.rollDeg);
+          imuWidget.setAttribute('synced', poseFusion.usingGnssHeading === true ? 'true' : 'false');
+        }
+        if (gnssWidget) {
+          gnssWidget.setAttribute('status', gnss.status || 'idle');
+          if (gnss.error != null) gnssWidget.setAttribute('error', gnss.error);
+          if (gnss.headingDeg != null) gnssWidget.setAttribute('heading-deg', gnss.headingDeg);
+          if (gnss.headingAccuracyDeg != null) gnssWidget.setAttribute('heading-accuracy-deg', gnss.headingAccuracyDeg);
+          if (gnss.xMeters != null) gnssWidget.setAttribute('x-meters', gnss.xMeters);
+          if (gnss.yMeters != null) gnssWidget.setAttribute('y-meters', gnss.yMeters);
+          if (gnss.positionAccuracyMeters != null) gnssWidget.setAttribute('position-accuracy-meters', gnss.positionAccuracyMeters);
+          if (gnss.fixType != null) gnssWidget.setAttribute('fix-type', gnss.fixType);
+          if (gnss.satellitesInUse != null) gnssWidget.setAttribute('satellites', gnss.satellitesInUse);
+          gnssWidget.setAttribute('synced', poseFusion.usingGnssHeading === true ? 'true' : 'false');
+        }
+        if (motorOdoWidget) {
+          motorOdoWidget.setAttribute('status', poseFusion.status || 'idle');
+          if (poseFusion.encoderOnlyHeadingDeg != null) motorOdoWidget.setAttribute('heading-deg', poseFusion.encoderOnlyHeadingDeg);
+          if (poseFusion.encoderOnlyXMeters != null) motorOdoWidget.setAttribute('x-meters', poseFusion.encoderOnlyXMeters);
+          if (poseFusion.encoderOnlyYMeters != null) motorOdoWidget.setAttribute('y-meters', poseFusion.encoderOnlyYMeters);
+          motorOdoWidget.setAttribute('confidence', poseFusion.drConfidence ?? 1);
+          motorOdoWidget.setAttribute('synced', poseFusion.encoderSynced === true ? 'true' : 'false');
+        }
 
         if (primitives.poseFusion && primitives.poseFusion.status === 'ok') {
           const pose = primitives.poseFusion;

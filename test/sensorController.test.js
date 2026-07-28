@@ -68,6 +68,135 @@ test('SensorController restarts the stall window when pivoting changes to transl
   });
 });
 
+test('SensorController measures pivot progress from IMU heading rather than GNSS position', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+    let now = 0;
+    const controller = new SensorController({
+      logger,
+      primitivesStore: new PrimitivesStore(),
+      gateway: {
+        async initialise() {},
+        async readImu() { return null; },
+        async readGnss() { return null; },
+        async readMotorFeedback() { return null; },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => now,
+    });
+
+    systemStop.clearStop('pivot-stall-test');
+    await controller.setMotorWheelOutputs(-0.5, 0.5);
+    now = 5_000;
+    controller.setHeading(10);
+    for (let sample = 0; sample < 12; sample += 1) {
+      controller.evaluateStallDetection(-30, 30, 0.5, 0.5, 0);
+    }
+    assert.equal(systemStop.isStopped(), false);
+
+    now = 10_000;
+    for (let sample = 0; sample < 12; sample += 1) {
+      controller.evaluateStallDetection(-30, 30, 0.5, 0.5, 0);
+    }
+    assert.equal(systemStop.snapshot().reason, 'motor_stall_detected');
+    systemStop.clearStop('pivot-stall-test-cleanup');
+    await logger.close();
+  });
+});
+
+test('SensorController requires GNSS chassis progress during translation despite encoder movement', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+    let now = 0;
+    const controller = new SensorController({
+      logger,
+      primitivesStore: new PrimitivesStore(),
+      gateway: {
+        async initialise() {},
+        async readImu() { return null; },
+        async readGnss() { return null; },
+        async readMotorFeedback() { return null; },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => now,
+    });
+
+    controller.latestGnssPosition = { x: 1, y: 2 };
+    controller.latestGnssAccuracyMeters = 0.02;
+    systemStop.clearStop('translation-stall-test');
+    await controller.setMotorWheelOutputs(0.7, 0.7);
+    now = 5_000;
+    for (let sample = 0; sample < 12; sample += 1) {
+      controller.evaluateStallDetection(40, 42, 0.5, 0.5, 0);
+    }
+    assert.equal(systemStop.snapshot().reason, 'motor_stall_detected');
+    systemStop.clearStop('translation-stall-test-cleanup');
+    await logger.close();
+  });
+});
+
+test('SensorController ignores normal 2.3A mowing load but stops sustained 2.8A current', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+    let now = 0;
+    const controller = new SensorController({
+      logger,
+      primitivesStore: new PrimitivesStore(),
+      gateway: {
+        async initialise() {},
+        async readImu() { return null; },
+        async readGnss() { return null; },
+        async readMotorFeedback() { return null; },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => now,
+    });
+
+    controller.latestGnssPosition = { x: 0, y: 0 };
+    controller.latestGnssAccuracyMeters = 0.02;
+    systemStop.clearStop('high-current-stall-test');
+    await controller.setMotorWheelOutputs(0.75, 0.75);
+    now = 1_000;
+    for (let sample = 1; sample <= 100; sample += 1) {
+      controller.latestGnssPosition = { x: sample * 0.11, y: 0 };
+      controller.evaluateStallDetection(40, 40, 2.3, 0, 0);
+    }
+    assert.equal(systemStop.isStopped(), false);
+
+    for (let sample = 101; sample <= 152; sample += 1) {
+      controller.latestGnssPosition = { x: sample * 0.11, y: 0 };
+      controller.evaluateStallDetection(40, 40, 2.8, 0, 0);
+    }
+    assert.equal(systemStop.snapshot().reason, 'motor_stall_detected');
+    systemStop.clearStop('high-current-stall-test-cleanup');
+    await logger.close();
+  });
+});
+
 test('SensorController polls IMU and stores latest integrated heading state', async () => {
   await withTempDir(async (dir) => {
       const logger = await SessionLogger.create({

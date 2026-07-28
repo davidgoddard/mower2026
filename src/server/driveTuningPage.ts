@@ -389,7 +389,7 @@ ${getOperatorPageCommonScriptTag()}
     <div class="header">
       <div class="header-content">
         <h1>Drive Tuning</h1>
-        <a class="back-link" href="/">← Back to Dashboard</a>
+        <a class="back-link" href="/dashboard">← Back to Dashboard</a>
       </div>
     </div>
 
