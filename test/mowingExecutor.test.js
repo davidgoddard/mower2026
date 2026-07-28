@@ -451,13 +451,15 @@ test("MowingExecutor follows longer multi-point connectors with the continuous f
   assert.equal(followCalls.at(-1).options.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(followCalls.at(-1).options.minimumSpeed, 0.75);
   assert.equal(followCalls.at(-1).options.maximumSpeed, 0.75);
-  assert.equal(followCalls.at(-1).options.pivotIfInnerWheelBelow, 0.4);
+  assert.equal(followCalls.at(-1).options.pivotIfInnerWheelBelow, 0.2);
 });
 
 test("MowingExecutor simplifies a safe short multi-point connector to a direct transfer", async () => {
   const driveTargets = [];
+  const driveRequests = [];
   const driveController = {
     async executeDrive(options) {
+      driveRequests.push(options);
       driveTargets.push([options.targetPosition.xMeters, options.targetPosition.yMeters]);
       return { status: "success", maxCteMeters: 0 };
     },
@@ -538,6 +540,7 @@ test("MowingExecutor simplifies a safe short multi-point connector to a direct t
 
   assert.equal(result.completed, true);
   assert.deepEqual(driveTargets, [[1, 0.85]]);
+  assert.equal(driveRequests[0].minimumDriveDistanceMeters, 0.1);
   assert.equal(followCalls.length, 0);
 });
 
@@ -1198,7 +1201,7 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
   assert.equal(saved.activeOperation.followOptions.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(saved.activeOperation.followOptions.minimumSpeed, 0.75);
   assert.equal(saved.activeOperation.followOptions.maximumSpeed, 0.75);
-  assert.equal(saved.activeOperation.followOptions.pivotIfInnerWheelBelow, 0.4);
+  assert.equal(saved.activeOperation.followOptions.pivotIfInnerWheelBelow, 0.2);
 });
 
 test("MowingExecutor passes saved continuous-follow progress back to the follower on resume", async () => {
@@ -1281,5 +1284,5 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
   assert.equal(followCalls[0].options.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(followCalls[0].options.minimumSpeed, 0.75);
   assert.equal(followCalls[0].options.maximumSpeed, 0.75);
-  assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.4);
+  assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.2);
 });

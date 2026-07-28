@@ -356,6 +356,53 @@ describe("DriveController", () => {
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 
+  it("skips a mowing translation when the alignment pivot leaves less than 10cm", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+    const mockTurn = createMockTurnController();
+    mockTurn.executeTurn = mock.fn(async (request) => {
+      mockPose._testSetPose({
+        position: createPosition(0, 0.06),
+        heading: createInternalHeading(90),
+        quality: "gnss",
+      });
+      return {
+        requestedAngle: request.targetAngle,
+        achievedAngle: request.targetAngle,
+        errorAngle: createInternalHeading(0),
+        durationMs: 1000,
+        brakeAngleUsed: createInternalHeading(0),
+        motorEngaged: true,
+        status: "success",
+        timestamp: new Date().toISOString(),
+      };
+    });
+
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    const result = await controller.executeDrive({
+      targetPosition: createPosition(0, 0.15),
+      learningEnabled: true,
+      minimumDriveDistanceMeters: 0.1,
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(result.learnSkipReason, "below_minimum_drive_distance");
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 0);
+  });
+
   it("reverse recovery segments do not force a pre-turn before backing out", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();

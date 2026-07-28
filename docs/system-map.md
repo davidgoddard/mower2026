@@ -83,6 +83,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
   - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
+  - all mowing segment requests use the 10 cm post-pivot minimum translation, and fitted routed connectors use a lower tight-arc pivot floor than perimeter tracing so viable smooth curves do not repeatedly enter recovery alignment
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
 - `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control; meaningful corners and general tight-arc recovery both lock one segment and pivot direction through alignment and a forward capture before projection may select another segment. Finite boundary loops may complete near their final target once ordered progress reaches it, avoiding unusably short closing chords, and all commitment transitions yield to sensor/stop processing.
 - `src/pathfollowing/pathPrimitiveFitter.ts`: greedily fits each smoothed execution path into the furthest valid straight chord or consistently turning circular arc within the configured simplification tolerance; straights win equal-distance votes, sharp/inconsistent turns stop fitting, straight spans collapse to endpoints, and arc samples are projected onto the fitted circle before the continuous follower runs.
@@ -182,6 +183,7 @@ This document maps problem domains to candidate files removing the need for Code
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
   - short and long point-to-point segments use the same turn-then-straight rule; only an explicit caller request may skip the initial pivot
+  - callers may supply a minimum useful translation; mowing uses 10 cm and rechecks after the alignment pivot, while training leaves the option unset
   - delegates to line controller immediately after the turn, then records successful segment history
   - `getCurrentPose()` exposes the live fused pose for higher-level path executors that need to re-evaluate progress between segment drives
   - stop requests are unconditional: they are awaited through both the turn phase and the line-drive phase when active, and still issue an immediate stop command even when no drive is currently active
@@ -320,6 +322,7 @@ This document maps problem domains to candidate files removing the need for Code
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
   - when a preferred perimeter start is supplied, starts at its nearest strip end and builds a fresh traversal from there using a bounded set of the nearest remaining strip candidates; it does not rotate an edge-origin sequence and therefore avoids an artificial far-edge wrap while nearer strips remain
+  - traversal scores connector distance, departure and arrival turn energy, connector vertex complexity, obstacle routing, and crossings of already-mown strips; this avoids saving centimetres of travel at the cost of large extra pivots
   - without a preferred start, sequences strips in locked normal-axis order; both modes mark per-strip traversal direction for boustrophedon preview and execution
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it

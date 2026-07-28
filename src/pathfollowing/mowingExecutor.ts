@@ -71,6 +71,7 @@ const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
 const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
+const MOWING_MINIMUM_TRANSLATION_METERS = 0.1;
 const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
 const SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS = 0.25;
 const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
@@ -78,6 +79,7 @@ const PERIMETER_FOLLOW_SPEED = 0.75;
 const PERIMETER_CORNER_PIVOT_DEG = 20;
 const PERIMETER_CORNER_PIVOT_DISTANCE_METERS = 0.15;
 const PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.4;
+const CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.2;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
@@ -271,6 +273,7 @@ export class MowingExecutor {
       const approachResult = await this.driveController.executeDrive({
         targetPosition: createPosition(approachX, approachY),
         learningEnabled: true,
+        minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
       });
       if (approachResult.status !== "success") {
         if (approachResult.status === "stopped") {
@@ -413,6 +416,7 @@ export class MowingExecutor {
           const approachResult = await this.driveController.executeDrive({
             targetPosition: createPosition(entryStandoff.x, entryStandoff.y),
             learningEnabled: true,
+            minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
           });
           if (approachResult.status !== "success") {
             if (approachResult.status === "stopped") {
@@ -488,6 +492,7 @@ export class MowingExecutor {
           const stripResult = await this.driveController.executeDrive({
             targetPosition: createPosition(exitStandoff.x, exitStandoff.y),
             learningEnabled: true,
+            minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
           });
           if (stripResult.status !== "success") {
             if (stripResult.status === "stopped") {
@@ -564,6 +569,7 @@ export class MowingExecutor {
         const result = await this.driveController.executeDrive({
           targetPosition: createPosition(operation.targetX, operation.targetY),
           learningEnabled: true,
+          minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
         });
         if (result.status !== "success") {
           if (result.status === "stopped") {
@@ -669,6 +675,7 @@ export class MowingExecutor {
     const result = await this.driveController.executeDrive({
       targetPosition: createPosition(entryStandoff.x, entryStandoff.y),
       learningEnabled: true,
+      minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
     });
     if (result.status === "success") {
       return null;
@@ -958,6 +965,7 @@ export class MowingExecutor {
       const driveResult = await this.driveController.executeDrive({
         targetPosition: createPosition(target.xMeters, target.yMeters),
         learningEnabled: true,
+        minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
       });
       if (driveResult.status === "success") {
         return { completed: true, reason: "reached_end" };
@@ -994,7 +1002,7 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        pivotIfInnerWheelBelow: CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR,
       },
       errorCode: "connector_failed",
       continuation,
@@ -1010,7 +1018,7 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        pivotIfInnerWheelBelow: CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR,
       },
     );
     if (followResult.completed) {

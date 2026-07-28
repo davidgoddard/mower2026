@@ -211,6 +211,40 @@ export class DriveController {
           });
         }
 
+        const postTurnPose = this.poseFusion.getCurrentPose();
+        const postTurnDistanceMeters = unwrapMeters(distanceBetween(
+          postTurnPose.position,
+          request.targetPosition,
+        ));
+        const minimumDriveDistanceMeters = Math.max(0, request.minimumDriveDistanceMeters ?? 0);
+        if (minimumDriveDistanceMeters > 0 && postTurnDistanceMeters < minimumDriveDistanceMeters) {
+          this.logger.info("drive.translation_skipped_near_target", {
+            postTurnDistanceMeters,
+            minimumDriveDistanceMeters,
+          });
+          const skippedResult: DriveResult = {
+            startPosition: this.driveStartPosition ?? postTurnPose.position,
+            targetPosition: request.targetPosition,
+            finalPosition: postTurnPose.position,
+            errorX: createMeters(postTurnDistanceMeters),
+            errorY: createMeters(0),
+            maxCteMeters: createMeters(0),
+            avgCteMeters: createMeters(0),
+            durationMs: this.nowMillis() - this.driveStartTime,
+            brakeDistanceUsed: createMeters(0),
+            status: "success",
+            timestamp: new Date().toISOString(),
+            learnApplied: false,
+            learnSkipReason: "below_minimum_drive_distance",
+          };
+          this.addToHistory(skippedResult);
+          this.stopRequested = false;
+          this.status = preserveLearningState ? "learning" : "idle";
+          this.currentDrive = null;
+          resolve(skippedResult);
+          return;
+        }
+
         // 4. Delegate straight-line driving immediately after the turn.
         this.status = "driving";
         const lineResult = await this.lineDriveController.executeLineDrive({

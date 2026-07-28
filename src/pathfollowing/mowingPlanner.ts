@@ -60,6 +60,8 @@ const INITIAL_ENTRY_CORNER_CLEARANCE_METERS = 0.3;
 const ROUTED_OBSTACLE_PENALTY = 2;
 const ROUTED_OBSTACLE_PREFERENCE_MARGIN = 0.75;
 const SAME_OFFSET_ROUTED_OBSTACLE_PENALTY = 5;
+const TURN_COST_METERS_PER_RADIAN = 0.4;
+const CONNECTOR_VERTEX_COST_METERS = 0.15;
 
 interface Vector {
   readonly x: number;
@@ -615,10 +617,19 @@ function sequenceStripsForMowing(
 
   while (remaining.length > 0 && currentPoint !== null) {
     const currentOffset = traversal[traversal.length - 1].strip.centerOffsetMeters;
+    const currentStep = traversal[traversal.length - 1];
     const candidates = preferredStartPoint
       ? selectNearestTraversalCandidates(remaining, currentPoint)
       : selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
-    const bestEvaluation = chooseBestTraversalStep(candidates, currentPoint, currentOffset, direction, obstacles, mownCrossings);
+    const bestEvaluation = chooseBestTraversalStep(
+      candidates,
+      currentPoint,
+      currentOffset,
+      direction,
+      obstacles,
+      mownCrossings,
+      currentStep,
+    );
     traversalCandidateEvaluations += candidates.length * 2;
     traversalConnectorPathEvaluations += candidates.length * 2;
     if (bestEvaluation.requiresObstacleRouting) {
@@ -687,7 +698,7 @@ function selectNearestTraversalCandidates(
   remaining: MowingStrip[],
   currentPoint: Vector,
 ): MowingStrip[] {
-  const candidateLimit = 12;
+  const candidateLimit = 16;
   return remaining
     .map((strip) => ({
       strip,
@@ -756,6 +767,7 @@ function chooseBestTraversalStep(
   direction: Vector,
   obstacles: Vector[][],
   mownCrossings: ReadonlyMap<MowingStrip, number>,
+  currentStep: TraversalStep,
 ): TraversalEvaluation {
   let bestEvaluation: TraversalEvaluation | null = null;
 
@@ -771,6 +783,7 @@ function chooseBestTraversalStep(
         mownCrossings,
         candidate,
         reversed,
+        currentStep,
       );
       if (
         !bestEvaluation
@@ -1360,6 +1373,7 @@ function evaluateTraversalCandidate(
   mownCrossings: ReadonlyMap<MowingStrip, number>,
   strip: MowingStrip,
   reversed: boolean,
+  currentStep: TraversalStep,
 ): TraversalEvaluation {
   const path = buildConnectorVectors(from, to, obstacles);
   let total = 0;
@@ -1367,6 +1381,8 @@ function evaluateTraversalCandidate(
     total += distance(path[index - 1], path[index]);
   }
   total += mownCrossingPenalty(path, mownCrossings);
+  total += connectorTurnCost(path, currentStep, strip, reversed);
+  total += Math.max(0, path.length - 2) * CONNECTOR_VERTEX_COST_METERS;
 
   const isSameOffset = Math.abs(candidateOffset - currentOffset) <= EPSILON;
   const requiresObstacleRouting = path.length > 2;
@@ -1386,6 +1402,39 @@ function evaluateTraversalCandidate(
     cost: total,
     requiresObstacleRouting,
   };
+}
+
+function connectorTurnCost(
+  path: Vector[],
+  currentStep: TraversalStep,
+  candidate: MowingStrip,
+  candidateReversed: boolean,
+): number {
+  if (path.length < 2) {
+    return 0;
+  }
+  const currentStart = stripTraversalStart(currentStep.strip, currentStep.reversed);
+  const currentEnd = stripTraversalEnd(currentStep.strip, currentStep.reversed);
+  const candidateStart = stripTraversalStart(candidate, candidateReversed);
+  const candidateEnd = stripTraversalEnd(candidate, candidateReversed);
+  const exitHeading = Math.atan2(currentEnd.y - currentStart.y, currentEnd.x - currentStart.x);
+  const connectorStartHeading = Math.atan2(path[1].y - path[0].y, path[1].x - path[0].x);
+  const connectorEndHeading = Math.atan2(
+    path[path.length - 1].y - path[path.length - 2].y,
+    path[path.length - 1].x - path[path.length - 2].x,
+  );
+  const entryHeading = Math.atan2(candidateEnd.y - candidateStart.y, candidateEnd.x - candidateStart.x);
+  return (
+    absoluteAngleDifferenceRadians(exitHeading, connectorStartHeading)
+    + absoluteAngleDifferenceRadians(connectorEndHeading, entryHeading)
+  ) * TURN_COST_METERS_PER_RADIAN;
+}
+
+function absoluteAngleDifferenceRadians(left: number, right: number): number {
+  let difference = right - left;
+  while (difference > Math.PI) difference -= Math.PI * 2;
+  while (difference < -Math.PI) difference += Math.PI * 2;
+  return Math.abs(difference);
 }
 
 function preferCandidate(

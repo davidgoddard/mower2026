@@ -18,6 +18,13 @@ export interface DriveRequest {
    */
   readonly skipInitialTurn?: boolean;
   /**
+   * Optional operational deadband checked again after the alignment turn.
+   * If the pivot has moved the mower within this distance, the translation is
+   * treated as complete. Mowing uses this to suppress valueless centimetre
+   * corrections; calibration and training leave it unset.
+   */
+  readonly minimumDriveDistanceMeters?: number;
+  /**
    * Optional explicit learning-class override. Training flows should set this
    * from the intended bucket/sample type so a nominal 100 cm run never flips
    * between short and long learning due to floating-point distance noise.
