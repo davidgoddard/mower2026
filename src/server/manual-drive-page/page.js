@@ -37,6 +37,8 @@
     }
 
     const MOWING_HEADING_STORAGE_KEY = 'manualDrivePage.mowingHeadingDeg';
+    const STRIP_SPACING_STORAGE_KEY = 'manualDrivePage.stripSpacingCm';
+    const MOWING_PROGRESS_STORAGE_KEY = 'manualDrivePage.mowingProgress';
     const DEFAULT_STRIP_SPACING_CM = 30;
     function loadStoredMowingHeading() {
       try {
@@ -49,6 +51,27 @@
     function storeMowingHeading(headingDeg) {
       try {
         window.localStorage.setItem(MOWING_HEADING_STORAGE_KEY, String(Math.round(normalizeAxisHeading(headingDeg))));
+      } catch (_error) {
+        // Ignore storage failures; the page still works without persistence.
+      }
+    }
+
+    function loadStoredStripSpacingCm() {
+      try {
+        const value = Number(window.localStorage.getItem(STRIP_SPACING_STORAGE_KEY));
+        return Number.isFinite(value) && value >= 10 && value <= 40 ? value : null;
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function storeStripSpacingCm(value) {
+      const spacingCm = Number(value);
+      if (!Number.isFinite(spacingCm) || spacingCm < 10 || spacingCm > 40) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(STRIP_SPACING_STORAGE_KEY, String(spacingCm));
       } catch (_error) {
         // Ignore storage failures; the page still works without persistence.
       }
@@ -84,17 +107,21 @@
         updateHeadingLabel();
       }
       if (Number.isFinite(defaults.stripSpacingMeters) && defaults.stripSpacingMeters > 0) {
-        stripSpacingInput.value = String(Math.round(defaults.stripSpacingMeters * 100));
+        const storedSpacingCm = loadStoredStripSpacingCm();
+        stripSpacingInput.value = String(
+          storedSpacingCm ?? Math.round(defaults.stripSpacingMeters * 100),
+        );
       }
       return true;
     }
 
     // Position history tracking
     const positionHistory = [];
-    const MAX_HISTORY_MS = 10 * 60 * 1000; // 10 minutes
     const MAP_MIN_VIEW_RANGE_METERS = 5;
     const MAP_STATIONARY_POINT_SPACING_METERS = 0.03;
-    const MAP_HISTORY_RESET_DISTANCE_METERS = 2.0;
+    const MAP_HISTORY_DISCONTINUITY_DISTANCE_METERS = 2.0;
+    const MOWING_PROGRESS_STORE_INTERVAL_MS = 2000;
+    let lastMowingProgressStoreAt = 0;
     const canvas = $("mapCanvas");
     const ctx = canvas.getContext("2d");
 
@@ -127,6 +154,52 @@
     const LIST_REFRESH_MS = 30000;
     const FAILURE_BACKOFF_MS = 5000;
 
+    function loadStoredMowingProgress() {
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(MOWING_PROGRESS_STORAGE_KEY) || '[]');
+        if (!Array.isArray(stored)) {
+          return;
+        }
+        for (const point of stored) {
+          if (
+            Number.isFinite(point?.x)
+            && Number.isFinite(point?.y)
+            && Number.isFinite(point?.heading)
+            && Number.isFinite(point?.timestamp)
+          ) {
+            positionHistory.push({
+              x: point.x,
+              y: point.y,
+              heading: point.heading,
+              timestamp: point.timestamp,
+              breakBefore: point.breakBefore === true,
+            });
+          }
+        }
+      } catch (_error) {
+        // Ignore invalid or unavailable storage and begin with an empty trail.
+      }
+    }
+
+    function storeMowingProgress(force = false) {
+      const now = Date.now();
+      if (!force && now - lastMowingProgressStoreAt < MOWING_PROGRESS_STORE_INTERVAL_MS) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(MOWING_PROGRESS_STORAGE_KEY, JSON.stringify(positionHistory));
+        lastMowingProgressStoreAt = now;
+      } catch (_error) {
+        // Keep drawing live progress if browser storage is unavailable or full.
+      }
+    }
+
+    function clearMowingProgress() {
+      positionHistory.length = 0;
+      storeMowingProgress(true);
+      drawMap();
+    }
+
     // Elements
     const pathNameInput = $("pathName");
     const startRecordingBtn = $("startRecordingBtn");
@@ -158,24 +231,30 @@
       const previous = positionHistory[positionHistory.length - 1];
       if (previous) {
         const movementMeters = Math.hypot(x - previous.x, y - previous.y);
-        if (movementMeters > MAP_HISTORY_RESET_DISTANCE_METERS) {
-          positionHistory.length = 0;
-          positionHistory.push({ x, y, heading, timestamp });
-          return;
-        }
         if (movementMeters < MAP_STATIONARY_POINT_SPACING_METERS) {
-          positionHistory[positionHistory.length - 1] = { x, y, heading, timestamp };
+          positionHistory[positionHistory.length - 1] = {
+            x,
+            y,
+            heading,
+            timestamp,
+            breakBefore: previous.breakBefore === true,
+          };
+          storeMowingProgress();
           return;
         }
+        positionHistory.push({
+          x,
+          y,
+          heading,
+          timestamp,
+          breakBefore: movementMeters > MAP_HISTORY_DISCONTINUITY_DISTANCE_METERS,
+        });
+        storeMowingProgress();
+        return;
       }
 
       positionHistory.push({ x, y, heading, timestamp });
-
-      // Remove old points beyond 10 minutes
-      const cutoff = timestamp - MAX_HISTORY_MS;
-      while (positionHistory.length > 0 && positionHistory[0].timestamp < cutoff) {
-        positionHistory.shift();
-      }
+      storeMowingProgress();
     }
 
     function drawMap() {
@@ -395,17 +474,17 @@
       drawMowingPlanPreview(toCanvasX, toCanvasY);
 
       if (positionHistory.length > 0) {
-        // Draw trail with fading (on top of stored paths)
-        const now = positionHistory[positionHistory.length - 1].timestamp;
+        // Draw the complete mowing-progress trail until a fresh mowing run clears it.
         ctx.lineWidth = 3;
 
         for (let i = 1; i < positionHistory.length; i++) {
           const prev = positionHistory[i - 1];
           const curr = positionHistory[i];
-          const age = now - curr.timestamp;
-          const opacity = 1 - (age / MAX_HISTORY_MS);
+          if (curr.breakBefore) {
+            continue;
+          }
 
-          ctx.strokeStyle = `rgba(37, 99, 235, ${opacity * 0.6})`;
+          ctx.strokeStyle = 'rgba(37, 99, 235, 0.6)';
           ctx.beginPath();
           ctx.moveTo(toCanvasX(prev.x), toCanvasY(prev.y));
           ctx.lineTo(toCanvasX(curr.x), toCanvasY(curr.y));
@@ -1077,6 +1156,7 @@
           skipInitialBoundaryTrace: Boolean(skipInitialBoundaryTrace),
         });
 
+        clearMowingProgress();
         updateMowingStatusUi({ phase: 'approaching_area_perimeter', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
         schedulePageStatePoll(0);
       } catch (error) {
@@ -1237,7 +1317,8 @@
       markMowingPlanPreviewStale();
     });
 
-    stripSpacingInput.addEventListener('change', () => {
+    stripSpacingInput.addEventListener('input', () => {
+      storeStripSpacingCm(stripSpacingInput.value);
       markMowingPlanPreviewStale();
     });
 
@@ -1432,7 +1513,8 @@
       }
     }
 
-    stripSpacingInput.value = String(DEFAULT_STRIP_SPACING_CM);
+    stripSpacingInput.value = String(loadStoredStripSpacingCm() ?? DEFAULT_STRIP_SPACING_CM);
+    loadStoredMowingProgress();
     const storedMowingHeading = loadStoredMowingHeading();
     if (storedMowingHeading !== null) {
       mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(storedMowingHeading)));
@@ -1441,6 +1523,10 @@
     updateRecordingUi();
     updateAreaRecordingUi();
     updateHeadingLabel();
+
+    window.addEventListener('pagehide', () => {
+      storeMowingProgress(true);
+    });
 
     Promise.all([
       loadStoredPaths(),

@@ -1,7 +1,7 @@
 import { DRIVE_FULL_SPEED_COMMAND_DEFAULT } from "../constants.js";
 import { PathFollowingParameters, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
 import { crossTrackError, angleTo, Pose, Position, unwrapMeters, createPosition } from "../geometry/positionTypes.js";
-import { headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
+import { createInternalHeading, headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { LoggerScope } from "../logging/types.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
@@ -9,6 +9,7 @@ import { systemStop } from "../control/systemStop.js";
 import { defaultSleep } from "../control/sleep.js";
 import { PathFollowResult, PathPoint } from "./pathFollowerApi.js";
 import { advancePassedTargets } from "./segmentedBoundaryExecutor.js";
+import type { FittedPathPrimitive } from "./pathPrimitiveFitter.js";
 
 const CONTINUOUS_CONTROL_INTERVAL_MS = 100;
 const CONTINUOUS_TRACE_SPEED = 1.0;
@@ -29,6 +30,9 @@ const CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG = 12;
 const CONTINUOUS_PIVOT_INNER_WHEEL_HYSTERESIS = 0.1;
 const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_CYCLE = 0.08;
 const CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS = 0.4;
+const CONTINUOUS_ARC_HEADING_GAIN = 0.01;
+const CONTINUOUS_ARC_RADIAL_GAIN = 1.2;
+const CONTINUOUS_ARC_MAX_FEEDBACK_TRIM = 0.2;
 
 export interface ContinuousPathFollowerOptions {
   readonly sensorController: SensorController;
@@ -62,6 +66,8 @@ export interface ContinuousPathExecutionOptions {
   readonly completionToleranceMeters?: number;
   /** Resume an interrupted ordered follow from this target index. */
   readonly initialTargetIndex?: number;
+  /** Geometric primitives fitted over this exact execution-point array. */
+  readonly fittedPrimitives?: ReadonlyArray<FittedPathPrimitive>;
 }
 
 export interface ContinuousPathFollowResult extends PathFollowResult {
@@ -237,9 +243,16 @@ export class ContinuousPathFollower {
           options.strictOrderedProgress ?? false,
         );
         currentIndex = Math.max(currentIndex, projection.segmentStartIndex + 1);
+        const activeArc = findActiveArcPrimitive(
+          options.fittedPrimitives,
+          projection.segmentStartIndex,
+        );
         const cornerVertexIndex = projection.segmentStartIndex + 1;
+        const insideArcSamples = activeArc !== null
+          && cornerVertexIndex < activeArc.executionEndIndex;
         if (
-          Number.isFinite(options.pivotAtWaypointTurnDeg)
+          !insideArcSamples
+          && Number.isFinite(options.pivotAtWaypointTurnDeg)
           && Number.isFinite(options.pivotAtWaypointDistanceMeters)
           && cornerVertexIndex < pathPoints.length - 1
           && isCornerAtLeast(pathPoints, cornerVertexIndex, Math.abs(options.pivotAtWaypointTurnDeg ?? 0))
@@ -264,20 +277,27 @@ export class ContinuousPathFollower {
           0.2,
           Math.min(this.baseSpeed, options.maximumSpeed ?? this.baseSpeed),
         );
-        const computedCommands = computeContinuousPathWheelCommands(
-          pose,
-          guidance.segmentStart,
-          guidance.segmentEnd,
-          guidance.lookaheadTarget,
-          executionBaseSpeed,
-          pivoting,
-          {
-            pivotAtWaypointTurnDeg: options.pivotAtWaypointTurnDeg,
-            pivotAtWaypointDistanceMeters: options.pivotAtWaypointDistanceMeters,
-            minimumSpeed: options.minimumSpeed,
-            pivotIfInnerWheelBelow: options.pivotIfInnerWheelBelow,
-          },
-        );
+        const computedCommands = activeArc
+          ? computeFittedArcWheelCommands(
+            pose,
+            activeArc,
+            executionBaseSpeed,
+            this.poseFusion.getWheelbaseMeters(),
+          )
+          : computeContinuousPathWheelCommands(
+            pose,
+            guidance.segmentStart,
+            guidance.segmentEnd,
+            guidance.lookaheadTarget,
+            executionBaseSpeed,
+            pivoting,
+            {
+              pivotAtWaypointTurnDeg: options.pivotAtWaypointTurnDeg,
+              pivotAtWaypointDistanceMeters: options.pivotAtWaypointDistanceMeters,
+              minimumSpeed: options.minimumSpeed,
+              pivotIfInnerWheelBelow: options.pivotIfInnerWheelBelow,
+            },
+          );
         const requestedCommands = capContinuousWheelCommands(
           computedCommands,
           options.maximumSpeed,
@@ -456,6 +476,42 @@ export function computeContinuousPathWheelCommands(
   };
 }
 
+export function computeFittedArcWheelCommands(
+  pose: Pose,
+  arc: Extract<FittedPathPrimitive, { kind: "arc" }>,
+  baseSpeed: number,
+  wheelbaseMeters: number,
+): { left: number; right: number; pivoting: false } {
+  const x = unwrapMeters(pose.position.xMeters);
+  const y = unwrapMeters(pose.position.yMeters);
+  const radialX = x - arc.centerX;
+  const radialY = y - arc.centerY;
+  const radialDistance = Math.max(1e-6, Math.hypot(radialX, radialY));
+  const radialHeadingDeg = Math.atan2(radialY, radialX) * (180 / Math.PI);
+  const tangentHeadingDeg = radialHeadingDeg + (arc.direction * 90);
+  const headingErrorDeg = unwrapRelativeAngle(
+    headingDifference(pose.heading, createInternalHeading(tangentHeadingDeg)),
+  );
+  const radialErrorMeters = radialDistance - arc.radiusMeters;
+  const safeRadiusMeters = Math.max(0.1, arc.radiusMeters);
+  const safeWheelbaseMeters = Math.max(0, Math.min(wheelbaseMeters, safeRadiusMeters * 1.8));
+  const feedForwardTrim = arc.direction
+    * baseSpeed
+    * (safeWheelbaseMeters / (2 * safeRadiusMeters));
+  const feedbackTrim = clamp(
+    (headingErrorDeg * CONTINUOUS_ARC_HEADING_GAIN)
+      + (arc.direction * radialErrorMeters * CONTINUOUS_ARC_RADIAL_GAIN),
+    -CONTINUOUS_ARC_MAX_FEEDBACK_TRIM,
+    CONTINUOUS_ARC_MAX_FEEDBACK_TRIM,
+  );
+  const trim = feedForwardTrim + feedbackTrim;
+  return {
+    left: clamp(baseSpeed - trim, 0.2, 1),
+    right: clamp(baseSpeed + trim, 0.2, 1),
+    pivoting: false,
+  };
+}
+
 export function limitContinuousWheelCommandChange(
   previousCommand: number,
   requestedCommand: number,
@@ -512,6 +568,20 @@ function buildCumulativeDistances(points: PathPoint[]): number[] {
     cumulative[index] = cumulative[index - 1] + distance(points[index - 1], points[index]);
   }
   return cumulative;
+}
+
+function findActiveArcPrimitive(
+  primitives: ReadonlyArray<FittedPathPrimitive> | undefined,
+  segmentStartIndex: number,
+): Extract<FittedPathPrimitive, { kind: "arc" }> | null {
+  if (!primitives) {
+    return null;
+  }
+  return primitives.find((primitive): primitive is Extract<FittedPathPrimitive, { kind: "arc" }> => (
+    primitive.kind === "arc"
+    && segmentStartIndex >= primitive.executionStartIndex
+    && segmentStartIndex < primitive.executionEndIndex
+  )) ?? null;
 }
 
 interface ContinuousPathProjection {

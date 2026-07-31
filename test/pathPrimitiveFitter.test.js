@@ -38,6 +38,8 @@ test("primitive fitter retains a long smooth circular run as one fitted arc", ()
   assert.equal(fitted.primitives.length, 1);
   assert.equal(fitted.primitives[0].kind, "arc");
   assert.equal(fitted.primitives[0].endIndex, source.length - 1);
+  assert.equal(fitted.primitives[0].executionStartIndex, 0);
+  assert.equal(fitted.primitives[0].executionEndIndex, source.length - 1);
   assert.equal(fitted.points.length, source.length);
   for (const fittedPoint of fitted.points) {
     assert.equal(Math.abs(Math.hypot(fittedPoint.xMeters, fittedPoint.yMeters) - 2) < 1e-9, true);
@@ -65,6 +67,13 @@ test("primitive fitter keeps a sharp corner as two straight primitives", () => {
     point(0, 0, 1),
     point(2, 0, 3),
     point(2, 2, 5),
+  ]);
+  assert.deepEqual(fitted.primitives.map(({ executionStartIndex, executionEndIndex }) => ({
+    executionStartIndex,
+    executionEndIndex,
+  })), [
+    { executionStartIndex: 0, executionEndIndex: 1 },
+    { executionStartIndex: 1, executionEndIndex: 2 },
   ]);
 });
 

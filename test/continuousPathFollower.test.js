@@ -6,11 +6,45 @@ import {
   buildCommittedCornerCaptureTarget,
   capContinuousWheelCommands,
   computeContinuousPathBaseSpeed,
+  computeFittedArcWheelCommands,
   computeContinuousPathWheelCommands,
   ContinuousPathFollower,
   limitContinuousWheelCommandChange,
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
+
+test("fitted arc control commands one continuous curvature without pivoting", () => {
+  const arc = {
+    kind: "arc",
+    startIndex: 0,
+    endIndex: 9,
+    executionStartIndex: 0,
+    executionEndIndex: 9,
+    maxDeviationMeters: 0.01,
+    centerX: 0,
+    centerY: 0,
+    radiusMeters: 2,
+    direction: 1,
+  };
+  const onArc = computeFittedArcWheelCommands(
+    createPose(2, 0, createInternalHeading(90), "gnss"),
+    arc,
+    0.75,
+    0.6,
+  );
+  const outsideArc = computeFittedArcWheelCommands(
+    createPose(2.1, 0, createInternalHeading(90), "gnss"),
+    arc,
+    0.75,
+    0.6,
+  );
+
+  assert.equal(onArc.pivoting, false);
+  assert.equal(onArc.left > 0 && onArc.right > 0, true);
+  assert.equal(onArc.left < onArc.right, true);
+  assert.equal(outsideArc.left < onArc.left, true);
+  assert.equal(outsideArc.right > onArc.right, true);
+});
 
 test("continuous follower locks one recovery segment through pivot and capture", async () => {
   const poses = [

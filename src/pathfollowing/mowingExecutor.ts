@@ -606,9 +606,18 @@ export class MowingExecutor {
         ? { completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters }
         : {}),
     };
-    const result = await this.continuousPathFollower.executePath([...operation.pathPoints], {
+    const resumedFittedPath = fitPathToStraightAndArcPrimitives(
+      operation.pathPoints,
+      this.parameters.segmentedDriveSimplificationToleranceMeters,
+      this.parameters.segmentedDriveMaxVertexTurnDeg,
+    );
+    const resumedExecutionPoints = resumedFittedPath.points.length >= 2
+      ? resumedFittedPath.points
+      : [...operation.pathPoints];
+    const result = await this.continuousPathFollower.executePath([...resumedExecutionPoints], {
       parameters: this.parameters,
       ...resumedFollowOptions,
+      fittedPrimitives: resumedFittedPath.primitives,
     });
     if (!result.completed) {
       this.persistInterruptedFollowProgress({
@@ -906,6 +915,7 @@ export class MowingExecutor {
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
       pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
       completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
+      fittedPrimitives: fittedLoop.primitives,
     });
     if (!followResult.completed) {
       this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);
@@ -1019,6 +1029,7 @@ export class MowingExecutor {
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
         pivotIfInnerWheelBelow: CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        fittedPrimitives: fittedConnector.primitives,
       },
     );
     if (followResult.completed) {

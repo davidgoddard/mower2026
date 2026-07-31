@@ -5,12 +5,16 @@ export type FittedPathPrimitive =
     readonly kind: "straight";
     readonly startIndex: number;
     readonly endIndex: number;
+    readonly executionStartIndex: number;
+    readonly executionEndIndex: number;
     readonly maxDeviationMeters: number;
   }
   | {
     readonly kind: "arc";
     readonly startIndex: number;
     readonly endIndex: number;
+    readonly executionStartIndex: number;
+    readonly executionEndIndex: number;
     readonly maxDeviationMeters: number;
     readonly centerX: number;
     readonly centerY: number;
@@ -63,6 +67,8 @@ export function fitPathToStraightAndArcPrimitives(
       kind: "straight",
       startIndex: anchorIndex,
       endIndex: anchorIndex + 1,
+      executionStartIndex: 0,
+      executionEndIndex: 0,
       maxDeviationMeters: 0,
     };
     let bestCircle: CircleFit | null = null;
@@ -85,6 +91,8 @@ export function fitPathToStraightAndArcPrimitives(
           kind: "straight",
           startIndex: anchorIndex,
           endIndex,
+          executionStartIndex: 0,
+          executionEndIndex: 0,
           maxDeviationMeters: straightDeviation,
         };
         bestCircle = null;
@@ -93,6 +101,8 @@ export function fitPathToStraightAndArcPrimitives(
           kind: "arc",
           startIndex: anchorIndex,
           endIndex,
+          executionStartIndex: 0,
+          executionEndIndex: 0,
           maxDeviationMeters: circle.maxDeviationMeters,
           centerX: circle.centerX,
           centerY: circle.centerY,
@@ -103,7 +113,7 @@ export function fitPathToStraightAndArcPrimitives(
       }
     }
 
-    primitives.push(best);
+    const executionStartIndex = fittedPoints.length - 1;
     if (best.kind === "straight") {
       fittedPoints.push(points[best.endIndex]);
     } else {
@@ -126,6 +136,11 @@ export function fitPathToStraightAndArcPrimitives(
         }
       }
     }
+    primitives.push({
+      ...best,
+      executionStartIndex,
+      executionEndIndex: fittedPoints.length - 1,
+    });
     anchorIndex = best.endIndex;
   }
 

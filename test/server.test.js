@@ -194,6 +194,11 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('Mow From Perimeter'), true);
   assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
   assert.equal(manualPage.includes('Carry On Mowing'), true);
+  assert.equal(manualPage.includes("const STRIP_SPACING_STORAGE_KEY = 'manualDrivePage.stripSpacingCm';"), true);
+  assert.equal(manualPage.includes("const MOWING_PROGRESS_STORAGE_KEY = 'manualDrivePage.mowingProgress';"), true);
+  assert.equal(manualPage.includes('clearMowingProgress();'), true);
+  assert.equal(manualPage.includes('MAX_HISTORY_MS'), false);
+  assert.equal(manualPage.includes("ctx.strokeStyle = 'rgba(37, 99, 235, 0.6)';"), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="startAreaRecordingBtn"'), true);
   assert.equal(manualPage.includes('id="stopPathBtn"'), true);
