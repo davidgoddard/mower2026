@@ -3,7 +3,7 @@ import { ContinuousPathFollower } from "./continuousPathFollower.js";
 import { buildMowingPlan, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
 import type { MowingResumeContinuation, MowingResumeOperation, MowingResumeState, MowingResumeStage } from "./mowingResumeStore.js";
 import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan } from "./pathVerification.js";
-import { fitPathToStraightAndArcPrimitives } from "./pathPrimitiveFitter.js";
+import { fitPathToStraightAndArcPrimitives, type FittedPathPrimitive } from "./pathPrimitiveFitter.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
@@ -22,6 +22,7 @@ export type MowingPhase =
   | "tracing_boundary"
   | "mowing_strip"
   | "following_connector"
+  | "returning_to_start"
   | "complete"
   | "stopped"
   | "error";
@@ -59,6 +60,8 @@ export interface MowingExecutorOptions {
   readonly resumeState?: MowingResumeState | null;
   /** Test override; production allows brief validator state transitions. */
   readonly gnssLossGraceMs?: number;
+  readonly returnToStartAfterMowing?: boolean;
+  readonly mowingStartPoint?: { readonly xMeters: number; readonly yMeters: number };
 }
 
 interface AreaStartAnchorPlan {
@@ -67,6 +70,8 @@ interface AreaStartAnchorPlan {
 }
 
 const AREA_ESCAPE_STOP_DISTANCE_METERS = 0.25;
+const RESUME_RECOVERY_MAX_OUTSIDE_DISTANCE_METERS = 0.75;
+const RESUME_RECOVERY_INSET_METERS = 0.25;
 const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
@@ -75,7 +80,7 @@ const MOWING_MINIMUM_TRANSLATION_METERS = 0.1;
 const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
 const SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS = 0.25;
 const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
-const PERIMETER_FOLLOW_SPEED = 0.75;
+const PERIMETER_FOLLOW_SPEED = 1.0;
 const PERIMETER_CORNER_PIVOT_DEG = 20;
 const PERIMETER_CORNER_PIVOT_DISTANCE_METERS = 0.15;
 const PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.4;
@@ -102,6 +107,8 @@ export class MowingExecutor {
   private readonly updateResumeState: ((state: MowingResumeState | null) => void) | undefined;
   private readonly resumeState: MowingResumeState | null;
   private readonly gnssLossGraceMs: number;
+  private readonly returnToStartAfterMowing: boolean;
+  private readonly mowingStartPoint: { readonly xMeters: number; readonly yMeters: number } | null;
 
   private phase: MowingPhase = "idle";
   private currentStripIndex: number = 0;
@@ -132,6 +139,10 @@ export class MowingExecutor {
     this.updateResumeState = options.updateResumeState;
     this.resumeState = options.resumeState ?? null;
     this.gnssLossGraceMs = Math.max(0, options.gnssLossGraceMs ?? MOWING_GNSS_LOSS_GRACE_MS);
+    this.returnToStartAfterMowing = options.returnToStartAfterMowing ?? false;
+    this.mowingStartPoint = options.resumeState?.mowingStartPoint
+      ?? options.mowingStartPoint
+      ?? null;
   }
 
   getStatus(): MowingStatus {
@@ -169,6 +180,10 @@ export class MowingExecutor {
 
     try {
       if (this.resumeState) {
+        const recoveryStatus = await this.recoverResumePoseInsideArea();
+        if (recoveryStatus) {
+          return recoveryStatus;
+        }
         return await this.executeResumeFlow();
       }
 
@@ -352,7 +367,9 @@ export class MowingExecutor {
       continuation = { stage: "strip_approach", stripIndex: 0 };
     }
     if (continuation.stage === "complete") {
-      return this.completeMowing();
+      return resumeState.activeOperation.phase === "returning_to_start"
+        ? this.completeMowing()
+        : this.returnToStartOrComplete();
     }
 
     if (continuation.stage !== "initial_entry_approach" && continuation.stage !== "initial_boundary_trace") {
@@ -364,6 +381,91 @@ export class MowingExecutor {
     }
 
     return this.runStripSequence(continuation.stripIndex, continuation.stage);
+  }
+
+  private async recoverResumePoseInsideArea(): Promise<MowingStatus | null> {
+    const pose = this.poseFusion.getCurrentPose();
+    const current = {
+      xMeters: pose.position.xMeters,
+      yMeters: pose.position.yMeters,
+    };
+    const outsideDistanceMeters = outsideDistanceFromAreaMeters(
+      current.xMeters,
+      current.yMeters,
+      this.areaPoints,
+    );
+    if (outsideDistanceMeters <= 0) {
+      return null;
+    }
+    if (outsideDistanceMeters > RESUME_RECOVERY_MAX_OUTSIDE_DISTANCE_METERS) {
+      this.phase = "error";
+      return { ...this.getStatus(), error: `resume_outside_area_too_far:${outsideDistanceMeters.toFixed(2)}m` };
+    }
+
+    const nearestBoundaryPoint = nearestPointOnAreaBoundary(current, this.areaPoints);
+    if (!nearestBoundaryPoint) {
+      this.phase = "error";
+      return { ...this.getStatus(), error: "resume_recovery_target_unavailable" };
+    }
+    const target = movePointInsideArea(
+      {
+        xMeters: nearestBoundaryPoint.x,
+        yMeters: nearestBoundaryPoint.y,
+        capturedAt: Date.now(),
+      },
+      current,
+      this.areaPoints,
+      Math.max(RESUME_RECOVERY_INSET_METERS, this.standoff),
+    );
+    if (!pointInPolygon(target.x, target.y, this.areaPoints)) {
+      this.phase = "error";
+      return { ...this.getStatus(), error: "resume_recovery_target_not_inside_area" };
+    }
+    const recoverySegment = {
+      start: { x: current.xMeters, y: current.yMeters },
+      end: target,
+    };
+    if (this.obstaclePointsArray.some((obstacle) => segmentIntersectsPolygon(
+      recoverySegment.start,
+      recoverySegment.end,
+      normalizePolygon(obstacle),
+    ))) {
+      this.phase = "error";
+      return { ...this.getStatus(), error: "resume_recovery_path_blocked" };
+    }
+
+    this.phase = "approaching_area_perimeter";
+    this.logger.info("mowing.resume.outside_recovery_start", {
+      outsideDistanceMeters,
+      targetX: target.x,
+      targetY: target.y,
+    });
+    const result = await this.driveController.executeDrive({
+      targetPosition: createPosition(target.x, target.y),
+      learningEnabled: true,
+      minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
+    });
+    if (result.status !== "success") {
+      this.phase = result.status === "stopped" ? "stopped" : "error";
+      return {
+        ...this.getStatus(),
+        ...(result.status === "stopped" ? {} : { error: `resume_recovery_failed:${result.status}` }),
+      };
+    }
+    const recoveredPose = this.poseFusion.getCurrentPose();
+    if (outsideDistanceFromAreaMeters(
+      recoveredPose.position.xMeters,
+      recoveredPose.position.yMeters,
+      this.areaPoints,
+    ) > 0) {
+      this.phase = "error";
+      return { ...this.getStatus(), error: "resume_recovery_did_not_enter_area" };
+    }
+    this.logger.info("mowing.resume.outside_recovery_done", {
+      xMeters: recoveredPose.position.xMeters,
+      yMeters: recoveredPose.position.yMeters,
+    });
+    return null;
   }
 
   private async runStripSequence(startIndex: number, startStage: MowingResumeStage): Promise<MowingStatus> {
@@ -532,7 +634,7 @@ export class MowingExecutor {
       }
 
       if (stage === "complete") {
-        return this.completeMowing();
+        return this.returnToStartOrComplete();
       }
 
       if (stage === "connector_follow" && !isLastStrip) {
@@ -557,6 +659,80 @@ export class MowingExecutor {
       stage = "strip_approach";
     }
 
+    return this.returnToStartOrComplete();
+  }
+
+  private async returnToStartOrComplete(): Promise<MowingStatus> {
+    if (!this.returnToStartAfterMowing || !this.mowingStartPoint) {
+      return this.completeMowing();
+    }
+    if (this.isNearCurrentPose(this.mowingStartPoint.xMeters, this.mowingStartPoint.yMeters)) {
+      return this.completeMowing();
+    }
+
+    this.phase = "returning_to_start";
+    this.stopAreaEscapeMonitor();
+    const currentPose = this.poseFusion.getCurrentPose();
+    const returnPath = buildMowingReturnPath(
+      this.areaPoints,
+      { xMeters: currentPose.position.xMeters, yMeters: currentPose.position.yMeters },
+      this.mowingStartPoint,
+    );
+    if (returnPath.length < 2) {
+      this.phase = "error";
+      return { ...this.getStatus(), error: "return_to_start_path_unavailable" };
+    }
+
+    const fittedReturn = fitPathToStraightAndArcPrimitives(
+      returnPath,
+      this.parameters.segmentedDriveSimplificationToleranceMeters,
+      this.parameters.segmentedDriveMaxVertexTurnDeg,
+    );
+    const executionPoints = fittedReturn.points.length >= 2 ? fittedReturn.points : returnPath;
+    const operation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
+      kind: "follow_path",
+      phase: "returning_to_start",
+      stripIndex: Math.max(0, this.plan.strips.length - 1),
+      pathPoints: [...executionPoints],
+      fittedPrimitives: [...fittedReturn.primitives],
+      followOptions: {
+        loopPath: false,
+        strictOrderedProgress: true,
+        preserveFirstTargetAtPose: true,
+        pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+        pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+        minimumSpeed: PERIMETER_FOLLOW_SPEED,
+        maximumSpeed: PERIMETER_FOLLOW_SPEED,
+        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+      },
+      errorCode: "return_to_start_failed",
+      continuation: { stage: "complete", stripIndex: Math.max(0, this.plan.strips.length - 1) },
+    };
+    this.persistResumeOperation(operation);
+    this.updateRecoveryCheckpoint?.([...executionPoints]);
+    this.logger.info("mowing.return_to_start.start", {
+      pathPointCount: executionPoints.length,
+      targetX: this.mowingStartPoint.xMeters,
+      targetY: this.mowingStartPoint.yMeters,
+    });
+    const result = await this.continuousPathFollower.executePath([...executionPoints], {
+      parameters: this.parameters,
+      ...operation.followOptions,
+      fittedPrimitives: fittedReturn.primitives,
+    });
+    if (!result.completed) {
+      this.persistInterruptedFollowProgress(operation, result.completedWaypoints);
+      if (result.reason === "user_stopped") {
+        this.phase = "stopped";
+        return this.getStatus();
+      }
+      this.phase = "error";
+      return { ...this.getStatus(), error: result.error ?? "return_to_start_failed" };
+    }
+    this.logger.info("mowing.return_to_start.done", {
+      targetX: this.mowingStartPoint.xMeters,
+      targetY: this.mowingStartPoint.yMeters,
+    });
     return this.completeMowing();
   }
 
@@ -606,18 +782,34 @@ export class MowingExecutor {
         ? { completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters }
         : {}),
     };
-    const resumedFittedPath = fitPathToStraightAndArcPrimitives(
-      operation.pathPoints,
-      this.parameters.segmentedDriveSimplificationToleranceMeters,
-      this.parameters.segmentedDriveMaxVertexTurnDeg,
-    );
-    const resumedExecutionPoints = resumedFittedPath.points.length >= 2
-      ? resumedFittedPath.points
-      : [...operation.pathPoints];
-    const result = await this.continuousPathFollower.executePath([...resumedExecutionPoints], {
+    if (!Array.isArray(operation.fittedPrimitives)) {
+      this.logger.warn("mowing.resume.fitted_geometry_missing", {
+        phase: operation.phase,
+        stripIndex: operation.stripIndex,
+      });
+      this.phase = "error";
+      return null;
+    }
+    if (
+      (operation.phase === "following_connector" || operation.markBoundaryTraced === "area")
+      && !isMowingExecutionPathSafe(
+        operation.pathPoints,
+        operation.fittedPrimitives,
+        this.areaPoints,
+        this.obstaclePointsArray,
+      )
+    ) {
+      this.logger.warn("mowing.resume.unsafe_fitted_geometry", {
+        phase: operation.phase,
+        stripIndex: operation.stripIndex,
+      });
+      this.phase = "error";
+      return null;
+    }
+    const result = await this.continuousPathFollower.executePath([...operation.pathPoints], {
       parameters: this.parameters,
       ...resumedFollowOptions,
-      fittedPrimitives: resumedFittedPath.primitives,
+      fittedPrimitives: operation.fittedPrimitives,
     });
     if (!result.completed) {
       this.persistInterruptedFollowProgress({
@@ -716,6 +908,7 @@ export class MowingExecutor {
       areaPoints: [...this.areaPoints],
       obstaclePointsArray: this.obstaclePointsArray.map((points) => [...points]),
       initialEntryPlan: this.selectedAreaStartAnchor?.entryPlan ?? this.initialEntryPlan,
+      ...(this.mowingStartPoint ? { mowingStartPoint: this.mowingStartPoint } : {}),
       activeOperation: operation,
     });
   }
@@ -875,6 +1068,23 @@ export class MowingExecutor {
       this.parameters.segmentedDriveMaxVertexTurnDeg,
     );
     const executionLoopPoints = fittedLoop.points.length >= 2 ? fittedLoop.points : loopPoints;
+    if (
+      boundaryKey === "area"
+      && !isMowingExecutionPathSafe(
+        executionLoopPoints,
+        fittedLoop.primitives,
+        this.areaPoints,
+        this.obstaclePointsArray,
+      )
+    ) {
+      this.logger.warn("mowing.trace_boundary.unsafe_fitted_geometry", {
+        boundary: boundaryKey,
+        inputPointCount: loopPoints.length,
+        executionPointCount: executionLoopPoints.length,
+      });
+      this.phase = "error";
+      return false;
+    }
     this.logger.info("mowing.trace_boundary.primitives_fitted", {
       boundary: boundaryKey,
       inputPointCount: loopPoints.length,
@@ -888,6 +1098,7 @@ export class MowingExecutor {
       phase: "tracing_boundary",
       stripIndex: resumeMeta.stripIndex,
       pathPoints: [...executionLoopPoints],
+      fittedPrimitives: [...fittedLoop.primitives],
       followOptions: {
         preserveFirstTargetAtPose: true,
         loopPath: false,
@@ -952,7 +1163,10 @@ export class MowingExecutor {
     }
 
     const target = connector[connector.length - 1];
-    const useDirectDrive = connector.length === 2 || this.canUseDirectShortConnector(target);
+    if (this.isNearCurrentPose(target.xMeters, target.yMeters)) {
+      return { completed: true, reason: "reached_end" };
+    }
+    const useDirectDrive = this.canUseDirectShortConnector(target);
     if (useDirectDrive) {
       this.logger.info("mowing.connector.direct_drive", {
         stripIndex,
@@ -969,9 +1183,6 @@ export class MowingExecutor {
         errorCode: "connector_failed",
         continuation,
       });
-      if (this.isNearCurrentPose(target.xMeters, target.yMeters)) {
-        return { completed: true, reason: "reached_end" };
-      }
       const driveResult = await this.driveController.executeDrive({
         targetPosition: createPosition(target.xMeters, target.yMeters),
         learningEnabled: true,
@@ -993,6 +1204,19 @@ export class MowingExecutor {
       this.parameters.segmentedDriveMaxVertexTurnDeg,
     );
     const executionConnector = fittedConnector.points.length >= 2 ? fittedConnector.points : [...connector];
+    if (!isMowingExecutionPathSafe(
+      executionConnector,
+      fittedConnector.primitives,
+      this.areaPoints,
+      this.obstaclePointsArray,
+    )) {
+      this.logger.warn("mowing.connector.unsafe_fitted_geometry", {
+        stripIndex,
+        inputPointCount: connector.length,
+        executionPointCount: executionConnector.length,
+      });
+      return { completed: false, reason: "error", error: "connector_geometry_outside_safe_area" };
+    }
     this.logger.info("mowing.connector.primitives_fitted", {
       stripIndex,
       inputPointCount: connector.length,
@@ -1005,6 +1229,7 @@ export class MowingExecutor {
       phase: "following_connector",
       stripIndex,
       pathPoints: [...executionConnector],
+      fittedPrimitives: [...fittedConnector.primitives],
       followOptions: {
         loopPath: false,
         strictOrderedProgress: true,
@@ -1499,6 +1724,130 @@ export class MowingExecutor {
   }
 }
 
+export function buildMowingReturnPath(
+  areaPoints: ReadonlyArray<PathPoint>,
+  current: { readonly xMeters: number; readonly yMeters: number },
+  mowingStart: { readonly xMeters: number; readonly yMeters: number },
+): PathPoint[] {
+  const perimeter = [...areaPoints];
+  if (perimeter.length > 1) {
+    const first = perimeter[0];
+    const last = perimeter[perimeter.length - 1];
+    if (Math.hypot(first.xMeters - last.xMeters, first.yMeters - last.yMeters) <= PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS) {
+      perimeter.pop();
+    }
+  }
+  if (perimeter.length < 2) {
+    return [];
+  }
+
+  const nearestIndex = (point: { readonly xMeters: number; readonly yMeters: number }): number => {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    perimeter.forEach((candidate, index) => {
+      const distance = Math.hypot(candidate.xMeters - point.xMeters, candidate.yMeters - point.yMeters);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    return bestIndex;
+  };
+  const currentIndex = nearestIndex(current);
+  const startIndex = nearestIndex(mowingStart);
+  const buildDirection = (step: 1 | -1): PathPoint[] => {
+    const route: PathPoint[] = [perimeter[currentIndex]];
+    let index = currentIndex;
+    while (index !== startIndex && route.length <= perimeter.length) {
+      index = (index + step + perimeter.length) % perimeter.length;
+      route.push(perimeter[index]);
+    }
+    return route;
+  };
+  const routeLength = (route: ReadonlyArray<PathPoint>): number => route.slice(1).reduce(
+    (total, point, index) => total + Math.hypot(
+      point.xMeters - route[index].xMeters,
+      point.yMeters - route[index].yMeters,
+    ),
+    0,
+  );
+  const forward = buildDirection(1);
+  const reverse = buildDirection(-1);
+  const perimeterRoute = routeLength(forward) <= routeLength(reverse) ? forward : reverse;
+  const capturedAt = Date.now();
+  const result: PathPoint[] = [{ xMeters: current.xMeters, yMeters: current.yMeters, capturedAt }];
+  for (const point of perimeterRoute) {
+    const previous = result[result.length - 1];
+    if (Math.hypot(previous.xMeters - point.xMeters, previous.yMeters - point.yMeters) > 0.01) {
+      result.push(point);
+    }
+  }
+  const previous = result[result.length - 1];
+  if (Math.hypot(previous.xMeters - mowingStart.xMeters, previous.yMeters - mowingStart.yMeters) > 0.01) {
+    result.push({ xMeters: mowingStart.xMeters, yMeters: mowingStart.yMeters, capturedAt: capturedAt + 1 });
+  }
+  return result;
+}
+
+export function isMowingExecutionPathSafe(
+  points: ReadonlyArray<PathPoint>,
+  primitives: ReadonlyArray<FittedPathPrimitive>,
+  areaPoints: ReadonlyArray<PathPoint>,
+  obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>,
+): boolean {
+  if (points.length < 2 || normalizePolygon(areaPoints).length < 3) {
+    return false;
+  }
+  const sampleIsSafe = (x: number, y: number): boolean => (
+    outsideDistanceFromAreaMeters(x, y, areaPoints) <= 0.01
+    && !obstaclePointsArray.some((obstacle) => pointInPolygon(x, y, obstacle))
+  );
+
+  for (let segmentIndex = 0; segmentIndex < points.length - 1; segmentIndex += 1) {
+    const start = points[segmentIndex];
+    const end = points[segmentIndex + 1];
+    const arc = primitives.find((primitive): primitive is Extract<FittedPathPrimitive, { kind: "arc" }> => (
+      primitive.kind === "arc"
+      && segmentIndex >= primitive.executionStartIndex
+      && segmentIndex < primitive.executionEndIndex
+    ));
+    if (arc) {
+      const startAngle = Math.atan2(start.yMeters - arc.centerY, start.xMeters - arc.centerX);
+      let endAngle = Math.atan2(end.yMeters - arc.centerY, end.xMeters - arc.centerX);
+      if (arc.direction > 0) {
+        while (endAngle < startAngle) endAngle += Math.PI * 2;
+      } else {
+        while (endAngle > startAngle) endAngle -= Math.PI * 2;
+      }
+      const sweep = endAngle - startAngle;
+      const sampleCount = Math.max(1, Math.ceil(Math.abs(sweep) / (2 * Math.PI / 180)));
+      for (let sampleIndex = 0; sampleIndex <= sampleCount; sampleIndex += 1) {
+        const angle = startAngle + (sweep * sampleIndex / sampleCount);
+        if (!sampleIsSafe(
+          arc.centerX + (Math.cos(angle) * arc.radiusMeters),
+          arc.centerY + (Math.sin(angle) * arc.radiusMeters),
+        )) {
+          return false;
+        }
+      }
+      continue;
+    }
+
+    const distanceMeters = Math.hypot(end.xMeters - start.xMeters, end.yMeters - start.yMeters);
+    const sampleCount = Math.max(1, Math.ceil(distanceMeters / 0.025));
+    for (let sampleIndex = 0; sampleIndex <= sampleCount; sampleIndex += 1) {
+      const fraction = sampleIndex / sampleCount;
+      if (!sampleIsSafe(
+        start.xMeters + ((end.xMeters - start.xMeters) * fraction),
+        start.yMeters + ((end.yMeters - start.yMeters) * fraction),
+      )) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 function normalise(v: { x: number; y: number }): { x: number; y: number } {
   const len = Math.hypot(v.x, v.y);
   return len < 1e-9 ? { x: 1, y: 0 } : { x: v.x / len, y: v.y / len };
@@ -1616,6 +1965,28 @@ function nearestAreaSegmentIndex(
     }
   }
   return bestIndex;
+}
+
+function nearestPointOnAreaBoundary(
+  point: { readonly xMeters: number; readonly yMeters: number },
+  polygonPoints: ReadonlyArray<PathPoint>,
+): { x: number; y: number } | null {
+  const polygon = normalizePolygon(polygonPoints);
+  if (polygon.length < 2) {
+    return null;
+  }
+  const query = { x: point.xMeters, y: point.yMeters };
+  let nearest: { x: number; y: number } | null = null;
+  let nearestDistance = Infinity;
+  for (let index = 0; index < polygon.length; index += 1) {
+    const candidate = nearestPointOnSegment(query, polygon[index], polygon[(index + 1) % polygon.length]);
+    const distance = Math.hypot(query.x - candidate.x, query.y - candidate.y);
+    if (distance < nearestDistance) {
+      nearest = candidate;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
 }
 
 function nearestPointOnSegment(

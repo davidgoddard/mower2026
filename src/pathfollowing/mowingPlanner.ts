@@ -58,7 +58,6 @@ const EPSILON = 1e-9;
 const MOWN_STRIP_CROSSING_PENALTY = 10;
 const INITIAL_ENTRY_CORNER_CLEARANCE_METERS = 0.3;
 const ROUTED_OBSTACLE_PENALTY = 2;
-const ROUTED_OBSTACLE_PREFERENCE_MARGIN = 0.75;
 const SAME_OFFSET_ROUTED_OBSTACLE_PENALTY = 5;
 const TURN_COST_METERS_PER_RADIAN = 0.4;
 const CONNECTOR_VERTEX_COST_METERS = 0.15;
@@ -618,9 +617,10 @@ function sequenceStripsForMowing(
   while (remaining.length > 0 && currentPoint !== null) {
     const currentOffset = traversal[traversal.length - 1].strip.centerOffsetMeters;
     const currentStep = traversal[traversal.length - 1];
-    const candidates = preferredStartPoint
-      ? selectNearestTraversalCandidates(remaining, currentPoint)
-      : selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
+    // A preferred start only chooses the first strip. Once mowing has begun,
+    // preserve the adjacent-offset sweep instead of leaving holes through a
+    // repeated global nearest-neighbour search.
+    const candidates = selectTraversalCandidates(remaining, currentOffset, lockedOffsetDirection);
     const bestEvaluation = chooseBestTraversalStep(
       candidates,
       currentPoint,
@@ -692,24 +692,6 @@ function chooseNearestTraversalStep(
     throw new Error("mowing_plan_has_no_first_strip");
   }
   return bestStep;
-}
-
-function selectNearestTraversalCandidates(
-  remaining: MowingStrip[],
-  currentPoint: Vector,
-): MowingStrip[] {
-  const candidateLimit = 16;
-  return remaining
-    .map((strip) => ({
-      strip,
-      distance: Math.min(
-        distance(currentPoint, stripTraversalStart(strip, false)),
-        distance(currentPoint, stripTraversalStart(strip, true)),
-      ),
-    }))
-    .sort((left, right) => left.distance - right.distance || left.strip.sequenceIndex - right.strip.sequenceIndex)
-    .slice(0, candidateLimit)
-    .map(({ strip }) => strip);
 }
 
 function chooseFirstTraversalStep(candidates: MowingStrip[], direction: Vector): TraversalStep {
@@ -818,30 +800,15 @@ function isBetterTraversalEvaluation(
   direction: Vector,
 ): boolean {
   const costDelta = candidateEvaluation.cost - bestEvaluation.cost;
+  if (candidateEvaluation.requiresObstacleRouting !== bestEvaluation.requiresObstacleRouting) {
+    return !candidateEvaluation.requiresObstacleRouting;
+  }
   if (costDelta < -EPSILON) {
-    if (
-      candidateEvaluation.requiresObstacleRouting
-      && !bestEvaluation.requiresObstacleRouting
-      && costDelta > -ROUTED_OBSTACLE_PREFERENCE_MARGIN
-    ) {
-      return false;
-    }
     return true;
   }
 
   if (costDelta > EPSILON) {
-    if (
-      !candidateEvaluation.requiresObstacleRouting
-      && bestEvaluation.requiresObstacleRouting
-      && costDelta < ROUTED_OBSTACLE_PREFERENCE_MARGIN
-    ) {
-      return true;
-    }
     return false;
-  }
-
-  if (candidateEvaluation.requiresObstacleRouting !== bestEvaluation.requiresObstacleRouting) {
-    return !candidateEvaluation.requiresObstacleRouting;
   }
 
   return preferCandidate(candidate, reversed, currentBest, currentBestReversed, direction);
@@ -890,14 +857,25 @@ function buildSafeStripConnector(
   mowingStandoffMeters: number,
 ): PathPoint[] {
   if (sameBoundary(currentEndBoundary, nextStartBoundary)) {
-    return buildBoundaryStandoffConnector(
+    const boundary = boundaryPolygon(currentEndBoundary, areaPolygon, obstacles);
+    const connector = buildBoundaryStandoffConnector(
       currentEnd,
       nextStart,
       currentEndStandoff,
       nextStartStandoff,
-      boundaryPolygon(currentEndBoundary, areaPolygon, obstacles),
+      boundary,
       currentEndBoundary,
     );
+    const connectorVectors = connector.map((point) => ({ x: point.xMeters, y: point.yMeters }));
+    if (pathStaysWithinAreaAndAvoidsObstacles(
+      connectorVectors,
+      areaPolygon,
+      obstacles,
+      currentEndBoundary.kind === "obstacle" ? boundary : undefined,
+    )) {
+      return connector;
+    }
+    throw new Error("mowing_connector_no_safe_same_boundary_route");
   }
 
   const directConnector = [currentEndStandoff, nextStartStandoff];
@@ -930,7 +908,7 @@ function buildSafeStripConnector(
     return areaBoundaryConnector;
   }
 
-  return areaBoundaryConnector;
+  throw new Error("mowing_connector_no_safe_route");
 }
 
 function stripTraversalStart(strip: MowingStrip, reversed: boolean): Vector {

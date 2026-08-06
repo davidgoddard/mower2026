@@ -50,12 +50,30 @@ test('routeServerRequest serves Drive & Paths as home, dashboard expansion, and 
   assert.equal(homeRoute.body.includes('id="mini-gnss-widget"'), true);
   assert.equal(homeRoute.body.includes('id="mini-motor-odometry-widget"'), true);
   assert.equal(homeRoute.body.includes('href="/dashboard"'), true);
+  assert.equal(homeRoute.body.includes('href="/mowing-records"'), true);
+  assert.equal(homeRoute.body.includes('id="mowingPreset"'), true);
 
   const dashboardRoute = routeServerRequest('GET', '/dashboard', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(dashboardRoute.statusCode, 200);
   assert.equal(dashboardRoute.body.includes('Mower Control Dashboard'), true);
+  assert.equal(dashboardRoute.body.includes('<span>Home</span>'), true);
+  assert.equal(dashboardRoute.body.includes('href="/"'), true);
   assert.equal(dashboardRoute.body.includes('Segment Testing'), true);
   assert.equal(dashboardRoute.body.includes('id="gnss-sat-warning"'), true);
+
+  const recordsRoute = routeServerRequest('GET', '/mowing-records', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
+  assert.equal(recordsRoute.statusCode, 200);
+  assert.equal(recordsRoute.body.includes('Mowing Records'), true);
+  assert.equal(recordsRoute.body.includes('/api/mowing-records/maintenance'), true);
+  assert.equal(recordsRoute.body.includes('id="previewCanvas"'), true);
+  assert.equal(recordsRoute.body.includes('/api/mowing-plan/preview'), true);
+  assert.equal(recordsRoute.body.includes('Mowing definitions'), true);
+  assert.equal(recordsRoute.body.includes('id="definitionPicker"'), true);
+  assert.equal(recordsRoute.body.includes('id="definitionStatus"'), true);
+  assert.equal(recordsRoute.body.includes('Update definition'), true);
+  assert.equal(recordsRoute.body.includes('data-definition-id='), true);
+  assert.equal(recordsRoute.body.includes("selectDefinition(row.dataset.definitionId)"), true);
+  assert.equal(recordsRoute.body.includes("e.key==='Enter'||e.key===' '"), true);
 
   const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(manualRoute.statusCode, 200);
@@ -214,6 +232,12 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('/api/path/verify'), true);
   assert.equal(manualPage.includes('/api/area-perimeter/verify'), true);
   assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);
+  assert.equal(manualPage.includes('id="perimeterEditorCanvas"'), true);
+  assert.equal(manualPage.includes('onclick="editAreaPerimeter('), true);
+  assert.equal(manualPage.includes("postJson('/api/area-perimeter/update'"), true);
+  assert.equal(manualPage.includes('function replaceShorterPerimeterSection('), true);
+  assert.equal(manualPage.includes("perimeterEditorStatus.textContent = 'Corrected mowing area perimeter saved."), true);
+  assert.equal(manualPage.includes('await closePerimeterEditor();'), false);
   assert.equal(manualPage.includes('/api/mowing-plan/preview'), true);
   assert.equal(manualPage.includes('/api/mowing/resume'), true);
   assert.equal(manualPage.includes('skipInitialBoundaryTrace: Boolean(skipInitialBoundaryTrace)'), true);

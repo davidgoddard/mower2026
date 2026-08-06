@@ -22,6 +22,8 @@ import { PoseCalibration } from "../config/poseCalibration.js";
 import { GeometryCalibration } from "../config/geometryCalibration.js";
 import { PathFollowingConfig, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
 import { LearningPolicyConfig } from "../config/learningPolicyConfig.js";
+import { MowingRecordsStore } from "../config/mowingRecordsStore.js";
+import { BladeUsageTracker } from "../maintenance/bladeUsageTracker.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -29,6 +31,7 @@ import { getSegmentTestingPageHtml } from "./segmentTestingPage.js";
 import { renderPathTracingPage } from "./pathTracingPage.js";
 import { getManualDrivePageCss, getManualDrivePageHtml, getManualDrivePageJs } from "./manualDrivePage.js";
 import { getDeadReckoningPageHtml } from "./deadReckoningPage.js";
+import { getMowingRecordsPageHtml } from "./mowingRecordsPage.js";
 import { SENSOR_WIDGETS_JS } from "./liveSensorWidgets.js";
 import { OPERATOR_PAGE_COMMON_JS } from "./operatorPageCommon.js";
 import { DeadReckoningCalibrator } from "../control/deadReckoningCalibrator.js";
@@ -259,7 +262,9 @@ const STOP_ACTION_PATHS = new Set([
 ]);
 
 export function shouldClearSystemStopForPost(pathname: string): boolean {
-  return !STOP_ACTION_PATHS.has(pathname);
+  return !STOP_ACTION_PATHS.has(pathname)
+    && !pathname.startsWith("/api/mowing-records/")
+    && pathname !== "/api/mowing-plan/preview";
 }
 
 export function routeServerRequest(
@@ -293,6 +298,10 @@ export function routeServerRequest(
       body: renderHomePage(),
       logNotFound: false,
     };
+  }
+
+  if (method === "GET" && pathname === "/mowing-records") {
+    return { statusCode: 200, contentType: "text/html; charset=utf-8", body: getMowingRecordsPageHtml(), logNotFound: false };
   }
 
   if (method === "GET" && pathname === "/turn-tuning") {
@@ -605,6 +614,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let motorCalibration: MotorCalibration | null = null;
   let imuCalibration: ImuCalibration | null = null;
   let poseCalibration: PoseCalibration | null = null;
+  let bladeUsageTracker: BladeUsageTracker | null = null;
   let geometryCalibration: GeometryCalibration | null = null;
   let pathFollowingConfig: PathFollowingConfig | null = null;
   const learningPolicy = new LearningPolicyConfig({ logger });
@@ -615,6 +625,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let mowingExecutor: MowingExecutor | null = null;
   let mowingStatus: MowingStatus = { phase: "idle", currentStripIndex: 0, totalStrips: 0, tracedBoundaryCount: 0 };
   let mowingResumeStore: MowingResumeStore | null = null;
+  const mowingRecordsStore = new MowingRecordsStore();
   let mowingResumeState: MowingResumeState | null = null;
   let operationContextTracker: OperationContextTracker | null = null;
   let checkpointStore: CheckpointStore | null = null;
@@ -635,6 +646,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     logger: logger.child({ context: "mowing", source: "MowingResumeStore" }),
   });
   mowingResumeState = await mowingResumeStore.loadState();
+  await mowingRecordsStore.load();
 
   function setMowingResumeState(state: MowingResumeState | null): void {
     mowingResumeState = state;
@@ -894,6 +906,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         return;
       }
 
+      if (requestUrl.pathname === "/api/mowing-records") {
+        response.writeHead(200, { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson(mowingRecordsStore.snapshot()));
+        return;
+      }
+
       if (requestUrl.pathname === "/api/dead-reckoning/status") {
         const drState = deadReckoningCalibrator
           ? deadReckoningCalibrator.getState()
@@ -923,11 +941,37 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     // Handle POST endpoints
     if (method === "POST") {
       try {
+        const body = await readRequestBody(request);
         if (shouldClearSystemStopForPost(requestUrl.pathname)) {
           systemStop.clearStop(`post:${requestUrl.pathname}`);
         }
 
-        const body = await readRequestBody(request);
+        if (requestUrl.pathname === "/api/mowing-records/maintenance") {
+          const data = JSON.parse(body);
+          await bladeUsageTracker?.flush();
+          const maintenance = await mowingRecordsStore.updateBladeMaintenance(data.lastSharpenedAt, data.sharpeningIntervalMeters);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(maintenance));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/mowing-records/presets") {
+          const data = JSON.parse(body);
+          const areaName = typeof data.areaName === "string" ? data.areaName.trim() : "";
+          if (!areaName || !areaPerimeterStore || !(await areaPerimeterStore.pathExists(areaName))) throw new BadRequestError("area_not_found");
+          const preset = await mowingRecordsStore.savePreset(data);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson(preset));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/mowing-records/presets/delete") {
+          const data = JSON.parse(body);
+          await mowingRecordsStore.deletePreset(typeof data.id === "string" ? data.id : "");
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ deleted: true }));
+          return;
+        }
 
         if (requestUrl.pathname === "/api/stop") {
           await requestEmergencyStop("emergency_stop");
@@ -1092,6 +1136,32 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           await areaPerimeterStore.deletePath(pathName);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(encodeJson({ deleted: true, pathName }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/area-perimeter/update" && areaPerimeterStore) {
+          const data = JSON.parse(body) as { pathName?: unknown; points?: unknown };
+          const pathName = typeof data.pathName === "string" ? data.pathName.trim() : "";
+          if (pathName.length === 0) {
+            throw new BadRequestError("path_name_required");
+          }
+          if (!Array.isArray(data.points) || data.points.length < 3 || data.points.length > 50_000) {
+            throw new BadRequestError("invalid_perimeter_points");
+          }
+          const points = data.points.map((value, index) => {
+            const point = value as { xMeters?: unknown; yMeters?: unknown; capturedAt?: unknown };
+            const xMeters = Number(point?.xMeters);
+            const yMeters = Number(point?.yMeters);
+            const capturedAt = Number(point?.capturedAt);
+            if (!Number.isFinite(xMeters) || !Number.isFinite(yMeters)) {
+              throw new BadRequestError(`invalid_perimeter_point_${index}`);
+            }
+            return { xMeters, yMeters, capturedAt: Number.isFinite(capturedAt) ? capturedAt : Date.now() };
+          });
+          const existing = await areaPerimeterStore.loadPath(pathName);
+          await areaPerimeterStore.savePath(pathName, points, { mowingDefaults: existing.mowingDefaults });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ updated: true, pathName, pointCount: points.length }));
           return;
         }
 
@@ -1702,6 +1772,11 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             turnController,
             poseFusion,
             continuousPathFollower: continuousPathFollower!,
+            returnToStartAfterMowing: true,
+            mowingStartPoint: {
+              xMeters: unwrapMeters(mowingStartPose.position.xMeters),
+              yMeters: unwrapMeters(mowingStartPose.position.yMeters),
+            },
             logger: logger.child({ context: "mowing", source: "MowingExecutor" }),
             parameters: pathFollowingParameters,
             recentTargetSink: retryManager ?? undefined,
@@ -1748,8 +1823,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           // Run in background; update shared status when done. Release the
           // executor reference after settlement so the saved operation can be resumed.
           const activeMowingExecutor = mowingExecutor;
-          activeMowingExecutor.execute().then((finalStatus) => {
+          activeMowingExecutor.execute().then(async (finalStatus) => {
             mowingStatus = finalStatus;
+            if (finalStatus.phase === "complete") {
+              try { await mowingRecordsStore.recordMowing(areaName, headingDeg, plan.stripSpacingMeters); }
+              catch (error) { logger.error("mowing_history.persist_failed", { error: error instanceof Error ? error.message : String(error) }); }
+            }
           }).catch((error) => {
             const message = error instanceof Error ? error.message : String(error);
             mowingStatus = { phase: "error", currentStripIndex: 0, totalStrips: plan.strips.length, tracedBoundaryCount: 0, error: message };
@@ -1811,6 +1890,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             turnController,
             poseFusion,
             continuousPathFollower: continuousPathFollower!,
+            returnToStartAfterMowing: true,
             logger: logger.child({ context: "mowing", source: "MowingExecutor" }),
             parameters: pathFollowingParameters,
             recentTargetSink: retryManager ?? undefined,
@@ -1854,8 +1934,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           const activeMowingExecutor = mowingExecutor;
-          activeMowingExecutor.execute().then((finalStatus) => {
+          activeMowingExecutor.execute().then(async (finalStatus) => {
             mowingStatus = finalStatus;
+            if (finalStatus.phase === "complete") {
+              try { await mowingRecordsStore.recordMowing(resumeState.areaName, resumeState.plan.headingDeg, resumeState.plan.stripSpacingMeters); }
+              catch (error) { logger.error("mowing_history.persist_failed", { error: error instanceof Error ? error.message : String(error) }); }
+            }
           }).catch((error) => {
             const message = error instanceof Error ? error.message : String(error);
             mowingStatus = {
@@ -2538,6 +2622,13 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
   }
 
+  bladeUsageTracker = new BladeUsageTracker(
+    sensorController!,
+    poseCalibration!,
+    mowingRecordsStore,
+  );
+  bladeUsageTracker.start();
+
   logger.transition("starting", "running", { port: boundPort, host });
 
   return {
@@ -2550,6 +2641,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
       state = "stopping";
       logger.transition("running", "stopping");
+
+      await bladeUsageTracker?.close();
 
       if (fatalHandlerInstalled) {
         process.off("uncaughtException", fatalExceptionHandler);

@@ -41,6 +41,10 @@ import {
   MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS,
   MOTOR_STALL_HIGH_CURRENT_CONSECUTIVE_SAMPLES,
   MOTOR_STALL_STARTUP_GRACE_MS,
+  MOTOR_FEEDBACK_MAX_ENCODER_DELTA_TICKS,
+  MOTOR_FEEDBACK_FAILURE_STOP_COUNT,
+  MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT,
+  MOTOR_FEEDBACK_ERROR_LOG_INTERVAL_MS,
   MOTOR_OUTPUT_DEADBAND_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
@@ -193,6 +197,11 @@ export class SensorController extends EventEmitter {
   private stallDetectionSamples = 0;
   private stallHighCurrentSamples = 0;
   private stallDetectionLatched = false;
+  private motorFeedbackFailureCount = 0;
+  private motorFeedbackFailureStartedMillis: number | null = null;
+  private motorFeedbackLastErrorLogMillis: number | null = null;
+  private motorFeedbackRecoveryValidSamples = 0;
+  private motorFeedbackSafetyStopIssued = false;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   /**
@@ -270,6 +279,11 @@ export class SensorController extends EventEmitter {
     this.stallDetectionSamples = 0;
     this.stallHighCurrentSamples = 0;
     this.stallDetectionLatched = false;
+    this.motorFeedbackFailureCount = 0;
+    this.motorFeedbackFailureStartedMillis = null;
+    this.motorFeedbackLastErrorLogMillis = null;
+    this.motorFeedbackRecoveryValidSamples = 0;
+    this.motorFeedbackSafetyStopIssued = false;
     this.imuBiasAutoRecalibratedForCurrentStop = false;
     this.primitivesStore.update({
       sensorController: {
@@ -1082,6 +1096,15 @@ export class SensorController extends EventEmitter {
   private async pollMotors(): Promise<void> {
     try {
       const sample = await this.gateway.readMotorFeedback();
+      if (!this.isPlausibleMotorFeedback(sample.leftEncoderDelta, sample.rightEncoderDelta)) {
+        await this.handleMotorFeedbackFailure(
+          `Implausible encoder delta: left=${sample.leftEncoderDelta} right=${sample.rightEncoderDelta}`,
+        );
+        return;
+      }
+      if (!(await this.acceptRecoveredMotorFeedback())) {
+        return;
+      }
       const current = this.primitivesStore.snapshot().motors;
       this.primitivesStore.update({
         motors: {
@@ -1124,6 +1147,63 @@ export class SensorController extends EventEmitter {
       this.updateMotorStoppedState(sample.leftEncoderDelta, sample.rightEncoderDelta);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      await this.handleMotorFeedbackFailure(message);
+    }
+  }
+
+  private isPlausibleMotorFeedback(leftEncoderDelta: number, rightEncoderDelta: number): boolean {
+    return Number.isInteger(leftEncoderDelta)
+      && Number.isInteger(rightEncoderDelta)
+      && Math.abs(leftEncoderDelta) <= MOTOR_FEEDBACK_MAX_ENCODER_DELTA_TICKS
+      && Math.abs(rightEncoderDelta) <= MOTOR_FEEDBACK_MAX_ENCODER_DELTA_TICKS;
+  }
+
+  private async acceptRecoveredMotorFeedback(): Promise<boolean> {
+    if (this.motorFeedbackFailureCount === 0) {
+      return true;
+    }
+
+    this.motorFeedbackRecoveryValidSamples += 1;
+    if (this.motorFeedbackRecoveryValidSamples < MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT) {
+      return false;
+    }
+
+    const now = this.nowMillis();
+    const failureDurationMs = this.motorFeedbackFailureStartedMillis === null
+      ? 0
+      : Math.max(0, now - this.motorFeedbackFailureStartedMillis);
+    this.logger.info("sensor.motors.feedback_recovered", {
+      failedPolls: this.motorFeedbackFailureCount,
+      failureDurationMs,
+      coherentSamples: this.motorFeedbackRecoveryValidSamples,
+      safetyStopIssued: this.motorFeedbackSafetyStopIssued,
+    });
+
+    if (this.motorFeedbackSafetyStopIssued) {
+      await this.attemptMotorFeedbackSafetyStop();
+    }
+    this.motorFeedbackFailureCount = 0;
+    this.motorFeedbackFailureStartedMillis = null;
+    this.motorFeedbackLastErrorLogMillis = null;
+    this.motorFeedbackRecoveryValidSamples = 0;
+    this.motorFeedbackSafetyStopIssued = false;
+    return true;
+  }
+
+  private async handleMotorFeedbackFailure(message: string): Promise<void> {
+    const now = this.nowMillis();
+    this.motorFeedbackFailureCount += 1;
+    this.motorFeedbackRecoveryValidSamples = 0;
+    if (this.motorFeedbackFailureStartedMillis === null) {
+      this.motorFeedbackFailureStartedMillis = now;
+    }
+    const failureStartedMillis = this.motorFeedbackFailureStartedMillis ?? now;
+
+    const shouldLog = this.motorFeedbackFailureCount === 1
+      || this.motorFeedbackLastErrorLogMillis === null
+      || now - this.motorFeedbackLastErrorLogMillis >= MOTOR_FEEDBACK_ERROR_LOG_INTERVAL_MS;
+    if (shouldLog) {
+      this.motorFeedbackLastErrorLogMillis = now;
       const current = this.primitivesStore.snapshot().motors;
       this.primitivesStore.update({
         motors: {
@@ -1132,7 +1212,36 @@ export class SensorController extends EventEmitter {
           error: message,
         },
       });
-      this.logger.error("sensor.motors.poll_failed", { error: message });
+      this.logger.error("sensor.motors.poll_failed", {
+        error: message,
+        consecutiveFailures: this.motorFeedbackFailureCount,
+        failureDurationMs: now - failureStartedMillis,
+      });
+    }
+
+    if (
+      !this.motorFeedbackSafetyStopIssued
+      && this.motorFeedbackFailureCount >= MOTOR_FEEDBACK_FAILURE_STOP_COUNT
+    ) {
+      this.motorFeedbackSafetyStopIssued = true;
+      this.logger.error("sensor.motors.feedback_lost_stop", {
+        consecutiveFailures: this.motorFeedbackFailureCount,
+        failureDurationMs: now - failureStartedMillis,
+      });
+      systemStop.requestStop("sensors", "motor_feedback_unavailable");
+      await this.attemptMotorFeedbackSafetyStop();
+    } else if (this.motorFeedbackSafetyStopIssued && shouldLog) {
+      await this.attemptMotorFeedbackSafetyStop();
+    }
+  }
+
+  private async attemptMotorFeedbackSafetyStop(): Promise<void> {
+    try {
+      await this.sendDisableMotorsCommand();
+    } catch (error) {
+      this.logger.warn("sensor.motors.feedback_loss_disable_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

@@ -6,6 +6,7 @@ import { getSegmentTestingPageHtml } from "./segmentTestingPage.js";
 import { renderPathTracingPage } from "./pathTracingPage.js";
 import { getManualDrivePageCss, getManualDrivePageHtml, getManualDrivePageJs } from "./manualDrivePage.js";
 import { getDeadReckoningPageHtml } from "./deadReckoningPage.js";
+import { getMowingRecordsPageHtml } from "./mowingRecordsPage.js";
 import { SENSOR_WIDGETS_JS } from "./liveSensorWidgets.js";
 import { OPERATOR_PAGE_COMMON_JS } from "./operatorPageCommon.js";
 
@@ -25,6 +26,7 @@ export interface RunningMowerWebServer {
 const PAGE_RENDERERS = new Map<string, () => string>([
   ["/", getManualDrivePageHtml],
   ["/dashboard", renderHomePage],
+  ["/mowing-records", getMowingRecordsPageHtml],
   ["/turn-tuning", getTurnTuningPageHtml],
   ["/drive-tuning", getDriveTuningPageHtml],
   ["/segment-testing", getSegmentTestingPageHtml],

@@ -158,6 +158,8 @@ test("non-stop POST actions clear the stop latch while stop actions do not", () 
   assert.equal(shouldClearSystemStopForPost("/api/drive/execute"), true);
   assert.equal(shouldClearSystemStopForPost("/api/path/record/start"), true);
   assert.equal(shouldClearSystemStopForPost("/api/mowing/start"), true);
+  assert.equal(shouldClearSystemStopForPost("/api/mowing-records/maintenance"), false);
+  assert.equal(shouldClearSystemStopForPost("/api/mowing-plan/preview"), false);
 
   assert.equal(shouldClearSystemStopForPost("/api/stop"), false);
   assert.equal(shouldClearSystemStopForPost("/api/turn/stop"), false);

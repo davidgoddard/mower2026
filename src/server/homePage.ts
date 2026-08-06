@@ -608,6 +608,10 @@ ${getOperatorPageCommonScriptTag()}
           <div class="subtitle">Autonomous Lawn Mower Control System</div>
         </div>
         <div class="header-nav">
+          <a href="/" class="nav-button" title="Return to the Drive & Paths landing page">
+            <span class="nav-button-icon">🏠</span>
+            <span>Home</span>
+          </a>
           <a href="/turn-tuning" class="nav-button" title="Configure and test autonomous turning with self-learning brake points">
             <span class="nav-button-icon">🔄</span>
             <span>Turn Tuning</span>
@@ -619,10 +623,6 @@ ${getOperatorPageCommonScriptTag()}
           <a href="/segment-testing" class="nav-button" title="Collect rough waypoints and exercise the full turn-and-drive segment controller">
             <span class="nav-button-icon">🧭</span>
             <span>Segment Testing</span>
-          </a>
-          <a href="/" class="nav-button" title="Manual drive, live position tracking, and stored path management">
-            <span class="nav-button-icon">🧭</span>
-            <span>Drive &amp; Paths</span>
           </a>
           <a href="/dead-reckoning" class="nav-button" title="Calibrate dead-reckoning: straight-line encoder calibration and arc tracking validation">
             <span class="nav-button-icon">📐</span>

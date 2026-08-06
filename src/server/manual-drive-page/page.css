@@ -84,7 +84,11 @@
       justify-content: flex-end;
       gap: 0.5rem;
       flex-shrink: 0;
+      flex-wrap: wrap;
     }
+
+    .header-nav-link { color: var(--primary-color); text-decoration: none; font-weight: 650; padding: 0.35rem 0.5rem; border-radius: 0.35rem; white-space: nowrap; }
+    .header-nav-link:hover { background: var(--bg-tertiary); }
 
     .mini-widget-link {
       position: relative;
@@ -184,6 +188,19 @@
       border-radius: 0.5rem;
       display: block;
     }
+
+    .perimeter-editor-backdrop { position: fixed; inset: 0; z-index: 1500; display: none; align-items: center; justify-content: center; padding: 1rem; background: rgba(15, 23, 42, 0.68); }
+    .perimeter-editor-backdrop.visible { display: flex; }
+    .perimeter-editor { width: min(96vw, 76rem); max-height: 96vh; overflow: auto; padding: 1.25rem; border-radius: 0.9rem; background: var(--bg-primary); box-shadow: 0 24px 70px rgba(0,0,0,.3); }
+    .perimeter-editor-header,.perimeter-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .perimeter-editor-header h2 { font-size: 1.25rem; }
+    .perimeter-editor-header p,.perimeter-editor-help { color: var(--text-secondary); }
+    .perimeter-editor-toolbar,.perimeter-editor-legend { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0; }
+    #perimeterEditorCanvas { width: 100%; height: auto; max-height: 68vh; border: 1px solid var(--border-color); border-radius: .5rem; background: var(--bg-tertiary); touch-action: none; cursor: crosshair; }
+    .perimeter-editor-legend span::before { content: ''; display: inline-block; width: 1.5rem; height: .22rem; margin-right: .35rem; vertical-align: middle; background: currentColor; }
+    .legend-original { color: #94a3b8; }.legend-edited { color: #059669; }.legend-anchor { color: #f59e0b; }.legend-control { color: #dc2626; }
+    #perimeterEditorStatus { min-height: 1.5rem; color: var(--text-secondary); font-weight: 600; }
+    @media (max-width: 700px) { .perimeter-editor-header,.perimeter-editor-footer { align-items: stretch; flex-direction: column; } }
 
     .map-stats {
       margin-top: 0.75rem;

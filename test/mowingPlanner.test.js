@@ -483,7 +483,7 @@ test("buildMowingPlan reanchors with a consistent traversal after choosing the o
   );
 });
 
-test("buildMowingPlan resequences locally from a preferred middle start without an edge-wrap connector", () => {
+test("buildMowingPlan uses a preferred middle start only for the first strip then sweeps adjacent offsets", () => {
   const area = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 8, yMeters: 0, capturedAt: 2 },
@@ -498,17 +498,19 @@ test("buildMowingPlan resequences locally from a preferred middle start without 
   });
 
   assert.ok(plan.stripCount > 10);
-  const connectorDistances = plan.connectors.map((connector) => {
-    let total = 0;
-    for (let index = 1; index < connector.length; index += 1) {
-      total += Math.hypot(
-        connector[index].xMeters - connector[index - 1].xMeters,
-        connector[index].yMeters - connector[index - 1].yMeters,
-      );
-    }
-    return total;
-  });
-  assert.ok(Math.max(...connectorDistances) < 3);
+  const offsets = plan.strips.map((strip) => strip.centerOffsetMeters);
+  const offsetDeltas = offsets.slice(1).map((offset, index) => Math.abs(offset - offsets[index]));
+  const nonAdjacentTransitions = offsetDeltas.filter((delta) => delta > 0.500001);
+
+  assert.equal(
+    nonAdjacentTransitions.length,
+    1,
+    "a middle start should sweep adjacent strips to one edge before crossing the exhausted region once",
+  );
+  assert.equal(
+    offsetDeltas.every((delta) => Math.abs(delta - 0.5) <= 0.000001 || delta > 0.500001),
+    true,
+  );
 });
 
 test("buildMowingInitialEntryPlan selects nearest projected area perimeter point", () => {

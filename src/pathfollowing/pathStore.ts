@@ -50,15 +50,18 @@ export class PathStore implements IPathStore {
 
     await this.ensureStorageDirectory();
 
-    // Update cache
-    this.pathCache.set(name, path);
-
     // Persist to disk via atomic write (tmp file + rename)
     const filename = this.getFilename(name);
     const filepath = join(this.storageDirectory, filename);
 
     try {
       await writeJsonFile(filepath, path);
+
+      // A display name containing spaces and its sanitized filename stem can
+      // both be used to load the same file. Remove every alias before caching
+      // the new value so a list-driven reload cannot return pre-save points.
+      this.invalidateCacheForFilename(filename);
+      this.pathCache.set(name, path);
 
       this.logger.info("path_store.saved", {
         name,
@@ -136,8 +139,8 @@ export class PathStore implements IPathStore {
       await this.ensureStorageDirectory();
       await unlink(filepath);
 
-      // Remove from cache
-      this.pathCache.delete(name);
+      // Remove display-name and sanitized-name aliases from cache.
+      this.invalidateCacheForFilename(filename);
 
       this.logger.info("path_store.deleted", { name, filepath });
     } catch (error) {
@@ -173,6 +176,14 @@ export class PathStore implements IPathStore {
     // cannot generate an oversized filename.
     const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, SANITIZED_NAME_MAX_LEN);
     return `${sanitized}${this.filenameSuffix}`;
+  }
+
+  private invalidateCacheForFilename(filename: string): void {
+    for (const cachedName of this.pathCache.keys()) {
+      if (this.getFilename(cachedName) === filename) {
+        this.pathCache.delete(cachedName);
+      }
+    }
   }
 
   private normalizeStoredPath(raw: unknown): StoredPath {

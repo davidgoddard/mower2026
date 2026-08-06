@@ -171,7 +171,6 @@ export class MotorNodeClient {
         if (decoded.header.nodeId !== NodeId.Motor || decoded.header.messageType !== MessageType.MotorFeedbackSample) {
           throw new Error("Unexpected motor response frame");
         }
-
         return decodeMotorFeedbackSample(decoded.payload);
       } catch (error) {
         lastError = error;

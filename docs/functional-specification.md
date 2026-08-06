@@ -67,6 +67,14 @@ The system shall:
 - the drive tuning page shall train the fixed short-bucket distances through 100cm and then longer forward/reverse-brake sample distances at 200, 300 and 400cm
 - the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, average CTE, maximum CTE, X error, and Y error
 - the Drive & Paths page shall provide a second mowing start action that drives to the selected area perimeter and then begins the first strip nearest that perimeter without tracing the outer perimeter first
+- the Drive & Paths page shall allow an operator to open a stored mowing area perimeter in an on-screen editor, straighten a selected section between two fixed anchors, or replace a selected section with a movable corner between two fixed anchors; the original and edited outlines shall remain visible until the operator explicitly saves the corrected perimeter, and saving shall retain the editor with the saved outline until the operator explicitly closes it
+- the Drive & Paths homepage shall retain a header navigation strip linking to the other operator pages
+- the system shall persist successful completed mowings in a small JSON datastore with completion date, area name, strip heading angle, and strip width; stopped or failed mowings shall not create history entries
+- after the final mowing strip, the mower shall take the shorter route around the recorded area perimeter and return to the GNSS position at which that mowing session started; this return is part of the resumable mowing workflow and the mowing is not complete until the return succeeds
+- the Mowing Records page shall allow the operator to save reusable named area, angle, and strip-width presets, delete those presets, record the blades' last-sharpened date, and configure the forward motor travel in metres before sharpening is due; blade usage shall accumulate the larger calibrated forward encoder distance reported by either motor in each feedback sample, while reverse encoder movement shall not count
+- while creating a named mowing definition, the Mowing Records page shall show the selected area's actual boundary and generated mowing strips, refreshing as its angle or width changes so the settings can be visually fine-tuned before saving
+- saving, updating, or deleting a mowing definition shall show explicit success or error feedback; saved definitions shall be available from an edit picklist, and clicking or keyboard-selecting a saved definition in the table shall load it into the form and refresh its preview
+- a saved mowing preset shall populate the Drive & Paths area, angle, and width controls without preventing the operator from overriding the angle or width for that mowing
 - derive mowing patterns that avoid obstacles and ensure the least number of strips are mowed filling the mowing area with strips that are spaced at 3/4 of the cutting width.
 
 ## Operation
@@ -452,7 +460,7 @@ The drive controller shall not impose a duration-based timeout on a drive. Drive
 
 Operational mowing drives may specify a 10 cm minimum useful translation. The controller shall remeasure distance after its alignment pivot and treat the operation as successfully reached when less than that minimum remains, preventing a pivot-induced pose change from causing another turn and centimetre-scale corrective drive. Calibration and training drives shall not inherit this mowing-only deadband.
 
-Mowing strip sequencing shall minimise a combined traversal cost rather than connector distance alone. The cost shall include connector length, departure and arrival pivot angles, connector complexity, obstacle routing and repeated crossings of completed strips, so a marginally shorter transfer cannot win by requiring substantially more turning or fragile path recovery.
+Mowing strip sequencing shall maintain the adjacent-strip sweep as a hard constraint while an unmown strip remains at the next normal-axis offset. A preferred perimeter start may choose the first strip but shall not enable unrestricted nearest-neighbour selection for later strips. Within the eligible adjacent strip fragments, traversal cost shall include connector length, departure and arrival pivot angles, connector complexity and repeated crossings of completed strips. A directly reachable adjacent fragment shall always rank ahead of a fragment requiring obstacle-perimeter routing; routed or non-adjacent fragments are considered only after the locally adjacent region is exhausted.
 
 Using events for all sensor value inputs.
 
@@ -508,6 +516,8 @@ For segment testing, the system shall:
 
 ## Path following
 
+Continuous perimeter and connector steering shall update at 50 Hz, express wheel-command slew limits per elapsed second, preserve full requested output on the faster forward wheel, and vary the inner wheel for steering. A fitted arc may engage only when the mower is within 10 cm of its circle and within 20 degrees of its tangent; otherwise the follower shall stop, align, and perform one committed straight capture to acquire that primitive. Once acquired, the complete fitted arc shall remain engaged until ordered progress leaves that primitive: its dense projected samples shall not independently reapply the capture test or trigger segment-by-segment reacquisition. Arc wheel commands shall preserve the requested differential-drive curvature when normalised to put the faster wheel at the requested output. Every planned connector and fitted area-boundary execution path shall fail closed when its mower-centre geometry cannot be validated inside the allowed area and outside obstacles; an unsafe fallback path shall never be returned for execution.
+
 There is a need to be able to trace around obstacles using manual driving and then have the mower re-trace that path whilst mowing. 
 
 A path driving component is required which will take an array of path points which may be far apart or very close together and drive that path and return.
@@ -555,13 +565,14 @@ The closed-loop tolerance, closed-loop detection tolerance, verification approac
 
 A "Stop" button shall be prominent on the screen and immediately terminate a drive.
 
-Driving should initially be performed at full speed as this ensures the blades are moving quickly and it overcomes the friction — a slow drive could get stuck.
+Driving should initially be performed at full speed as this ensures the blades are moving quickly and it overcomes the friction — a slow drive could get stuck. The fastest forward-moving drive wheel powers the rotating blades, so autonomous forward steering may reduce the inner wheel but shall keep the outer wheel at the requested full output. It shall not reduce both forward wheel outputs together in response to curvature, heading error, or cross-track error. When the requested curvature cannot be achieved reliably within the available differential output, the mower shall stop, pivot, and then resume forward travel.
 
 ## Obstructions - retry
 
 The mower has two current meters; one for each motor. The system shall classify obstruction events into three types:
 
 - **high_current** — either motor draws above the configured current threshold (initial value 2 A). This is treated as the mower hitting thick grass or a clump that the blades may yet cut through with another run-up.
+- Motor-feedback integrity is safety-critical: impossible encoder deltas shall be rejected, feedback recovered after an outage shall not be trusted until three consecutive coherent frames have arrived, and ten consecutive failed polls shall latch a system stop and request a hardware motor disable. Repeated identical poll failures shall be rate-limited in the session log and summarized on recovery.
 - **wheel_slip** — wheels are turning per encoder feedback but the fused position is effectively stationary.
 - **stall** — trusted GNSS position remains stationary during translational driving, IMU heading remains stationary during a pivot, or motor current remains high while motion is commanded. Encoder-stationary evidence is a fallback when the motion-specific reference is unavailable; spinning encoders do not by themselves prove chassis progress.
 
@@ -585,13 +596,13 @@ The mowing planner divides a recorded area perimeter into a set of parallel mowi
 
 ### Traversal sequencing and directional consistency
 
-Once all strips are computed the planner sequences them for the shortest total travel path.  The first strip is chosen at the lowest normal-axis offset and entered from the end with the highest projection along the mowing direction.  After the first transition the planner records which side of the area (which normal-axis direction) it advanced toward and locks that crossing direction in for the remainder of the plan.  Subsequent strip choices prefer candidates that continue in the same crossing direction; only if no same-direction strip is reachable (for example an island of unmown ground on the far side of an obstacle) will the planner cross back.
+Once all strips are computed the planner sequences them as an adjacent-strip sweep. The first strip is chosen at the lowest normal-axis offset and entered from the end with the highest projection along the mowing direction, or is chosen nearest a supplied perimeter start. After the first transition the planner records which side of the area (which normal-axis direction) it advanced toward and locks that crossing direction in for the remainder of the plan. The preferred start affects only the first strip. Subsequent choices must use the next unmown normal-axis offset in that direction while one remains; only when the local sweep is exhausted may the planner cross back or seek an isolated fragment.
 
 Mowing start and resume require a fused pose whose quality is `gnss`. If GNSS is unusable at start, mowing shall remain stopped with reason `poor_gnss`. If pose quality remains below `gnss` for 2 seconds during mowing, the runtime shall request a global stop with the same reason. Brief validator transitions shorter than that debounce do not stop an otherwise healthy mow. This gate applies to autonomous mowing only.
 
 Drive and turn learning shall obey `config/learning-policy.json`. The default `training_only` mode permits parameter updates only for dedicated web tuning and validation sessions; ordinary mowing, path driving, retries, and ad-hoc movement shall use the learned parameters without modifying them. An explicit `always` mode may enable operational learning for controlled experiments.
 
-Within each strip the mower always enters at one end and exits at the other, giving a boustrophedon (back-and-forth) pattern across the area.  Where two candidate strips have equal connector cost, the planner prefers the strip with the smallest offset difference from the current strip (i.e. the immediately adjacent strip) to avoid skipping over uncut ground.
+Within each strip the mower always enters at one end and exits at the other, giving a boustrophedon (back-and-forth) pattern across the area. A directly reachable fragment on the adjacent offset always outranks a candidate that requires obstacle-perimeter routing, regardless of route-cost score. Cost scoring chooses only among candidates that satisfy those sequencing constraints.
 
 ### Boundary standoff distance
 
@@ -601,7 +612,7 @@ No mowing strip or connector segment shall bring the mower closer than 15 cm to 
 
 The first time the mower reaches any boundary — whether the outer area perimeter or an obstacle perimeter — during a mowing session it must perform a complete boundary trace of that boundary before continuing with strip mowing.  This ensures a clean mowed edge is cut all the way around the area and around each obstacle, which the strip pattern alone would not achieve since strips stop short of the boundary by the standoff distance.
 
-When mowing stops or errors after an operation has begun, the Drive & Paths page shall offer a **Carry On Mowing** control. The saved state shall include the active operation and, for continuous boundary or connector following, the completed target index so resumption continues from the interrupted ordered path position rather than restarting at the first saved point. The control shall become available after the active executor has settled and shall remain available across process restarts while the saved state exists.
+When mowing stops or errors after an operation has begun, the Drive & Paths page shall offer a **Carry On Mowing** control. The saved state shall include the active operation, its exact fitted primitives and, for continuous boundary or connector following, the completed target index so resumption continues from the interrupted ordered path position rather than restarting or refitting the saved execution geometry. The control shall become available after the active executor has settled and shall remain available across process restarts while the saved state exists. If the resumed GNSS pose is outside the mowing area by no more than 75 cm, Carry On shall first find the nearest perimeter point, construct a target at least 25 cm inside the area, reject a recovery line that intersects an obstacle, pivot toward that target through the ordinary drive controller, and drive into the area before continuing the saved operation. A farther outside pose, unavailable safe target, blocked recovery line, or failure to enter the polygon shall fail closed without resuming mowing.
 
 The sequence on first arrival at a boundary is:
 

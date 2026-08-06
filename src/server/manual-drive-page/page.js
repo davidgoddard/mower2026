@@ -134,6 +134,7 @@
     let currentAreaPerimeterName = '';
     let areaPointCount = 0;
     let storedAreaPerimeters = [];
+    let mowingPresets = [];
     let mowingPlanPreview = null;
     let selectedMowingPlanArea = '';
     let mapTransform = null;
@@ -149,6 +150,7 @@
     let pathRecordingStatusInFlight = false;
     let areaRecordingStatusInFlight = false;
     let mowingStatusInFlight = false;
+    let perimeterEdit = null;
 
     const PRIMITIVES_POLL_MS = 1000;
     const LIST_REFRESH_MS = 30000;
@@ -220,12 +222,20 @@
     const currentAreaPerimeterNameEl = $("currentAreaPerimeterName");
     const areaPerimetersListEl = $("areaPerimetersList");
     const mowingPlanAreaSelect = $("mowingPlanArea");
+    const mowingPresetSelect = $("mowingPreset");
     const mowingPlanStatusEl = $("mowingPlanStatus");
     const mowingHeadingInput = $("mowingHeadingDeg");
     const mowingHeadingValue = $("mowingHeadingValue");
     const stripSpacingInput = $("stripSpacingCm");
     const previewMowingPlanBtn = $("previewMowingPlanBtn");
     const resumeMowingBtn = $("resumeMowingBtn");
+    const perimeterEditorBackdrop = $("perimeterEditorBackdrop");
+    const perimeterEditorCanvas = $("perimeterEditorCanvas");
+    const perimeterEditorContext = perimeterEditorCanvas.getContext("2d");
+    const perimeterEditorHelp = $("perimeterEditorHelp");
+    const perimeterEditorStatus = $("perimeterEditorStatus");
+    const savePerimeterEditBtn = $("savePerimeterEdit");
+    const undoPerimeterEditBtn = $("undoPerimeterEdit");
 
     function addPositionToHistory(x, y, heading, timestamp) {
       const previous = positionHistory[positionHistory.length - 1];
@@ -726,6 +736,18 @@
       }
     }
 
+    async function loadMowingPresets() {
+      try {
+        const data = await fetchJson('/api/mowing-records');
+        mowingPresets = Array.isArray(data.presets) ? data.presets : [];
+        mowingPresetSelect.innerHTML = '<option value="">Custom settings</option>' + mowingPresets.map((preset) =>
+          `<option value="${htmlAttribute(preset.id)}">${htmlAttribute(preset.name)} — ${htmlAttribute(preset.areaName)}</option>`
+        ).join('');
+      } catch (error) {
+        console.error('Failed to load mowing presets:', error);
+      }
+    }
+
     function renderMowingPlanAreaOptions() {
       const previousSelection = selectedMowingPlanArea || mowingPlanAreaSelect.value;
       mowingPlanAreaSelect.innerHTML = storedAreaPerimeters.map((path) => {
@@ -942,6 +964,9 @@
               </div>
             </div>
             <div class="path-actions">
+              <button class="button button-secondary button-small" type="button" onclick="editAreaPerimeter(${htmlAttribute(jsString(path.name))})">
+                <span>✏️</span> Edit
+              </button>
               <button class="button button-primary button-small" type="button" onclick="driveAreaPerimeter(${htmlAttribute(jsString(path.name))})">
                 <span>▶️</span> Drive
               </button>
@@ -956,6 +981,195 @@
         `;
       }).join('');
     }
+
+    function copyPerimeterPoints(points) {
+      return points.map((point) => ({ xMeters: Number(point.xMeters), yMeters: Number(point.yMeters), capturedAt: Number(point.capturedAt) || Date.now() }));
+    }
+
+    function setPerimeterEditorTool(mode) {
+      if (!perimeterEdit) return;
+      perimeterEdit.mode = mode;
+      perimeterEdit.anchors = [];
+      perimeterEdit.controlIndex = null;
+      perimeterEditorHelp.textContent = mode === 'straighten'
+        ? 'Click the two fixed endpoints of the wobbly section. The shorter perimeter section between them will become a straight line.'
+        : 'Click two fixed endpoints, then click where the replacement corner should be. Drag the red point to fine-tune it.';
+      perimeterEditorStatus.textContent = 'Choose the first fixed anchor.';
+      drawPerimeterEditor();
+    }
+
+    function perimeterEditorTransform() {
+      const points = [...perimeterEdit.original, ...perimeterEdit.points];
+      const xs = points.map((point) => point.xMeters);
+      const ys = points.map((point) => point.yMeters);
+      const padding = 42;
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const scale = Math.min((perimeterEditorCanvas.width - padding * 2) / Math.max(maxX - minX, .5), (perimeterEditorCanvas.height - padding * 2) / Math.max(maxY - minY, .5));
+      return {
+        toCanvas: (point) => ({ x: perimeterEditorCanvas.width / 2 + (point.xMeters - (minX + maxX) / 2) * scale, y: perimeterEditorCanvas.height / 2 - (point.yMeters - (minY + maxY) / 2) * scale }),
+        toWorld: (point) => ({ xMeters: (point.x - perimeterEditorCanvas.width / 2) / scale + (minX + maxX) / 2, yMeters: -(point.y - perimeterEditorCanvas.height / 2) / scale + (minY + maxY) / 2 }),
+      };
+    }
+
+    function drawPerimeterLine(points, color, width, dashed = false) {
+      if (points.length < 2) return;
+      const transform = perimeterEditorTransform();
+      perimeterEditorContext.beginPath();
+      points.forEach((point, index) => {
+        const canvasPoint = transform.toCanvas(point);
+        index ? perimeterEditorContext.lineTo(canvasPoint.x, canvasPoint.y) : perimeterEditorContext.moveTo(canvasPoint.x, canvasPoint.y);
+      });
+      const first = transform.toCanvas(points[0]);
+      perimeterEditorContext.lineTo(first.x, first.y);
+      perimeterEditorContext.setLineDash(dashed ? [9, 7] : []);
+      perimeterEditorContext.strokeStyle = color;
+      perimeterEditorContext.lineWidth = width;
+      perimeterEditorContext.stroke();
+      perimeterEditorContext.setLineDash([]);
+    }
+
+    function drawPerimeterEditor() {
+      if (!perimeterEdit) return;
+      perimeterEditorContext.clearRect(0, 0, perimeterEditorCanvas.width, perimeterEditorCanvas.height);
+      perimeterEditorContext.fillStyle = '#f8fafc';
+      perimeterEditorContext.fillRect(0, 0, perimeterEditorCanvas.width, perimeterEditorCanvas.height);
+      drawPerimeterLine(perimeterEdit.original, '#94a3b8', 3, true);
+      drawPerimeterLine(perimeterEdit.points, '#059669', 4);
+      const transform = perimeterEditorTransform();
+      perimeterEdit.anchors.forEach((index) => {
+        const point = transform.toCanvas(perimeterEdit.points[index]);
+        perimeterEditorContext.beginPath(); perimeterEditorContext.arc(point.x, point.y, 8, 0, Math.PI * 2);
+        perimeterEditorContext.fillStyle = '#f59e0b'; perimeterEditorContext.fill();
+      });
+      if (perimeterEdit.controlIndex !== null) {
+        const point = transform.toCanvas(perimeterEdit.points[perimeterEdit.controlIndex]);
+        perimeterEditorContext.beginPath(); perimeterEditorContext.arc(point.x, point.y, 10, 0, Math.PI * 2);
+        perimeterEditorContext.fillStyle = '#dc2626'; perimeterEditorContext.fill();
+      }
+    }
+
+    function editorCanvasPoint(event) {
+      const bounds = perimeterEditorCanvas.getBoundingClientRect();
+      return { x: (event.clientX - bounds.left) * perimeterEditorCanvas.width / bounds.width, y: (event.clientY - bounds.top) * perimeterEditorCanvas.height / bounds.height };
+    }
+
+    function nearestPerimeterPointIndex(canvasPoint) {
+      const transform = perimeterEditorTransform();
+      let nearest = 0, nearestDistance = Infinity;
+      perimeterEdit.points.forEach((point, index) => {
+        const candidate = transform.toCanvas(point);
+        const distance = Math.hypot(candidate.x - canvasPoint.x, candidate.y - canvasPoint.y);
+        if (distance < nearestDistance) { nearest = index; nearestDistance = distance; }
+      });
+      return nearest;
+    }
+
+    function replaceShorterPerimeterSection(firstIndex, secondIndex, middlePoint = null) {
+      const points = perimeterEdit.points;
+      const count = points.length;
+      const forwardLength = (secondIndex - firstIndex + count) % count;
+      let start = firstIndex, end = secondIndex;
+      if (forwardLength > count / 2) { start = secondIndex; end = firstIndex; }
+      const rotated = Array.from({ length: count }, (_, offset) => points[(start + offset) % count]);
+      const endOffset = (end - start + count) % count;
+      const replacement = [rotated[0]];
+      if (middlePoint) replacement.push({ ...middlePoint, capturedAt: Math.round((rotated[0].capturedAt + rotated[endOffset].capturedAt) / 2) });
+      replacement.push(rotated[endOffset]);
+      perimeterEdit.undo.push(copyPerimeterPoints(points));
+      perimeterEdit.points = replacement.concat(rotated.slice(endOffset + 1));
+      perimeterEdit.anchors = middlePoint ? [0, 2] : [0, 1];
+      perimeterEdit.controlIndex = middlePoint ? 1 : null;
+      perimeterEdit.dirty = true;
+      undoPerimeterEditBtn.disabled = false;
+      savePerimeterEditBtn.disabled = false;
+      perimeterEditorStatus.textContent = middlePoint ? 'Corner replaced. Drag the red point to adjust it, or save when ready.' : 'Section straightened. Choose Straighten section again to make another correction, or save.';
+      drawPerimeterEditor();
+    }
+
+    perimeterEditorCanvas.addEventListener('pointerdown', (event) => {
+      if (!perimeterEdit) return;
+      const canvasPoint = editorCanvasPoint(event);
+      if (perimeterEdit.controlIndex !== null) {
+        const control = perimeterEditorTransform().toCanvas(perimeterEdit.points[perimeterEdit.controlIndex]);
+        if (Math.hypot(control.x - canvasPoint.x, control.y - canvasPoint.y) <= 24) {
+          perimeterEdit.dragging = true;
+          perimeterEdit.dragTransform = perimeterEditorTransform();
+          perimeterEditorCanvas.setPointerCapture(event.pointerId);
+          return;
+        }
+      }
+      if (perimeterEdit.anchors.length < 2) {
+        const index = nearestPerimeterPointIndex(canvasPoint);
+        if (!perimeterEdit.anchors.includes(index)) perimeterEdit.anchors.push(index);
+        if (perimeterEdit.anchors.length === 1) perimeterEditorStatus.textContent = 'Choose the second fixed anchor.';
+        if (perimeterEdit.anchors.length === 2 && perimeterEdit.mode === 'straighten') replaceShorterPerimeterSection(perimeterEdit.anchors[0], perimeterEdit.anchors[1]);
+        else if (perimeterEdit.anchors.length === 2) perimeterEditorStatus.textContent = 'Click the desired position of the replacement corner.';
+        drawPerimeterEditor();
+        return;
+      }
+      if (perimeterEdit.mode === 'reshape' && perimeterEdit.controlIndex === null) {
+        const worldPoint = perimeterEditorTransform().toWorld(canvasPoint);
+        replaceShorterPerimeterSection(perimeterEdit.anchors[0], perimeterEdit.anchors[1], worldPoint);
+      }
+    });
+
+    perimeterEditorCanvas.addEventListener('pointermove', (event) => {
+      if (!perimeterEdit?.dragging || perimeterEdit.controlIndex === null) return;
+      const worldPoint = perimeterEdit.dragTransform.toWorld(editorCanvasPoint(event));
+      Object.assign(perimeterEdit.points[perimeterEdit.controlIndex], worldPoint);
+      perimeterEdit.dirty = true;
+      savePerimeterEditBtn.disabled = false;
+      drawPerimeterEditor();
+    });
+    perimeterEditorCanvas.addEventListener('pointerup', () => { if (perimeterEdit) { perimeterEdit.dragging = false; perimeterEdit.dragTransform = null; } });
+
+    window.editAreaPerimeter = function(pathName) {
+      const path = getStoredAreaPerimeterByName(pathName);
+      if (!path?.points?.length) { alert('This perimeter has no editable points.'); return; }
+      perimeterEdit = { name: path.name, original: copyPerimeterPoints(path.points), points: copyPerimeterPoints(path.points), mode: 'straighten', anchors: [], controlIndex: null, dragging: false, dragTransform: null, dirty: false, undo: [] };
+      $('perimeterEditorSubtitle').textContent = path.name;
+      perimeterEditorBackdrop.classList.add('visible');
+      perimeterEditorBackdrop.setAttribute('aria-hidden', 'false');
+      savePerimeterEditBtn.disabled = true;
+      undoPerimeterEditBtn.disabled = true;
+      setPerimeterEditorTool('straighten');
+    };
+
+    async function closePerimeterEditor() {
+      if (perimeterEdit?.dirty && !await window.appConfirm('Discard the unsaved perimeter corrections?', 'Close perimeter editor')) return;
+      perimeterEditorBackdrop.classList.remove('visible');
+      perimeterEditorBackdrop.setAttribute('aria-hidden', 'true');
+      perimeterEdit = null;
+    }
+
+    $('closePerimeterEditor').addEventListener('click', () => { void closePerimeterEditor(); });
+    $('straightenPerimeterSection').addEventListener('click', () => setPerimeterEditorTool('straighten'));
+    $('reshapePerimeterSection').addEventListener('click', () => setPerimeterEditorTool('reshape'));
+    $('resetPerimeterEdit').addEventListener('click', () => {
+      if (!perimeterEdit) return;
+      perimeterEdit.points = copyPerimeterPoints(perimeterEdit.original); perimeterEdit.undo = []; perimeterEdit.dirty = false; savePerimeterEditBtn.disabled = true; undoPerimeterEditBtn.disabled = true; setPerimeterEditorTool(perimeterEdit.mode);
+    });
+    undoPerimeterEditBtn.addEventListener('click', () => {
+      if (!perimeterEdit?.undo.length) return;
+      perimeterEdit.points = perimeterEdit.undo.pop(); perimeterEdit.anchors = []; perimeterEdit.controlIndex = null; perimeterEdit.dirty = true; undoPerimeterEditBtn.disabled = perimeterEdit.undo.length === 0; savePerimeterEditBtn.disabled = false; perimeterEditorStatus.textContent = 'Last edit undone.'; drawPerimeterEditor();
+    });
+    savePerimeterEditBtn.addEventListener('click', async () => {
+      if (!perimeterEdit) return;
+      savePerimeterEditBtn.disabled = true; perimeterEditorStatus.textContent = 'Saving corrected perimeter…';
+      try {
+        await postJson('/api/area-perimeter/update', { pathName: perimeterEdit.name, points: perimeterEdit.points });
+        perimeterEdit.original = copyPerimeterPoints(perimeterEdit.points);
+        perimeterEdit.undo = [];
+        perimeterEdit.dirty = false;
+        perimeterEdit.anchors = [];
+        perimeterEdit.controlIndex = null;
+        undoPerimeterEditBtn.disabled = true;
+        await loadStoredAreaPerimeters();
+        markMowingPlanPreviewStale();
+        perimeterEditorStatus.textContent = 'Corrected mowing area perimeter saved. Close when finished, or make another correction.';
+        drawPerimeterEditor();
+      } catch (error) { savePerimeterEditBtn.disabled = false; perimeterEditorStatus.textContent = 'Save failed: ' + error.message; }
+    });
 
     function schedulePageStatePoll(delayMs = PRIMITIVES_POLL_MS) {
       if (pageStatePollTimer !== null) {
@@ -1306,18 +1520,34 @@
     });
 
     mowingPlanAreaSelect.addEventListener('change', () => {
+      mowingPresetSelect.value = '';
       selectedMowingPlanArea = mowingPlanAreaSelect.value;
       applyAreaMowingDefaults(selectedMowingPlanArea);
       markMowingPlanPreviewStale();
     });
 
+    mowingPresetSelect.addEventListener('change', () => {
+      const preset = mowingPresets.find((entry) => entry.id === mowingPresetSelect.value);
+      if (!preset) return;
+      mowingPlanAreaSelect.value = preset.areaName;
+      selectedMowingPlanArea = preset.areaName;
+      mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(preset.headingDeg)));
+      stripSpacingInput.value = String(Math.round(Number(preset.stripWidthMeters) * 100));
+      storeMowingHeading(mowingHeadingInput.value);
+      storeStripSpacingCm(stripSpacingInput.value);
+      updateHeadingLabel();
+      markMowingPlanPreviewStale();
+    });
+
     mowingHeadingInput.addEventListener('input', () => {
+      mowingPresetSelect.value = '';
       storeMowingHeading(mowingHeadingInput.value);
       updateHeadingLabel();
       markMowingPlanPreviewStale();
     });
 
     stripSpacingInput.addEventListener('input', () => {
+      mowingPresetSelect.value = '';
       storeStripSpacingCm(stripSpacingInput.value);
       markMowingPlanPreviewStale();
     });
@@ -1531,6 +1761,7 @@
     Promise.all([
       loadStoredPaths(),
       loadStoredAreaPerimeters(),
+      loadMowingPresets(),
       pollMowingStatus(),
     ]).then(() => {
       listsLoadedOnce = true;

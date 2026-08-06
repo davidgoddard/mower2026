@@ -27,6 +27,9 @@ This document maps problem domains to candidate files removing the need for Code
 - `config/path-following-parameters.json`: persisted segmented-drive perimeter follow parameters.
 - `config/drive-learning-params.json`: persisted drive learning values, including forward/reverse CTE gains.
 - `config/turn-learning-parameters.json`: persisted turn learning values.
+- `src/config/mowingRecordsStore.ts`: atomic JSON persistence for completed mowing history, reusable area/heading/strip-width presets, and blade-sharpening distance settings/usage.
+- `src/maintenance/bladeUsageTracker.ts`: accumulates blade wear from the hardware gateway's already-normalized motor feedback as the larger calibrated logical-forward encoder distance in each sample; reverse wheel movement is ignored and usage is periodically persisted by `MowingRecordsStore`.
+- `data/mowing-records.json`: runtime-created mowing records datastore.
 
 ## Heading and Angle Types
 - `src/geometry/headingTypes.ts`: branded types for heading representations to prevent mixing incompatible angle conventions at compile time.
@@ -52,11 +55,15 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/appDialogs.ts`: shared lightweight modal alert/confirm overlay used by operator pages.
 - `src/server/manualDrivePage.ts`: Drive & Paths page asset loader and HTML/CSS/JS assembly for the manual-drive UI.
 - `src/server/manual-drive-page/page.html`: Drive & Paths HTML shell.
-- `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling.
+- `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling and the responsive stored-perimeter editor modal.
 - `src/server/manual-drive-page/page.js`: Drive & Paths browser logic for map drawing, mowing preview, recording, and path actions.
   - served as the `/` home screen (and at `/manual-drive`) with compact live IMU, GNSS, and motor-odometry widgets linking to `/dashboard`
   - area-perimeter saves include the current mowing strip heading and strip spacing, and selecting an area restores those saved defaults into the preview controls
   - the mowing controls also expose a perimeter-entry start path that skips the initial area loop trace and goes straight into the first strip
+  - each stored mowing area exposes an editor that overlays the original and proposed boundaries, supports two-anchor straightening and two-anchor/one-control-point corner reshaping, undo/reset, and explicit save
+  - the homepage header includes navigation to all operator pages, and its mowing controls can apply reusable presets while still allowing per-run angle and width edits
+- `src/server/mowingRecordsPage.ts`: left-aligned mowing history, reusable definition, and distance-based blade-sharpening maintenance page served at `/mowing-records`; definition inputs call the production mowing-plan preview API and render the selected area with its generated strips for fine tuning before save, with visible mutation feedback plus picklist, pointer, and keyboard selection for loading and previewing saved definitions.
+- `src/server/appServer.ts`: mowing-definition saves validate area display names through `PathStore.pathExists()` so names containing spaces resolve to the same sanitized file used by preview and loading.
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
 - `src/server/driveTuningPage.ts`: drive tuning UI uses the shared popup overlay for alerts.
   - staged tuning flow: short-distance brake/CTE learning, long heading-bias tuning, and long heading-gain tuning
@@ -81,11 +88,14 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
+  - Carry On first recovers a GNSS pose up to 75cm outside the area to a validated 25cm-inset target through the ordinary pivot-then-straight drive controller; farther, blocked, or unsuccessful recovery fails closed
+  - continuous operations persist their exact fitted primitives with progress, reject stale resume state without fitted geometry, and validate fitted connector samples against the area and obstacles before initial or resumed execution
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
   - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
   - all mowing segment requests use the 10 cm post-pivot minimum translation, and fitted routed connectors use a lower tight-arc pivot floor than perimeter tracing so viable smooth curves do not repeatedly enter recovery alignment
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
-- `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control; fitted arcs are executed as committed curvature commands derived from radius, direction, and the live calibrated wheelbase, with bounded radial/heading feedback, so their reference samples cannot trigger repeated tight-arc recovery pivots. Meaningful primitive-boundary corners and genuine off-path recovery still lock one segment and pivot direction through alignment and a forward capture. Finite boundary loops may complete near their final target once ordered progress reaches it, avoiding unusably short closing chords, and all commitment transitions yield to sensor/stop processing.
+  - after the final strip, follows the shorter direction around the recorded area perimeter and then returns to the session's original GNSS start position; the return path and start point are persisted for stop/resume recovery
+- `src/pathfollowing/continuousPathFollower.ts`: 50Hz continuous perimeter and routed-connector control with elapsed-time wheel-command slew limiting and full requested output preserved on the faster forward wheel; fitted arcs are acquired once when entering the primitive and remain continuously engaged across all of their dense projected samples, with differential-drive curvature preserved when wheel outputs are normalised. If initial radial/tangent capture fails, recovery locks one segment and pivots then drives one straight capture before engaging the complete arc. Meaningful primitive-boundary corners and genuine off-path recovery use the same locked alignment/capture process. Finite boundary loops may complete near their final target once ordered progress reaches it, avoiding unusably short closing chords, and all commitment transitions yield to sensor/stop processing.
 - `src/pathfollowing/pathPrimitiveFitter.ts`: greedily fits each smoothed execution path into the furthest valid straight chord or consistently turning circular arc within the configured simplification tolerance; straights win equal-distance votes, sharp/inconsistent turns stop fitting, straight spans collapse to endpoints, and arc samples are projected onto the fitted circle. Each primitive records its corresponding execution-point span so the continuous follower preserves and executes the fitted geometry.
 
 ## Pose Fusion
@@ -108,6 +118,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorNodeClient.ts`: Pi-side motor I2C client, including ramp timing injection and percent-based command transmission.
 - `src/sensing/sensorController.ts`: converts raw motor encoder deltas into wheel-speed estimates using persisted calibration.
   - runs the top-level sensor loop, with IMU on every loop tick while GNSS and motor polling run at their own lower cadences to reduce CPU and I2C load
+  - rejects impossible encoder jumps, requires three coherent frames after a motor-feedback outage, rate-limits repeated poll errors, and safety-stops motion after ten consecutive failed feedback polls
 - `src/sensing/sensorHardwareGateway.ts`: clamps normalized wheel outputs (`-1..1`) and applies direction mapping before sending to the motor client.
 - `external-hardware/esp32/motor-controller-v2/motor-controller-v2.ino`: ESP32 motor controller firmware; acts as a ramped PWM bridge that applies commanded wheel targets, handles safe zero-crossing on reversals, and reports encoder/current telemetry back to the Pi without local wheel-speed regulation.
   - no local motor-command watchdog is enforced; the node intentionally holds the last accepted command until the Pi sends a different target or an explicit disable
@@ -298,7 +309,7 @@ This document maps problem domains to candidate files removing the need for Code
   - can pivot in place only as a fallback for very large heading errors and now uses pivot-entry / pivot-exit hysteresis so it does not flap between arc-drive and pivot-turn modes
 - `src/pathfollowing/pathStore.ts`: JSON-based persistent storage for recorded paths
   - file format: `{name}.path.json` by default, with configurable suffix for separate collections such as mowing area perimeters
-  - in-memory caching for loaded paths
+  - in-memory caching for loaded paths invalidates every display-name/sanitized-name alias when a shared file is saved or deleted, preventing list-driven reloads from returning stale perimeter geometry
   - path metadata: total distance, point count, creation timestamp
   - mowing area entries may also persist optional strip-heading / strip-spacing defaults alongside the geometry
 - `src/pathfollowing/pathRecorder.ts`: records paths during manual driving
@@ -321,12 +332,12 @@ This document maps problem domains to candidate files removing the need for Code
   - outside-area starts may join directly from outside so long as the approach only meets the area boundary at the chosen join and does not cross an obstacle; the "midpoint must stay inside" guard applies only when already inside the area
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
-  - when a preferred perimeter start is supplied, starts at its nearest strip end and builds a fresh traversal from there using a bounded set of the nearest remaining strip candidates; it does not rotate an edge-origin sequence and therefore avoids an artificial far-edge wrap while nearer strips remain
+  - when a preferred perimeter start is supplied, uses it only to choose the nearest first strip end, then resumes the adjacent-offset sweep so global nearest-neighbour scoring cannot leave gaps
   - traversal scores connector distance, departure and arrival turn energy, connector vertex complexity, obstacle routing, and crossings of already-mown strips; this avoids saving centimetres of travel at the cost of large extra pivots
   - without a preferred start, sequences strips in locked normal-axis order; both modes mark per-strip traversal direction for boustrophedon preview and execution
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
-  - traversal sequencing now treats obstacle-perimeter routing as an expensive last resort, so adjacent non-routed strip ends win whenever they are still reasonably competitive
+  - traversal sequencing treats obstacle-perimeter routing as a categorical last resort, so an adjacent non-routed strip end always wins regardless of cost score
   - same-offset obstacle-split continuation carries an extra penalty on top of the general routed-obstacle cost, pushing isolated fragments behind locally adjacent mowable strips until the planner has effectively exhausted the nearby region
   - returns logical strip segments for canvas preview and future execution planning
 - `src/pathfollowing/experimentalAdaptiveAreaSmoothing.ts`: experimental adaptive low-pass area smoothing harness module
@@ -413,7 +424,8 @@ This document maps problem domains to candidate files removing the need for Code
   - `GET /api/area-perimeter/record/status` - current mowing area perimeter recording point count
   - `POST /api/area-perimeter/drive` - follow a stored mowing area perimeter from the nearest point and current-facing direction
   - `POST /api/area-perimeter/verify` - drive to the nearest mowing area perimeter point, align, and follow it
-  - `POST /api/area-perimeter/delete` - delete a stored mowing area perimeter
+- `POST /api/area-perimeter/delete` - delete a stored mowing area perimeter
+- `POST /api/area-perimeter/update` - validate and atomically replace the points of an existing mowing area perimeter while retaining its saved mowing defaults
   - `POST /api/mowing-plan/preview` - generate a strip preview for a selected mowing area perimeter, heading, and strip spacing
     - emits `mowing.preview_timing` with timing breakdowns for area load, area shaping, obstacle shaping, and plan generation
     - returns raw, smoothed, and reduced area outlines plus area-geometry timings and per-stage mowing-plan timings for the preview canvas

@@ -16,6 +16,12 @@ __APP_DIALOG_STYLE_TAG__
         <p class="subtitle">Manual drive, live position tracking, and path recording in one place</p>
       </div>
       <nav class="mini-widget-strip" aria-label="Open full system dashboard">
+        <a href="/dashboard" class="header-nav-link">Dashboard</a>
+        <a href="/turn-tuning" class="header-nav-link">Turn Tuning</a>
+        <a href="/drive-tuning" class="header-nav-link">Drive Tuning</a>
+        <a href="/segment-testing" class="header-nav-link">Segment Testing</a>
+        <a href="/dead-reckoning" class="header-nav-link">Dead Reckoning</a>
+        <a href="/mowing-records" class="header-nav-link">Mowing Records</a>
         <a href="/dashboard" class="mini-widget-link" aria-label="Open full IMU dashboard">
           <span class="mini-widget-content">
             <imu-sensor-widget id="mini-imu-widget"></imu-sensor-widget>
@@ -42,6 +48,10 @@ __APP_DIALOG_STYLE_TAG__
         <div class="input-group">
           <label for="mowingPlanArea">Mowing Area</label>
           <select id="mowingPlanArea"></select>
+        </div>
+        <div class="input-group">
+          <label for="mowingPreset">Saved Settings</label>
+          <select id="mowingPreset"><option value="">Custom settings</option></select>
         </div>
         <div class="input-group">
           <label for="mowingHeadingDeg">Strip Heading</label>
@@ -217,6 +227,28 @@ __APP_DIALOG_STYLE_TAG__
     </div>
   </div>
 
+
+  <div id="perimeterEditorBackdrop" class="perimeter-editor-backdrop" aria-hidden="true">
+    <section class="perimeter-editor" role="dialog" aria-modal="true" aria-labelledby="perimeterEditorTitle">
+      <div class="perimeter-editor-header">
+        <div><h2 id="perimeterEditorTitle">Edit mowing area perimeter</h2><p id="perimeterEditorSubtitle"></p></div>
+        <button id="closePerimeterEditor" class="button button-secondary" type="button">Close</button>
+      </div>
+      <div class="perimeter-editor-toolbar" role="toolbar" aria-label="Perimeter editing tools">
+        <button id="straightenPerimeterSection" class="button button-primary" type="button">Straighten section</button>
+        <button id="reshapePerimeterSection" class="button button-secondary" type="button">Reshape corner</button>
+        <button id="undoPerimeterEdit" class="button button-secondary" type="button" disabled>Undo</button>
+        <button id="resetPerimeterEdit" class="button button-secondary" type="button">Reset</button>
+      </div>
+      <p id="perimeterEditorHelp" class="perimeter-editor-help"></p>
+      <canvas id="perimeterEditorCanvas" width="1100" height="700"></canvas>
+      <div class="perimeter-editor-legend"><span class="legend-original">Original</span><span class="legend-edited">Edited</span><span class="legend-anchor">Fixed anchor</span><span class="legend-control">Movable point</span></div>
+      <div class="perimeter-editor-footer">
+        <div id="perimeterEditorStatus" role="status" aria-live="polite"></div>
+        <button id="savePerimeterEdit" class="button button-success" type="button" disabled>Save corrected perimeter</button>
+      </div>
+    </section>
+  </div>
 
 __APP_DIALOG_HTML__
 

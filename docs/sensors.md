@@ -321,9 +321,11 @@ Motor message types:
 - `watchdogHealthy` (`uint8`)
 - `faultFlags` (`uint16`)
 
-The ESP32 motor node sends raw encoder deltas only. The Pi-side sensor controller exposes those deltas verbatim — no metres-per-second conversion is performed at runtime, because the encoder-to-metres calibration is the responsibility of the dead-reckoning calibrator alone and the rest of the system avoids absolute speeds on principle.
+The ESP32 motor node sends raw encoder deltas only. The Pi-side hardware gateway applies the configured motor direction signs before the sensor controller publishes them, so positive app-facing deltas mean logical forward travel. No metres-per-second conversion is performed at runtime, because the encoder-to-metres calibration is the responsibility of the dead-reckoning calibrator alone and the rest of the system avoids absolute speeds on principle.
 
 For control and stationary-detection purposes the only motor feedback values consumed are the raw encoder deltas per sample (`leftEncoderDelta`, `rightEncoderDelta`).
+
+The sensor controller rejects samples above 1,000 ticks per wheel as physically implausible. After any failed or rejected feedback sample it requires three consecutive coherent frames before publishing motor feedback again. Ten consecutive failed polls latch `systemStop` with reason `motor_feedback_unavailable` and request an H-bridge disable; the disable is retried periodically while feedback remains unavailable. Repeated poll errors are logged at most once every five seconds and a recovery summary records the outage duration and failure count.
 
 ### Motor queue priorities
 

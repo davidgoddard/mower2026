@@ -11,7 +11,7 @@ import { PathFollowResult, PathPoint } from "./pathFollowerApi.js";
 import { advancePassedTargets } from "./segmentedBoundaryExecutor.js";
 import type { FittedPathPrimitive } from "./pathPrimitiveFitter.js";
 
-const CONTINUOUS_CONTROL_INTERVAL_MS = 100;
+const CONTINUOUS_CONTROL_INTERVAL_MS = 20;
 const CONTINUOUS_TRACE_SPEED = 1.0;
 const CONTINUOUS_TRACE_SPEED_MIN = 0.5;
 const CONTINUOUS_TRACE_SPEED_CURVE_GAIN = 0.006;
@@ -28,11 +28,13 @@ const CONTINUOUS_PIVOT_EXIT_HEADING_THRESHOLD_DEG = 25;
 const CONTINUOUS_PIVOT_OUTPUT = 0.45;
 const CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG = 12;
 const CONTINUOUS_PIVOT_INNER_WHEEL_HYSTERESIS = 0.1;
-const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_CYCLE = 0.08;
+const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND = 0.8;
 const CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS = 0.4;
 const CONTINUOUS_ARC_HEADING_GAIN = 0.01;
 const CONTINUOUS_ARC_RADIAL_GAIN = 1.2;
 const CONTINUOUS_ARC_MAX_FEEDBACK_TRIM = 0.2;
+const CONTINUOUS_ARC_CAPTURE_RADIAL_ERROR_METERS = 0.1;
+const CONTINUOUS_ARC_CAPTURE_HEADING_ERROR_DEG = 20;
 
 export interface ContinuousPathFollowerOptions {
   readonly sensorController: SensorController;
@@ -81,10 +83,11 @@ interface SegmentCommitment {
   readonly segmentStartIndex: number;
   readonly segmentStart: PathPoint;
   readonly segmentEnd: PathPoint;
-  readonly captureTarget: PathPoint;
-  readonly startingProgressMeters: number;
-  readonly requiredProgressMeters: number;
+  captureTarget: PathPoint;
+  startingProgressMeters: number;
+  requiredProgressMeters: number;
   readonly turnSign: number;
+  readonly arcToEngage?: Extract<FittedPathPrimitive, { kind: "arc" }>;
   phase: "align" | "capture";
 }
 
@@ -125,6 +128,7 @@ export class ContinuousPathFollower {
     let appliedLeftCommand = 0;
     let appliedRightCommand = 0;
     let segmentCommitment: SegmentCommitment | null = null;
+    let engagedArc: Extract<FittedPathPrimitive, { kind: "arc" }> | null = null;
 
     this.sensorController.beginMotionSession();
     try {
@@ -170,6 +174,7 @@ export class ContinuousPathFollower {
             commitment.phase === "align"
             && Math.abs(segmentHeadingErrorDeg) <= CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG
           ) {
+            anchorCommitmentCaptureAtPose(commitment, pose);
             commitment.phase = "capture";
             pivoting = false;
             this.logger.info(`continuous_path.${commitment.kind}_capture_started`, {
@@ -197,6 +202,15 @@ export class ContinuousPathFollower {
                 capturedProgressMeters,
               });
               currentIndex = Math.max(currentIndex, commitment.segmentStartIndex + 1);
+              const arcToEngage = commitment.arcToEngage;
+              if (arcToEngage) {
+                engagedArc = arcToEngage;
+                this.logger.info("continuous_path.arc_engaged", {
+                  executionStartIndex: arcToEngage.executionStartIndex,
+                  executionEndIndex: arcToEngage.executionEndIndex,
+                  radiusMeters: arcToEngage.radiusMeters,
+                });
+              }
               segmentCommitment = null;
               pivoting = false;
               await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
@@ -215,8 +229,18 @@ export class ContinuousPathFollower {
           }
 
           const cappedCommands = capContinuousWheelCommands(committedCommands, options.maximumSpeed);
-          appliedLeftCommand = limitContinuousWheelCommandChange(appliedLeftCommand, cappedCommands.left);
-          appliedRightCommand = limitContinuousWheelCommandChange(appliedRightCommand, cappedCommands.right);
+          appliedLeftCommand = limitContinuousWheelCommandChange(
+            appliedLeftCommand,
+            cappedCommands.left,
+            CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
+            CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
+          );
+          appliedRightCommand = limitContinuousWheelCommandChange(
+            appliedRightCommand,
+            cappedCommands.right,
+            CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
+            CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
+          );
           pivoting = cappedCommands.pivoting;
           await this.sensorController.setMotorWheelOutputs(appliedLeftCommand, appliedRightCommand);
           await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
@@ -247,6 +271,33 @@ export class ContinuousPathFollower {
           options.fittedPrimitives,
           projection.segmentStartIndex,
         );
+        if (engagedArc !== null && activeArc !== engagedArc) {
+          engagedArc = null;
+        }
+        if (activeArc && engagedArc !== activeArc && isFittedArcCaptured(pose, activeArc)) {
+          engagedArc = activeArc;
+          this.logger.info("continuous_path.arc_engaged", {
+            executionStartIndex: activeArc.executionStartIndex,
+            executionEndIndex: activeArc.executionEndIndex,
+            radiusMeters: activeArc.radiusMeters,
+          });
+        }
+        if (activeArc && engagedArc !== activeArc) {
+          segmentCommitment = buildRecoveryCommitment(
+            pathPoints[projection.segmentStartIndex],
+            pathPoints[Math.min(pathPoints.length - 1, projection.segmentStartIndex + 1)],
+            projection.segmentStartIndex,
+            pose,
+            activeArc,
+          );
+          pivoting = true;
+          this.logger.info("continuous_path.arc_acquisition_started", {
+            segmentStartIndex: projection.segmentStartIndex,
+            radiusMeters: activeArc.radiusMeters,
+          });
+          await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
+          continue;
+        }
         const cornerVertexIndex = projection.segmentStartIndex + 1;
         const insideArcSamples = activeArc !== null
           && cornerVertexIndex < activeArc.executionEndIndex;
@@ -323,8 +374,18 @@ export class ContinuousPathFollower {
           continue;
         }
         pivoting = requestedCommands.pivoting;
-        appliedLeftCommand = limitContinuousWheelCommandChange(appliedLeftCommand, requestedCommands.left);
-        appliedRightCommand = limitContinuousWheelCommandChange(appliedRightCommand, requestedCommands.right);
+        appliedLeftCommand = limitContinuousWheelCommandChange(
+          appliedLeftCommand,
+          requestedCommands.left,
+          CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
+          CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
+        );
+        appliedRightCommand = limitContinuousWheelCommandChange(
+          appliedRightCommand,
+          requestedCommands.right,
+          CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
+          CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
+        );
 
         this.logger.debug("continuous_path.control", {
           currentIndex,
@@ -469,9 +530,29 @@ export function computeContinuousPathWheelCommands(
     CONTINUOUS_MAX_TRIM,
   );
 
-  return {
+  return preserveForwardPeakOutput({
     left: clamp(adaptiveBaseSpeed - trim, -1, 1),
     right: clamp(adaptiveBaseSpeed + trim, -1, 1),
+    pivoting: false,
+  }, baseSpeed);
+}
+
+export function preserveForwardPeakOutput(
+  commands: { readonly left: number; readonly right: number; readonly pivoting: boolean },
+  requestedPeakOutput: number,
+): { readonly left: number; readonly right: number; readonly pivoting: boolean } {
+  if (commands.pivoting || commands.left < 0 || commands.right < 0) {
+    return commands;
+  }
+  const peak = Math.max(commands.left, commands.right);
+  const targetPeak = Math.max(0, Math.min(1, requestedPeakOutput));
+  if (peak <= 1e-9 || peak >= targetPeak) {
+    return commands;
+  }
+  const scale = targetPeak / peak;
+  return {
+    left: clamp(commands.left * scale, 0, 1),
+    right: clamp(commands.right * scale, 0, 1),
     pivoting: false,
   };
 }
@@ -505,9 +586,14 @@ export function computeFittedArcWheelCommands(
     CONTINUOUS_ARC_MAX_FEEDBACK_TRIM,
   );
   const trim = feedForwardTrim + feedbackTrim;
+  const rawLeft = Math.max(0.2, baseSpeed - trim);
+  const rawRight = Math.max(0.2, baseSpeed + trim);
+  const peak = Math.max(rawLeft, rawRight);
+  const requestedPeak = clamp(baseSpeed, 0.2, 1);
+  const scale = peak > 1e-9 ? requestedPeak / peak : 1;
   return {
-    left: clamp(baseSpeed - trim, 0.2, 1),
-    right: clamp(baseSpeed + trim, 0.2, 1),
+    left: clamp(rawLeft * scale, 0.2, requestedPeak),
+    right: clamp(rawRight * scale, 0.2, requestedPeak),
     pivoting: false,
   };
 }
@@ -515,10 +601,28 @@ export function computeFittedArcWheelCommands(
 export function limitContinuousWheelCommandChange(
   previousCommand: number,
   requestedCommand: number,
-  maxDelta = CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_CYCLE,
+  maxDeltaPerSecond = CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
+  elapsedSeconds = CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
 ): number {
-  const boundedDelta = Math.max(0, maxDelta);
+  const boundedDelta = Math.max(0, maxDeltaPerSecond) * Math.max(0, elapsedSeconds);
   return clamp(requestedCommand, previousCommand - boundedDelta, previousCommand + boundedDelta);
+}
+
+export function isFittedArcCaptured(
+  pose: Pose,
+  arc: Extract<FittedPathPrimitive, { kind: "arc" }>,
+): boolean {
+  const x = unwrapMeters(pose.position.xMeters);
+  const y = unwrapMeters(pose.position.yMeters);
+  const radialX = x - arc.centerX;
+  const radialY = y - arc.centerY;
+  const radialDistance = Math.hypot(radialX, radialY);
+  const tangentHeadingDeg = (Math.atan2(radialY, radialX) * (180 / Math.PI)) + (arc.direction * 90);
+  const headingErrorDeg = unwrapRelativeAngle(
+    headingDifference(pose.heading, createInternalHeading(tangentHeadingDeg)),
+  );
+  return Math.abs(radialDistance - arc.radiusMeters) <= CONTINUOUS_ARC_CAPTURE_RADIAL_ERROR_METERS
+    && Math.abs(headingErrorDeg) <= CONTINUOUS_ARC_CAPTURE_HEADING_ERROR_DEG;
 }
 
 export function capContinuousWheelCommands(
@@ -743,6 +847,7 @@ function buildRecoveryCommitment(
   segmentEnd: PathPoint,
   segmentStartIndex: number,
   pose: Pose,
+  arcToEngage?: Extract<FittedPathPrimitive, { kind: "arc" }>,
 ): SegmentCommitment {
   const segmentLength = distance(segmentStart, segmentEnd);
   const startingProgressMeters = clamp(
@@ -769,8 +874,27 @@ function buildRecoveryCommitment(
     startingProgressMeters,
     requiredProgressMeters,
     turnSign: headingErrorDeg >= 0 ? 1 : -1,
+    arcToEngage,
     phase: "align",
   };
+}
+
+function anchorCommitmentCaptureAtPose(commitment: SegmentCommitment, pose: Pose): void {
+  const segmentLength = distance(commitment.segmentStart, commitment.segmentEnd);
+  commitment.startingProgressMeters = clamp(
+    progressAlongSegmentMeters(pose, commitment.segmentStart, commitment.segmentEnd),
+    0,
+    segmentLength,
+  );
+  commitment.requiredProgressMeters = Math.min(
+    CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS,
+    Math.max(0, segmentLength - commitment.startingProgressMeters),
+  );
+  commitment.captureTarget = buildCommittedCornerCaptureTarget(
+    commitment.segmentStart,
+    commitment.segmentEnd,
+    commitment.startingProgressMeters + commitment.requiredProgressMeters,
+  );
 }
 
 export function buildCommittedCornerCaptureTarget(

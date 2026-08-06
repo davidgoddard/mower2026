@@ -345,6 +345,18 @@ export const MOTOR_STALL_HIGH_CURRENT_CONSECUTIVE_SAMPLES = 40;
  */
 export const MOTOR_STALL_STARTUP_GRACE_MS = 500;
 
+/** Maximum credible encoder ticks in one 50ms motor-feedback sample. */
+export const MOTOR_FEEDBACK_MAX_ENCODER_DELTA_TICKS = 1_000;
+
+/** Consecutive failed motor-feedback polls before motion is safety-stopped. */
+export const MOTOR_FEEDBACK_FAILURE_STOP_COUNT = 10;
+
+/** Valid frames required after an outage before feedback is trusted again. */
+export const MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT = 3;
+
+/** Minimum interval between repeated motor-feedback error log entries. */
+export const MOTOR_FEEDBACK_ERROR_LOG_INTERVAL_MS = 5_000;
+
 // =============================================================================
 // NETWORK DEFAULTS
 // =============================================================================

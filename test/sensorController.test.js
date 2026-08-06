@@ -151,6 +151,85 @@ test('SensorController requires GNSS chassis progress during translation despite
   });
 });
 
+test('SensorController safety-stops after sustained motor feedback loss', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app', context: 'test', source: 'SensorControllerTest', logDir: dir, minLevel: 'error',
+    });
+    let now = 0;
+    let disableCount = 0;
+    const controller = new SensorController({
+      logger,
+      primitivesStore: new PrimitivesStore(),
+      gateway: {
+        async initialise() {},
+        async readImu() { return null; },
+        async readGnss() { return null; },
+        async readMotorFeedback() { now += 50; throw new Error('motor i2c unavailable'); },
+        async setMotorWheelOutputs() {},
+        async stopMotors() { disableCount += 1; },
+        async close() {},
+      },
+      nowMillis: () => now,
+    });
+
+    systemStop.clearStop('feedback-loss-test');
+    await controller.setMotorWheelOutputs(1, 1);
+    for (let poll = 0; poll < 10; poll += 1) await controller.pollMotors();
+    assert.equal(systemStop.snapshot().reason, 'motor_feedback_unavailable');
+    assert.equal(disableCount, 1);
+    systemStop.clearStop('feedback-loss-test-cleanup');
+    await logger.close();
+  });
+});
+
+test('SensorController rejects implausible encoder jumps and requires three coherent recovery frames', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app', context: 'test', source: 'SensorControllerTest', logDir: dir, minLevel: 'error',
+    });
+    let now = 0;
+    const samples = [
+      { leftEncoderDelta: 950_000, rightEncoderDelta: 945_000 },
+      { leftEncoderDelta: 50, rightEncoderDelta: 51 },
+      { leftEncoderDelta: 52, rightEncoderDelta: 53 },
+      { leftEncoderDelta: 54, rightEncoderDelta: 55 },
+    ];
+    const controller = new SensorController({
+      logger,
+      primitivesStore: new PrimitivesStore(),
+      gateway: {
+        async initialise() {},
+        async readImu() { return null; },
+        async readGnss() { return null; },
+        async readMotorFeedback() {
+          now += 50;
+          return {
+            timestampMillis: now,
+            ...samples.shift(),
+            leftPwmAppliedPercent: 100,
+            rightPwmAppliedPercent: 100,
+            watchdogHealthy: true,
+            faultFlags: 0,
+          };
+        },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => now,
+    });
+    const accepted = [];
+    controller.on('motorFeedbackUpdate', (sample) => accepted.push(sample));
+
+    for (let poll = 0; poll < 4; poll += 1) await controller.pollMotors();
+    assert.equal(accepted.length, 1);
+    assert.equal(accepted[0].leftEncoderDelta, 54);
+    assert.equal(accepted[0].rightEncoderDelta, 55);
+    await logger.close();
+  });
+});
+
 test('SensorController ignores normal 2.3A mowing load but stops sustained 2.8A current', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
