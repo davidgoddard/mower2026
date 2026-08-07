@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "closedLoopToleranceMeters": 0.05,
   "closedLoopDetectionToleranceMeters": 0.35,
   "verificationApproachStandoffMeters": 0.1,
@@ -10,6 +10,9 @@
   "segmentedDriveMaxSegmentLengthMeters": 0.5,
   "segmentedDriveMinSegmentLengthMeters": 0.05,
   "segmentedDriveMaxCteMeters": 0.05,
+  "continuousPathMinimumLookaheadMeters": 0.25,
+  "continuousPathMaximumLookaheadMeters": 1.0,
+  "continuousPathMaximumChordDeviationMeters": 0.05,
   "pathRetryReverseDistanceMeters": 0.5,
   "updatedAt": "2026-06-04T00:00:00.000Z"
 }

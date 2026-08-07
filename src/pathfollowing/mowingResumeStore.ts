@@ -3,7 +3,6 @@ import { readJsonFile, writeJsonFile } from "../config/jsonFileStore.js";
 import { LoggerScope } from "../logging/types.js";
 import { MowingPlan, MowingInitialEntryPlan } from "./mowingPlanner.js";
 import { PathPoint } from "./pathFollowerApi.js";
-import type { FittedPathPrimitive } from "./pathPrimitiveFitter.js";
 import type { MowingPhase } from "./mowingExecutor.js";
 
 export type MowingResumeStage =
@@ -31,6 +30,7 @@ export interface MowingResumeFollowOptions {
   readonly minimumSpeed?: number;
   readonly maximumSpeed?: number;
   readonly pivotIfInnerWheelBelow?: number;
+  readonly routeLookaheadMeters?: number;
   readonly completionToleranceMeters?: number;
   readonly initialTargetIndex?: number;
 }
@@ -57,7 +57,6 @@ export type MowingResumeOperation =
     readonly phase: MowingPhase;
     readonly stripIndex: number;
     readonly pathPoints: PathPoint[];
-    readonly fittedPrimitives: FittedPathPrimitive[];
     readonly followOptions: MowingResumeFollowOptions;
     readonly errorCode: string;
     readonly continuation: MowingResumeContinuation;

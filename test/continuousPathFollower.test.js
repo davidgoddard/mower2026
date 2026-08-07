@@ -6,172 +6,11 @@ import {
   buildCommittedCornerCaptureTarget,
   capContinuousWheelCommands,
   computeContinuousPathBaseSpeed,
-  computeFittedArcWheelCommands,
   computeContinuousPathWheelCommands,
   ContinuousPathFollower,
-  isFittedArcCaptured,
   limitContinuousWheelCommandChange,
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
-
-test("fitted arc control commands one continuous curvature without pivoting", () => {
-  const arc = {
-    kind: "arc",
-    startIndex: 0,
-    endIndex: 9,
-    executionStartIndex: 0,
-    executionEndIndex: 9,
-    maxDeviationMeters: 0.01,
-    centerX: 0,
-    centerY: 0,
-    radiusMeters: 2,
-    direction: 1,
-  };
-  const onArc = computeFittedArcWheelCommands(
-    createPose(2, 0, createInternalHeading(90), "gnss"),
-    arc,
-    0.75,
-    0.6,
-  );
-  const outsideArc = computeFittedArcWheelCommands(
-    createPose(2.1, 0, createInternalHeading(90), "gnss"),
-    arc,
-    0.75,
-    0.6,
-  );
-
-  assert.equal(onArc.pivoting, false);
-  assert.equal(onArc.left > 0 && onArc.right > 0, true);
-  assert.equal(onArc.left < onArc.right, true);
-  assert.equal(Math.abs(onArc.right - 0.75) < 1e-9, true);
-  assert.equal(Math.abs(outsideArc.right - 0.75) < 1e-9, true);
-  assert.equal((outsideArc.left / outsideArc.right) < (onArc.left / onArc.right), true);
-});
-
-test("2.12 metre fitted arc preserves curvature with the faster wheel at full output", () => {
-  const radiusMeters = 2.12;
-  const wheelbaseMeters = 0.55;
-  const commands = computeFittedArcWheelCommands(
-    createPose(radiusMeters, 0, createInternalHeading(90), "gnss"),
-    {
-      kind: "arc",
-      startIndex: 0,
-      endIndex: 20,
-      executionStartIndex: 0,
-      executionEndIndex: 20,
-      maxDeviationMeters: 0.01,
-      centerX: 0,
-      centerY: 0,
-      radiusMeters,
-      direction: 1,
-    },
-    1,
-    wheelbaseMeters,
-  );
-  const expectedInnerOuterRatio = (radiusMeters - (wheelbaseMeters / 2))
-    / (radiusMeters + (wheelbaseMeters / 2));
-
-  assert.equal(commands.pivoting, false);
-  assert.equal(Math.abs(commands.right - 1) < 1e-9, true);
-  assert.equal(Math.abs((commands.left / commands.right) - expectedInnerOuterRatio) < 1e-9, true);
-});
-
-test("fitted arcs require radial and tangent capture before committed forward control", () => {
-  const arc = {
-    kind: "arc",
-    startIndex: 0,
-    endIndex: 3,
-    executionStartIndex: 0,
-    executionEndIndex: 3,
-    maxDeviationMeters: 0.01,
-    centerX: 0,
-    centerY: 0,
-    radiusMeters: 2,
-    direction: 1,
-  };
-
-  assert.equal(isFittedArcCaptured(createPose(2, 0, createInternalHeading(90), "gnss"), arc), true);
-  assert.equal(isFittedArcCaptured(createPose(2.3, 0, createInternalHeading(90), "gnss"), arc), false);
-  assert.equal(isFittedArcCaptured(createPose(2, 0, createInternalHeading(20), "gnss"), arc), false);
-});
-
-test("continuous follower keeps one dense fitted arc engaged despite ordinary tracking error", async () => {
-  const radiusMeters = 2.12;
-  const anglesDeg = [0, 10, 20, 30, 40, 50, 60];
-  const points = anglesDeg.map((angleDeg, index) => {
-    const angle = angleDeg * (Math.PI / 180);
-    return {
-      xMeters: Math.cos(angle) * radiusMeters,
-      yMeters: Math.sin(angle) * radiusMeters,
-      capturedAt: index + 1,
-    };
-  });
-  const poses = anglesDeg.map((angleDeg, index) => {
-    const angle = angleDeg * (Math.PI / 180);
-    const radialOffset = index >= 2 && index < anglesDeg.length - 1 ? 0.12 : 0;
-    return createPose(
-      Math.cos(angle) * (radiusMeters + radialOffset),
-      Math.sin(angle) * (radiusMeters + radialOffset),
-      createInternalHeading(angleDeg + 90),
-      "gnss",
-    );
-  });
-  let poseIndex = 0;
-  let cycles = 0;
-  const commands = [];
-  const events = [];
-  const follower = new ContinuousPathFollower({
-    poseFusion: {
-      getCurrentPose: () => poses[Math.min(poseIndex, poses.length - 1)],
-      getWheelbaseMeters: () => 0.55,
-    },
-    sensorController: {
-      beginMotionSession: () => {},
-      endMotionSession: () => {},
-      setMotorWheelOutputs: async (left, right) => commands.push({ left, right }),
-      requestNeutralMotorOutputs: async () => {},
-    },
-    logger: {
-      info: (message, data) => events.push({ message, data }),
-      debug: () => {},
-    },
-    sleep: async () => {
-      poseIndex = Math.min(poseIndex + 1, poses.length - 1);
-      cycles += 1;
-      if (cycles > 20) {
-        throw new Error("dense arc did not complete");
-      }
-    },
-    baseSpeed: 1,
-  });
-
-  const result = await follower.executePath(points, {
-    loopPath: false,
-    strictOrderedProgress: true,
-    preserveFirstTargetAtPose: true,
-    completionToleranceMeters: 0.2,
-    minimumSpeed: 1,
-    maximumSpeed: 1,
-    fittedPrimitives: [{
-      kind: "arc",
-      startIndex: 0,
-      endIndex: points.length - 1,
-      executionStartIndex: 0,
-      executionEndIndex: points.length - 1,
-      maxDeviationMeters: 0.01,
-      centerX: 0,
-      centerY: 0,
-      radiusMeters,
-      direction: 1,
-    }],
-  });
-
-  assert.equal(result.completed, true);
-  assert.equal(events.filter(({ message }) => message === "continuous_path.arc_engaged").length, 1);
-  assert.equal(events.filter(({ message }) => message === "continuous_path.arc_acquisition_started").length, 0);
-  assert.equal(commands.length > 0, true);
-  assert.equal(commands.every(({ left, right }) => left >= 0 && right >= 0), true);
-});
 
 test("continuous follower locks one recovery segment through pivot and capture", async () => {
   const poses = [
@@ -334,7 +173,7 @@ test("capContinuousWheelCommands preserves curvature while limiting the peak whe
 });
 
 const TEST_PARAMETERS = {
-  version: 3,
+  version: 4,
   closedLoopToleranceMeters: 0.05,
   closedLoopDetectionToleranceMeters: 0.35,
   verificationApproachStandoffMeters: 0.1,
@@ -345,6 +184,9 @@ const TEST_PARAMETERS = {
   segmentedDriveMaxSegmentLengthMeters: 0.5,
   segmentedDriveMinSegmentLengthMeters: 0.05,
   segmentedDriveMaxCteMeters: 0.05,
+  continuousPathMinimumLookaheadMeters: 0.25,
+  continuousPathMaximumLookaheadMeters: 1,
+  continuousPathMaximumChordDeviationMeters: 0.05,
   pathRetryReverseDistanceMeters: 0.5,
   turnAlignmentThresholdDeg: 2,
   updatedAt: "2026-06-19T00:00:00.000Z",
@@ -519,6 +361,21 @@ test("continuous forward steering preserves the requested peak wheel output", ()
 
   assert.equal(commands.pivoting, false);
   assert.equal(Math.abs(Math.max(commands.left, commands.right) - 1) < 1e-9, true);
+});
+
+test("continuous steering uses the learned CTE gain supplied by straight driving", () => {
+  const pose = createPose(0, 0.08, createInternalHeading(0), "gnss");
+  const pathStart = { xMeters: 0, yMeters: 0, capturedAt: 1 };
+  const pathTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
+  const lookahead = { xMeters: 2, yMeters: 0, capturedAt: 3 };
+  const gentle = computeContinuousPathWheelCommands(
+    pose, pathStart, pathTarget, lookahead, 1, false, { cteGain: 0.2, headingGain: 0 },
+  );
+  const learned = computeContinuousPathWheelCommands(
+    pose, pathStart, pathTarget, lookahead, 1, false, { cteGain: 1.2, headingGain: 0 },
+  );
+
+  assert.equal(Math.abs(learned.left - learned.right) > Math.abs(gentle.left - gentle.right), true);
 });
 
 

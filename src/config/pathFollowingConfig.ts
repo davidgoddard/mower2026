@@ -15,6 +15,9 @@ export interface PathFollowingParameters {
   segmentedDriveMaxSegmentLengthMeters: number;
   segmentedDriveMinSegmentLengthMeters: number;
   segmentedDriveMaxCteMeters: number;
+  continuousPathMinimumLookaheadMeters: number;
+  continuousPathMaximumLookaheadMeters: number;
+  continuousPathMaximumChordDeviationMeters: number;
   /**
    * On a high-current obstruction during a perimeter follow, the recovery routine
    * retraces the most recently completed targets in reverse until the cumulative
@@ -33,7 +36,7 @@ export interface PathFollowingParameters {
 }
 
 export const DEFAULT_PATH_FOLLOWING_PARAMETERS: PathFollowingParameters = {
-  version: 3,
+  version: 4,
   closedLoopToleranceMeters: 0.05,
   closedLoopDetectionToleranceMeters: 0.35,
   verificationApproachStandoffMeters: 0.10,
@@ -44,6 +47,9 @@ export const DEFAULT_PATH_FOLLOWING_PARAMETERS: PathFollowingParameters = {
   segmentedDriveMaxSegmentLengthMeters: 0.5,
   segmentedDriveMinSegmentLengthMeters: 0.05,
   segmentedDriveMaxCteMeters: 0.05,
+  continuousPathMinimumLookaheadMeters: 0.25,
+  continuousPathMaximumLookaheadMeters: 1.0,
+  continuousPathMaximumChordDeviationMeters: 0.05,
   pathRetryReverseDistanceMeters: 0.5,
   turnAlignmentThresholdDeg: 2,
   updatedAt: new Date().toISOString(),
@@ -66,6 +72,9 @@ interface LegacyPathFollowingParameters {
   segmentedDriveMaxSegmentLengthMeters?: unknown;
   segmentedDriveMinSegmentLengthMeters?: unknown;
   segmentedDriveMaxCteMeters?: unknown;
+  continuousPathMinimumLookaheadMeters?: unknown;
+  continuousPathMaximumLookaheadMeters?: unknown;
+  continuousPathMaximumChordDeviationMeters?: unknown;
   pathRetryReverseDistanceMeters?: unknown;
   turnAlignmentThresholdDeg?: unknown;
   updatedAt?: unknown;
@@ -195,6 +204,18 @@ export class PathFollowingConfig {
       segmentedDriveMaxCteMeters: this.readPositiveNumber(
         legacy.segmentedDriveMaxCteMeters,
         DEFAULT_PATH_FOLLOWING_PARAMETERS.segmentedDriveMaxCteMeters,
+      ),
+      continuousPathMinimumLookaheadMeters: this.readPositiveNumber(
+        legacy.continuousPathMinimumLookaheadMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.continuousPathMinimumLookaheadMeters,
+      ),
+      continuousPathMaximumLookaheadMeters: this.readPositiveNumber(
+        legacy.continuousPathMaximumLookaheadMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.continuousPathMaximumLookaheadMeters,
+      ),
+      continuousPathMaximumChordDeviationMeters: this.readPositiveNumber(
+        legacy.continuousPathMaximumChordDeviationMeters,
+        DEFAULT_PATH_FOLLOWING_PARAMETERS.continuousPathMaximumChordDeviationMeters,
       ),
       pathRetryReverseDistanceMeters: this.readPositiveNumber(
         legacy.pathRetryReverseDistanceMeters,

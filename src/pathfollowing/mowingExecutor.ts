@@ -3,7 +3,6 @@ import { ContinuousPathFollower } from "./continuousPathFollower.js";
 import { buildMowingPlan, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
 import type { MowingResumeContinuation, MowingResumeOperation, MowingResumeState, MowingResumeStage } from "./mowingResumeStore.js";
 import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan } from "./pathVerification.js";
-import { fitPathToStraightAndArcPrimitives, type FittedPathPrimitive } from "./pathPrimitiveFitter.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
@@ -14,6 +13,7 @@ import { createPosition } from "../geometry/positionTypes.js";
 import { headingDifference, unwrapRelativeAngle, createInternalHeading } from "../geometry/headingTypes.js";
 import type { PathFollowingParameters } from "../config/pathFollowingConfig.js";
 import { DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
+import { planConservativeRouteLookahead } from "./conservativeLookahead.js";
 
 export type MowingPhase =
   | "idle"
@@ -83,8 +83,8 @@ const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
 const PERIMETER_FOLLOW_SPEED = 1.0;
 const PERIMETER_CORNER_PIVOT_DEG = 20;
 const PERIMETER_CORNER_PIVOT_DISTANCE_METERS = 0.15;
-const PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.4;
-const CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR = 0.2;
+const PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT = 0.4;
+const CONNECTOR_MINIMUM_INNER_WHEEL_OUTPUT = 0.2;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
@@ -683,18 +683,12 @@ export class MowingExecutor {
       return { ...this.getStatus(), error: "return_to_start_path_unavailable" };
     }
 
-    const fittedReturn = fitPathToStraightAndArcPrimitives(
-      returnPath,
-      this.parameters.segmentedDriveSimplificationToleranceMeters,
-      this.parameters.segmentedDriveMaxVertexTurnDeg,
-    );
-    const executionPoints = fittedReturn.points.length >= 2 ? fittedReturn.points : returnPath;
+    const executionPoints = returnPath;
     const operation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
       kind: "follow_path",
       phase: "returning_to_start",
       stripIndex: Math.max(0, this.plan.strips.length - 1),
       pathPoints: [...executionPoints],
-      fittedPrimitives: [...fittedReturn.primitives],
       followOptions: {
         loopPath: false,
         strictOrderedProgress: true,
@@ -703,7 +697,7 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
       },
       errorCode: "return_to_start_failed",
       continuation: { stage: "complete", stripIndex: Math.max(0, this.plan.strips.length - 1) },
@@ -718,7 +712,6 @@ export class MowingExecutor {
     const result = await this.continuousPathFollower.executePath([...executionPoints], {
       parameters: this.parameters,
       ...operation.followOptions,
-      fittedPrimitives: fittedReturn.primitives,
     });
     if (!result.completed) {
       this.persistInterruptedFollowProgress(operation, result.completedWaypoints);
@@ -777,29 +770,20 @@ export class MowingExecutor {
       pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
       minimumSpeed: PERIMETER_FOLLOW_SPEED,
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
-      pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+      pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
       ...(operation.phase === "tracing_boundary"
         ? { completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters }
         : {}),
     };
-    if (!Array.isArray(operation.fittedPrimitives)) {
-      this.logger.warn("mowing.resume.fitted_geometry_missing", {
-        phase: operation.phase,
-        stripIndex: operation.stripIndex,
-      });
-      this.phase = "error";
-      return null;
-    }
     if (
       (operation.phase === "following_connector" || operation.markBoundaryTraced === "area")
       && !isMowingExecutionPathSafe(
         operation.pathPoints,
-        operation.fittedPrimitives,
         this.areaPoints,
         this.obstaclePointsArray,
       )
     ) {
-      this.logger.warn("mowing.resume.unsafe_fitted_geometry", {
+      this.logger.warn("mowing.resume.unsafe_path_geometry", {
         phase: operation.phase,
         stripIndex: operation.stripIndex,
       });
@@ -809,7 +793,6 @@ export class MowingExecutor {
     const result = await this.continuousPathFollower.executePath([...operation.pathPoints], {
       parameters: this.parameters,
       ...resumedFollowOptions,
-      fittedPrimitives: operation.fittedPrimitives,
     });
     if (!result.completed) {
       this.persistInterruptedFollowProgress({
@@ -1062,22 +1045,22 @@ export class MowingExecutor {
     if (loopPoints.length < 2) {
       return true;
     }
-    const fittedLoop = fitPathToStraightAndArcPrimitives(
-      loopPoints,
-      this.parameters.segmentedDriveSimplificationToleranceMeters,
-      this.parameters.segmentedDriveMaxVertexTurnDeg,
-    );
-    const executionLoopPoints = fittedLoop.points.length >= 2 ? fittedLoop.points : loopPoints;
+    const routeLookaheadMeters = planConservativeRouteLookahead(tracingBoundaryPoints, {
+      minimumLookaheadMeters: this.parameters.continuousPathMinimumLookaheadMeters,
+      maximumLookaheadMeters: this.parameters.continuousPathMaximumLookaheadMeters,
+      maximumPathDeviationMeters: this.parameters.continuousPathMaximumChordDeviationMeters,
+      loopPath: true,
+    }).lookaheadMeters;
+    const executionLoopPoints = loopPoints;
     if (
       boundaryKey === "area"
       && !isMowingExecutionPathSafe(
         executionLoopPoints,
-        fittedLoop.primitives,
         this.areaPoints,
         this.obstaclePointsArray,
       )
     ) {
-      this.logger.warn("mowing.trace_boundary.unsafe_fitted_geometry", {
+      this.logger.warn("mowing.trace_boundary.unsafe_path_geometry", {
         boundary: boundaryKey,
         inputPointCount: loopPoints.length,
         executionPointCount: executionLoopPoints.length,
@@ -1085,12 +1068,10 @@ export class MowingExecutor {
       this.phase = "error";
       return false;
     }
-    this.logger.info("mowing.trace_boundary.primitives_fitted", {
+    this.logger.info("mowing.trace_boundary.path_ready", {
       boundary: boundaryKey,
       inputPointCount: loopPoints.length,
       executionPointCount: executionLoopPoints.length,
-      straightCount: fittedLoop.primitives.filter((primitive) => primitive.kind === "straight").length,
-      arcCount: fittedLoop.primitives.filter((primitive) => primitive.kind === "arc").length,
     });
 
     const followOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
@@ -1098,7 +1079,6 @@ export class MowingExecutor {
       phase: "tracing_boundary",
       stripIndex: resumeMeta.stripIndex,
       pathPoints: [...executionLoopPoints],
-      fittedPrimitives: [...fittedLoop.primitives],
       followOptions: {
         preserveFirstTargetAtPose: true,
         loopPath: false,
@@ -1107,7 +1087,8 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
+        routeLookaheadMeters,
         completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
       },
       errorCode: "boundary_trace_failed",
@@ -1124,9 +1105,9 @@ export class MowingExecutor {
       pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
       minimumSpeed: PERIMETER_FOLLOW_SPEED,
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
-      pivotIfInnerWheelBelow: PERIMETER_TIGHT_ARC_INNER_WHEEL_FLOOR,
+      pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
+      routeLookaheadMeters,
       completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
-      fittedPrimitives: fittedLoop.primitives,
     });
     if (!followResult.completed) {
       this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);
@@ -1198,38 +1179,29 @@ export class MowingExecutor {
       };
     }
 
-    const fittedConnector = fitPathToStraightAndArcPrimitives(
-      connector,
-      this.parameters.segmentedDriveSimplificationToleranceMeters,
-      this.parameters.segmentedDriveMaxVertexTurnDeg,
-    );
-    const executionConnector = fittedConnector.points.length >= 2 ? fittedConnector.points : [...connector];
+    const executionConnector = [...connector];
     if (!isMowingExecutionPathSafe(
       executionConnector,
-      fittedConnector.primitives,
       this.areaPoints,
       this.obstaclePointsArray,
     )) {
-      this.logger.warn("mowing.connector.unsafe_fitted_geometry", {
+      this.logger.warn("mowing.connector.unsafe_path_geometry", {
         stripIndex,
         inputPointCount: connector.length,
         executionPointCount: executionConnector.length,
       });
       return { completed: false, reason: "error", error: "connector_geometry_outside_safe_area" };
     }
-    this.logger.info("mowing.connector.primitives_fitted", {
+    this.logger.info("mowing.connector.path_ready", {
       stripIndex,
       inputPointCount: connector.length,
       executionPointCount: executionConnector.length,
-      straightCount: fittedConnector.primitives.filter((primitive) => primitive.kind === "straight").length,
-      arcCount: fittedConnector.primitives.filter((primitive) => primitive.kind === "arc").length,
     });
     const followOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
       kind: "follow_path",
       phase: "following_connector",
       stripIndex,
       pathPoints: [...executionConnector],
-      fittedPrimitives: [...fittedConnector.primitives],
       followOptions: {
         loopPath: false,
         strictOrderedProgress: true,
@@ -1237,7 +1209,7 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR,
+        pivotIfInnerWheelBelow: CONNECTOR_MINIMUM_INNER_WHEEL_OUTPUT,
       },
       errorCode: "connector_failed",
       continuation,
@@ -1253,8 +1225,7 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: CONNECTOR_TIGHT_ARC_INNER_WHEEL_FLOOR,
-        fittedPrimitives: fittedConnector.primitives,
+        pivotIfInnerWheelBelow: CONNECTOR_MINIMUM_INNER_WHEEL_OUTPUT,
       },
     );
     if (followResult.completed) {
@@ -1791,7 +1762,6 @@ export function buildMowingReturnPath(
 
 export function isMowingExecutionPathSafe(
   points: ReadonlyArray<PathPoint>,
-  primitives: ReadonlyArray<FittedPathPrimitive>,
   areaPoints: ReadonlyArray<PathPoint>,
   obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>,
 ): boolean {
@@ -1806,33 +1776,6 @@ export function isMowingExecutionPathSafe(
   for (let segmentIndex = 0; segmentIndex < points.length - 1; segmentIndex += 1) {
     const start = points[segmentIndex];
     const end = points[segmentIndex + 1];
-    const arc = primitives.find((primitive): primitive is Extract<FittedPathPrimitive, { kind: "arc" }> => (
-      primitive.kind === "arc"
-      && segmentIndex >= primitive.executionStartIndex
-      && segmentIndex < primitive.executionEndIndex
-    ));
-    if (arc) {
-      const startAngle = Math.atan2(start.yMeters - arc.centerY, start.xMeters - arc.centerX);
-      let endAngle = Math.atan2(end.yMeters - arc.centerY, end.xMeters - arc.centerX);
-      if (arc.direction > 0) {
-        while (endAngle < startAngle) endAngle += Math.PI * 2;
-      } else {
-        while (endAngle > startAngle) endAngle -= Math.PI * 2;
-      }
-      const sweep = endAngle - startAngle;
-      const sampleCount = Math.max(1, Math.ceil(Math.abs(sweep) / (2 * Math.PI / 180)));
-      for (let sampleIndex = 0; sampleIndex <= sampleCount; sampleIndex += 1) {
-        const angle = startAngle + (sweep * sampleIndex / sampleCount);
-        if (!sampleIsSafe(
-          arc.centerX + (Math.cos(angle) * arc.radiusMeters),
-          arc.centerY + (Math.sin(angle) * arc.radiusMeters),
-        )) {
-          return false;
-        }
-      }
-      continue;
-    }
-
     const distanceMeters = Math.hypot(end.xMeters - start.xMeters, end.yMeters - start.yMeters);
     const sampleCount = Math.max(1, Math.ceil(distanceMeters / 0.025));
     for (let sampleIndex = 0; sampleIndex <= sampleCount; sampleIndex += 1) {

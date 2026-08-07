@@ -35,7 +35,7 @@ test("mowing return path takes the shorter perimeter route back to the recorded 
   ]);
 });
 
-test("fitted connector geometry is rejected when an arc leaves the mowing area", () => {
+test("connector geometry is rejected when its route leaves the mowing area", () => {
   const area = [
     { xMeters: -1.1, yMeters: -1.1, capturedAt: 1 },
     { xMeters: 1.1, yMeters: -1.1, capturedAt: 2 },
@@ -45,23 +45,12 @@ test("fitted connector geometry is rejected when an arc leaves the mowing area",
   ];
   const points = [
     { xMeters: -1, yMeters: -1, capturedAt: 6 },
-    { xMeters: 1, yMeters: -1, capturedAt: 7 },
+    { xMeters: 0, yMeters: 0.5, capturedAt: 7 },
+    { xMeters: 1, yMeters: -1, capturedAt: 8 },
   ];
-  const primitives = [{
-    kind: "arc",
-    startIndex: 0,
-    endIndex: 1,
-    executionStartIndex: 0,
-    executionEndIndex: 1,
-    maxDeviationMeters: 0,
-    centerX: 0,
-    centerY: -1,
-    radiusMeters: 1,
-    direction: 1,
-  }];
 
-  assert.equal(isMowingExecutionPathSafe(points, primitives, area, []), false);
-  assert.equal(isMowingExecutionPathSafe(points, [], area, []), true);
+  assert.equal(isMowingExecutionPathSafe(points, area, []), false);
+  assert.equal(isMowingExecutionPathSafe([points[0], points[2]], area, []), true);
 });
 
 test("MowingExecutor completes only after following the perimeter return path", async () => {
@@ -1329,7 +1318,6 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
       phase: "following_connector",
       stripIndex: 0,
       pathPoints,
-      fittedPrimitives: [],
       followOptions: {
         loopPath: false,
         strictOrderedProgress: true,

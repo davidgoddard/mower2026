@@ -8,7 +8,7 @@ export * from "./pathRecorder.js";
 export * from "./pathVerification.js";
 export * from "./segmentedBoundaryExecutor.js";
 export * from "./continuousPathFollower.js";
-export * from "./pathPrimitiveFitter.js";
+export * from "./conservativeLookahead.js";
 export * from "./mowingPlanner.js";
 export * from "./mowingExecutor.js";
 export * from "./mowingResumeStore.js";
