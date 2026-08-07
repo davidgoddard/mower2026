@@ -16,13 +16,24 @@ const logger = {
 
 function state(savedAt) {
   return {
-    version: 1,
+    version: 2,
     areaName: "test-area",
     savedAt,
     currentStripIndex: savedAt,
     totalStrips: 1,
     tracedBoundaryKeys: [],
-    plan: { strips: [] },
+    plan: {
+      strips: [],
+      regions: [],
+      regionOrder: [],
+      routeCost: {
+        mowingDistanceMeters: 0,
+        connectorDistanceMeters: 0,
+        startAndReturnDistanceMeters: 0,
+        estimatedCombinedWheelTravelMeters: 0,
+        regionTransitionCount: 0,
+      },
+    },
     areaPoints: [],
     obstaclePointsArray: [],
     initialEntryPlan: null,

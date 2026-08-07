@@ -193,11 +193,10 @@ export class MowingExecutor {
         return initialEntryStatus;
       }
 
-      if (!this.selectedAreaStartAnchor) {
-        this.reanchorPlanToCurrentPose();
-      } else {
-        this.currentStripIndex = 0;
-      }
+      // The selected regional route is frozen before the first movement and is
+      // persisted with every continuation. Arrival error must not silently
+      // produce a different region order.
+      this.currentStripIndex = 0;
       if (this.skipInitialBoundaryTrace) {
         this.tracedBoundaries.add("area");
       }
@@ -881,7 +880,7 @@ export class MowingExecutor {
 
   private persistResumeOperation(operation: MowingResumeOperation): void {
     this.updateResumeState?.({
-      version: 1,
+      version: 2,
       areaName: this.areaName,
       savedAt: Date.now(),
       currentStripIndex: operation.stripIndex,
@@ -1298,50 +1297,6 @@ export class MowingExecutor {
       pose.position.xMeters - x,
       pose.position.yMeters - y,
     ) <= toleranceMeters;
-  }
-
-  private reanchorPlanToCurrentPose(): void {
-    if (this.plan.strips.length <= 1) {
-      return;
-    }
-
-    const pose = this.poseFusion.getCurrentPose();
-    const replanned = buildMowingPlan(
-      [...this.areaPoints],
-      {
-        headingDeg: this.plan.headingDeg,
-        stripSpacingMeters: this.plan.stripSpacingMeters,
-        bladeWidthMeters: this.plan.bladeWidthMeters,
-        mowingStandoffMeters: this.parameters.mowingStandoffMeters,
-        preferredStartPoint: {
-          xMeters: pose.position.xMeters,
-          yMeters: pose.position.yMeters,
-        },
-        obstacles: this.obstaclePointsArray,
-      },
-    );
-
-    if (replanned.stripCount !== this.plan.stripCount) {
-      this.logger.warn("mowing.plan_reanchor_rejected", {
-        originalStripCount: this.plan.stripCount,
-        replannedStripCount: replanned.stripCount,
-      });
-      return;
-    }
-
-    this.plan = replanned;
-    this.currentStripIndex = 0;
-    this.logger.info("mowing.plan_reanchored", {
-      stripCount: this.plan.stripCount,
-      poseX: pose.position.xMeters,
-      poseY: pose.position.yMeters,
-      firstStripStartX: this.plan.strips[0]?.traversalReversed
-        ? this.plan.strips[0].end.xMeters
-        : this.plan.strips[0].start.xMeters,
-      firstStripStartY: this.plan.strips[0]?.traversalReversed
-        ? this.plan.strips[0].end.yMeters
-        : this.plan.strips[0].start.yMeters,
-    });
   }
 
   private prepareAreaStartAnchorPlan(): void {

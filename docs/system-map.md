@@ -57,6 +57,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/manual-drive-page/page.html`: Drive & Paths HTML shell.
 - `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling and the responsive stored-perimeter editor modal.
 - `src/server/manual-drive-page/page.js`: Drive & Paths browser logic for map drawing, mowing preview, recording, and path actions.
+  - mowing previews shade the strips by planned region so the selected regional traversal is visible before motion
   - served as the `/` home screen (and at `/manual-drive`) with compact live IMU, GNSS, and motor-odometry widgets linking to `/dashboard`
   - area-perimeter saves include the current mowing strip heading and strip spacing, and selecting an area restores those saved defaults into the preview controls
   - the mowing controls also expose a perimeter-entry start path that skips the initial area loop trace and goes straight into the first strip
@@ -95,6 +96,7 @@ This document maps problem domains to candidate files removing the need for Code
   - all mowing segment requests use the 10 cm post-pivot minimum translation; routed connectors and perimeter traces use the conservative continuous follower
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
   - after the final strip, follows the shorter direction around the recorded area perimeter and then returns to the session's original GNSS start position; the return path and start point are persisted for stop/resume recovery
+- `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, assigns stable obstacle-relative regions, builds both sweep orientations for every region, and globally selects a start-aware region order before safe connectors are generated. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
 - `src/pathfollowing/continuousPathFollower.ts`: 50Hz continuous perimeter and routed-connector control with elapsed-time wheel-command slew limiting, learned forward CTE/heading gains, ordered local-path projection, a stable route-wide moving lookahead, and a locked stop/pivot/outgoing-edge capture fallback at genuine corners.
 - `src/pathfollowing/conservativeLookahead.ts`: samples the complete stored boundary at 5cm spacing before motion, independently of the mower's arrival section, and selects the longest stable 25cm-to-1m lookahead whose chords remain within the configured path-deviation budget everywhere; reports when genuine corners require the pivot/capture fallback rather than relaxing safety.
 
@@ -332,14 +334,13 @@ This document maps problem domains to candidate files removing the need for Code
   - outside-area starts may join directly from outside so long as the approach only meets the area boundary at the chosen join and does not cross an obstacle; the "midpoint must stay inside" guard applies only when already inside the area
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
-  - when a preferred perimeter start is supplied, uses it only to choose the nearest first strip end, then resumes the adjacent-offset sweep so global nearest-neighbour scoring cannot leave gaps
-  - traversal scores connector distance, departure and arrival turn energy, connector vertex complexity, obstacle routing, and crossings of already-mown strips; this avoids saving centimetres of travel at the cost of large extra pivots
-  - without a preferred start, sequences strips in locked normal-axis order; both modes mark per-strip traversal direction for boustrophedon preview and execution
+  - classifies clipped strip fragments into stable obstacle-relative regions and creates forward/reverse adjacent-sweep templates for each region
+  - globally optimises the small set of region templates from the preferred live start and back toward that start, while preserving boustrophedon order inside each region
+  - records stable strip IDs, region order, region entry/exit points, and an estimated combined-wheel-travel cost in the plan
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it
-  - traversal sequencing treats obstacle-perimeter routing as a categorical last resort, so an adjacent non-routed strip end always wins regardless of cost score
-  - same-offset obstacle-split continuation carries an extra penalty on top of the general routed-obstacle cost, pushing isolated fragments behind locally adjacent mowable strips until the planner has effectively exhausted the nearby region
-  - returns logical strip segments for canvas preview and future execution planning
+  - exact regional optimisation is used for up to twelve regions; unexpectedly complex layouts use a deterministic bounded fallback
+  - returns logical strip segments, region shading metadata, and the selected connector route for preview and execution
 - `src/pathfollowing/experimentalAdaptiveAreaSmoothing.ts`: experimental adaptive low-pass area smoothing harness module
   - resamples the recorded area loop, applies curvature-weighted smoothing, and iteratively blends failing points back toward the original geometry until they are inside and within the allowed deviation
 - `src/pathfollowing/areaPerimeterPathCleaner.ts`: production mowing-area perimeter cleanup now uses the adaptive smoother plus bounded-error reduction

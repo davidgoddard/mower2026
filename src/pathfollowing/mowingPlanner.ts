@@ -13,6 +13,25 @@ export interface MowingStrip {
   readonly centerOffsetMeters: number;
   readonly sequenceIndex: number;
   readonly traversalReversed: boolean;
+  readonly stableId?: string;
+  readonly regionId?: string;
+}
+
+export interface MowingRegion {
+  readonly id: string;
+  readonly orderIndex: number;
+  readonly stripIds: string[];
+  readonly stripCount: number;
+  readonly entryPoint: PathPoint;
+  readonly exitPoint: PathPoint;
+}
+
+export interface MowingRouteCost {
+  readonly mowingDistanceMeters: number;
+  readonly connectorDistanceMeters: number;
+  readonly startAndReturnDistanceMeters: number;
+  readonly estimatedCombinedWheelTravelMeters: number;
+  readonly regionTransitionCount: number;
 }
 
 export interface MowingPlan {
@@ -22,6 +41,9 @@ export interface MowingPlan {
   readonly stripCount: number;
   readonly strips: MowingStrip[];
   readonly connectors: PathPoint[][];
+  readonly regions: MowingRegion[];
+  readonly regionOrder: string[];
+  readonly routeCost: MowingRouteCost;
   readonly performance?: MowingPlanPerformance;
 }
 
@@ -88,6 +110,15 @@ interface PreparedObstacle {
   readonly polygon: Vector[];
   readonly minOffset: number;
   readonly maxOffset: number;
+  readonly minAlong: number;
+  readonly maxAlong: number;
+}
+
+interface RegionalTraversalResult {
+  readonly sequencing: SequenceStripsResult;
+  readonly regionByStrip: Map<MowingStrip, string>;
+  readonly regionOrder: string[];
+  readonly turnCostMeters: number;
 }
 
 interface PreparedMowingPlanBuild {
@@ -163,6 +194,9 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
       stripCount: 0,
       strips: [],
       connectors: [],
+      regions: [],
+      regionOrder: [],
+      routeCost: { mowingDistanceMeters: 0, connectorDistanceMeters: 0, startAndReturnDistanceMeters: 0, estimatedCombinedWheelTravelMeters: 0, regionTransitionCount: 0 },
       performance: {
         prepareMs,
         stripBuildMs: 0,
@@ -189,16 +223,14 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
 
   const obstaclePolygons = obstacles.map((obstacle) => obstacle.polygon);
   const sequenceStartedAtMs = Date.now();
-  const sequencing = sequenceStripsForMowing(
-    strips,
-    direction,
-    obstaclePolygons,
-    options.preferredStartPoint,
-  );
+  const regional = buildRegionalTraversal(strips, direction, normal, obstacles, obstaclePolygons, options.preferredStartPoint);
+  const sequencing = regional.sequencing;
   const reanchoredTraversal = sequencing.traversal;
   const sequenceMs = Date.now() - sequenceStartedAtMs;
   const sequencedStrips = reanchoredTraversal.map((step, index) => ({
     ...step.strip,
+    stableId: stableStripId(step.strip),
+    regionId: regional.regionByStrip.get(step.strip),
     sequenceIndex: index,
     traversalReversed: step.reversed,
   }));
@@ -207,6 +239,35 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
   const connectorBuildMs = Date.now() - connectorBuildStartedAtMs;
   const stripOffsetCount = countStripOffsets(firstOffset, maxOffset, stripSpacingMeters);
   const routedConnectorCount = connectors.filter((connector) => connector.length > 2).length;
+  const connectorDistanceMeters = connectors.reduce((sum, connector) => sum + pathPointPathLength(connector), 0);
+  const mowingDistanceMeters = sequencedStrips.reduce((sum, strip) => sum + distance(
+    { x: strip.start.xMeters, y: strip.start.yMeters },
+    { x: strip.end.xMeters, y: strip.end.yMeters },
+  ), 0);
+  const firstTraversal = reanchoredTraversal[0];
+  const lastTraversal = reanchoredTraversal[reanchoredTraversal.length - 1];
+  const startAndReturnDistanceMeters = options.preferredStartPoint && firstTraversal && lastTraversal
+    ? distance(
+      { x: options.preferredStartPoint.xMeters, y: options.preferredStartPoint.yMeters },
+      stripTraversalStart(firstTraversal.strip, firstTraversal.reversed),
+    ) + distance(
+      stripTraversalEnd(lastTraversal.strip, lastTraversal.reversed),
+      { x: options.preferredStartPoint.xMeters, y: options.preferredStartPoint.yMeters },
+    )
+    : 0;
+  const regions = regional.regionOrder.map((regionId, orderIndex) => {
+    const regionStrips = sequencedStrips.filter((strip) => strip.regionId === regionId);
+    const first = regionStrips[0];
+    const last = regionStrips[regionStrips.length - 1];
+    return {
+      id: regionId,
+      orderIndex,
+      stripIds: regionStrips.map((strip) => strip.stableId ?? ""),
+      stripCount: regionStrips.length,
+      entryPoint: toPathPoint(stripTraversalStart(first, first.traversalReversed)),
+      exitPoint: toPathPoint(stripTraversalEnd(last, last.traversalReversed)),
+    };
+  });
 
   return {
     headingDeg,
@@ -215,6 +276,15 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
     stripCount: sequencedStrips.length,
     strips: sequencedStrips,
     connectors,
+    regions,
+    regionOrder: regional.regionOrder,
+    routeCost: {
+      mowingDistanceMeters,
+      connectorDistanceMeters,
+      startAndReturnDistanceMeters,
+      estimatedCombinedWheelTravelMeters: ((mowingDistanceMeters + connectorDistanceMeters + startAndReturnDistanceMeters) * 2) + regional.turnCostMeters,
+      regionTransitionCount: Math.max(0, regions.length - 1),
+    },
     performance: {
       prepareMs,
       stripBuildMs,
@@ -255,7 +325,7 @@ function prepareMowingPlanBuild(points: PathPoint[], options: MowingPlanOptions)
   const minOffset = projectedOffsets.length > 0 ? Math.min(...projectedOffsets) : 0;
   const maxOffset = projectedOffsets.length > 0 ? Math.max(...projectedOffsets) : 0;
   const firstOffset = Math.ceil((minOffset - EPSILON) / stripSpacingMeters) * stripSpacingMeters;
-  const obstacles = prepareObstacles(options.obstacles ?? [], normal);
+  const obstacles = prepareObstacles(options.obstacles ?? [], direction, normal);
 
   return {
     headingDeg,
@@ -273,6 +343,7 @@ function prepareMowingPlanBuild(points: PathPoint[], options: MowingPlanOptions)
 
 function prepareObstacles(
   obstacles: ReadonlyArray<ReadonlyArray<PathPoint>>,
+  direction: Vector,
   normal: Vector,
 ): PreparedObstacle[] {
   return obstacles
@@ -282,11 +353,14 @@ function prepareObstacles(
         return null;
       }
       const offsets = polygon.map((point) => dot(point, normal));
+      const alongs = polygon.map((point) => dot(point, direction));
       return {
         obstacleIndex,
         polygon,
         minOffset: Math.min(...offsets),
         maxOffset: Math.max(...offsets),
+        minAlong: Math.min(...alongs),
+        maxAlong: Math.max(...alongs),
       };
     })
     .filter((obstacle): obstacle is PreparedObstacle => obstacle !== null);
@@ -667,6 +741,191 @@ function sequenceStripsForMowing(
       routedCandidateCount,
     },
   };
+}
+
+function buildRegionalTraversal(
+  strips: MowingStrip[],
+  direction: Vector,
+  normal: Vector,
+  preparedObstacles: PreparedObstacle[],
+  obstaclePolygons: Vector[][],
+  preferredStartPoint?: MowingInitialEntryPosition,
+): RegionalTraversalResult {
+  if (strips.length === 0 || preparedObstacles.length === 0) {
+    const sequencing = sequenceStripsForMowing(strips, direction, obstaclePolygons, preferredStartPoint);
+    return {
+      sequencing,
+      regionByStrip: new Map(strips.map((strip) => [strip, "region-01"])),
+      regionOrder: strips.length > 0 ? ["region-01"] : [],
+      turnCostMeters: estimateTraversalTurnCost(sequencing.traversal),
+    };
+  }
+
+  const groups = new Map<string, MowingStrip[]>();
+  for (const strip of strips) {
+    const midpoint = {
+      x: (strip.start.xMeters + strip.end.xMeters) / 2,
+      y: (strip.start.yMeters + strip.end.yMeters) / 2,
+    };
+    const offset = dot(midpoint, normal);
+    const along = dot(midpoint, direction);
+    const signature = preparedObstacles.map((obstacle) => {
+      if (offset < obstacle.minOffset - EPSILON) return `o${obstacle.obstacleIndex}:n-`;
+      if (offset > obstacle.maxOffset + EPSILON) return `o${obstacle.obstacleIndex}:n+`;
+      const obstacleMidAlong = (obstacle.minAlong + obstacle.maxAlong) / 2;
+      return `o${obstacle.obstacleIndex}:${along < obstacleMidAlong ? "a-" : "a+"}`;
+    }).join("|");
+    const group = groups.get(signature) ?? [];
+    group.push(strip);
+    groups.set(signature, group);
+  }
+
+  const orderedGroups = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const templates = orderedGroups.map(([signature, regionStrips], regionIndex) => {
+    const base = sequenceStripsForMowing(regionStrips, direction, obstaclePolygons).traversal;
+    const reverse = base.slice().reverse().map((step) => ({ strip: step.strip, reversed: !step.reversed }));
+    return {
+      signature,
+      id: `region-${String(regionIndex + 1).padStart(2, "0")}`,
+      variants: [base, reverse] as const,
+    };
+  });
+
+  const selected = optimiseRegionTemplates(templates, preferredStartPoint);
+  const traversal = selected.flatMap((choice) => templates[choice.regionIndex].variants[choice.variantIndex]);
+  const regionByStrip = new Map<MowingStrip, string>();
+  selected.forEach((choice) => {
+    const template = templates[choice.regionIndex];
+    template.variants[choice.variantIndex].forEach((step) => regionByStrip.set(step.strip, template.id));
+  });
+  const sequencing: SequenceStripsResult = {
+    traversal,
+    performance: {
+      traversalCandidateEvaluations: 0,
+      traversalConnectorPathEvaluations: 0,
+      routedCandidateCount: 0,
+    },
+  };
+  return {
+    sequencing,
+    regionByStrip,
+    regionOrder: selected.map((choice) => templates[choice.regionIndex].id),
+    turnCostMeters: estimateTraversalTurnCost(traversal),
+  };
+}
+
+interface RegionTemplateChoice {
+  readonly regionIndex: number;
+  readonly variantIndex: 0 | 1;
+}
+
+function optimiseRegionTemplates(
+  templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
+  preferredStartPoint?: MowingInitialEntryPosition,
+): RegionTemplateChoice[] {
+  if (templates.length === 0) return [];
+  // Region counts are deliberately small. For unexpectedly complex gardens,
+  // cap exact search and retain deterministic nearest-region behaviour.
+  if (templates.length > 12) {
+    const remaining = templates.map((_, regionIndex) => regionIndex);
+    const result: RegionTemplateChoice[] = [];
+    let current = preferredStartPoint ? { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters } : null;
+    while (remaining.length > 0) {
+      let best = { listIndex: 0, variantIndex: 0 as 0 | 1, cost: Infinity };
+      remaining.forEach((regionIndex, listIndex) => {
+        ([0, 1] as const).forEach((variantIndex) => {
+          const variant = templates[regionIndex].variants[variantIndex];
+          const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
+          const cost = current ? distance(current, start) : regionIndex;
+          if (cost < best.cost - EPSILON) best = { listIndex, variantIndex, cost };
+        });
+      });
+      const regionIndex = remaining.splice(best.listIndex, 1)[0];
+      result.push({ regionIndex, variantIndex: best.variantIndex });
+      const variant = templates[regionIndex].variants[best.variantIndex];
+      const last = variant[variant.length - 1];
+      current = stripTraversalEnd(last.strip, last.reversed);
+    }
+    return result;
+  }
+
+  type State = { cost: number; choices: RegionTemplateChoice[]; end: Vector };
+  let states = new Map<string, State>();
+  templates.forEach((template, regionIndex) => ([0, 1] as const).forEach((variantIndex) => {
+    const variant = template.variants[variantIndex];
+    const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
+    const last = variant[variant.length - 1];
+    const cost = preferredStartPoint ? distance({ x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters }, start) : 0;
+    states.set(`${1 << regionIndex}:${regionIndex}:${variantIndex}`, {
+      cost,
+      choices: [{ regionIndex, variantIndex }],
+      end: stripTraversalEnd(last.strip, last.reversed),
+    });
+  }));
+  for (let size = 1; size < templates.length; size += 1) {
+    const nextStates = new Map(states);
+    for (const [key, state] of states) {
+      const mask = Number(key.split(":", 1)[0]);
+      if (state.choices.length !== size) continue;
+      templates.forEach((template, regionIndex) => {
+        if ((mask & (1 << regionIndex)) !== 0) return;
+        ([0, 1] as const).forEach((variantIndex) => {
+          const variant = template.variants[variantIndex];
+          const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
+          const last = variant[variant.length - 1];
+          const candidate: State = {
+            cost: state.cost + distance(state.end, start),
+            choices: [...state.choices, { regionIndex, variantIndex }],
+            end: stripTraversalEnd(last.strip, last.reversed),
+          };
+          const nextKey = `${mask | (1 << regionIndex)}:${regionIndex}:${variantIndex}`;
+          const existing = nextStates.get(nextKey);
+          if (!existing || candidate.cost < existing.cost - EPSILON) nextStates.set(nextKey, candidate);
+        });
+      });
+    }
+    states = nextStates;
+  }
+  const complete = [...states.values()].filter((state) => state.choices.length === templates.length);
+  complete.sort((left, right) => {
+    const leftReturn = preferredStartPoint
+      ? distance(left.end, { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters })
+      : 0;
+    const rightReturn = preferredStartPoint
+      ? distance(right.end, { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters })
+      : 0;
+    return (left.cost + leftReturn) - (right.cost + rightReturn);
+  });
+  return complete[0].choices;
+}
+
+function estimateTraversalTurnCost(traversal: TraversalStep[]): number {
+  let radians = 0;
+  for (let index = 1; index < traversal.length; index += 1) {
+    const previous = traversal[index - 1];
+    const current = traversal[index];
+    const previousStart = stripTraversalStart(previous.strip, previous.reversed);
+    const previousEnd = stripTraversalEnd(previous.strip, previous.reversed);
+    const currentStart = stripTraversalStart(current.strip, current.reversed);
+    const currentEnd = stripTraversalEnd(current.strip, current.reversed);
+    const a = Math.atan2(previousEnd.y - previousStart.y, previousEnd.x - previousStart.x);
+    const b = Math.atan2(currentEnd.y - currentStart.y, currentEnd.x - currentStart.x);
+    radians += Math.abs(Math.atan2(Math.sin(b - a), Math.cos(b - a)));
+  }
+  return radians * TURN_COST_METERS_PER_RADIAN;
+}
+
+function stableStripId(strip: MowingStrip): string {
+  const values = [strip.centerOffsetMeters, strip.start.xMeters, strip.start.yMeters, strip.end.xMeters, strip.end.yMeters];
+  return `strip-${values.map((value) => value.toFixed(3).replace(/-/g, "m").replace(/\./g, "p")).join("-")}`;
+}
+
+function pathPointPathLength(points: PathPoint[]): number {
+  let total = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    total += Math.hypot(points[index].xMeters - points[index - 1].xMeters, points[index].yMeters - points[index - 1].yMeters);
+  }
+  return total;
 }
 
 function chooseNearestTraversalStep(

@@ -64,7 +64,7 @@ export type MowingResumeOperation =
   };
 
 export interface MowingResumeState {
-  readonly version: 1;
+  readonly version: 2;
   readonly areaName: string;
   readonly savedAt: number;
   readonly currentStripIndex: number;
@@ -147,7 +147,7 @@ export class MowingResumeStore {
       return null;
     }
     const state = raw as Partial<MowingResumeState>;
-    if (state.version !== 1 || typeof state.areaName !== "string") {
+    if (state.version !== 2 || typeof state.areaName !== "string") {
       return null;
     }
     if (!Array.isArray(state.areaPoints) || !Array.isArray(state.obstaclePointsArray) || !Array.isArray(state.tracedBoundaryKeys)) {
@@ -156,7 +156,7 @@ export class MowingResumeStore {
     if (typeof state.currentStripIndex !== "number" || typeof state.totalStrips !== "number") {
       return null;
     }
-    if (!state.plan || !state.activeOperation) {
+    if (!state.plan || !Array.isArray(state.plan.regions) || !Array.isArray(state.plan.regionOrder) || !state.plan.routeCost || !state.activeOperation) {
       return null;
     }
     return state as MowingResumeState;

@@ -97,6 +97,34 @@ test("buildMowingPlan clips 30cm strips to a square perimeter", () => {
   assert.equal(plan.performance.connectorCount, plan.connectors.length);
   assert.ok(plan.performance.totalMs >= 0);
   assert.ok(plan.performance.sequenceMs >= 0);
+  assert.deepEqual(plan.regionOrder, ["region-01"]);
+  assert.equal(plan.regions[0].stripCount, 4);
+  assert.equal(plan.strips.every((strip) => strip.stableId && strip.regionId === "region-01"), true);
+});
+
+test("buildMowingPlan plans obstacle-relative regions as one persisted route", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0 }, { xMeters: 4, yMeters: 0 },
+    { xMeters: 4, yMeters: 4 }, { xMeters: 0, yMeters: 4 },
+    { xMeters: 0, yMeters: 0 },
+  ];
+  const obstacle = [
+    { xMeters: 1.5, yMeters: 1.5 }, { xMeters: 2.5, yMeters: 1.5 },
+    { xMeters: 2.5, yMeters: 2.5 }, { xMeters: 1.5, yMeters: 2.5 },
+    { xMeters: 1.5, yMeters: 1.5 },
+  ];
+  const plan = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 0.4,
+    preferredStartPoint: { xMeters: 0, yMeters: 0 },
+    obstacles: [obstacle],
+  });
+
+  assert.equal(plan.regions.length, 4);
+  assert.equal(new Set(plan.regionOrder).size, 4);
+  assert.equal(plan.regions.reduce((sum, region) => sum + region.stripCount, 0), plan.stripCount);
+  assert.equal(new Set(plan.strips.map((strip) => strip.stableId)).size, plan.stripCount);
+  assert.ok(plan.routeCost.estimatedCombinedWheelTravelMeters > plan.routeCost.mowingDistanceMeters);
 });
 
 test("buildMowingPlan rotates strip direction with heading", () => {
@@ -372,7 +400,7 @@ test("buildMowingPlan uses configured mowing standoff for same-boundary connecto
   );
 });
 
-test("buildMowingPlan prefers adjacent strips over routed same-offset continuation across an obstacle", () => {
+test("buildMowingPlan keeps each obstacle-relative region contiguous", () => {
   const area = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 4, yMeters: 0, capturedAt: 2 },
@@ -394,26 +422,14 @@ test("buildMowingPlan prefers adjacent strips over routed same-offset continuati
     obstacles: [obstacle],
   });
 
-  for (let index = 0; index < plan.strips.length - 1; index += 1) {
-    const current = plan.strips[index];
-    const next = plan.strips[index + 1];
-    assert.notEqual(
-      Math.abs(current.centerOffsetMeters - next.centerOffsetMeters) <= 1e-9,
-      true,
-    );
+  assert.equal(plan.regions.length, 4);
+  for (const region of plan.regions) {
+    const indices = plan.strips
+      .map((strip, index) => strip.regionId === region.id ? index : -1)
+      .filter((index) => index >= 0);
+    assert.equal(indices.length, region.stripCount);
+    assert.equal(indices[indices.length - 1] - indices[0] + 1, indices.length);
   }
-
-  const offsets = plan.strips.map((strip) => Number(strip.centerOffsetMeters.toFixed(6)));
-  const duplicateOffsetIndex = offsets.findIndex((offset, index) => offsets.indexOf(offset) !== index);
-  assert.notEqual(duplicateOffsetIndex, -1, "expected an isolated region to force a later return to a prior offset");
-
-  const seenBeforeDuplicate = new Set(offsets.slice(0, duplicateOffsetIndex));
-  const uniqueOffsets = new Set(offsets);
-  assert.equal(
-    seenBeforeDuplicate.size,
-    uniqueOffsets.size,
-    "planner should exhaust the locally adjacent non-routed offsets before returning around the obstacle to a deferred fragment",
-  );
 });
 
 test("buildMowingPlan reanchors strip order around the preferred perimeter start point", () => {

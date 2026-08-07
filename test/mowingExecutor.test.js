@@ -877,7 +877,7 @@ test("MowingExecutor resumes from a saved strip-drive operation without replanni
     continuousPathFollower,
     logger: createLogger(),
     resumeState: {
-      version: 1,
+      version: 2,
       areaName: "Rear Lawn",
       savedAt: 1,
       currentStripIndex: 0,
@@ -1303,7 +1303,7 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
     { xMeters: -1, yMeters: -1, capturedAt: 14 },
   ];
   const resumeState = {
-    version: 1,
+    version: 2,
     areaName: "Back lawn",
     savedAt: Date.now(),
     currentStripIndex: 0,
@@ -1381,7 +1381,7 @@ test("MowingExecutor recovers a nearby outside resume pose before continuing", a
   let pose = createPose(-0.2, 5, createInternalHeading(180), "gnss");
   const driveTargets = [];
   const resumeState = {
-    version: 1,
+    version: 2,
     areaName: "Back lawn",
     savedAt: Date.now(),
     currentStripIndex: 0,

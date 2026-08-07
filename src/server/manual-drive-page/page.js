@@ -547,6 +547,23 @@
 
       ctx.save();
       drawPreviewAreaGeometry(toCanvasX, toCanvasY);
+      const regionColours = [
+        'rgba(59, 130, 246, 0.16)', 'rgba(16, 185, 129, 0.16)',
+        'rgba(245, 158, 11, 0.16)', 'rgba(168, 85, 247, 0.16)',
+        'rgba(236, 72, 153, 0.16)', 'rgba(6, 182, 212, 0.16)'
+      ];
+      const regionsById = new Map((mowingPlanPreview.regions ?? []).map((region) => [region.id, region]));
+      mowingPlanPreview.strips.forEach((strip) => {
+        const region = regionsById.get(strip.regionId);
+        if (!region) return;
+        ctx.strokeStyle = regionColours[region.orderIndex % regionColours.length];
+        ctx.lineWidth = Math.max(8, mowingPlanPreview.stripSpacingMeters * 0.8 / Math.max(0.001, 1 / Math.abs(toCanvasX(1) - toCanvasX(0))));
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(toCanvasX(strip.start.xMeters), toCanvasY(strip.start.yMeters));
+        ctx.lineTo(toCanvasX(strip.end.xMeters), toCanvasY(strip.end.yMeters));
+        ctx.stroke();
+      });
       ctx.strokeStyle = 'rgba(17, 24, 39, 0.32)';
       ctx.lineWidth = 1.5;
       ctx.setLineDash([10, 6]);
@@ -591,7 +608,7 @@
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillText(
-        `${mowingPlanPreview.stripCount} strips @ ${Math.round(mowingPlanPreview.stripSpacingMeters * 100)}cm`,
+        `${mowingPlanPreview.stripCount} strips in ${(mowingPlanPreview.regions ?? []).length || 1} regions @ ${Math.round(mowingPlanPreview.stripSpacingMeters * 100)}cm`,
         72,
         72,
       );
