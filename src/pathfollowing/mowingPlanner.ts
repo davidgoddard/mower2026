@@ -110,8 +110,6 @@ interface PreparedObstacle {
   readonly polygon: Vector[];
   readonly minOffset: number;
   readonly maxOffset: number;
-  readonly minAlong: number;
-  readonly maxAlong: number;
 }
 
 interface RegionalTraversalResult {
@@ -223,7 +221,7 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
 
   const obstaclePolygons = obstacles.map((obstacle) => obstacle.polygon);
   const sequenceStartedAtMs = Date.now();
-  const regional = buildRegionalTraversal(strips, direction, normal, obstacles, obstaclePolygons, options.preferredStartPoint);
+  const regional = buildRegionalTraversal(strips, direction, obstaclePolygons, options.preferredStartPoint);
   const sequencing = regional.sequencing;
   const reanchoredTraversal = sequencing.traversal;
   const sequenceMs = Date.now() - sequenceStartedAtMs;
@@ -325,7 +323,7 @@ function prepareMowingPlanBuild(points: PathPoint[], options: MowingPlanOptions)
   const minOffset = projectedOffsets.length > 0 ? Math.min(...projectedOffsets) : 0;
   const maxOffset = projectedOffsets.length > 0 ? Math.max(...projectedOffsets) : 0;
   const firstOffset = Math.ceil((minOffset - EPSILON) / stripSpacingMeters) * stripSpacingMeters;
-  const obstacles = prepareObstacles(options.obstacles ?? [], direction, normal);
+  const obstacles = prepareObstacles(options.obstacles ?? [], normal);
 
   return {
     headingDeg,
@@ -343,7 +341,6 @@ function prepareMowingPlanBuild(points: PathPoint[], options: MowingPlanOptions)
 
 function prepareObstacles(
   obstacles: ReadonlyArray<ReadonlyArray<PathPoint>>,
-  direction: Vector,
   normal: Vector,
 ): PreparedObstacle[] {
   return obstacles
@@ -353,14 +350,11 @@ function prepareObstacles(
         return null;
       }
       const offsets = polygon.map((point) => dot(point, normal));
-      const alongs = polygon.map((point) => dot(point, direction));
       return {
         obstacleIndex,
         polygon,
         minOffset: Math.min(...offsets),
         maxOffset: Math.max(...offsets),
-        minAlong: Math.min(...alongs),
-        maxAlong: Math.max(...alongs),
       };
     })
     .filter((obstacle): obstacle is PreparedObstacle => obstacle !== null);
@@ -746,46 +740,24 @@ function sequenceStripsForMowing(
 function buildRegionalTraversal(
   strips: MowingStrip[],
   direction: Vector,
-  normal: Vector,
-  preparedObstacles: PreparedObstacle[],
   obstaclePolygons: Vector[][],
   preferredStartPoint?: MowingInitialEntryPosition,
 ): RegionalTraversalResult {
-  if (strips.length === 0 || preparedObstacles.length === 0) {
+  if (strips.length === 0) {
     const sequencing = sequenceStripsForMowing(strips, direction, obstaclePolygons, preferredStartPoint);
     return {
       sequencing,
-      regionByStrip: new Map(strips.map((strip) => [strip, "region-01"])),
-      regionOrder: strips.length > 0 ? ["region-01"] : [],
+      regionByStrip: new Map(),
+      regionOrder: [],
       turnCostMeters: estimateTraversalTurnCost(sequencing.traversal),
     };
   }
 
-  const groups = new Map<string, MowingStrip[]>();
-  for (const strip of strips) {
-    const midpoint = {
-      x: (strip.start.xMeters + strip.end.xMeters) / 2,
-      y: (strip.start.yMeters + strip.end.yMeters) / 2,
-    };
-    const offset = dot(midpoint, normal);
-    const along = dot(midpoint, direction);
-    const signature = preparedObstacles.map((obstacle) => {
-      if (offset < obstacle.minOffset - EPSILON) return `o${obstacle.obstacleIndex}:n-`;
-      if (offset > obstacle.maxOffset + EPSILON) return `o${obstacle.obstacleIndex}:n+`;
-      const obstacleMidAlong = (obstacle.minAlong + obstacle.maxAlong) / 2;
-      return `o${obstacle.obstacleIndex}:${along < obstacleMidAlong ? "a-" : "a+"}`;
-    }).join("|");
-    const group = groups.get(signature) ?? [];
-    group.push(strip);
-    groups.set(signature, group);
-  }
-
-  const orderedGroups = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
-  const templates = orderedGroups.map(([signature, regionStrips], regionIndex) => {
+  const orderedGroups = decomposeSweepRegions(strips, direction);
+  const templates = orderedGroups.map((regionStrips, regionIndex) => {
     const base = sequenceStripsForMowing(regionStrips, direction, obstaclePolygons).traversal;
     const reverse = base.slice().reverse().map((step) => ({ strip: step.strip, reversed: !step.reversed }));
     return {
-      signature,
       id: `region-${String(regionIndex + 1).padStart(2, "0")}`,
       variants: [base, reverse] as const,
     };
@@ -812,6 +784,58 @@ function buildRegionalTraversal(
     regionOrder: selected.map((choice) => templates[choice.regionIndex].id),
     turnCostMeters: estimateTraversalTurnCost(traversal),
   };
+}
+
+interface SweepInterval {
+  readonly strip: MowingStrip;
+  readonly minAlong: number;
+  readonly maxAlong: number;
+  regionIndex: number;
+}
+
+function decomposeSweepRegions(strips: MowingStrip[], direction: Vector): MowingStrip[][] {
+  const offsets = [...new Set(strips.map((strip) => strip.centerOffsetMeters))].sort((a, b) => a - b);
+  const regions: MowingStrip[][] = [];
+  let previous: SweepInterval[] = [];
+
+  for (const offset of offsets) {
+    const current = strips
+      .filter((strip) => Math.abs(strip.centerOffsetMeters - offset) <= EPSILON)
+      .map((strip): SweepInterval => {
+        const startAlong = dot({ x: strip.start.xMeters, y: strip.start.yMeters }, direction);
+        const endAlong = dot({ x: strip.end.xMeters, y: strip.end.yMeters }, direction);
+        return {
+          strip,
+          minAlong: Math.min(startAlong, endAlong),
+          maxAlong: Math.max(startAlong, endAlong),
+          regionIndex: -1,
+        };
+      })
+      .sort((left, right) => left.minAlong - right.minAlong);
+
+    const previousOverlaps = previous.map((prior) => current.filter((candidate) => sweepIntervalsOverlap(prior, candidate)));
+    const currentOverlaps = current.map((candidate) => previous.filter((prior) => sweepIntervalsOverlap(prior, candidate)));
+
+    current.forEach((candidate, currentIndex) => {
+      const overlappingPrevious = currentOverlaps[currentIndex];
+      const continuesOneToOne = overlappingPrevious.length === 1
+        && previousOverlaps[previous.indexOf(overlappingPrevious[0])]?.length === 1;
+      if (continuesOneToOne) {
+        candidate.regionIndex = overlappingPrevious[0].regionIndex;
+      } else {
+        candidate.regionIndex = regions.length;
+        regions.push([]);
+      }
+      regions[candidate.regionIndex].push(candidate.strip);
+    });
+    previous = current;
+  }
+
+  return regions.filter((region) => region.length > 0);
+}
+
+function sweepIntervalsOverlap(left: SweepInterval, right: SweepInterval): boolean {
+  return Math.min(left.maxAlong, right.maxAlong) - Math.max(left.minAlong, right.minAlong) > EPSILON;
 }
 
 interface RegionTemplateChoice {

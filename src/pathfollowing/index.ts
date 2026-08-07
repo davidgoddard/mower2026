@@ -12,3 +12,4 @@ export * from "./conservativeLookahead.js";
 export * from "./mowingPlanner.js";
 export * from "./mowingExecutor.js";
 export * from "./mowingResumeStore.js";
+export * from "./mowingProgressStore.js";

@@ -213,7 +213,12 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
   assert.equal(manualPage.includes('Carry On Mowing'), true);
   assert.equal(manualPage.includes("const STRIP_SPACING_STORAGE_KEY = 'manualDrivePage.stripSpacingCm';"), true);
+  assert.equal(manualPage.includes("const MOWING_PRESET_STORAGE_KEY = 'manualDrivePage.mowingPresetId';"), true);
+  assert.equal(manualPage.includes('storeMowingPresetId(preset?.id || \'\');'), true);
+  assert.equal(manualPage.includes('restoreStoredMowingPreset();'), true);
   assert.equal(manualPage.includes("const MOWING_PROGRESS_STORAGE_KEY = 'manualDrivePage.mowingProgress';"), true);
+  assert.equal(manualPage.includes("fetchJson('/api/mowing/progress')"), true);
+  assert.equal(manualPage.includes('loadMowerMowingProgress(),'), true);
   assert.equal(manualPage.includes('clearMowingProgress();'), true);
   assert.equal(manualPage.includes('MAX_HISTORY_MS'), false);
   assert.equal(manualPage.includes("ctx.strokeStyle = 'rgba(37, 99, 235, 0.6)';"), true);

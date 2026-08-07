@@ -47,7 +47,7 @@ import {
   WHEEL_BASE_METERS_MIN_PLAUSIBLE,
   WHEEL_BASE_METERS_MAX_PLAUSIBLE,
 } from "../constants.js";
-import { ContinuousPathFollower, MowingExecutor, MowingResumeStore, PathRecorder, PathStore, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildPerimeterFollowPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath } from "../pathfollowing/index.js";
+import { ContinuousPathFollower, MowingExecutor, MowingProgressStore, MowingResumeStore, PathRecorder, PathStore, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildPerimeterFollowPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath } from "../pathfollowing/index.js";
 import type { MowingResumeState, MowingStatus, PathPoint } from "../pathfollowing/index.js";
 import { shapeObstacleRecordedPath } from "../pathfollowing/obstaclePathShaper.js";
 import { buildAreaPerimeterGeometry } from "../pathfollowing/areaPerimeterPathCleaner.js";
@@ -71,6 +71,7 @@ interface StartMowerServerOptions {
   controllerSpeedSign?: number;
   manualDriveLoopMs?: number;
   maxWheelOutputPercent?: number;
+  mowingProgressFilePath?: string;
 }
 
 export interface RunningMowerServer {
@@ -625,6 +626,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let mowingExecutor: MowingExecutor | null = null;
   let mowingStatus: MowingStatus = { phase: "idle", currentStripIndex: 0, totalStrips: 0, tracedBoundaryCount: 0 };
   let mowingResumeStore: MowingResumeStore | null = null;
+  let mowingProgressStore: MowingProgressStore | null = null;
   const mowingRecordsStore = new MowingRecordsStore();
   let mowingResumeState: MowingResumeState | null = null;
   let operationContextTracker: OperationContextTracker | null = null;
@@ -903,6 +905,18 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           resumeAreaName: !mowingExecutor ? mowingResumeState?.areaName ?? null : null,
           resumeSavedAt: !mowingExecutor ? mowingResumeState?.savedAt ?? null : null,
         }));
+        return;
+      }
+
+      if (requestUrl.pathname === "/api/mowing/progress") {
+        try {
+          const points = mowingProgressStore ? await mowingProgressStore.readPoints() : [];
+          response.writeHead(200, { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ points }));
+        } catch (error) {
+          response.writeHead(500, { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ error: error instanceof Error ? error.message : String(error) }));
+        }
         return;
       }
 
@@ -1760,6 +1774,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           }
 
           setMowingResumeState(null);
+          await mowingProgressStore?.startFresh();
           systemStop.clearStop("api-mowing-start");
           mowingExecutor = new MowingExecutor({
             areaName,
@@ -1833,6 +1848,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             const message = error instanceof Error ? error.message : String(error);
             mowingStatus = { phase: "error", currentStripIndex: 0, totalStrips: plan.strips.length, tracedBoundaryCount: 0, error: message };
           }).finally(() => {
+            mowingProgressStore?.pause();
             retryManager?.endSession();
             operationContextTracker?.clearContext();
             if (mowingExecutor === activeMowingExecutor) {
@@ -1879,6 +1895,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const resumeState = mowingResumeState;
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const mowingSessionId = `mowing-resume-${Date.now()}`;
+          await mowingProgressStore?.continueExisting();
           systemStop.clearStop("api-mowing-resume");
           mowingExecutor = new MowingExecutor({
             areaName: resumeState.areaName,
@@ -1950,6 +1967,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
               error: message,
             };
           }).finally(() => {
+            mowingProgressStore?.pause();
             retryManager?.endSession();
             operationContextTracker?.clearContext();
             if (mowingExecutor === activeMowingExecutor) {
@@ -2493,6 +2511,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     };
     poseFusion.on("poseUpdate", refreshPoseFusionPrimitive);
     refreshPoseFusionPrimitive();
+    mowingProgressStore = new MowingProgressStore(poseFusion, {
+      filePath: options.mowingProgressFilePath,
+      logger: logger.child({ context: "mowing", source: "MowingProgressStore" }),
+    });
 
     turnValidationRunner = new TurnValidationRunner({
       turnController,
@@ -2644,6 +2666,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
       logger.transition("running", "stopping");
 
       await bladeUsageTracker?.close();
+      await mowingProgressStore?.close();
 
       if (fatalHandlerInstalled) {
         process.off("uncaughtException", fatalExceptionHandler);

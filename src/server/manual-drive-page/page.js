@@ -38,6 +38,7 @@
 
     const MOWING_HEADING_STORAGE_KEY = 'manualDrivePage.mowingHeadingDeg';
     const STRIP_SPACING_STORAGE_KEY = 'manualDrivePage.stripSpacingCm';
+    const MOWING_PRESET_STORAGE_KEY = 'manualDrivePage.mowingPresetId';
     const MOWING_PROGRESS_STORAGE_KEY = 'manualDrivePage.mowingProgress';
     const DEFAULT_STRIP_SPACING_CM = 30;
     function loadStoredMowingHeading() {
@@ -72,6 +73,26 @@
       }
       try {
         window.localStorage.setItem(STRIP_SPACING_STORAGE_KEY, String(spacingCm));
+      } catch (_error) {
+        // Ignore storage failures; the page still works without persistence.
+      }
+    }
+
+    function loadStoredMowingPresetId() {
+      try {
+        return window.localStorage.getItem(MOWING_PRESET_STORAGE_KEY) || '';
+      } catch (_error) {
+        return '';
+      }
+    }
+
+    function storeMowingPresetId(presetId) {
+      try {
+        if (presetId) {
+          window.localStorage.setItem(MOWING_PRESET_STORAGE_KEY, presetId);
+        } else {
+          window.localStorage.removeItem(MOWING_PRESET_STORAGE_KEY);
+        }
       } catch (_error) {
         // Ignore storage failures; the page still works without persistence.
       }
@@ -180,6 +201,37 @@
         }
       } catch (_error) {
         // Ignore invalid or unavailable storage and begin with an empty trail.
+      }
+    }
+
+    async function loadMowerMowingProgress() {
+      try {
+        const data = await fetchJson('/api/mowing/progress');
+        if (!Array.isArray(data.points)) {
+          return;
+        }
+        const mowerPoints = data.points.filter((point) => (
+          Number.isFinite(point?.x)
+          && Number.isFinite(point?.y)
+          && Number.isFinite(point?.heading)
+          && Number.isFinite(point?.timestamp)
+        ));
+        positionHistory.length = 0;
+        for (let index = 0; index < mowerPoints.length; index++) {
+          const point = mowerPoints[index];
+          const previous = mowerPoints[index - 1];
+          positionHistory.push({
+            x: point.x,
+            y: point.y,
+            heading: point.heading,
+            timestamp: point.timestamp,
+            breakBefore: Boolean(previous) && Math.hypot(point.x - previous.x, point.y - previous.y) > MAP_HISTORY_DISCONTINUITY_DISTANCE_METERS,
+          });
+        }
+        storeMowingProgress(true);
+        drawMap();
+      } catch (error) {
+        console.error('Failed to load mower mowing progress:', error);
       }
     }
 
@@ -564,6 +616,20 @@
         ctx.lineTo(toCanvasX(strip.end.xMeters), toCanvasY(strip.end.yMeters));
         ctx.stroke();
       });
+      (mowingPlanPreview.regions ?? []).forEach((region) => {
+        if (!region.entryPoint) return;
+        const x = toCanvasX(region.entryPoint.xMeters);
+        const y = toCanvasY(region.entryPoint.yMeters);
+        ctx.fillStyle = 'rgba(17, 24, 39, 0.88)';
+        ctx.beginPath();
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(region.orderIndex + 1), x, y);
+      });
       ctx.strokeStyle = 'rgba(17, 24, 39, 0.32)';
       ctx.lineWidth = 1.5;
       ctx.setLineDash([10, 6]);
@@ -760,8 +826,40 @@
         mowingPresetSelect.innerHTML = '<option value="">Custom settings</option>' + mowingPresets.map((preset) =>
           `<option value="${htmlAttribute(preset.id)}">${htmlAttribute(preset.name)} — ${htmlAttribute(preset.areaName)}</option>`
         ).join('');
+        const storedPresetId = loadStoredMowingPresetId();
+        if (mowingPresets.some((preset) => preset.id === storedPresetId)) {
+          mowingPresetSelect.value = storedPresetId;
+        } else if (storedPresetId) {
+          storeMowingPresetId('');
+        }
       } catch (error) {
         console.error('Failed to load mowing presets:', error);
+      }
+    }
+
+    function applyMowingPreset(preset) {
+      if (!preset) {
+        return false;
+      }
+      mowingPresetSelect.value = preset.id;
+      mowingPlanAreaSelect.value = preset.areaName;
+      selectedMowingPlanArea = preset.areaName;
+      mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(preset.headingDeg)));
+      stripSpacingInput.value = String(Math.round(Number(preset.stripWidthMeters) * 100));
+      storeMowingHeading(mowingHeadingInput.value);
+      storeStripSpacingCm(stripSpacingInput.value);
+      updateHeadingLabel();
+      return true;
+    }
+
+    function restoreStoredMowingPreset() {
+      const storedPresetId = loadStoredMowingPresetId();
+      if (!storedPresetId) {
+        return;
+      }
+      const preset = mowingPresets.find((entry) => entry.id === storedPresetId);
+      if (!applyMowingPreset(preset)) {
+        storeMowingPresetId('');
       }
     }
 
@@ -1538,6 +1636,7 @@
 
     mowingPlanAreaSelect.addEventListener('change', () => {
       mowingPresetSelect.value = '';
+      storeMowingPresetId('');
       selectedMowingPlanArea = mowingPlanAreaSelect.value;
       applyAreaMowingDefaults(selectedMowingPlanArea);
       markMowingPlanPreviewStale();
@@ -1545,19 +1644,14 @@
 
     mowingPresetSelect.addEventListener('change', () => {
       const preset = mowingPresets.find((entry) => entry.id === mowingPresetSelect.value);
-      if (!preset) return;
-      mowingPlanAreaSelect.value = preset.areaName;
-      selectedMowingPlanArea = preset.areaName;
-      mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(preset.headingDeg)));
-      stripSpacingInput.value = String(Math.round(Number(preset.stripWidthMeters) * 100));
-      storeMowingHeading(mowingHeadingInput.value);
-      storeStripSpacingCm(stripSpacingInput.value);
-      updateHeadingLabel();
+      storeMowingPresetId(preset?.id || '');
+      if (!applyMowingPreset(preset)) return;
       markMowingPlanPreviewStale();
     });
 
     mowingHeadingInput.addEventListener('input', () => {
       mowingPresetSelect.value = '';
+      storeMowingPresetId('');
       storeMowingHeading(mowingHeadingInput.value);
       updateHeadingLabel();
       markMowingPlanPreviewStale();
@@ -1565,6 +1659,7 @@
 
     stripSpacingInput.addEventListener('input', () => {
       mowingPresetSelect.value = '';
+      storeMowingPresetId('');
       storeStripSpacingCm(stripSpacingInput.value);
       markMowingPlanPreviewStale();
     });
@@ -1776,11 +1871,13 @@
     });
 
     Promise.all([
+      loadMowerMowingProgress(),
       loadStoredPaths(),
       loadStoredAreaPerimeters(),
       loadMowingPresets(),
       pollMowingStatus(),
     ]).then(() => {
+      restoreStoredMowingPreset();
       listsLoadedOnce = true;
       lastListRefreshAt = Date.now();
       if (!recording) {

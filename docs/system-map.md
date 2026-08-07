@@ -63,6 +63,7 @@ This document maps problem domains to candidate files removing the need for Code
   - the mowing controls also expose a perimeter-entry start path that skips the initial area loop trace and goes straight into the first strip
   - each stored mowing area exposes an editor that overlays the original and proposed boundaries, supports two-anchor straightening and two-anchor/one-control-point corner reshaping, undo/reset, and explicit save
   - the homepage header includes navigation to all operator pages, and its mowing controls can apply reusable presets while still allowing per-run angle and width edits
+  - the selected reusable mowing preset is retained in browser storage across page refreshes; manual area, angle, or width changes return the selector to custom settings
 - `src/server/mowingRecordsPage.ts`: left-aligned mowing history, reusable definition, and distance-based blade-sharpening maintenance page served at `/mowing-records`; definition inputs call the production mowing-plan preview API and render the selected area with its generated strips for fine tuning before save, with visible mutation feedback plus picklist, pointer, and keyboard selection for loading and previewing saved definitions.
 - `src/server/appServer.ts`: mowing-definition saves validate area display names through `PathStore.pathExists()` so names containing spaces resolve to the same sanitized file used by preview and loading.
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
@@ -334,7 +335,7 @@ This document maps problem domains to candidate files removing the need for Code
   - outside-area starts may join directly from outside so long as the approach only meets the area boundary at the chosen join and does not cross an obstacle; the "midpoint must stay inside" guard applies only when already inside the area
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
-  - classifies clipped strip fragments into stable obstacle-relative regions and creates forward/reverse adjacent-sweep templates for each region
+  - performs sweep-topology decomposition: interval appearances, disappearances, splits and merges caused by either the area boundary or obstacles create stable visitable regions, including concave outer-boundary pockets
   - globally optimises the small set of region templates from the preferred live start and back toward that start, while preserving boustrophedon order inside each region
   - records stable strip IDs, region order, region entry/exit points, and an estimated combined-wheel-travel cost in the plan
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
@@ -357,6 +358,10 @@ This document maps problem domains to candidate files removing the need for Code
   - dedicated drive/segment and turn-validation/training runners label their controller requests as `training`; unlabeled requests are treated as ordinary operations
 - `src/pathfollowing/mowingResumeStore.ts`: JSON persistence for the saved mowing resume state
   - stores the exact active mowing operation, continuous-follow target index, traced-boundary progress, saved strip plan, and recorded area/obstacle geometry used by `/api/mowing/resume`
+- `src/pathfollowing/mowingProgressStore.ts`: mower-owned JSONL mowing trail persistence
+  - samples fused poses at 1 Hz while a mowing executor is active, queues asynchronous appends outside the pose callback, tolerates a partial final row, and preserves sequence numbering across **Carry On Mowing**
+  - stores the current trail at `data/mowing-progress.jsonl`; a validated fresh mowing start truncates it, while resume appends to it
+- `scripts/rebuild-mowing-progress-from-run-records.mjs`: operator/development recovery utility that rebuilds a representative mowing-progress JSONL file from timestamped drive RunRecord poses within a supplied mowing-session time range
   - serializes save and clear requests through one ordered promise queue, preventing rapid progress checkpoints from racing each other or an initial clear
   - uses the shared collision-proof atomic JSON writer; app-server persistence failures are logged as `mowing_resume.persist_failed` and do not terminate active motor control
   - on mow start, now tries to select a strip-adjacent area-perimeter anchor that is directly reachable without re-leaving the area after entry; when one is found it re-anchors the strip order to that perimeter point, drives to the associated inside standoff, traces the full area loop once, and then starts strip mowing from that same strip-adjacent point instead of re-planning again from the post-trace pose
@@ -393,7 +398,7 @@ This document maps problem domains to candidate files removing the need for Code
   - persists the operator's strip-width selection in browser storage so refreshes do not reset it to 30 cm or overwrite it with an older area-capture default
   - drive and verify actions for stored paths (single segmented drive mode — no per-path algorithm choice)
   - canvas map auto-scales across live position history, obstacle paths, and mowing area perimeters, with a minimum view range and stationary jitter coalescing so centimetre-scale GNSS drift does not dominate the display
-  - retains the full-opacity mowing progress trail in browser storage across refresh and **Carry On Mowing**; only a successful fresh **Mow Area** or **Mow From Perimeter** start clears it, while large pose jumps create a visual discontinuity instead of erasing prior progress
+  - loads the mower-owned mowing progress trail once during page startup, retains a browser copy as a fallback, and then adds live polled poses; large pose jumps create a visual discontinuity instead of erasing prior progress
   - canvas map overlays generated mowing strips and obstacle-aware connectors for the selected area
   - stored path and area-perimeter detail loads are skipped individually if invalid so one bad/missing file does not suppress all overlays
   - prominent stop button for path following aborts
@@ -537,7 +542,7 @@ This document maps problem domains to candidate files removing the need for Code
   - serves shared browser assets including `/sensor-widgets.js` and `/operator-page-common.js`
   - owns the mowing executor lifecycle (`MowingExecutor`) and dead-reckoning calibrator lifecycle
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
-  - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`
+  - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`, `GET /api/mowing/progress`
 - `src/server/homePage.ts`: expanded dashboard served at `/dashboard`, including navigation to Drive & Paths and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
 - `src/server/deadReckoningPage.ts`: dead-reckoning arc-calibration page — three-phase calibration procedure UI (straight line, forward CW arc, forward CCW arc); live IMU, GNSS, and motor-odometry widgets in a scaled row across the top; controls panel and a 45°-step test-moves panel side-by-side beneath; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
   - Test-moves panel: 8 directional buttons (1 m at 45° increments) drive the mower to `current GNSS pose + Δ` via `POST /api/drive/execute` with learning disabled, snapshot pose before and after each move, and tabulate GNSS-measured Δx/Δy/Δheading vs encoder-DR Δx/Δy/Δheading plus their differences for direct comparison of motor-encoder dead-reckoning fidelity.

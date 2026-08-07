@@ -127,6 +127,25 @@ test("buildMowingPlan plans obstacle-relative regions as one persisted route", (
   assert.ok(plan.routeCost.estimatedCombinedWheelTravelMeters > plan.routeCost.mowingDistanceMeters);
 });
 
+test("buildMowingPlan discovers an outer-boundary pocket without a recorded obstacle", () => {
+  const concaveArea = [
+    { xMeters: 0, yMeters: 0 }, { xMeters: 4, yMeters: 0 },
+    { xMeters: 4, yMeters: 1 }, { xMeters: 1, yMeters: 1 },
+    { xMeters: 1, yMeters: 3 }, { xMeters: 4, yMeters: 3 },
+    { xMeters: 4, yMeters: 4 }, { xMeters: 0, yMeters: 4 },
+    { xMeters: 0, yMeters: 0 },
+  ];
+  const plan = buildMowingPlan(concaveArea, {
+    headingDeg: 90,
+    stripSpacingMeters: 0.4,
+    preferredStartPoint: { xMeters: 0, yMeters: 0 },
+  });
+
+  assert.equal(plan.regions.length, 3);
+  assert.equal(plan.regions.some((region) => region.stripCount > 1), true);
+  assert.equal(plan.regions.reduce((sum, region) => sum + region.stripCount, 0), plan.stripCount);
+});
+
 test("buildMowingPlan rotates strip direction with heading", () => {
   const plan = buildMowingPlan(square, {
     headingDeg: 90,
