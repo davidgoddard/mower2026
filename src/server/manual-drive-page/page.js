@@ -158,6 +158,7 @@
     let mowingPresets = [];
     let mowingPlanPreview = null;
     let selectedMowingPlanArea = '';
+    let mowingPlanPreviewError = '';
     let mapTransform = null;
     let headingDragStart = null;
     let mowingStatusNeedsPolling = false;
@@ -881,11 +882,16 @@
       selectedMowingPlanArea = mowingPlanAreaSelect.value || storedAreaPerimeters[0].name;
       mowingPlanAreaSelect.value = selectedMowingPlanArea;
       applyAreaMowingDefaults(selectedMowingPlanArea);
-      mowingPlanStatusEl.textContent = `Selected area: ${selectedMowingPlanArea}. Click Preview to inspect the plan.`;
+      if (mowingPlanPreviewError) {
+        mowingPlanStatusEl.textContent = mowingPlanPreviewError;
+      } else {
+        mowingPlanStatusEl.textContent = `Selected area: ${selectedMowingPlanArea}. Click Preview to inspect the plan.`;
+      }
     }
 
     function markMowingPlanPreviewStale() {
       mowingPlanPreview = null;
+      mowingPlanPreviewError = '';
       const areaName = mowingPlanAreaSelect.value;
       if (!areaName) {
         mowingPlanStatusEl.textContent = 'Choose a mowing area and a valid strip spacing to preview strips.';
@@ -910,14 +916,19 @@
 
       selectedMowingPlanArea = areaName;
       mowingPlanStatusEl.textContent = `Generating preview for ${areaName}...`;
+      const previewAbortController = new AbortController();
+      const previewTimeout = setTimeout(() => previewAbortController.abort(), 30000);
       try {
         const result = await postJson('/api/mowing-plan/preview', {
           areaName,
           headingDeg,
           stripSpacingMeters,
+        }, {
+          signal: previewAbortController.signal,
         });
 
         mowingPlanPreview = result;
+        mowingPlanPreviewError = '';
         const stats = result.areaGeometryStats;
         const timing = result.areaGeometryTiming;
         const planPerformance = result.planPerformance;
@@ -934,9 +945,15 @@
         drawMap();
       } catch (error) {
         mowingPlanPreview = null;
-        mowingPlanStatusEl.textContent = `Preview failed for ${areaName}: ${error.message}`;
+        const message = error?.name === 'AbortError'
+          ? 'planning exceeded 30 seconds'
+          : error.message;
+        mowingPlanPreviewError = `Preview failed for ${areaName}: ${message}`;
+        mowingPlanStatusEl.textContent = mowingPlanPreviewError;
         drawMap();
         console.error('Failed to preview mowing plan:', error);
+      } finally {
+        clearTimeout(previewTimeout);
       }
     }
 

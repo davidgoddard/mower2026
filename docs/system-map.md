@@ -337,6 +337,8 @@ This document maps problem domains to candidate files removing the need for Code
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
   - performs sweep-topology decomposition: interval appearances, disappearances, splits and merges caused by either the area boundary or obstacles create stable visitable regions, including concave outer-boundary pockets
   - globally optimises the small set of region templates from the preferred live start and back toward that start, while preserving boustrophedon order inside each region
+  - filters the regional optimisation graph through the production safe-connector builder, preventing oblique mowing angles from selecting an infeasible transition and failing later during preview connector generation
+  - caches each oriented region-to-region connector evaluation so exact optimisation does not repeatedly run expensive geometry validation for the same edge
   - records stable strip IDs, region order, region entry/exit points, and an estimated combined-wheel-travel cost in the plan
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it

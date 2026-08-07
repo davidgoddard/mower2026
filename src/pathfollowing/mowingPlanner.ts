@@ -221,7 +221,14 @@ export function buildMowingPlan(points: PathPoint[], options: MowingPlanOptions)
 
   const obstaclePolygons = obstacles.map((obstacle) => obstacle.polygon);
   const sequenceStartedAtMs = Date.now();
-  const regional = buildRegionalTraversal(strips, direction, obstaclePolygons, options.preferredStartPoint);
+  const regional = buildRegionalTraversal(
+    strips,
+    direction,
+    polygon,
+    obstaclePolygons,
+    mowingStandoffMeters,
+    options.preferredStartPoint,
+  );
   const sequencing = regional.sequencing;
   const reanchoredTraversal = sequencing.traversal;
   const sequenceMs = Date.now() - sequenceStartedAtMs;
@@ -740,7 +747,9 @@ function sequenceStripsForMowing(
 function buildRegionalTraversal(
   strips: MowingStrip[],
   direction: Vector,
+  areaPolygon: Vector[],
   obstaclePolygons: Vector[][],
+  mowingStandoffMeters: number,
   preferredStartPoint?: MowingInitialEntryPosition,
 ): RegionalTraversalResult {
   if (strips.length === 0) {
@@ -763,7 +772,25 @@ function buildRegionalTraversal(
     };
   });
 
-  const selected = optimiseRegionTemplates(templates, preferredStartPoint);
+  const transitionCostCache = new Map<string, number>();
+  const selected = optimiseRegionTemplates(
+    templates,
+    preferredStartPoint,
+    (from, to) => {
+      const key = `${from.regionIndex}:${from.variantIndex}>${to.regionIndex}:${to.variantIndex}`;
+      const cached = transitionCostCache.get(key);
+      if (cached !== undefined) return cached;
+      const cost = safeRegionTransitionCost(
+        templates[from.regionIndex].variants[from.variantIndex],
+        templates[to.regionIndex].variants[to.variantIndex],
+        areaPolygon,
+        obstaclePolygons,
+        mowingStandoffMeters,
+      );
+      transitionCostCache.set(key, cost);
+      return cost;
+    },
+  );
   const traversal = selected.flatMap((choice) => templates[choice.regionIndex].variants[choice.variantIndex]);
   const regionByStrip = new Map<MowingStrip, string>();
   selected.forEach((choice) => {
@@ -843,9 +870,37 @@ interface RegionTemplateChoice {
   readonly variantIndex: 0 | 1;
 }
 
+function safeRegionTransitionCost(
+  fromTraversal: TraversalStep[],
+  toTraversal: TraversalStep[],
+  areaPolygon: Vector[],
+  obstacles: Vector[][],
+  mowingStandoffMeters: number,
+): number {
+  const from = fromTraversal[fromTraversal.length - 1];
+  const to = toTraversal[0];
+  try {
+    const connector = buildSafeStripConnector(
+      stripTraversalEnd(from.strip, from.reversed),
+      stripTraversalStart(to.strip, to.reversed),
+      stripTraversalEndBoundary(from.strip, from.reversed),
+      stripTraversalStartBoundary(to.strip, to.reversed),
+      stripTraversalEndStandoff(from.strip, from.reversed, mowingStandoffMeters),
+      stripTraversalStartStandoff(to.strip, to.reversed, mowingStandoffMeters),
+      areaPolygon,
+      obstacles,
+      mowingStandoffMeters,
+    );
+    return pathPointPathLength(connector) * 2;
+  } catch {
+    return Infinity;
+  }
+}
+
 function optimiseRegionTemplates(
   templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
   preferredStartPoint?: MowingInitialEntryPosition,
+  transitionCost: (from: RegionTemplateChoice, to: RegionTemplateChoice) => number = () => 0,
 ): RegionTemplateChoice[] {
   if (templates.length === 0) return [];
   // Region counts are deliberately small. For unexpectedly complex gardens,
@@ -853,22 +908,28 @@ function optimiseRegionTemplates(
   if (templates.length > 12) {
     const remaining = templates.map((_, regionIndex) => regionIndex);
     const result: RegionTemplateChoice[] = [];
-    let current = preferredStartPoint ? { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters } : null;
+    let previousChoice: RegionTemplateChoice | null = null;
     while (remaining.length > 0) {
       let best = { listIndex: 0, variantIndex: 0 as 0 | 1, cost: Infinity };
       remaining.forEach((regionIndex, listIndex) => {
         ([0, 1] as const).forEach((variantIndex) => {
           const variant = templates[regionIndex].variants[variantIndex];
           const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
-          const cost = current ? distance(current, start) : regionIndex;
+          const choice = { regionIndex, variantIndex };
+          const cost = previousChoice
+            ? transitionCost(previousChoice, choice)
+            : preferredStartPoint
+              ? distance({ x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters }, start)
+              : regionIndex;
           if (cost < best.cost - EPSILON) best = { listIndex, variantIndex, cost };
         });
       });
+      if (!Number.isFinite(best.cost)) {
+        throw new Error("mowing_regional_route_unavailable");
+      }
       const regionIndex = remaining.splice(best.listIndex, 1)[0];
-      result.push({ regionIndex, variantIndex: best.variantIndex });
-      const variant = templates[regionIndex].variants[best.variantIndex];
-      const last = variant[variant.length - 1];
-      current = stripTraversalEnd(last.strip, last.reversed);
+      previousChoice = { regionIndex, variantIndex: best.variantIndex };
+      result.push(previousChoice);
     }
     return result;
   }
@@ -895,11 +956,13 @@ function optimiseRegionTemplates(
         if ((mask & (1 << regionIndex)) !== 0) return;
         ([0, 1] as const).forEach((variantIndex) => {
           const variant = template.variants[variantIndex];
-          const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
           const last = variant[variant.length - 1];
+          const nextChoice = { regionIndex, variantIndex };
+          const edgeCost = transitionCost(state.choices[state.choices.length - 1], nextChoice);
+          if (!Number.isFinite(edgeCost)) return;
           const candidate: State = {
-            cost: state.cost + distance(state.end, start),
-            choices: [...state.choices, { regionIndex, variantIndex }],
+            cost: state.cost + edgeCost,
+            choices: [...state.choices, nextChoice],
             end: stripTraversalEnd(last.strip, last.reversed),
           };
           const nextKey = `${mask | (1 << regionIndex)}:${regionIndex}:${variantIndex}`;
@@ -911,6 +974,9 @@ function optimiseRegionTemplates(
     states = nextStates;
   }
   const complete = [...states.values()].filter((state) => state.choices.length === templates.length);
+  if (complete.length === 0) {
+    throw new Error("mowing_regional_route_unavailable");
+  }
   complete.sort((left, right) => {
     const leftReturn = preferredStartPoint
       ? distance(left.end, { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters })

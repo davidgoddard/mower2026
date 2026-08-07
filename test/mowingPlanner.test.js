@@ -127,6 +127,29 @@ test("buildMowingPlan plans obstacle-relative regions as one persisted route", (
   assert.ok(plan.routeCost.estimatedCombinedWheelTravelMeters > plan.routeCost.mowingDistanceMeters);
 });
 
+test("buildMowingPlan at an oblique heading selects only safe regional transitions", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0 }, { xMeters: 8, yMeters: 0 },
+    { xMeters: 8, yMeters: 6 }, { xMeters: 0, yMeters: 6 },
+    { xMeters: 0, yMeters: 0 },
+  ];
+  const obstacle = [
+    { xMeters: 3, yMeters: 2 }, { xMeters: 5, yMeters: 2 },
+    { xMeters: 5, yMeters: 4 }, { xMeters: 3, yMeters: 4 },
+    { xMeters: 3, yMeters: 2 },
+  ];
+
+  const plan = buildMowingPlan(area, {
+    headingDeg: 143,
+    stripSpacingMeters: 0.38,
+    obstacles: [obstacle],
+  });
+
+  assert.ok(plan.regions.length > 1);
+  assert.equal(plan.connectors.length, plan.strips.length - 1);
+  assert.equal(plan.regionOrder.length, plan.regions.length);
+});
+
 test("buildMowingPlan discovers an outer-boundary pocket without a recorded obstacle", () => {
   const concaveArea = [
     { xMeters: 0, yMeters: 0 }, { xMeters: 4, yMeters: 0 },

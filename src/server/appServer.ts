@@ -2023,13 +2023,22 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           const loadObstaclesMs = elapsedMilliseconds(loadObstaclesStartedAtMs);
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
           const buildPlanStartedAtMs = Date.now();
-          const plan = buildMowingPlan(shapedAreaPoints, {
-            headingDeg,
-            stripSpacingMeters,
-            bladeWidthMeters: 0.4,
-            mowingStandoffMeters: pathFollowingParameters?.mowingStandoffMeters,
-            obstacles,
-          });
+          let plan: ReturnType<typeof buildMowingPlan>;
+          try {
+            plan = buildMowingPlan(shapedAreaPoints, {
+              headingDeg,
+              stripSpacingMeters,
+              bladeWidthMeters: 0.4,
+              mowingStandoffMeters: pathFollowingParameters?.mowingStandoffMeters,
+              obstacles,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (message.startsWith("mowing_")) {
+              throw new BadRequestError(message);
+            }
+            throw error;
+          }
           const buildPlanMs = elapsedMilliseconds(buildPlanStartedAtMs);
           logger.info("mowing.preview_timing", {
             areaName,
