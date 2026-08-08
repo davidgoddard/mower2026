@@ -131,6 +131,7 @@ This document maps problem domains to candidate files removing the need for Code
 ## GNSS ESP32 Firmware
 - `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover-side GNSS ESP32 firmware; receives RTCM over ESP-NOW, relays corrections to the UM982, parses receiver logs, and serves compact GNSS frames to the Pi over I2C.
 - `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`: base-side GNSS ESP32 firmware; reads RTCM from the UM980 base receiver and forwards it to rover peers over the current fragmented ESP-NOW RTCM transport.
+- `external-hardware/esp32/gnss-relay-v1/gnss-relay-v1.ino`: optional ESP-NOW range relay; filters packets by the configured base MAC and forwards each packet unchanged so the rover can deduplicate direct and relayed copies.
 - `external-hardware/esp32/gnss-base-station-v1/README.md`: base-station wiring and peer-configuration notes.
 
 ## Turn Controller

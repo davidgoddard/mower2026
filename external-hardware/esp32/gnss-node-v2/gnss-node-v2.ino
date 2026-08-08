@@ -8,15 +8,17 @@
 // - Heading status LED -> ESP32 GPIO5
 // - Position status LED -> ESP32 GPIO18
 // - RTCM activity LED -> ESP32 GPIO19
+// - RTCM route indicator LED -> ESP32 GPIO23
 // - UM982/ESP32 grounds must be common
 //
 // Operation:
 // - receives RTCM corrections from the base station over ESP-NOW
-// - accepts the current fragmented RTCM transport and the older legacy chunk format
-// - reassembles RTCM frames, validates CRC, and forwards valid corrections to the UM982
+// - accepts the current fragmented RTCM transport from configured base/relay MACs
+// - assembles out-of-order fragments, suppresses duplicates, validates CRC, and
+//   forwards each correction to the UM982 once
 // - parses UM982 runtime logs to build a compact GNSS sample for the Pi
 // - serves that GNSS sample over I2C address 0x52
-// - drives three LEDs for heading quality, position quality, and RTCM activity
+// - drives LEDs for heading quality, position quality, RTCM activity, and route
 //
 // Notes:
 // - the UM982 is expected to be provisioned already; boot-time configuration is
@@ -82,6 +84,7 @@ static const uint8_t UM982_TX_PIN = 17;
 static const uint8_t LED_HEADING_PIN = 5;
 static const uint8_t LED_POSITION_PIN = 18;
 static const uint8_t LED_RTCM_PIN = 19;
+static const uint8_t LED_RTCM_ROUTE_PIN = 23;
 
 // UART baud between the ESP32 and the UM982.
 // 115200 has only ~30% headroom at 10 Hz PVTSLN; 460800 gives comfortable
@@ -128,7 +131,50 @@ static const uint8_t RTCM_TRANSPORT_VERSION = 0x01;
 static const uint8_t RTCM_TRANSPORT_MESSAGE_RTCM_FRAGMENT = 0x01;
 static const uint8_t RTCM_WIFI_CHANNEL = 1;
 static const uint8_t RTCM_TRANSPORT_HEADER_SIZE = 15;
-static const uint32_t RTCM_FRAGMENT_TIMEOUT_MILLIS = 100;
+static const uint8_t RTCM_MAX_FRAGMENT_PAYLOAD = 235;
+static const uint16_t RTCM_MAX_MESSAGE_SIZE = 1029;
+static const uint8_t RTCM_MAX_FRAGMENT_COUNT = 5;
+static const uint8_t RTCM_ASSEMBLY_SLOT_COUNT = 4;
+static const uint8_t RTCM_COMPLETED_CACHE_SIZE = 128;
+static const uint32_t RTCM_FRAGMENT_TIMEOUT_MILLIS = 500;
+static const uint32_t RTCM_COMPLETED_RETENTION_MILLIS = 10000;
+static const uint32_t RTCM_ROUTE_FRESH_MILLIS = 3000;
+
+// TODO: Fill both station-mode MAC addresses before flashing this mower node.
+// Incoming ESP-NOW corrections are deliberately rejected while both are zero.
+static const uint8_t BASE_STATION_MAC[6] = { 0, 0, 0, 0, 0, 0 };
+static const uint8_t GNSS_RELAY_MAC[6] = { 0, 0, 0, 0, 0, 0 };
+
+enum RtcmPacketSource : uint8_t {
+  RTCM_SOURCE_NONE = 0,
+  RTCM_SOURCE_DIRECT = 1,
+  RTCM_SOURCE_RELAY = 2,
+};
+
+struct RtcmAssembly {
+  bool active;
+  uint16_t messageId;
+  uint8_t fragmentCount;
+  uint16_t totalLength;
+  uint32_t payloadCrc;
+  uint8_t receivedMask;
+  uint8_t directMask;
+  uint8_t relayMask;
+  uint32_t lastFragmentMillis;
+  uint8_t data[RTCM_MAX_MESSAGE_SIZE];
+};
+
+struct CompletedRtcmMessage {
+  bool active;
+  uint16_t messageId;
+  uint8_t fragmentCount;
+  uint16_t totalLength;
+  uint32_t payloadCrc;
+  uint8_t directMask;
+  uint8_t relayMask;
+  uint32_t completedMillis;
+};
+
 static uint8_t g_rtcmBuffer[RTCM_BUFFER_SIZE];
 static int g_rtcmIndex = 0;
 static uint16_t g_lastRtcmSequence = 0;
@@ -140,15 +186,14 @@ static uint32_t g_totalRtcmFragmentsAccepted = 0;
 static uint32_t g_totalRtcmFragmentsRejected = 0;
 static uint32_t g_totalRtcmFragmentsDuplicated = 0;
 static uint32_t g_totalRtcmAssemblyTimeouts = 0;
+static uint32_t g_totalRtcmUnknownSenders = 0;
 static uint32_t g_totalRtcm1006Messages = 0;
 static uint32_t g_lastRtcm1006Millis = 0;
-static bool g_rtcmFragmentAssemblyActive = false;
-static uint16_t g_rtcmFragmentMessageId = 0;
-static uint8_t g_rtcmFragmentCount = 0;
-static uint8_t g_rtcmNextFragmentIndex = 0;
-static uint16_t g_rtcmExpectedTotalLength = 0;
-static uint32_t g_rtcmExpectedPayloadCrc = 0;
-static uint32_t g_rtcmFragmentAssemblyStartMillis = 0;
+static RtcmAssembly g_rtcmAssemblies[RTCM_ASSEMBLY_SLOT_COUNT] = {};
+static CompletedRtcmMessage g_completedRtcmMessages[RTCM_COMPLETED_CACHE_SIZE] = {};
+static uint8_t g_nextCompletedRtcmSlot = 0;
+static uint8_t g_lastRtcmRouteSourceMask = RTCM_SOURCE_NONE;
+static uint32_t g_lastRtcmRouteMillis = 0;
 
 // ===== LED status =====
 enum LedQualityState : uint8_t {
@@ -646,6 +691,18 @@ void printDebugStatus() {
   Serial.print(g_totalRtcmFragmentsDuplicated);
   Serial.print("/");
   Serial.print(g_totalRtcmAssemblyTimeouts);
+  Serial.print(" unknownRtcmSenders=");
+  Serial.print(g_totalRtcmUnknownSenders);
+  Serial.print(" rtcmRoute=");
+  if (g_lastRtcmRouteSourceMask == (RTCM_SOURCE_DIRECT | RTCM_SOURCE_RELAY)) {
+    Serial.print("mixed");
+  } else if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_RELAY) {
+    Serial.print("relay");
+  } else if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_DIRECT) {
+    Serial.print("direct");
+  } else {
+    Serial.print("none");
+  }
   Serial.print(" rtcm1006=");
   Serial.print(g_totalRtcm1006Messages);
   Serial.print(" rtcm1006AgeMs=");
@@ -844,10 +901,29 @@ void flashStartupLeds() {
   for (int index = 0; index < 10; index += 1) {
     digitalWrite(LED_HEADING_PIN, HIGH);
     digitalWrite(LED_POSITION_PIN, HIGH);
+    digitalWrite(LED_RTCM_ROUTE_PIN, HIGH);
     delay(100);
     digitalWrite(LED_HEADING_PIN, LOW);
     digitalWrite(LED_POSITION_PIN, LOW);
+    digitalWrite(LED_RTCM_ROUTE_PIN, LOW);
     delay(100);
+  }
+}
+
+void updateRtcmRouteLed(uint32_t nowMillis) {
+  if (g_lastRtcmRouteMillis == 0 || (nowMillis - g_lastRtcmRouteMillis) > RTCM_ROUTE_FRESH_MILLIS) {
+    digitalWrite(LED_RTCM_ROUTE_PIN, LOW);
+    return;
+  }
+
+  const uint16_t phaseMillis = static_cast<uint16_t>(nowMillis % 1000u);
+  if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_DIRECT) {
+    digitalWrite(LED_RTCM_ROUTE_PIN, HIGH);
+  } else if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_RELAY) {
+    digitalWrite(LED_RTCM_ROUTE_PIN, phaseMillis < 200u ? HIGH : LOW);
+  } else {
+    const bool doubleFlash = phaseMillis < 120u || (phaseMillis >= 240u && phaseMillis < 360u);
+    digitalWrite(LED_RTCM_ROUTE_PIN, doubleFlash ? HIGH : LOW);
   }
 }
 
@@ -880,6 +956,7 @@ void updateIndicatorLeds() {
   if ((nowMillis - g_lastRtcmLedPulseMillis) > 100u) {
     digitalWrite(LED_RTCM_PIN, LOW);
   }
+  updateRtcmRouteLed(nowMillis);
 }
 
 void ensureOriginFromCurrentFix() {
@@ -1054,18 +1131,119 @@ bool noteRtcm1006BasePosition(const uint8_t *payload, int payloadLength) {
   return true;
 }
 
-void resetRtcmFragmentAssembly(bool countTimeout) {
-  if (countTimeout) {
+bool isConfiguredMac(const uint8_t *address) {
+  for (uint8_t index = 0; index < 6; index += 1) {
+    if (address[index] != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+RtcmPacketSource classifyRtcmSender(const uint8_t *address) {
+  if (isConfiguredMac(BASE_STATION_MAC) && memcmp(address, BASE_STATION_MAC, 6) == 0) {
+    return RTCM_SOURCE_DIRECT;
+  }
+  if (isConfiguredMac(GNSS_RELAY_MAC) && memcmp(address, GNSS_RELAY_MAC, 6) == 0) {
+    return RTCM_SOURCE_RELAY;
+  }
+  return RTCM_SOURCE_NONE;
+}
+
+uint8_t completeFragmentMask(uint8_t fragmentCount) {
+  return static_cast<uint8_t>((1u << fragmentCount) - 1u);
+}
+
+void expireRtcmState(uint32_t nowMillis) {
+  for (uint8_t index = 0; index < RTCM_ASSEMBLY_SLOT_COUNT; index += 1) {
+    RtcmAssembly &assembly = g_rtcmAssemblies[index];
+    if (assembly.active && (nowMillis - assembly.lastFragmentMillis) > RTCM_FRAGMENT_TIMEOUT_MILLIS) {
+      assembly.active = false;
+      g_totalRtcmAssemblyTimeouts += 1;
+    }
+  }
+  for (uint8_t index = 0; index < RTCM_COMPLETED_CACHE_SIZE; index += 1) {
+    CompletedRtcmMessage &completed = g_completedRtcmMessages[index];
+    if (completed.active && (nowMillis - completed.completedMillis) > RTCM_COMPLETED_RETENTION_MILLIS) {
+      completed.active = false;
+    }
+  }
+}
+
+CompletedRtcmMessage *findCompletedRtcmMessage(uint16_t messageId, uint16_t totalLength, uint32_t payloadCrc) {
+  for (uint8_t index = 0; index < RTCM_COMPLETED_CACHE_SIZE; index += 1) {
+    CompletedRtcmMessage &completed = g_completedRtcmMessages[index];
+    if (completed.active
+      && completed.messageId == messageId
+      && completed.totalLength == totalLength
+      && completed.payloadCrc == payloadCrc) {
+      return &completed;
+    }
+  }
+  return nullptr;
+}
+
+void noteCompletedRoute(CompletedRtcmMessage &completed, RtcmPacketSource source, uint8_t fragmentIndex) {
+  const uint8_t fragmentBit = static_cast<uint8_t>(1u << fragmentIndex);
+  if (source == RTCM_SOURCE_DIRECT) {
+    completed.directMask |= fragmentBit;
+  } else if (source == RTCM_SOURCE_RELAY) {
+    completed.relayMask |= fragmentBit;
+  }
+
+  const uint8_t fullMask = completeFragmentMask(completed.fragmentCount);
+  uint8_t completeSources = RTCM_SOURCE_NONE;
+  if (completed.directMask == fullMask) {
+    completeSources |= RTCM_SOURCE_DIRECT;
+  }
+  if (completed.relayMask == fullMask) {
+    completeSources |= RTCM_SOURCE_RELAY;
+  }
+  if (completeSources != RTCM_SOURCE_NONE) {
+    g_lastRtcmRouteSourceMask = completeSources;
+    g_lastRtcmRouteMillis = millis();
+  }
+}
+
+RtcmAssembly *findOrAllocateRtcmAssembly(
+  uint16_t messageId,
+  uint8_t fragmentCount,
+  uint16_t totalLength,
+  uint32_t payloadCrc,
+  uint32_t nowMillis
+) {
+  RtcmAssembly *freeSlot = nullptr;
+  RtcmAssembly *oldestSlot = &g_rtcmAssemblies[0];
+  for (uint8_t index = 0; index < RTCM_ASSEMBLY_SLOT_COUNT; index += 1) {
+    RtcmAssembly &assembly = g_rtcmAssemblies[index];
+    if (assembly.active
+      && assembly.messageId == messageId
+      && assembly.totalLength == totalLength
+      && assembly.payloadCrc == payloadCrc) {
+      return &assembly;
+    }
+    if (!assembly.active && freeSlot == nullptr) {
+      freeSlot = &assembly;
+    }
+    if (assembly.lastFragmentMillis < oldestSlot->lastFragmentMillis) {
+      oldestSlot = &assembly;
+    }
+  }
+
+  RtcmAssembly *assembly = freeSlot == nullptr ? oldestSlot : freeSlot;
+  if (assembly->active) {
     g_totalRtcmAssemblyTimeouts += 1;
   }
-  g_rtcmFragmentAssemblyActive = false;
-  g_rtcmFragmentMessageId = 0;
-  g_rtcmFragmentCount = 0;
-  g_rtcmNextFragmentIndex = 0;
-  g_rtcmExpectedTotalLength = 0;
-  g_rtcmExpectedPayloadCrc = 0;
-  g_rtcmFragmentAssemblyStartMillis = 0;
-  g_rtcmIndex = 0;
+  assembly->active = true;
+  assembly->messageId = messageId;
+  assembly->fragmentCount = fragmentCount;
+  assembly->totalLength = totalLength;
+  assembly->payloadCrc = payloadCrc;
+  assembly->receivedMask = 0;
+  assembly->directMask = 0;
+  assembly->relayMask = 0;
+  assembly->lastFragmentMillis = nowMillis;
+  return assembly;
 }
 
 bool handleCompleteRtcmMessage(const uint8_t *message, int totalLength) {
@@ -1153,16 +1331,14 @@ bool isNewRtcmTransportPacket(const uint8_t *incomingData, int len) {
     && incomingData[2] == RTCM_TRANSPORT_VERSION;
 }
 
-void appendFragmentedRtcmPacket(const uint8_t *incomingData, int len) {
+void appendFragmentedRtcmPacket(const uint8_t *incomingData, int len, RtcmPacketSource source) {
   if (len < static_cast<int>(RTCM_TRANSPORT_HEADER_SIZE)) {
     g_totalRtcmFragmentsRejected += 1;
     return;
   }
 
   const uint32_t nowMillis = millis();
-  if (g_rtcmFragmentAssemblyActive && (nowMillis - g_rtcmFragmentAssemblyStartMillis) > RTCM_FRAGMENT_TIMEOUT_MILLIS) {
-    resetRtcmFragmentAssembly(true);
-  }
+  expireRtcmState(nowMillis);
 
   const uint8_t messageType = incomingData[3];
   const uint16_t messageId = readU16LE(&incomingData[5]);
@@ -1174,87 +1350,128 @@ void appendFragmentedRtcmPacket(const uint8_t *incomingData, int len) {
 
   if (messageType != RTCM_TRANSPORT_MESSAGE_RTCM_FRAGMENT
     || fragmentCount == 0
+    || fragmentCount > RTCM_MAX_FRAGMENT_COUNT
     || fragmentIndex >= fragmentCount
-    || totalLength > RTCM_BUFFER_SIZE
+    || totalLength < 6
+    || totalLength > RTCM_MAX_MESSAGE_SIZE
     || len != static_cast<int>(RTCM_TRANSPORT_HEADER_SIZE + fragmentPayloadLength)
-    || fragmentPayloadLength == 0) {
+    || fragmentPayloadLength == 0
+    || fragmentPayloadLength > RTCM_MAX_FRAGMENT_PAYLOAD
+    || fragmentCount != static_cast<uint8_t>((totalLength + RTCM_MAX_FRAGMENT_PAYLOAD - 1) / RTCM_MAX_FRAGMENT_PAYLOAD)) {
     g_totalRtcmFragmentsRejected += 1;
     return;
   }
 
-  if (fragmentIndex == 0) {
-    resetRtcmFragmentAssembly(false);
-    g_rtcmFragmentAssemblyActive = true;
-    g_rtcmFragmentMessageId = messageId;
-    g_rtcmFragmentCount = fragmentCount;
-    g_rtcmNextFragmentIndex = 0;
-    g_rtcmExpectedTotalLength = totalLength;
-    g_rtcmExpectedPayloadCrc = payloadCrc;
-    g_rtcmFragmentAssemblyStartMillis = nowMillis;
-  }
-
-  if (!g_rtcmFragmentAssemblyActive
-    || messageId != g_rtcmFragmentMessageId
-    || fragmentCount != g_rtcmFragmentCount
-    || totalLength != g_rtcmExpectedTotalLength
-    || payloadCrc != g_rtcmExpectedPayloadCrc) {
+  const uint16_t fragmentOffset = static_cast<uint16_t>(fragmentIndex) * RTCM_MAX_FRAGMENT_PAYLOAD;
+  const uint16_t expectedFragmentLength = min(
+    static_cast<uint16_t>(RTCM_MAX_FRAGMENT_PAYLOAD),
+    static_cast<uint16_t>(totalLength - fragmentOffset)
+  );
+  if (fragmentOffset >= totalLength || fragmentPayloadLength != expectedFragmentLength) {
     g_totalRtcmFragmentsRejected += 1;
     return;
   }
 
-  if (fragmentIndex < g_rtcmNextFragmentIndex) {
+  CompletedRtcmMessage *completed = findCompletedRtcmMessage(messageId, totalLength, payloadCrc);
+  if (completed != nullptr) {
+    noteCompletedRoute(*completed, source, fragmentIndex);
     g_totalRtcmFragmentsDuplicated += 1;
     return;
   }
 
-  if (fragmentIndex != g_rtcmNextFragmentIndex) {
+  RtcmAssembly *assembly = findOrAllocateRtcmAssembly(
+    messageId,
+    fragmentCount,
+    totalLength,
+    payloadCrc,
+    nowMillis
+  );
+  if (assembly->fragmentCount != fragmentCount) {
     g_totalRtcmFragmentsRejected += 1;
-    resetRtcmFragmentAssembly(false);
+    assembly->active = false;
     return;
   }
 
-  if ((g_rtcmIndex + fragmentPayloadLength) > static_cast<int>(RTCM_BUFFER_SIZE)) {
-    g_totalRtcmFragmentsRejected += 1;
-    resetRtcmFragmentAssembly(false);
+  const uint8_t fragmentBit = static_cast<uint8_t>(1u << fragmentIndex);
+  if ((assembly->receivedMask & fragmentBit) != 0) {
+    if (source == RTCM_SOURCE_DIRECT) {
+      assembly->directMask |= fragmentBit;
+    } else if (source == RTCM_SOURCE_RELAY) {
+      assembly->relayMask |= fragmentBit;
+    }
+    assembly->lastFragmentMillis = nowMillis;
+    g_totalRtcmFragmentsDuplicated += 1;
     return;
   }
 
-  memcpy(g_rtcmBuffer + g_rtcmIndex, incomingData + RTCM_TRANSPORT_HEADER_SIZE, fragmentPayloadLength);
-  g_rtcmIndex += fragmentPayloadLength;
-  g_rtcmNextFragmentIndex += 1;
+  memcpy(assembly->data + fragmentOffset, incomingData + RTCM_TRANSPORT_HEADER_SIZE, fragmentPayloadLength);
+  assembly->receivedMask |= fragmentBit;
+  if (source == RTCM_SOURCE_DIRECT) {
+    assembly->directMask |= fragmentBit;
+  } else if (source == RTCM_SOURCE_RELAY) {
+    assembly->relayMask |= fragmentBit;
+  }
+  assembly->lastFragmentMillis = nowMillis;
   g_totalRtcmFragmentsAccepted += 1;
-  g_rtcmFragmentAssemblyStartMillis = nowMillis;
 
-  if (g_rtcmNextFragmentIndex < g_rtcmFragmentCount) {
+  if (assembly->receivedMask != completeFragmentMask(fragmentCount)) {
     return;
   }
 
-  if (g_rtcmIndex != static_cast<int>(g_rtcmExpectedTotalLength)) {
+  const uint32_t actualPayloadCrc = crc24q(assembly->data, static_cast<size_t>(totalLength - 3));
+  if (actualPayloadCrc != payloadCrc) {
     g_totalRtcmFragmentsRejected += 1;
-    resetRtcmFragmentAssembly(false);
+    assembly->active = false;
     return;
   }
 
-  const uint32_t actualPayloadCrc = crc24q(g_rtcmBuffer, static_cast<size_t>(g_rtcmIndex - 3));
-  if (actualPayloadCrc != g_rtcmExpectedPayloadCrc) {
-    g_totalRtcmFragmentsRejected += 1;
-    resetRtcmFragmentAssembly(false);
+  if (!handleCompleteRtcmMessage(assembly->data, totalLength)) {
+    assembly->active = false;
     return;
   }
 
-  handleCompleteRtcmMessage(g_rtcmBuffer, g_rtcmIndex);
-  resetRtcmFragmentAssembly(false);
+  CompletedRtcmMessage &newCompleted = g_completedRtcmMessages[g_nextCompletedRtcmSlot];
+  g_nextCompletedRtcmSlot = static_cast<uint8_t>((g_nextCompletedRtcmSlot + 1) % RTCM_COMPLETED_CACHE_SIZE);
+  newCompleted.active = true;
+  newCompleted.messageId = messageId;
+  newCompleted.fragmentCount = fragmentCount;
+  newCompleted.totalLength = totalLength;
+  newCompleted.payloadCrc = payloadCrc;
+  newCompleted.directMask = assembly->directMask;
+  newCompleted.relayMask = assembly->relayMask;
+  newCompleted.completedMillis = nowMillis;
+  assembly->active = false;
+
+  // A message assembled from a mixture of direct and relayed fragments proves
+  // that both routes contributed even if neither route supplied every part.
+  g_lastRtcmRouteSourceMask = RTCM_SOURCE_NONE;
+  if (newCompleted.directMask != 0) {
+    g_lastRtcmRouteSourceMask |= RTCM_SOURCE_DIRECT;
+  }
+  if (newCompleted.relayMask != 0) {
+    g_lastRtcmRouteSourceMask |= RTCM_SOURCE_RELAY;
+  }
+  g_lastRtcmRouteMillis = nowMillis;
 }
 
 // ===== RTCM relay =====
 void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
-  (void)info;
+  if (info == nullptr) {
+    return;
+  }
+  const RtcmPacketSource source = classifyRtcmSender(info->src_addr);
+  if (source == RTCM_SOURCE_NONE) {
+    g_totalRtcmUnknownSenders += 1;
+    return;
+  }
   if (isNewRtcmTransportPacket(incomingData, len)) {
-    appendFragmentedRtcmPacket(incomingData, len);
+    appendFragmentedRtcmPacket(incomingData, len, source);
     return;
   }
 
-  appendLegacyRtcmChunk(incomingData, len);
+  // The legacy transport has no stable message identity and cannot safely be
+  // deduplicated across direct and relayed paths.
+  g_totalRtcmFragmentsRejected += 1;
 }
 
 // ===== UM982 configuration =====
@@ -1781,9 +1998,11 @@ void setup() {
   pinMode(LED_HEADING_PIN, OUTPUT);
   pinMode(LED_POSITION_PIN, OUTPUT);
   pinMode(LED_RTCM_PIN, OUTPUT);
+  pinMode(LED_RTCM_ROUTE_PIN, OUTPUT);
   digitalWrite(LED_HEADING_PIN, LOW);
   digitalWrite(LED_POSITION_PIN, LOW);
   digitalWrite(LED_RTCM_PIN, LOW);
+  digitalWrite(LED_RTCM_ROUTE_PIN, LOW);
   flashStartupLeds();
 
   Wire.begin(I2C_SLAVE_ADDRESS, I2C_SDA_PIN, I2C_SCL_PIN, 400000);

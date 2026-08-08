@@ -54,6 +54,7 @@ Also confirm the current wiring assumptions in the sketch:
 - heading quality LED: `GPIO5`
 - position quality LED: `GPIO18`
 - RTCM activity LED: `GPIO19`
+- RTCM route indicator LED: `GPIO23`
 
 The specific UM982 breakout module pin/header mapping used on this mower is documented in [UM982-module-pinout.md](/Volumes/mower/mower/external-hardware/esp32/gnss-node-v2/UM982-module-pinout.md).
 
@@ -69,6 +70,26 @@ The sketch restores the three practical status LEDs from the legacy rover firmwa
 - `GPIO5` heading quality
 - `GPIO18` position quality
 - `GPIO19` RTCM activity
+- `GPIO23` RTCM route indicator
+
+The route indicator is derived from complete, CRC-valid RTCM messages rather
+than individual radio packets:
+
+- off: no verified RTCM message in the last 3 seconds
+- solid: the latest correction route was direct from the base
+- one 200 ms flash per second: the latest correction route was through the relay
+- two short flashes per second: both direct and relay packets contributed, or
+  both complete routes were observed
+
+Before flashing, set `BASE_STATION_MAC` and `GNSS_RELAY_MAC` in the sketch to
+the station-mode MAC addresses of those ESP32s. When both values are zero the
+node rejects correction packets; this prevents an unconfigured node from
+mistaking unrelated ESP-NOW traffic for RTCM input.
+
+The fragmented transport accepts packets out of order, combines direct and
+relayed fragments by message ID and RTCM CRC, retains incomplete assemblies for
+up to 500 ms, and retains completed identities for 10 seconds. A completed RTCM
+message is written to the UM982 only once.
 
 Heading and position LEDs use the same pattern:
 

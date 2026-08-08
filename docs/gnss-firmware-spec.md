@@ -287,6 +287,13 @@ Current transport header:
 
 The rover sketch reassembles fragments by message ID and fragment index, rejects incomplete or inconsistent assemblies, and only forwards a fully reconstructed RTCM frame to the UM982 after verifying the RTCM CRC again.
 
+The optional `external-hardware/esp32/gnss-relay-v1` firmware forwards each
+base packet unchanged. The rover keys up to four concurrent, out-of-order
+assemblies by message ID, total length, and RTCM CRC. Incomplete assemblies
+expire after 500 ms; completed identities remain for 10 seconds so direct and
+relayed copies are delivered to the UM982 only once. Sender MAC classification
+also drives the dedicated GPIO23 route indicator.
+
 ### Reliability guidance
 
 - Prefer unicast ESP-NOW peers over broadcast. Broadcast remains available only as a fallback bench mode.

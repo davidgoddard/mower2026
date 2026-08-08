@@ -54,12 +54,18 @@ GPIO22  I2C SCL to Raspberry Pi
 GPIO5   Heading quality LED
 GPIO18  Position quality LED
 GPIO19  RTCM activity LED
+GPIO23  RTCM route indicator LED
 ```
 
 ### GNSS LED meanings
 
 - `GPIO19`: RTCM activity LED
   - pulses when RTCM corrections are received and forwarded to the UM982
+- `GPIO23`: RTCM route indicator LED
+  - off when no verified correction arrived for 3 seconds
+  - solid for direct base reception
+  - one flash per second for relay reception
+  - two flashes per second when both paths contributed
 - `GPIO5`: heading quality LED
 - `GPIO18`: position quality LED
 
