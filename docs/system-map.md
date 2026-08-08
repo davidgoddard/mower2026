@@ -94,7 +94,7 @@ This document maps problem domains to candidate files removing the need for Code
   - continuous operations persist their exact ordered route with progress and validate connector samples against the area and obstacles before initial or resumed execution
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
   - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
-  - all mowing segment requests use the 10 cm post-pivot minimum translation; routed connectors and perimeter traces use the conservative continuous follower
+  - all mowing segment requests use the 15 cm post-pivot minimum translation; routed connectors and perimeter traces use the conservative continuous follower
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
   - after the final strip, follows the shorter direction around the recorded area perimeter and then returns to the session's original GNSS start position; the return path and start point are persisted for stop/resume recovery
 - `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, assigns stable obstacle-relative regions, builds both sweep orientations for every region, and globally selects a start-aware region order before safe connectors are generated. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
@@ -197,7 +197,7 @@ This document maps problem domains to candidate files removing the need for Code
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
   - short and long point-to-point segments use the same turn-then-straight rule; only an explicit caller request may skip the initial pivot
-  - callers may supply a minimum useful translation; mowing uses 10 cm and rechecks after the alignment pivot, while training leaves the option unset
+  - callers may supply a minimum useful translation; mowing uses 15 cm and rechecks after the alignment pivot, while training leaves the option unset
   - delegates to line controller immediately after the turn, then records successful segment history
   - `getCurrentPose()` exposes the live fused pose for higher-level path executors that need to re-evaluate progress between segment drives
   - stop requests are unconditional: they are awaited through both the turn phase and the line-drive phase when active, and still issue an immediate stop command even when no drive is currently active
@@ -339,6 +339,13 @@ This document maps problem domains to candidate files removing the need for Code
   - globally optimises the small set of region templates from the preferred live start and back toward that start, while preserving boustrophedon order inside each region
   - filters the regional optimisation graph through the production safe-connector builder, preventing oblique mowing angles from selecting an infeasible transition and failing later during preview connector generation
   - caches each oriented region-to-region connector evaluation so exact optimisation does not repeatedly run expensive geometry validation for the same edge
+  - safe connectors treat repeated ground as a cost rather than a prohibition: they evaluate direct travel, both boundary directions, all intersecting obstacles, both area-perimeter directions, then a free-space visibility-graph fallback before declaring genuinely disconnected geometry
+  - treats the driven outer perimeter as an authoritative retrace route when polygon sampling is numerically ambiguous, and defers expensive routed-connector construction until after regional optimisation
+  - explicitly connects transition endpoints into the sparse roadmap and preserves expanded obstacle-perimeter loops, allowing obstacle-to-area transitions without unsafe obstacle chords
+  - preserves complete generated strips, including boundary-to-standoff sections, as retrace edges joining obstacle-side work to the common outer-perimeter network
+  - rejects clipped strip fragments below the 15 cm minimum drive before sequencing and symmetrically caps standoffs on other short strips to retain a 15 cm commanded drive, preventing endpoint overshoot
+  - `scripts/verify-mowing-plan-angles.mjs` verifies every integer heading from 0° through 179° against a stored area and all recorded obstacle paths; `npm run verify:mowing-angles` defaults to Rear Lawn at 38 cm and reports every failure
+  - `test/manual/mowingPlannerAllAngles.test.js` exposes that exhaustive sweep to the mower MCP runner without adding it to the normal `test/*.test.js` suite
   - records stable strip IDs, region order, region entry/exit points, and an estimated combined-wheel-travel cost in the plan
   - builds connector previews from configured mowing standoff points and follows the same boundary when consecutive strip endpoints touch the same area or obstacle boundary
   - treats obstacle perimeters as holes, splits strips around them, and returns connector paths that route around an obstacle perimeter when a direct connector would cross it

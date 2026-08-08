@@ -34,4 +34,4 @@
 - Use `nvm` to select Node 20 before running `npm install` or any manual hardware script.
 - Rebuild native dependencies whenever the Node major version changes.
 - The production launcher executes `dist/server/main.js`, which now directly starts the single app/control HTTP server used by the operator pages and `/api/*`, so `npm run build` is required before `npm run start` or `systemctl start mower`.
-- When working from a workstation-mounted clone instead of `/home/mower/mower`, prefer the on-mower MCP server for `sync`, `build`, `test`, and log inspection. See [docs/mcp-server.md](mcp-server.md) for setup and usage.
+- `/Volumes/Mower/mower` is the mounted live mower software tree, not a detached workstation clone. The on-mower `mower` MCP server is configured and verified for `build`, `test`, `getLatestLogs`, `readFile`, and `sync`; prefer it because local build/test execution through the mount remains unsupported. The live mount normally makes `sync` unnecessary. See [docs/mcp-server.md](mcp-server.md) for setup and usage.

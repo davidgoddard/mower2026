@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMowingInitialEntryPlan, buildMowingPlan, normalizeAxisHeading } from "../dist/pathfollowing/mowingPlanner.js";
+import { buildMowingInitialEntryPlan, buildMowingPlan, effectiveMowingStripStandoffMeters, normalizeAxisHeading } from "../dist/pathfollowing/mowingPlanner.js";
 
 const square = [
   { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -301,6 +301,40 @@ test("buildMowingPlan removes strip sections inside obstacle perimeters", () => 
     [2.5, 4],
   ]);
   assert.equal(plan.connectors.some((connector) => connector.length > 2), true);
+});
+
+test("buildMowingPlan discards obstacle-clipped drives shorter than 15 cm", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 2, yMeters: 0, capturedAt: 2 },
+    { xMeters: 2, yMeters: 1, capturedAt: 3 },
+    { xMeters: 0, yMeters: 1, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const obstacle = [
+    { xMeters: 0.12, yMeters: 0.4, capturedAt: 6 },
+    { xMeters: 1, yMeters: 0.4, capturedAt: 7 },
+    { xMeters: 1, yMeters: 0.6, capturedAt: 8 },
+    { xMeters: 0.12, yMeters: 0.6, capturedAt: 9 },
+    { xMeters: 0.12, yMeters: 0.4, capturedAt: 10 },
+  ];
+
+  const plan = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 0.5,
+    obstacles: [obstacle],
+  });
+
+  assert.equal(plan.strips.some((strip) => Math.hypot(
+    strip.end.xMeters - strip.start.xMeters,
+    strip.end.yMeters - strip.start.yMeters,
+  ) < 0.15 - 1e-9), false);
+});
+
+test("effectiveMowingStripStandoffMeters preserves a 15 cm short-strip drive", () => {
+  assert.equal(effectiveMowingStripStandoffMeters(0.5, 0.15), 0.15);
+  assert.ok(Math.abs(effectiveMowingStripStandoffMeters(0.2, 0.15) - 0.025) < 1e-9);
+  assert.equal(effectiveMowingStripStandoffMeters(0.15, 0.15), 0);
 });
 
 test("buildMowingPlan ignores obstacles that do not overlap the active strip offsets", () => {

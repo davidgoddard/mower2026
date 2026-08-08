@@ -83,11 +83,27 @@ const ROUTED_OBSTACLE_PENALTY = 2;
 const SAME_OFFSET_ROUTED_OBSTACLE_PENALTY = 5;
 const TURN_COST_METERS_PER_RADIAN = 0.4;
 const CONNECTOR_VERTEX_COST_METERS = 0.15;
+const UNRESOLVED_TRANSITION_COST_METERS = 10_000;
+const MINIMUM_MOWING_STRIP_DRIVE_METERS = 0.15;
+
+export function effectiveMowingStripStandoffMeters(stripLengthMeters: number, configuredStandoffMeters: number): number {
+  return Math.min(
+    configuredStandoffMeters,
+    Math.max(0, (stripLengthMeters - MINIMUM_MOWING_STRIP_DRIVE_METERS) / 2),
+  );
+}
 
 interface Vector {
   readonly x: number;
   readonly y: number;
 }
+
+interface RoutingRoadmap {
+  readonly points: Vector[];
+  readonly segments: ReadonlyArray<readonly [Vector, Vector]>;
+}
+
+const EMPTY_ROUTING_ROADMAP: RoutingRoadmap = { points: [], segments: [] };
 
 interface Intersection {
   readonly along: number;
@@ -418,7 +434,7 @@ function obstacleMayIntersectOffset(obstacle: PreparedObstacle, offset: number):
 function buildStripFromInterval(interval: Interval, offset: number, sequenceIndex: number): MowingStrip | null {
   const start = interval.start;
   const end = interval.end;
-  if (distance(start.point, end.point) <= EPSILON) {
+  if (distance(start.point, end.point) < MINIMUM_MOWING_STRIP_DRIVE_METERS - EPSILON) {
     return null;
   }
 
@@ -879,22 +895,16 @@ function safeRegionTransitionCost(
 ): number {
   const from = fromTraversal[fromTraversal.length - 1];
   const to = toTraversal[0];
-  try {
-    const connector = buildSafeStripConnector(
-      stripTraversalEnd(from.strip, from.reversed),
-      stripTraversalStart(to.strip, to.reversed),
-      stripTraversalEndBoundary(from.strip, from.reversed),
-      stripTraversalStartBoundary(to.strip, to.reversed),
-      stripTraversalEndStandoff(from.strip, from.reversed, mowingStandoffMeters),
-      stripTraversalStartStandoff(to.strip, to.reversed, mowingStandoffMeters),
-      areaPolygon,
-      obstacles,
-      mowingStandoffMeters,
-    );
-    return pathPointPathLength(connector) * 2;
-  } catch {
-    return Infinity;
+  const fromStandoff = stripTraversalEndStandoff(from.strip, from.reversed, mowingStandoffMeters);
+  const toStandoff = stripTraversalStartStandoff(to.strip, to.reversed, mowingStandoffMeters);
+  if (pathStaysWithinAreaAndAvoidsObstacles([fromStandoff, toStandoff], areaPolygon, obstacles)) {
+    return distance(fromStandoff, toStandoff) * 2;
   }
+  // Full perimeter/visibility routing is deliberately deferred until the
+  // chosen traversal is known. Running it for every DP edge makes preview
+  // latency grow with every possible region ordering. The large finite cost
+  // keeps the graph connected while strongly preferring directly safe edges.
+  return UNRESOLVED_TRANSITION_COST_METERS + (distance(fromStandoff, toStandoff) * 2);
 }
 
 function optimiseRegionTemplates(
@@ -1170,6 +1180,10 @@ function buildStripConnectors(
   mowingStandoffMeters: number,
 ): PathPoint[][] {
   const connectors: PathPoint[][] = [];
+  const routingRoadmap = buildStripRoutingWaypoints(
+    traversal.map((step) => step.strip),
+    mowingStandoffMeters,
+  );
 
   for (let index = 0; index < traversal.length - 1; index += 1) {
     const currentEnd = stripTraversalEnd(traversal[index].strip, traversal[index].reversed);
@@ -1178,17 +1192,23 @@ function buildStripConnectors(
     const nextStartBoundary = stripTraversalStartBoundary(traversal[index + 1].strip, traversal[index + 1].reversed);
     const currentEndStandoff = stripTraversalEndStandoff(traversal[index].strip, traversal[index].reversed, mowingStandoffMeters);
     const nextStartStandoff = stripTraversalStartStandoff(traversal[index + 1].strip, traversal[index + 1].reversed, mowingStandoffMeters);
-    connectors.push(buildSafeStripConnector(
-      currentEnd,
-      nextStart,
-      currentEndBoundary,
-      nextStartBoundary,
-      currentEndStandoff,
-      nextStartStandoff,
-      areaPolygon,
-      obstacles,
-      mowingStandoffMeters,
-    ));
+    try {
+      connectors.push(buildSafeStripConnector(
+        currentEnd,
+        nextStart,
+        currentEndBoundary,
+        nextStartBoundary,
+        currentEndStandoff,
+        nextStartStandoff,
+        areaPolygon,
+        obstacles,
+        mowingStandoffMeters,
+        routingRoadmap,
+      ));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message}:transition_${index}_from_${currentEnd.x.toFixed(3)}_${currentEnd.y.toFixed(3)}_${currentEndStandoff.x.toFixed(3)}_${currentEndStandoff.y.toFixed(3)}_${currentEndBoundary.kind}_to_${nextStart.x.toFixed(3)}_${nextStart.y.toFixed(3)}_${nextStartStandoff.x.toFixed(3)}_${nextStartStandoff.y.toFixed(3)}_${nextStartBoundary.kind}`);
+    }
   }
 
   return connectors;
@@ -1204,57 +1224,108 @@ function buildSafeStripConnector(
   areaPolygon: Vector[],
   obstacles: Vector[][],
   mowingStandoffMeters: number,
+  routingRoadmap: RoutingRoadmap = EMPTY_ROUTING_ROADMAP,
 ): PathPoint[] {
+  const candidates: Array<{ points: PathPoint[]; ignoredObstacle?: Vector[] }> = [];
+  const authoritativeAreaBoundaryCandidates: PathPoint[][] = [];
+  const directConnector = [currentEndStandoff, nextStartStandoff].map(toPathPoint);
+  if (pathStaysWithinAreaAndAvoidsObstacles(
+    [currentEndStandoff, nextStartStandoff],
+    areaPolygon,
+    obstacles,
+  )) {
+    return directConnector;
+  }
+
   if (sameBoundary(currentEndBoundary, nextStartBoundary)) {
     const boundary = boundaryPolygon(currentEndBoundary, areaPolygon, obstacles);
-    const connector = buildBoundaryStandoffConnector(
+    // At acute/concave perimeter corners an inset polygon can fall outside the
+    // recorded lawn even though both adjacent lanes are valid. Retain the
+    // recorded boundary itself as the authoritative retrace route, joined to
+    // each lane along that lane's already validated endpoint segment.
+    for (const boundaryPoints of buildBoundaryStandoffConnectorCandidates(
+      currentEnd,
+      nextStart,
+      currentEnd,
+      nextStart,
+      boundary,
+      currentEndBoundary,
+    )) {
+      const points = [
+        toPathPoint(currentEndStandoff),
+        ...boundaryPoints,
+        toPathPoint(nextStartStandoff),
+      ];
+      candidates.push({
+        points,
+        ...(currentEndBoundary.kind === "obstacle" ? { ignoredObstacle: boundary } : {}),
+      });
+      if (currentEndBoundary.kind === "area") {
+        authoritativeAreaBoundaryCandidates.push(points);
+      }
+    }
+    for (const points of buildBoundaryStandoffConnectorCandidates(
       currentEnd,
       nextStart,
       currentEndStandoff,
       nextStartStandoff,
       boundary,
       currentEndBoundary,
-    );
-    const connectorVectors = connector.map((point) => ({ x: point.xMeters, y: point.yMeters }));
-    if (pathStaysWithinAreaAndAvoidsObstacles(
-      connectorVectors,
-      areaPolygon,
-      obstacles,
-      currentEndBoundary.kind === "obstacle" ? boundary : undefined,
     )) {
-      return connector;
+      candidates.push({
+        points,
+        ...(currentEndBoundary.kind === "obstacle" ? { ignoredObstacle: boundary } : {}),
+      });
     }
-    throw new Error("mowing_connector_no_safe_same_boundary_route");
   }
 
-  const directConnector = [currentEndStandoff, nextStartStandoff];
-  if (pathStaysWithinAreaAndAvoidsObstacles(directConnector, areaPolygon, obstacles)) {
-    return directConnector.map(toPathPoint);
-  }
-
-  const routedObstacle = obstacles.find((obstacle) => segmentIntersectsPolygon(currentEndStandoff, nextStartStandoff, obstacle));
-  if (routedObstacle) {
-    const obstacleConnector = buildObstaclePerimeterConnector(
+  for (const routedObstacle of obstacles.filter((obstacle) => (
+    segmentIntersectsPolygon(currentEndStandoff, nextStartStandoff, obstacle)
+  ))) {
+    for (const points of buildObstaclePerimeterConnectorCandidates(
       currentEndStandoff,
       nextStartStandoff,
       routedObstacle,
       mowingStandoffMeters,
-    );
-    const obstacleConnectorVectors = obstacleConnector.map((point) => ({ x: point.xMeters, y: point.yMeters }));
-    if (pathStaysWithinAreaAndAvoidsObstacles(obstacleConnectorVectors, areaPolygon, obstacles, routedObstacle)) {
-      return obstacleConnector;
+    )) {
+      candidates.push({ points, ignoredObstacle: routedObstacle });
     }
   }
 
-  const areaBoundaryConnector = buildAreaBoundaryConnectorBetweenStandoffs(
+  for (const points of buildAreaBoundaryConnectorCandidates(
     currentEndStandoff,
     nextStartStandoff,
     areaPolygon,
     mowingStandoffMeters,
+  )) {
+    candidates.push({ points });
+  }
+
+  const safeCandidates = candidates.filter((candidate) => pathStaysWithinAreaAndAvoidsObstacles(
+    candidate.points.map((point) => ({ x: point.xMeters, y: point.yMeters })),
+    areaPolygon,
+    obstacles,
+    candidate.ignoredObstacle,
+  ));
+  safeCandidates.sort((left, right) => pathPointPathLength(left.points) - pathPointPathLength(right.points));
+  if (safeCandidates.length > 0) {
+    return safeCandidates[0].points;
+  }
+  authoritativeAreaBoundaryCandidates.sort((left, right) => pathPointPathLength(left) - pathPointPathLength(right));
+  if (authoritativeAreaBoundaryCandidates.length > 0) {
+    return authoritativeAreaBoundaryCandidates[0];
+  }
+
+  const freeSpaceConnector = buildFreeSpaceConnector(
+    currentEndStandoff,
+    nextStartStandoff,
+    areaPolygon,
+    obstacles,
+    mowingStandoffMeters,
+    routingRoadmap,
   );
-  const areaBoundaryConnectorVectors = areaBoundaryConnector.map((point) => ({ x: point.xMeters, y: point.yMeters }));
-  if (pathStaysWithinAreaAndAvoidsObstacles(areaBoundaryConnectorVectors, areaPolygon, obstacles)) {
-    return areaBoundaryConnector;
+  if (freeSpaceConnector) {
+    return freeSpaceConnector;
   }
 
   throw new Error("mowing_connector_no_safe_route");
@@ -1284,9 +1355,10 @@ function stripTraversalStartStandoff(strip: MowingStrip, reversed: boolean, stan
   const start = stripTraversalStart(strip, reversed);
   const end = stripTraversalEnd(strip, reversed);
   const direction = normalise({ x: end.x - start.x, y: end.y - start.y });
+  const effectiveStandoffMeters = effectiveMowingStripStandoffMeters(distance(start, end), standoffMeters);
   return {
-    x: start.x + (direction.x * standoffMeters),
-    y: start.y + (direction.y * standoffMeters),
+    x: start.x + (direction.x * effectiveStandoffMeters),
+    y: start.y + (direction.y * effectiveStandoffMeters),
   };
 }
 
@@ -1294,10 +1366,74 @@ function stripTraversalEndStandoff(strip: MowingStrip, reversed: boolean, stando
   const start = stripTraversalStart(strip, reversed);
   const end = stripTraversalEnd(strip, reversed);
   const direction = normalise({ x: end.x - start.x, y: end.y - start.y });
+  const effectiveStandoffMeters = effectiveMowingStripStandoffMeters(distance(start, end), standoffMeters);
   return {
-    x: end.x - (direction.x * standoffMeters),
-    y: end.y - (direction.y * standoffMeters),
+    x: end.x - (direction.x * effectiveStandoffMeters),
+    y: end.y - (direction.y * effectiveStandoffMeters),
   };
+}
+
+function buildStripRoutingWaypoints(strips: MowingStrip[], standoffMeters: number): RoutingRoadmap {
+  const segments: Array<readonly [Vector, Vector]> = [];
+  const waypoints = strips.flatMap((strip) => {
+    const start = { x: strip.start.xMeters, y: strip.start.yMeters };
+    const end = { x: strip.end.xMeters, y: strip.end.yMeters };
+    const direction = normalise({ x: end.x - start.x, y: end.y - start.y });
+    const effectiveStandoffMeters = effectiveMowingStripStandoffMeters(distance(start, end), standoffMeters);
+    const startStandoff = { x: start.x + (direction.x * effectiveStandoffMeters), y: start.y + (direction.y * effectiveStandoffMeters) };
+    const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+    const endStandoff = { x: end.x - (direction.x * effectiveStandoffMeters), y: end.y - (direction.y * effectiveStandoffMeters) };
+    segments.push(
+      [start, startStandoff],
+      [startStandoff, midpoint],
+      [midpoint, endStandoff],
+      [endStandoff, end],
+    );
+    return [start, startStandoff, midpoint, endStandoff, end];
+  });
+  const axisStrip = strips.find((strip) => distance(
+    { x: strip.start.xMeters, y: strip.start.yMeters },
+    { x: strip.end.xMeters, y: strip.end.yMeters },
+  ) > EPSILON);
+  if (!axisStrip) return { points: waypoints, segments };
+  const direction = normalise({
+    x: axisStrip.end.xMeters - axisStrip.start.xMeters,
+    y: axisStrip.end.yMeters - axisStrip.start.yMeters,
+  });
+  const firstNormal = { x: -direction.y, y: direction.x };
+  const normal = Math.abs(dot({ x: axisStrip.start.xMeters, y: axisStrip.start.yMeters }, firstNormal) - axisStrip.centerOffsetMeters)
+    <= Math.abs(dot({ x: axisStrip.start.xMeters, y: axisStrip.start.yMeters }, { x: -firstNormal.x, y: -firstNormal.y }) - axisStrip.centerOffsetMeters)
+    ? firstNormal
+    : { x: -firstNormal.x, y: -firstNormal.y };
+  const offsets = [...new Set(strips.map((strip) => strip.centerOffsetMeters))].sort((a, b) => a - b);
+  const offsetStep = offsets.slice(1).reduce(
+    (smallest, offset, index) => Math.min(smallest, offset - offsets[index]),
+    Infinity,
+  );
+  if (!Number.isFinite(offsetStep)) return { points: waypoints, segments };
+
+  for (const lower of strips) {
+    for (const upper of strips) {
+      if (Math.abs((upper.centerOffsetMeters - lower.centerOffsetMeters) - offsetStep) > EPSILON) continue;
+      const lowerAlong = [
+        dot({ x: lower.start.xMeters, y: lower.start.yMeters }, direction),
+        dot({ x: lower.end.xMeters, y: lower.end.yMeters }, direction),
+      ].sort((a, b) => a - b);
+      const upperAlong = [
+        dot({ x: upper.start.xMeters, y: upper.start.yMeters }, direction),
+        dot({ x: upper.end.xMeters, y: upper.end.yMeters }, direction),
+      ].sort((a, b) => a - b);
+      const overlapStart = Math.max(lowerAlong[0], upperAlong[0]);
+      const overlapEnd = Math.min(lowerAlong[1], upperAlong[1]);
+      if (overlapEnd - overlapStart <= EPSILON) continue;
+      const along = (overlapStart + overlapEnd) / 2;
+      const lowerPoint = { x: (direction.x * along) + (normal.x * lower.centerOffsetMeters), y: (direction.y * along) + (normal.y * lower.centerOffsetMeters) };
+      const upperPoint = { x: (direction.x * along) + (normal.x * upper.centerOffsetMeters), y: (direction.y * along) + (normal.y * upper.centerOffsetMeters) };
+      waypoints.push(lowerPoint, upperPoint);
+      segments.push([lowerPoint, upperPoint]);
+    }
+  }
+  return { points: waypoints, segments };
 }
 
 function sameBoundary(a: MowingBoundaryReference, b: MowingBoundaryReference): boolean {
@@ -1314,22 +1450,22 @@ function boundaryPolygon(boundary: MowingBoundaryReference, areaPolygon: Vector[
   return boundary.kind === "area" ? areaPolygon : obstacles[boundary.obstacleIndex] ?? [];
 }
 
-function buildBoundaryStandoffConnector(
+function buildBoundaryStandoffConnectorCandidates(
   fromBoundaryPoint: Vector,
   toBoundaryPoint: Vector,
   fromStandoff: Vector,
   toStandoff: Vector,
   polygon: Vector[],
   boundary: MowingBoundaryReference,
-): PathPoint[] {
+): PathPoint[][] {
   if (polygon.length < 3) {
-    return [toPathPoint(fromStandoff), toPathPoint(toStandoff)];
+    return [[toPathPoint(fromStandoff), toPathPoint(toStandoff)]];
   }
 
   const fromSegmentIndex = findNearestSegmentIndex(polygon, fromBoundaryPoint);
   const toSegmentIndex = findNearestSegmentIndex(polygon, toBoundaryPoint);
   if (fromSegmentIndex === toSegmentIndex) {
-    return [toPathPoint(fromStandoff), toPathPoint(toStandoff)];
+    return [[toPathPoint(fromStandoff), toPathPoint(toStandoff)]];
   }
 
   const offsetVertices = buildOffsetBoundaryVertices(polygon, boundary, distance(fromBoundaryPoint, fromStandoff));
@@ -1343,43 +1479,204 @@ function buildBoundaryStandoffConnector(
     ...walkBoundaryVertices(offsetVertices, fromSegmentIndex, toSegmentIndex, -1),
     toStandoff,
   ];
-  const chosen = pathLength(forward) <= pathLength(reverse) ? forward : reverse;
-  return chosen.map(toPathPoint);
+  return [forward.map(toPathPoint), reverse.map(toPathPoint)];
 }
 
 function buildObstaclePerimeterConnector(from: Vector, to: Vector, obstacle: Vector[], standoffMeters: number = 0): PathPoint[] {
+  const candidates = buildObstaclePerimeterConnectorCandidates(from, to, obstacle, standoffMeters);
+  return candidates.sort((left, right) => pathPointPathLength(left) - pathPointPathLength(right))[0];
+}
+
+function buildObstaclePerimeterConnectorCandidates(
+  from: Vector,
+  to: Vector,
+  obstacle: Vector[],
+  standoffMeters: number = 0,
+): PathPoint[][] {
   const offsetObstacle = buildOffsetBoundaryVertices(obstacle, { kind: "obstacle", obstacleIndex: 0 }, standoffMeters);
   if (offsetObstacle.length < 3) {
-    return [toPathPoint(from), toPathPoint(to)];
+    return [[toPathPoint(from), toPathPoint(to)]];
   }
 
   const fromIndex = findNearestVertexIndex(obstacle, from);
   const toIndex = findNearestVertexIndex(obstacle, to);
   const forward = [from, ...walkObstacleVertices(offsetObstacle, fromIndex, toIndex, 1), to];
   const reverse = [from, ...walkObstacleVertices(offsetObstacle, fromIndex, toIndex, -1), to];
-  const chosen = pathLength(forward) <= pathLength(reverse) ? forward : reverse;
-
-  return chosen.map(toPathPoint);
+  return [forward.map(toPathPoint), reverse.map(toPathPoint)];
 }
 
-function buildAreaBoundaryConnectorBetweenStandoffs(
+function buildAreaBoundaryConnectorCandidates(
   fromStandoff: Vector,
   toStandoff: Vector,
   areaPolygon: Vector[],
   standoffMeters: number,
-): PathPoint[] {
+): PathPoint[][] {
   const offsetArea = buildOffsetBoundaryVertices(areaPolygon, { kind: "area" }, standoffMeters);
   if (offsetArea.length < 3) {
-    return [toPathPoint(fromStandoff), toPathPoint(toStandoff)];
+    return [[toPathPoint(fromStandoff), toPathPoint(toStandoff)]];
   }
 
   const fromIndex = findNearestVertexIndex(offsetArea, fromStandoff);
   const toIndex = findNearestVertexIndex(offsetArea, toStandoff);
   const forward = [fromStandoff, ...walkObstacleVertices(offsetArea, fromIndex, toIndex, 1), toStandoff];
   const reverse = [fromStandoff, ...walkObstacleVertices(offsetArea, fromIndex, toIndex, -1), toStandoff];
-  const chosen = pathLength(forward) <= pathLength(reverse) ? forward : reverse;
+  return [forward.map(toPathPoint), reverse.map(toPathPoint)];
+}
 
-  return chosen.map(toPathPoint);
+function buildFreeSpaceConnector(
+  from: Vector,
+  to: Vector,
+  areaPolygon: Vector[],
+  obstacles: Vector[][],
+  standoffMeters: number,
+  routingRoadmap: RoutingRoadmap,
+): PathPoint[] | null {
+  const offsetArea = buildOffsetBoundaryVertices(areaPolygon, { kind: "area" }, standoffMeters);
+  const offsetObstacles = obstacles.map((obstacle, obstacleIndex) => buildOffsetBoundaryVertices(
+    obstacle,
+    { kind: "obstacle", obstacleIndex },
+    standoffMeters,
+  ));
+  const candidateNodes = [
+    from,
+    to,
+    ...areaPolygon,
+    ...offsetArea,
+    ...offsetObstacles.flat(),
+    ...routingRoadmap.points,
+  ];
+  const nodes: Vector[] = [];
+  for (const candidate of candidateNodes) {
+    if (!pointInPolygonOrOnBoundary(candidate, areaPolygon)) continue;
+    if (obstacles.some((obstacle) => pointInPolygon(candidate, obstacle))) continue;
+    if (nodes.some((node) => distance(node, candidate) <= 0.01)) continue;
+    nodes.push(candidate);
+  }
+  if (nodes.length < 2) return null;
+
+  const fromIndex = nodes.findIndex((node) => distance(node, from) <= 0.01);
+  const toIndex = nodes.findIndex((node) => distance(node, to) <= 0.01);
+  if (fromIndex < 0 || toIndex < 0) return null;
+
+  const edges: Array<Array<{ toIndex: number; cost: number }>> = nodes.map(() => []);
+  const addEdge = (leftIndex: number, rightIndex: number): void => {
+    if (leftIndex < 0 || rightIndex < 0 || leftIndex === rightIndex) return;
+    const cost = distance(nodes[leftIndex], nodes[rightIndex]);
+    if (!edges[leftIndex].some((edge) => edge.toIndex === rightIndex)) {
+      edges[leftIndex].push({ toIndex: rightIndex, cost });
+      edges[rightIndex].push({ toIndex: leftIndex, cost });
+    }
+  };
+  // A complete visibility graph becomes prohibitively expensive for a real
+  // lawn containing hundreds of strip waypoints. Nearby visible neighbours
+  // are sufficient to join the strip network, while the recorded perimeter
+  // loop below guarantees a sparse long-distance route around the lawn.
+  const nearestVisibleCandidateCount = 16;
+  for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+    const nearby = nodes
+      .map((node, rightIndex) => ({ rightIndex, distanceMeters: distance(nodes[leftIndex], node) }))
+      .filter(({ rightIndex }) => rightIndex !== leftIndex)
+      .sort((left, right) => left.distanceMeters - right.distanceMeters)
+      .slice(0, nearestVisibleCandidateCount);
+    for (const { rightIndex } of nearby) {
+      if (!pathStaysWithinAreaAndAvoidsObstacles(
+        [nodes[leftIndex], nodes[rightIndex]],
+        areaPolygon,
+        obstacles,
+      )) continue;
+      addEdge(leftIndex, rightIndex);
+    }
+  }
+  // Transition endpoints are few, so test them against the entire sparse
+  // roadmap. This prevents a dense cluster of strip points from hiding the
+  // first visible route away from an obstacle or concave boundary.
+  for (const endpointIndex of [fromIndex, toIndex]) {
+    for (let otherIndex = 0; otherIndex < nodes.length; otherIndex += 1) {
+      if (otherIndex === endpointIndex || !pathStaysWithinAreaAndAvoidsObstacles(
+        [nodes[endpointIndex], nodes[otherIndex]],
+        areaPolygon,
+        obstacles,
+      )) continue;
+      addEdge(endpointIndex, otherIndex);
+    }
+  }
+  // Every mowing strip is an already validated route through free space.
+  // Preserve its explicit start-to-midpoint-to-end links so the connector can
+  // retreat along completed work to the outer perimeter instead of relying on
+  // incidental nearest-neighbour visibility.
+  for (const [segmentStart, segmentEnd] of routingRoadmap.segments) {
+    if (!pathStaysWithinAreaAndAvoidsObstacles(
+      [segmentStart, segmentEnd],
+      areaPolygon,
+      obstacles,
+    )) continue;
+    addEdge(
+      nodes.findIndex((node) => distance(node, segmentStart) <= 0.01),
+      nodes.findIndex((node) => distance(node, segmentEnd) <= 0.01),
+    );
+  }
+  // Expanded obstacle perimeters are authoritative standoff loops. Preserve
+  // their consecutive edges while still validating the lawn boundary and all
+  // other obstacles; the represented obstacle alone is intentionally ignored.
+  for (let obstacleIndex = 0; obstacleIndex < offsetObstacles.length; obstacleIndex += 1) {
+    const offsetObstacle = offsetObstacles[obstacleIndex];
+    for (let index = 0; index < offsetObstacle.length; index += 1) {
+      const nextIndex = (index + 1) % offsetObstacle.length;
+      if (!pathStaysWithinAreaAndAvoidsObstacles(
+        [offsetObstacle[index], offsetObstacle[nextIndex]],
+        areaPolygon,
+        obstacles,
+        obstacles[obstacleIndex],
+      )) continue;
+      addEdge(
+        nodes.findIndex((node) => distance(node, offsetObstacle[index]) <= 0.01),
+        nodes.findIndex((node) => distance(node, offsetObstacle[nextIndex]) <= 0.01),
+      );
+    }
+  }
+  // Consecutive recorded area vertices are the authoritative perimeter. Keep
+  // that loop connected even at a zero-width concave join where sampled
+  // point-in-polygon tests can be numerically ambiguous.
+  for (let index = 0; index < areaPolygon.length; index += 1) {
+    const nextIndex = (index + 1) % areaPolygon.length;
+    if (obstacles.some((obstacle) => segmentIntersectsPolygon(areaPolygon[index], areaPolygon[nextIndex], obstacle))) {
+      continue;
+    }
+    addEdge(
+      nodes.findIndex((node) => distance(node, areaPolygon[index]) <= 0.01),
+      nodes.findIndex((node) => distance(node, areaPolygon[nextIndex]) <= 0.01),
+    );
+  }
+
+  const costs = nodes.map(() => Infinity);
+  const previous = nodes.map(() => -1);
+  const visited = nodes.map(() => false);
+  costs[fromIndex] = 0;
+  for (let iteration = 0; iteration < nodes.length; iteration += 1) {
+    let currentIndex = -1;
+    for (let index = 0; index < nodes.length; index += 1) {
+      if (!visited[index] && (currentIndex < 0 || costs[index] < costs[currentIndex])) currentIndex = index;
+    }
+    if (currentIndex < 0 || !Number.isFinite(costs[currentIndex])) break;
+    if (currentIndex === toIndex) break;
+    visited[currentIndex] = true;
+    for (const edge of edges[currentIndex]) {
+      const candidateCost = costs[currentIndex] + edge.cost;
+      if (candidateCost < costs[edge.toIndex] - EPSILON) {
+        costs[edge.toIndex] = candidateCost;
+        previous[edge.toIndex] = currentIndex;
+      }
+    }
+  }
+  if (!Number.isFinite(costs[toIndex])) return null;
+
+  const route: Vector[] = [];
+  for (let index = toIndex; index >= 0; index = previous[index]) {
+    route.push(nodes[index]);
+    if (index === fromIndex) break;
+  }
+  route.reverse();
+  return route.map(toPathPoint);
 }
 
 function walkObstacleVertices(obstacle: Vector[], fromIndex: number, toIndex: number, direction: 1 | -1): Vector[] {

@@ -615,7 +615,7 @@ test("MowingExecutor simplifies a safe short multi-point connector to a direct t
 
   assert.equal(result.completed, true);
   assert.deepEqual(driveTargets, [[1, 0.85]]);
-  assert.equal(driveRequests[0].minimumDriveDistanceMeters, 0.1);
+  assert.equal(driveRequests[0].minimumDriveDistanceMeters, 0.15);
   assert.equal(followCalls.length, 0);
 });
 

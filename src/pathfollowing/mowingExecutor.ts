@@ -1,6 +1,6 @@
 import { PathPoint } from "./pathFollowerApi.js";
 import { ContinuousPathFollower } from "./continuousPathFollower.js";
-import { buildMowingPlan, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
+import { buildMowingPlan, effectiveMowingStripStandoffMeters, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
 import type { MowingResumeContinuation, MowingResumeOperation, MowingResumeState, MowingResumeStage } from "./mowingResumeStore.js";
 import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan } from "./pathVerification.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
@@ -76,7 +76,7 @@ const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
 const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
-const MOWING_MINIMUM_TRANSLATION_METERS = 0.1;
+const MOWING_MINIMUM_TRANSLATION_METERS = 0.15;
 const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
 const SHORT_DIRECT_CONNECTOR_MAX_OUTSIDE_AREA_METERS = 0.25;
 const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
@@ -489,8 +489,13 @@ export class MowingExecutor {
         y: stripEnd.yMeters - stripStart.yMeters,
       });
 
-      const entryStandoff = offsetPoint(stripStart, dir, this.standoff);
-      const exitStandoff = offsetPoint(stripEnd, dir, -this.standoff);
+      const stripLengthMeters = Math.hypot(
+        stripEnd.xMeters - stripStart.xMeters,
+        stripEnd.yMeters - stripStart.yMeters,
+      );
+      const effectiveStandoffMeters = effectiveMowingStripStandoffMeters(stripLengthMeters, this.standoff);
+      const entryStandoff = offsetPoint(stripStart, dir, effectiveStandoffMeters);
+      const exitStandoff = offsetPoint(stripEnd, dir, -effectiveStandoffMeters);
       const startBoundaryKey = this.boundaryKeyFromReference(
         strip.traversalReversed ? strip.endBoundary : strip.startBoundary,
       );
@@ -819,7 +824,11 @@ export class MowingExecutor {
           x: stripEnd.xMeters - stripStart.xMeters,
           y: stripEnd.yMeters - stripStart.yMeters,
         });
-        const entryStandoff = offsetPoint(stripStart, direction, this.standoff);
+        const effectiveStandoffMeters = effectiveMowingStripStandoffMeters(Math.hypot(
+          stripEnd.xMeters - stripStart.xMeters,
+          stripEnd.yMeters - stripStart.yMeters,
+        ), this.standoff);
+        const entryStandoff = offsetPoint(stripStart, direction, effectiveStandoffMeters);
         const approachStatus = await this.approachStripEntryAfterBoundaryTrace(
           operation.continuation.stripIndex,
           entryStandoff,

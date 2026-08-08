@@ -3,13 +3,14 @@
 ## Agents
 
 - Stay within `/Volumes/Mower/mower` and its subdirectories unless the task explicitly says otherwise.
+- `/Volumes/Mower/mower` is the mounted live mower filesystem, not a detached or static workstation clone. Source edits made there are edits to the mower's live software tree; generated `dist` output still changes only when the user runs `npm run build`.
 - Treat bug reports, log reviews, and diagnostic questions as analysis-only by default: explain findings, likely causes, and suggested fixes without changing code unless the user explicitly asks for implementation.
 - Check whether the session actually has the needed toolchain before attempting builds or package-manager commands.
 - If `node`, `npm`, or the repo build command is unavailable in this session, do not keep retrying those commands.
 - When tooling is unavailable, switch to source inspection, code edits, and a clear note that build/test verification could not be run here.
-- If the `mower` MCP server is available in the session, prefer its remote `sync`, `build`, `test`, and `getLatestLogs` tools over unsupported local verification on the static workstation clone.
+- The `mower` MCP server is configured and verified for this project. At the start of relevant work, check for its `build`, `test`, `getLatestLogs`, `readFile`, and `sync` tools. Prefer `build`, `test`, `getLatestLogs`, and `readFile` over unsupported execution through the mounted filesystem. Because the mount is already the live source tree, normally do not call `sync`.
 - Do not assume a missing command will become available later in the same session.
-- Never edit files in the dist folder.  Request the user does a "npm run build".
+- Never edit files in the dist folder. Use the mower MCP `build` tool to run `npm run build` and generate it from source; ask the user to build only if that MCP tool is unavailable.
 
 
 ## Goal
