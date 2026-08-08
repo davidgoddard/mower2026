@@ -92,6 +92,18 @@ void writeU24LE(uint8_t *bytes, uint32_t value) {
   bytes[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
 }
 
+void printMac(const uint8_t *address) {
+  for (uint8_t index = 0; index < 6; index += 1) {
+    if (index > 0) {
+      Serial.print(":");
+    }
+    if (address[index] < 0x10) {
+      Serial.print("0");
+    }
+    Serial.print(address[index], HEX);
+  }
+}
+
 void resetRtcmParser() {
   g_inRtcmMessage = false;
   g_rtcmLength = 0;
@@ -307,6 +319,15 @@ void setupEspNow() {
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
   esp_wifi_set_channel(RTCM_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  uint8_t stationMac[6];
+  if (esp_wifi_get_mac(WIFI_IF_STA, stationMac) == ESP_OK) {
+    Serial.print("[RTCM-BASE] station MAC=");
+    printMac(stationMac);
+    Serial.println();
+  } else {
+    Serial.println("[RTCM-BASE] failed to read station MAC");
+  }
 
   if (esp_now_init() != ESP_OK) {
     return;

@@ -13,6 +13,14 @@ This sketch reads RTCM3 messages from a UM980 base receiver on `Serial2` and for
 - ESP-NOW channel: `1`
 - Transport: fragmented RTCM packets with message ID, fragment index/count, total message length, and RTCM CRC tag
 
+At startup the serial console prints the station-mode MAC address as:
+
+```text
+[RTCM-BASE] station MAC=AA:BB:CC:DD:EE:FF
+```
+
+Use this address for `BASE_STATION_MAC` in the relay and mower GNSS firmware.
+
 ## Peer configuration
 
 For best reliability, set one or more rover MAC addresses in `ROVER_PEERS` and increase `ROVER_PEER_COUNT`.
@@ -25,4 +33,5 @@ This sketch is paired with:
 
 - `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`
 
-The rover sketch accepts this transport and still accepts the older 2-byte-sequence legacy transport for transition purposes.
+The rover sketch accepts this fragmented transport and uses its message identity
+to suppress duplicate direct and relayed packets.
