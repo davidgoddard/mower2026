@@ -23,7 +23,10 @@ import { GeometryCalibration } from "../config/geometryCalibration.js";
 import { PathFollowingConfig, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
 import { LearningPolicyConfig } from "../config/learningPolicyConfig.js";
 import { MowingRecordsStore } from "../config/mowingRecordsStore.js";
+import { RechargeConfigStore, type RechargeConfiguration } from "../config/rechargeConfigStore.js";
 import { BladeUsageTracker } from "../maintenance/bladeUsageTracker.js";
+import { MotorBatteryUsageTracker } from "../maintenance/motorBatteryUsageTracker.js";
+import { PiGpioOutput } from "../hardware/piGpioOutput.js";
 import { renderHomePage } from "./homePage.js";
 import { getTurnTuningPageHtml } from "./turnTuningPage.js";
 import { getDriveTuningPageHtml } from "./driveTuningPage.js";
@@ -32,12 +35,13 @@ import { renderPathTracingPage } from "./pathTracingPage.js";
 import { getManualDrivePageCss, getManualDrivePageHtml, getManualDrivePageJs } from "./manualDrivePage.js";
 import { getDeadReckoningPageHtml } from "./deadReckoningPage.js";
 import { getMowingRecordsPageHtml } from "./mowingRecordsPage.js";
+import { getBatteryManagementPageHtml } from "./batteryManagementPage.js";
 import { SENSOR_WIDGETS_JS } from "./liveSensorWidgets.js";
 import { OPERATOR_PAGE_COMMON_JS } from "./operatorPageCommon.js";
 import { DeadReckoningCalibrator } from "../control/deadReckoningCalibrator.js";
 import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapInternalHeading, unwrapRelativeAngle } from "../geometry/headingTypes.js";
-import { createPosition, unwrapMeters } from "../geometry/positionTypes.js";
+import { angleTo, createPosition, unwrapMeters } from "../geometry/positionTypes.js";
 import {
   MAX_PORT_NUMBER,
   MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
@@ -47,7 +51,7 @@ import {
   WHEEL_BASE_METERS_MIN_PLAUSIBLE,
   WHEEL_BASE_METERS_MAX_PLAUSIBLE,
 } from "../constants.js";
-import { ContinuousPathFollower, MowingExecutor, MowingProgressStore, MowingResumeStore, PathRecorder, PathStore, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildPerimeterFollowPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath } from "../pathfollowing/index.js";
+import { ContinuousPathFollower, MowingExecutor, MowingProgressStore, MowingResumeStore, PathRecorder, PathStore, buildDrivePathPointsForDirection, buildMowingInitialEntryPlan, buildMowingPlan, buildMowingTransitPath, buildPerimeterFollowPlan, buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildVerificationApproachPlan, buildVerificationPathPointsFromPlan, executeSegmentedBoundaryPath } from "../pathfollowing/index.js";
 import type { MowingResumeState, MowingStatus, PathPoint } from "../pathfollowing/index.js";
 import { shapeObstacleRecordedPath } from "../pathfollowing/obstaclePathShaper.js";
 import { buildAreaPerimeterGeometry } from "../pathfollowing/areaPerimeterPathCleaner.js";
@@ -265,6 +269,7 @@ const STOP_ACTION_PATHS = new Set([
 export function shouldClearSystemStopForPost(pathname: string): boolean {
   return !STOP_ACTION_PATHS.has(pathname)
     && !pathname.startsWith("/api/mowing-records/")
+    && !pathname.startsWith("/api/battery-management/")
     && pathname !== "/api/mowing-plan/preview";
 }
 
@@ -303,6 +308,10 @@ export function routeServerRequest(
 
   if (method === "GET" && pathname === "/mowing-records") {
     return { statusCode: 200, contentType: "text/html; charset=utf-8", body: getMowingRecordsPageHtml(), logNotFound: false };
+  }
+
+  if (method === "GET" && pathname === "/battery-management") {
+    return { statusCode: 200, contentType: "text/html; charset=utf-8", body: getBatteryManagementPageHtml(), logNotFound: false };
   }
 
   if (method === "GET" && pathname === "/turn-tuning") {
@@ -616,6 +625,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let imuCalibration: ImuCalibration | null = null;
   let poseCalibration: PoseCalibration | null = null;
   let bladeUsageTracker: BladeUsageTracker | null = null;
+  let motorBatteryUsageTracker: MotorBatteryUsageTracker | null = null;
+  const rechargeReturnLed = new PiGpioOutput(23, logger.child({ context: "hardware", source: "RechargeReturnLed" }));
   let geometryCalibration: GeometryCalibration | null = null;
   let pathFollowingConfig: PathFollowingConfig | null = null;
   const learningPolicy = new LearningPolicyConfig({ logger });
@@ -628,6 +639,14 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
   let mowingResumeStore: MowingResumeStore | null = null;
   let mowingProgressStore: MowingProgressStore | null = null;
   const mowingRecordsStore = new MowingRecordsStore();
+  const rechargeConfigStore = new RechargeConfigStore();
+  let rechargeConfiguration: RechargeConfiguration = await rechargeConfigStore.load();
+  let rechargeRequested = false;
+  let rechargeSuppressedUntilDistanceReset = false;
+  let rechargeWaiting = false;
+  const RECHARGE_POSITION_TOLERANCE_METERS = 0.5;
+  const RECHARGE_HEADING_TOLERANCE_DEG = 20;
+  let releaseRechargeWait: ((confirmedAtChargingPosition: boolean) => void) | null = null;
   let mowingResumeState: MowingResumeState | null = null;
   let operationContextTracker: OperationContextTracker | null = null;
   let checkpointStore: CheckpointStore | null = null;
@@ -664,6 +683,76 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           operation: state ? "save" : "clear",
         });
       });
+  }
+
+  async function performRechargeDiversion(context: {
+    interruptedPosition: PathPoint;
+    areaPoints: ReadonlyArray<PathPoint>;
+    obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
+    setPhase: (phase: MowingStatus["phase"]) => void;
+  }): Promise<void> {
+    if (!rechargeConfiguration.chargingPosition || !rechargeConfiguration.driveToPosition
+      || !poseFusion || !continuousPathFollower || !driveController) return;
+    rechargeRequested = false;
+    const driveTo = rechargeConfiguration.driveToPosition;
+    const charging = rechargeConfiguration.chargingPosition;
+    const pose = poseFusion.getCurrentPose();
+    const current = { xMeters: unwrapMeters(pose.position.xMeters), yMeters: unwrapMeters(pose.position.yMeters) };
+    const routeToCharger = buildMowingTransitPath(context.areaPoints, context.obstaclePointsArray,
+      current, driveTo, pathFollowingConfig?.getParameters().mowingStandoffMeters ?? 0.38);
+    await rechargeReturnLed.set(true);
+    context.setPhase("travelling_to_charger");
+    const inbound = await continuousPathFollower.executePath(routeToCharger, { loopPath: false });
+    if (!inbound.completed) {
+      await rechargeReturnLed.set(false);
+      throw new Error(`recharge_route_failed:${inbound.reason}`);
+    }
+    context.setPhase("docking");
+    const docked = await driveController.executeDrive({
+      targetPosition: createPosition(charging.xMeters, charging.yMeters),
+      driveDirectionSign: -1,
+      alwaysTurnToFaceTarget: true,
+      learningEnabled: false,
+      maximumWheelOutputPercent: rechargeConfiguration.dockingWheelOutputPercent,
+    });
+    if (docked.status !== "success") {
+      await rechargeReturnLed.set(false);
+      throw new Error(`recharge_docking_failed:${docked.status}`);
+    }
+    context.setPhase("waiting_for_charge");
+    await rechargeReturnLed.set(false);
+    rechargeWaiting = true;
+    const confirmedAtChargingPosition = await new Promise<boolean>((resolve) => { releaseRechargeWait = resolve; });
+    releaseRechargeWait = null;
+    rechargeWaiting = false;
+    let returnRouteStart = driveTo;
+    if (confirmedAtChargingPosition) {
+      await motorBatteryUsageTracker?.markCharged();
+      rechargeSuppressedUntilDistanceReset = false;
+      context.setPhase("undocking");
+      const undocked = await driveController.executeDrive({
+        targetPosition: createPosition(driveTo.xMeters, driveTo.yMeters),
+        driveDirectionSign: 1,
+        learningEnabled: false,
+        maximumWheelOutputPercent: rechargeConfiguration.dockingWheelOutputPercent,
+      });
+      if (undocked.status !== "success") throw new Error(`recharge_undocking_failed:${undocked.status}`);
+    } else {
+      // "Carry On" away from the charger is an explicit operator override.
+      // Do not immediately request the same diversion again at the next strip.
+      rechargeSuppressedUntilDistanceReset = true;
+      const currentPose = poseFusion.getCurrentPose();
+      returnRouteStart = {
+        xMeters: unwrapMeters(currentPose.position.xMeters),
+        yMeters: unwrapMeters(currentPose.position.yMeters),
+      };
+    }
+    context.setPhase("returning_to_mow");
+    const returnRoute = buildMowingTransitPath(context.areaPoints, context.obstaclePointsArray,
+      returnRouteStart, context.interruptedPosition, pathFollowingConfig?.getParameters().mowingStandoffMeters ?? 0.38);
+    const returned = await continuousPathFollower.executePath(returnRoute, { loopPath: false });
+    if (!returned.completed) throw new Error(`recharge_return_failed:${returned.reason}`);
+    await rechargeReturnLed.set(false);
   }
 
   /**
@@ -908,6 +997,27 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         return;
       }
 
+      if (requestUrl.pathname === "/api/recharge/status") {
+        const battery = motorBatteryUsageTracker?.snapshot();
+        response.writeHead(200, { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson({
+          configuration: rechargeConfiguration,
+          combinedWheelTravelMeters: battery?.combinedWheelMetersSinceCharge ?? 0,
+          rechargeDue: rechargeRequested || (!rechargeSuppressedUntilDistanceReset
+            && ((battery?.combinedWheelMetersSinceCharge ?? 0) >= rechargeConfiguration.combinedWheelBudgetMeters
+              || motorBatteryUsageTracker?.isReturnDue() === true)),
+          waitingForCharge: rechargeWaiting,
+        }));
+        return;
+      }
+
+      if (requestUrl.pathname === "/api/battery-management" && motorBatteryUsageTracker) {
+        const battery = motorBatteryUsageTracker.snapshot();
+        response.writeHead(200, { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" });
+        response.end(encodeJson({ ...battery, returnDue: motorBatteryUsageTracker.isReturnDue() }));
+        return;
+      }
+
       if (requestUrl.pathname === "/api/mowing/progress") {
         try {
           const points = mowingProgressStore ? await mowingProgressStore.readPoints() : [];
@@ -958,6 +1068,65 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         const body = await readRequestBody(request);
         if (shouldClearSystemStopForPost(requestUrl.pathname)) {
           systemStop.clearStop(`post:${requestUrl.pathname}`);
+        }
+
+        if (requestUrl.pathname === "/api/recharge/config") {
+          const data = JSON.parse(body) as Partial<RechargeConfiguration>;
+          rechargeConfiguration = await rechargeConfigStore.save({ ...rechargeConfiguration, ...data });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ configuration: rechargeConfiguration }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/recharge/capture" && poseFusion) {
+          const data = JSON.parse(body) as { point?: string };
+          const pose = poseFusion.getCurrentPose();
+          if (pose.quality !== "gnss") throw new BadRequestError("poor_gnss");
+          const point = { xMeters: unwrapMeters(pose.position.xMeters), yMeters: unwrapMeters(pose.position.yMeters) };
+          if (data.point === "charging") rechargeConfiguration = { ...rechargeConfiguration, chargingPosition: point };
+          else if (data.point === "driveTo") rechargeConfiguration = { ...rechargeConfiguration, driveToPosition: point };
+          else throw new BadRequestError("recharge_point_required");
+          rechargeConfiguration = await rechargeConfigStore.save(rechargeConfiguration);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ configuration: rechargeConfiguration }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/recharge/request") {
+          if (!rechargeConfiguration.chargingPosition || !rechargeConfiguration.driveToPosition) {
+            throw new BadRequestError("recharge_points_not_configured");
+          }
+          rechargeRequested = true;
+          rechargeSuppressedUntilDistanceReset = false;
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ requested: true }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/recharge/reset-distance") {
+          await motorBatteryUsageTracker?.resetDistance();
+          rechargeRequested = false;
+          rechargeSuppressedUntilDistanceReset = false;
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ reset: true }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/battery-management/settings" && motorBatteryUsageTracker) {
+          const data = JSON.parse(body) as { maximumCapacityAh?: unknown; returnToChargePercent?: unknown };
+          const battery = await motorBatteryUsageTracker.updateSettings(data.maximumCapacityAh, data.returnToChargePercent);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ ...battery, returnDue: motorBatteryUsageTracker.isReturnDue() }));
+          return;
+        }
+
+        if (requestUrl.pathname === "/api/battery-management/charged" && motorBatteryUsageTracker) {
+          const battery = await motorBatteryUsageTracker.markCharged();
+          rechargeRequested = false;
+          rechargeSuppressedUntilDistanceReset = false;
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(encodeJson({ ...battery, returnDue: motorBatteryUsageTracker.isReturnDue() }));
+          return;
         }
 
         if (requestUrl.pathname === "/api/mowing-records/maintenance") {
@@ -1811,6 +1980,14 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
               });
             },
             updateResumeState: setMowingResumeState,
+            rechargeDue: () => rechargeConfiguration.enabled
+              && rechargeConfiguration.chargingPosition !== null
+              && rechargeConfiguration.driveToPosition !== null
+              && (rechargeRequested || (!rechargeSuppressedUntilDistanceReset
+                && (((motorBatteryUsageTracker?.snapshot().combinedWheelMetersSinceCharge ?? 0)
+                  >= rechargeConfiguration.combinedWheelBudgetMeters)
+                  || motorBatteryUsageTracker?.isReturnDue() === true))),
+            performRechargeDiversion,
           });
           mowingStatus = mowingExecutor.getStatus();
 
@@ -1874,6 +2051,42 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
         }
 
         if (requestUrl.pathname === "/api/mowing/resume" && driveController && turnController && poseFusion) {
+          if (rechargeWaiting && releaseRechargeWait) {
+            const chargingPosition = rechargeConfiguration.chargingPosition;
+            const driveToPosition = rechargeConfiguration.driveToPosition;
+            const currentPose = poseFusion.getCurrentPose();
+            const distanceFromChargingPositionMeters = chargingPosition
+              ? Math.hypot(
+                unwrapMeters(currentPose.position.xMeters) - chargingPosition.xMeters,
+                unwrapMeters(currentPose.position.yMeters) - chargingPosition.yMeters,
+              )
+              : Infinity;
+            const chargingExitHeading = chargingPosition && driveToPosition
+              ? angleTo(
+                createPosition(chargingPosition.xMeters, chargingPosition.yMeters),
+                createPosition(driveToPosition.xMeters, driveToPosition.yMeters),
+              )
+              : null;
+            const chargingHeadingErrorDeg = chargingExitHeading
+              ? Math.abs(unwrapRelativeAngle(headingDifference(currentPose.heading, chargingExitHeading)))
+              : Infinity;
+            const confirmedAtChargingPosition = currentPose.quality === "gnss"
+              && distanceFromChargingPositionMeters <= RECHARGE_POSITION_TOLERANCE_METERS
+              && chargingHeadingErrorDeg <= RECHARGE_HEADING_TOLERANCE_DEG;
+            releaseRechargeWait(confirmedAtChargingPosition);
+            response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({
+              resumedFromCharger: confirmedAtChargingPosition,
+              carriedOnWithoutCharge: !confirmedAtChargingPosition,
+              distanceFromChargingPositionMeters: Number.isFinite(distanceFromChargingPositionMeters)
+                ? distanceFromChargingPositionMeters
+                : null,
+              chargingHeadingErrorDeg: Number.isFinite(chargingHeadingErrorDeg)
+                ? chargingHeadingErrorDeg
+                : null,
+            }));
+            return;
+          }
           if (mowingExecutor && mowingStatus.phase !== "idle" && mowingStatus.phase !== "complete" && mowingStatus.phase !== "stopped" && mowingStatus.phase !== "error") {
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
             response.end(encodeJson({ error: "mowing_already_active" }));
@@ -1913,6 +2126,14 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             recentTargetSink: retryManager ?? undefined,
             resumeState,
             updateResumeState: setMowingResumeState,
+            rechargeDue: () => rechargeConfiguration.enabled
+              && rechargeConfiguration.chargingPosition !== null
+              && rechargeConfiguration.driveToPosition !== null
+              && (rechargeRequested || (!rechargeSuppressedUntilDistanceReset
+                && (((motorBatteryUsageTracker?.snapshot().combinedWheelMetersSinceCharge ?? 0)
+                  >= rechargeConfiguration.combinedWheelBudgetMeters)
+                  || motorBatteryUsageTracker?.isReturnDue() === true))),
+            performRechargeDiversion,
             updateRecoveryCheckpoint: (waypoints) => {
               if (!poseFusion || !checkpointStore) {
                 return;
@@ -2022,6 +2243,16 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           );
           const loadObstaclesMs = elapsedMilliseconds(loadObstaclesStartedAtMs);
           const pathFollowingParameters = pathFollowingConfig?.getParameters();
+          const previewPose = poseFusion?.getCurrentPose();
+          const previewEntryPlan = previewPose
+            ? buildMowingInitialEntryPlan(shapedAreaPoints, {
+              xMeters: unwrapMeters(previewPose.position.xMeters),
+              yMeters: unwrapMeters(previewPose.position.yMeters),
+            }, {
+              mowingStandoffMeters: pathFollowingParameters?.mowingStandoffMeters,
+              obstacles,
+            })
+            : null;
           const buildPlanStartedAtMs = Date.now();
           let plan: ReturnType<typeof buildMowingPlan>;
           try {
@@ -2030,6 +2261,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
               stripSpacingMeters,
               bladeWidthMeters: 0.4,
               mowingStandoffMeters: pathFollowingParameters?.mowingStandoffMeters,
+              ...(previewEntryPlan ? { preferredStartPoint: previewEntryPlan.entryPoint } : {}),
               obstacles,
             });
           } catch (error) {
@@ -2579,6 +2811,8 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     continuousPathFollower = new ContinuousPathFollower({
       sensorController,
       poseFusion,
+      driveController,
+      turnController,
       learningModel: driveLearningModel,
       logger: logger.child({ context: "pathfollowing", source: "ContinuousPathFollower" }),
     });
@@ -2660,8 +2894,12 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     mowingRecordsStore,
   );
   bladeUsageTracker.start();
+  motorBatteryUsageTracker = new MotorBatteryUsageTracker(sensorController!, poseCalibration!);
+  await motorBatteryUsageTracker.load();
+  motorBatteryUsageTracker.start();
 
   logger.transition("starting", "running", { port: boundPort, host });
+  await rechargeReturnLed.set(false);
 
   return {
     host,
@@ -2673,8 +2911,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
 
       state = "stopping";
       logger.transition("running", "stopping");
+      await rechargeReturnLed.set(false);
 
       await bladeUsageTracker?.close();
+      await motorBatteryUsageTracker?.close();
       await mowingProgressStore?.close();
 
       if (fatalHandlerInstalled) {

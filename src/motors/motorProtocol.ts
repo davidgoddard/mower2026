@@ -9,6 +9,8 @@ export interface WheelSpeedCommand {
 }
 
 export interface MotorFeedbackSample {
+  /** ESP-owned sequence of the generated 20Hz feedback snapshot. */
+  readonly sequence: number;
   readonly timestampMillis: number;
   readonly leftEncoderDelta: number;
   readonly rightEncoderDelta: number;

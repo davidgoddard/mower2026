@@ -3,7 +3,8 @@ import { decodeOptionalUint16 } from "../protocols/codecPrimitives.js";
 
 // Motor protocol payload lengths (implementation details)
 const WHEEL_SPEED_COMMAND_LENGTH = 15;
-const MOTOR_FEEDBACK_SAMPLE_LENGTH = 22;
+// 21-byte payload + 9-byte header + 2-byte CRC = a fixed 32-byte response.
+const MOTOR_FEEDBACK_SAMPLE_LENGTH = 21;
 
 // Motor codec scaling factors (implementation details)
 const NORMALIZED_SCALE_MILLI_TO_UNIT = 1000;
@@ -44,7 +45,7 @@ export function encodeWheelSpeedCommand(command: WheelSpeedCommand): Uint8Array 
   return payload;
 }
 
-export function decodeMotorFeedbackSample(payload: Uint8Array): MotorFeedbackSample {
+export function decodeMotorFeedbackSample(payload: Uint8Array): Omit<MotorFeedbackSample, "sequence"> {
   if (payload.length !== MOTOR_FEEDBACK_SAMPLE_LENGTH) {
     throw new Error(`Invalid motor feedback payload length ${payload.length}`);
   }

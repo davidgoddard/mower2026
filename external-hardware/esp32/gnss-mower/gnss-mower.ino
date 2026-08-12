@@ -142,8 +142,8 @@ static const uint32_t RTCM_ROUTE_FRESH_MILLIS = 3000;
 
 // TODO: Fill both station-mode MAC addresses before flashing this mower node.
 // Incoming ESP-NOW corrections are deliberately rejected while both are zero.
-static const uint8_t BASE_STATION_MAC[6] = { 0, 0, 0, 0, 0, 0 };
-static const uint8_t GNSS_RELAY_MAC[6] = { 0, 0, 0, 0, 0, 0 };
+static const uint8_t BASE_STATION_MAC[6] = { 0x68, 0x09, 0x47, 0x9D, 0x30, 0x48 };
+static const uint8_t GNSS_RELAY_MAC[6] = { 0x24, 0x0A, 0xC4, 0x58, 0xDC, 0xB8 };
 
 enum RtcmPacketSource : uint8_t {
   RTCM_SOURCE_NONE = 0,

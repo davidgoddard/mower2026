@@ -2,14 +2,14 @@ import { PathPoint } from "./pathFollowerApi.js";
 import { ContinuousPathFollower } from "./continuousPathFollower.js";
 import { buildMowingPlan, effectiveMowingStripStandoffMeters, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
 import type { MowingResumeContinuation, MowingResumeOperation, MowingResumeState, MowingResumeStage } from "./mowingResumeStore.js";
-import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan } from "./pathVerification.js";
+import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan, buildVerificationApproachPlan } from "./pathVerification.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
 import { DriveController } from "../control/driveController.js";
 import { TurnController } from "../control/turnController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { LoggerScope } from "../logging/types.js";
 import { systemStop } from "../control/systemStop.js";
-import { createPosition } from "../geometry/positionTypes.js";
+import { createPosition, unwrapMeters } from "../geometry/positionTypes.js";
 import { headingDifference, unwrapRelativeAngle, createInternalHeading } from "../geometry/headingTypes.js";
 import type { PathFollowingParameters } from "../config/pathFollowingConfig.js";
 import { DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
@@ -22,6 +22,11 @@ export type MowingPhase =
   | "tracing_boundary"
   | "mowing_strip"
   | "following_connector"
+  | "travelling_to_charger"
+  | "docking"
+  | "waiting_for_charge"
+  | "undocking"
+  | "returning_to_mow"
   | "returning_to_start"
   | "complete"
   | "stopped"
@@ -62,6 +67,13 @@ export interface MowingExecutorOptions {
   readonly gnssLossGraceMs?: number;
   readonly returnToStartAfterMowing?: boolean;
   readonly mowingStartPoint?: { readonly xMeters: number; readonly yMeters: number };
+  readonly rechargeDue?: () => boolean;
+  readonly performRechargeDiversion?: (context: {
+    readonly interruptedPosition: PathPoint;
+    readonly areaPoints: ReadonlyArray<PathPoint>;
+    readonly obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>;
+    readonly setPhase: (phase: MowingPhase) => void;
+  }) => Promise<void>;
 }
 
 interface AreaStartAnchorPlan {
@@ -72,6 +84,8 @@ interface AreaStartAnchorPlan {
 const AREA_ESCAPE_STOP_DISTANCE_METERS = 0.25;
 const RESUME_RECOVERY_MAX_OUTSIDE_DISTANCE_METERS = 0.75;
 const RESUME_RECOVERY_INSET_METERS = 0.25;
+const RESUME_FOLLOW_DIRECT_DISTANCE_METERS = 0.25;
+const RESUME_BOUNDARY_REJOIN_MAX_DISTANCE_METERS = 1.5;
 const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
@@ -83,8 +97,6 @@ const SHORT_DIRECT_CONNECTOR_SAFETY_SAMPLE_METERS = 0.05;
 const PERIMETER_FOLLOW_SPEED = 1.0;
 const PERIMETER_CORNER_PIVOT_DEG = 20;
 const PERIMETER_CORNER_PIVOT_DISTANCE_METERS = 0.15;
-const PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT = 0.4;
-const CONNECTOR_MINIMUM_INNER_WHEEL_OUTPUT = 0.2;
 const PERIMETER_JOIN_START_DISTANCE_METERS = 0.5;
 const PREFERRED_BOUNDARY_POINT_TOLERANCE_METERS = 0.05;
 
@@ -109,6 +121,8 @@ export class MowingExecutor {
   private readonly gnssLossGraceMs: number;
   private readonly returnToStartAfterMowing: boolean;
   private readonly mowingStartPoint: { readonly xMeters: number; readonly yMeters: number } | null;
+  private readonly rechargeDue: (() => boolean) | undefined;
+  private readonly performRechargeDiversion: MowingExecutorOptions["performRechargeDiversion"];
 
   private phase: MowingPhase = "idle";
   private currentStripIndex: number = 0;
@@ -143,6 +157,8 @@ export class MowingExecutor {
     this.mowingStartPoint = options.resumeState?.mowingStartPoint
       ?? options.mowingStartPoint
       ?? null;
+    this.rechargeDue = options.rechargeDue;
+    this.performRechargeDiversion = options.performRechargeDiversion;
   }
 
   getStatus(): MowingStatus {
@@ -637,6 +653,23 @@ export class MowingExecutor {
         return this.getStatus();
       }
 
+      // The end of a completed strip (including its required boundary trace)
+      // is the recharge checkpoint. Divert before spending power following the
+      // connector toward a strip that will not be started until after charging.
+      if (this.rechargeDue?.() && this.performRechargeDiversion) {
+        const pose = this.poseFusion.getCurrentPose();
+        await this.performRechargeDiversion({
+          interruptedPosition: {
+            xMeters: unwrapMeters(pose.position.xMeters),
+            yMeters: unwrapMeters(pose.position.yMeters),
+            capturedAt: Date.now(),
+          },
+          areaPoints: this.areaPoints,
+          obstaclePointsArray: this.obstaclePointsArray,
+          setPhase: (phase) => { this.phase = phase; },
+        });
+      }
+
       if (stage === "complete") {
         return this.returnToStartOrComplete();
       }
@@ -701,7 +734,6 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
       },
       errorCode: "return_to_start_failed",
       continuation: { stage: "complete", stripIndex: Math.max(0, this.plan.strips.length - 1) },
@@ -767,6 +799,82 @@ export class MowingExecutor {
     }
 
     this.phase = operation.phase;
+    if (
+      operation.phase === "following_connector"
+      && operation.pathPoints.length === 2
+    ) {
+      const target = operation.pathPoints[1];
+      if (!this.canUseDirectConnector(target, Number.POSITIVE_INFINITY)) {
+        this.logger.warn("mowing.resume.direct_connector_unsafe", {
+          stripIndex: operation.stripIndex,
+          targetX: target.xMeters,
+          targetY: target.yMeters,
+        });
+        this.phase = "error";
+        return null;
+      }
+      this.persistResumeOperation({
+        kind: "drive",
+        phase: "following_connector",
+        stripIndex: operation.stripIndex,
+        targetX: target.xMeters,
+        targetY: target.yMeters,
+        errorCode: operation.errorCode,
+        continuation: operation.continuation,
+      });
+      const driveResult = await this.driveController.executeDrive({
+        targetPosition: createPosition(target.xMeters, target.yMeters),
+        learningEnabled: false,
+        minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
+      });
+      if (driveResult.status === "success") {
+        return operation.continuation;
+      }
+      this.phase = driveResult.status === "stopped" ? "stopped" : "error";
+      return null;
+    }
+    const livePose = this.poseFusion.getCurrentPose();
+    const livePathDistanceMeters = distanceFromPointToPathMeters(
+      livePose.position.xMeters,
+      livePose.position.yMeters,
+      operation.pathPoints,
+      operation.followOptions.initialTargetIndex ?? 0,
+    );
+    if (livePathDistanceMeters > RESUME_FOLLOW_DIRECT_DISTANCE_METERS) {
+      if (
+        operation.phase === "tracing_boundary"
+        && operation.markBoundaryTraced
+        && livePathDistanceMeters <= RESUME_BOUNDARY_REJOIN_MAX_DISTANCE_METERS
+      ) {
+        this.logger.info("mowing.resume.boundary_rejoin_started", {
+          boundary: operation.markBoundaryTraced,
+          livePathDistanceMeters,
+          previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
+        });
+        const rejoined = await this.traceBoundary(
+          operation.markBoundaryTraced,
+          {
+            xMeters: livePose.position.xMeters,
+            yMeters: livePose.position.yMeters,
+            capturedAt: Date.now(),
+          },
+          {
+            stripIndex: operation.stripIndex,
+            continuation: operation.continuation,
+            markBoundaryTraced: operation.markBoundaryTraced,
+          },
+        );
+        return rejoined ? operation.continuation : null;
+      }
+      this.logger.warn("mowing.resume.follow_pose_too_far_from_route", {
+        phase: operation.phase,
+        stripIndex: operation.stripIndex,
+        livePathDistanceMeters,
+        maximumRejoinDistanceMeters: RESUME_BOUNDARY_REJOIN_MAX_DISTANCE_METERS,
+      });
+      this.phase = "error";
+      return null;
+    }
     this.updateRecoveryCheckpoint?.(operation.pathPoints);
     const resumedFollowOptions = {
       ...operation.followOptions,
@@ -774,7 +882,6 @@ export class MowingExecutor {
       pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
       minimumSpeed: PERIMETER_FOLLOW_SPEED,
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
-      pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
       ...(operation.phase === "tracing_boundary"
         ? { completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters }
         : {}),
@@ -949,10 +1056,15 @@ export class MowingExecutor {
       return true;
     }
 
-    const currentPose = this.poseFusion.getCurrentPose();
+    let currentPose = this.poseFusion.getCurrentPose();
     const forcedInitialAreaPlan = this.buildForcedInitialAreaTracePlan(boundaryKey, boundaryPoints, currentPose);
     const tracingBoundaryPoints = forcedInitialAreaPlan?.boundaryPoints ?? boundaryPoints;
-    const joinPlan = forcedInitialAreaPlan?.plan ?? buildPerimeterJoinPlan(tracingBoundaryPoints, currentPose, this.parameters);
+    const obstacleApproachPlan = boundaryKey.startsWith("obstacle:") && !forcedInitialAreaPlan
+      ? buildVerificationApproachPlan(tracingBoundaryPoints, currentPose, this.parameters)
+      : null;
+    const joinPlan = forcedInitialAreaPlan?.plan
+      ?? obstacleApproachPlan
+      ?? buildPerimeterJoinPlan(tracingBoundaryPoints, currentPose, this.parameters);
     if (!joinPlan) {
       this.logger.warn("mowing.trace_boundary.no_join_plan", { boundary: boundaryKey });
       return true;
@@ -968,7 +1080,66 @@ export class MowingExecutor {
       });
     }
 
-    const preTurnPath = forcedInitialAreaPlan
+    if (obstacleApproachPlan && !obstacleApproachPlan.turnOnly) {
+      const approachPath: PathPoint[] = [
+        {
+          xMeters: unwrapMeters(currentPose.position.xMeters),
+          yMeters: unwrapMeters(currentPose.position.yMeters),
+          capturedAt: Date.now(),
+        },
+        {
+          xMeters: obstacleApproachPlan.approachTarget.xMeters,
+          yMeters: obstacleApproachPlan.approachTarget.yMeters,
+          capturedAt: Date.now(),
+        },
+      ];
+      if (!isMowingExecutionPathSafe(approachPath, this.areaPoints, this.obstaclePointsArray)) {
+        this.logger.warn("mowing.trace_boundary.unsafe_approach", {
+          boundary: boundaryKey,
+          approachX: obstacleApproachPlan.approachTarget.xMeters,
+          approachY: obstacleApproachPlan.approachTarget.yMeters,
+        });
+        this.phase = "error";
+        return false;
+      }
+
+      this.logger.info("mowing.trace_boundary.approach_started", {
+        boundary: boundaryKey,
+        joinX: obstacleApproachPlan.joinPoint.xMeters,
+        joinY: obstacleApproachPlan.joinPoint.yMeters,
+        approachX: obstacleApproachPlan.approachTarget.xMeters,
+        approachY: obstacleApproachPlan.approachTarget.yMeters,
+      });
+      const approachResult = await this.driveController.executeDrive({
+        targetPosition: createPosition(
+          obstacleApproachPlan.approachTarget.xMeters,
+          obstacleApproachPlan.approachTarget.yMeters,
+        ),
+        learningEnabled: true,
+        minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
+      });
+      if (approachResult.status !== "success") {
+        this.logger.warn("mowing.trace_boundary.approach_failed", {
+          boundary: boundaryKey,
+          status: approachResult.status,
+          error: approachResult.errorMessage,
+        });
+        this.phase = approachResult.status === "stopped" ? "stopped" : "error";
+        return false;
+      }
+      currentPose = this.poseFusion.getCurrentPose();
+      this.logger.info("mowing.trace_boundary.approach_completed", {
+        boundary: boundaryKey,
+      });
+    }
+
+    const preTurnPath = obstacleApproachPlan
+      ? buildPerimeterPathPointsFromPlan(
+        tracingBoundaryPoints,
+        obstacleApproachPlan,
+        this.parameters,
+      )
+      : forcedInitialAreaPlan
       ? buildPerimeterPathPointsFromPlanAndPose(
         tracingBoundaryPoints,
         currentPose,
@@ -992,7 +1163,7 @@ export class MowingExecutor {
     }
 
     const joinLeadTarget = preTurnPath[1];
-    const joinLeadHeading = createInternalHeading(
+    const joinLeadHeading = obstacleApproachPlan?.tangentHeading ?? createInternalHeading(
       Math.atan2(
         joinLeadTarget.yMeters - currentPose.position.yMeters,
         joinLeadTarget.xMeters - currentPose.position.xMeters,
@@ -1019,14 +1190,15 @@ export class MowingExecutor {
     }
 
     const postTurnPose = this.poseFusion.getCurrentPose();
-    const followPlan = forcedInitialAreaPlan
+    const followPlan = obstacleApproachPlan
+      ?? (forcedInitialAreaPlan
       ? joinPlan
       : buildPerimeterFollowPlan(
         tracingBoundaryPoints,
         postTurnPose,
         joinPlan.pathDirection,
         this.parameters,
-      );
+      ));
     if (!followPlan) {
       this.logger.warn("mowing.trace_boundary.no_follow_plan", {
         boundary: boundaryKey,
@@ -1035,7 +1207,13 @@ export class MowingExecutor {
       return true;
     }
 
-    const loopPoints = forcedInitialAreaPlan
+    const loopPoints = obstacleApproachPlan
+      ? buildPerimeterPathPointsFromPlan(
+        tracingBoundaryPoints,
+        followPlan,
+        this.parameters,
+      )
+      : forcedInitialAreaPlan
       ? buildPerimeterPathPointsFromPlanAndPose(
         tracingBoundaryPoints,
         postTurnPose,
@@ -1095,7 +1273,6 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
         routeLookaheadMeters,
         completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
       },
@@ -1113,7 +1290,6 @@ export class MowingExecutor {
       pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
       minimumSpeed: PERIMETER_FOLLOW_SPEED,
       maximumSpeed: PERIMETER_FOLLOW_SPEED,
-      pivotIfInnerWheelBelow: PERIMETER_MINIMUM_INNER_WHEEL_OUTPUT,
       routeLookaheadMeters,
       completionToleranceMeters: this.parameters.closedLoopDetectionToleranceMeters,
     });
@@ -1155,7 +1331,9 @@ export class MowingExecutor {
     if (this.isNearCurrentPose(target.xMeters, target.yMeters)) {
       return { completed: true, reason: "reached_end" };
     }
-    const useDirectDrive = this.canUseDirectShortConnector(target);
+    const useDirectDrive = connector.length === 2
+      ? this.canUseDirectConnector(target, Number.POSITIVE_INFINITY)
+      : this.canUseDirectConnector(target, SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS);
     if (useDirectDrive) {
       this.logger.info("mowing.connector.direct_drive", {
         stripIndex,
@@ -1217,7 +1395,6 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: CONNECTOR_MINIMUM_INNER_WHEEL_OUTPUT,
       },
       errorCode: "connector_failed",
       continuation,
@@ -1233,7 +1410,6 @@ export class MowingExecutor {
         pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
         minimumSpeed: PERIMETER_FOLLOW_SPEED,
         maximumSpeed: PERIMETER_FOLLOW_SPEED,
-        pivotIfInnerWheelBelow: CONNECTOR_MINIMUM_INNER_WHEEL_OUTPUT,
       },
     );
     if (followResult.completed) {
@@ -1247,7 +1423,7 @@ export class MowingExecutor {
     };
   }
 
-  private canUseDirectShortConnector(target: PathPoint): boolean {
+  private canUseDirectConnector(target: PathPoint, maximumDistanceMeters: number): boolean {
     if (this.areaPoints.length < 3) {
       return false;
     }
@@ -1256,7 +1432,7 @@ export class MowingExecutor {
     const start = { x: pose.position.xMeters, y: pose.position.yMeters };
     const end = { x: target.xMeters, y: target.yMeters };
     const directDistanceMeters = Math.hypot(end.x - start.x, end.y - start.y);
-    if (directDistanceMeters > SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS) {
+    if (directDistanceMeters > maximumDistanceMeters) {
       return false;
     }
 
@@ -1330,43 +1506,32 @@ export class MowingExecutor {
     let bestAnchor: AreaStartAnchorPlan | null = null;
     let bestDistanceMeters = Infinity;
 
-    for (const strip of this.plan.strips) {
-      const startCandidate = this.buildAreaStartAnchorCandidate(
-        strip.startBoundary.kind === "area" ? strip.start : null,
-        strip.startBoundary.kind === "area" ? strip.end : null,
+    // The regional optimiser supplies a closed cycle. Only its region entries
+    // are valid rotation points: starting on an arbitrary strip would break a
+    // region's adjacent-strip sweep and change the optimised transition set.
+    for (const region of this.plan.regions ?? []) {
+      const entryStrip = this.plan.strips.find((strip) => strip.stableId === region.stripIds[0]);
+      if (!entryStrip) continue;
+      const entryIsReversed = entryStrip.traversalReversed;
+      const entryBoundary = entryIsReversed ? entryStrip.endBoundary : entryStrip.startBoundary;
+      const entryPoint = entryIsReversed ? entryStrip.end : entryStrip.start;
+      const oppositePoint = entryIsReversed ? entryStrip.start : entryStrip.end;
+      const candidate = this.buildAreaStartAnchorCandidate(
+        entryBoundary.kind === "area" ? entryPoint : null,
+        entryBoundary.kind === "area" ? oppositePoint : null,
         current,
         areaPolygon,
         obstaclePolygons,
         currentInsideArea,
       );
-      if (startCandidate) {
-        const distanceMeters = Math.hypot(
-          startCandidate.entryPlan.approachTarget.xMeters - current.x,
-          startCandidate.entryPlan.approachTarget.yMeters - current.y,
-        );
-        if (distanceMeters < bestDistanceMeters) {
-          bestDistanceMeters = distanceMeters;
-          bestAnchor = startCandidate;
-        }
-      }
-
-      const endCandidate = this.buildAreaStartAnchorCandidate(
-        strip.endBoundary.kind === "area" ? strip.end : null,
-        strip.endBoundary.kind === "area" ? strip.start : null,
-        current,
-        areaPolygon,
-        obstaclePolygons,
-        currentInsideArea,
+      if (!candidate) continue;
+      const distanceMeters = Math.hypot(
+        candidate.entryPlan.approachTarget.xMeters - current.x,
+        candidate.entryPlan.approachTarget.yMeters - current.y,
       );
-      if (endCandidate) {
-        const distanceMeters = Math.hypot(
-          endCandidate.entryPlan.approachTarget.xMeters - current.x,
-          endCandidate.entryPlan.approachTarget.yMeters - current.y,
-        );
-        if (distanceMeters < bestDistanceMeters) {
-          bestDistanceMeters = distanceMeters;
-          bestAnchor = endCandidate;
-        }
+      if (distanceMeters < bestDistanceMeters) {
+        bestDistanceMeters = distanceMeters;
+        bestAnchor = candidate;
       }
     }
 
@@ -1931,6 +2096,34 @@ function pointInPolygon(x: number, y: number, polygonPoints: ReadonlyArray<PathP
     }
   }
   return inside;
+}
+
+function distanceFromPointToPathMeters(
+  x: number,
+  y: number,
+  points: ReadonlyArray<PathPoint>,
+  startTargetIndex: number,
+): number {
+  if (points.length === 0) {
+    return Infinity;
+  }
+  if (points.length === 1) {
+    return Math.hypot(x - points[0].xMeters, y - points[0].yMeters);
+  }
+  const firstSegmentIndex = Math.max(
+    0,
+    Math.min(points.length - 2, Math.trunc(startTargetIndex) - 1),
+  );
+  let nearest = Infinity;
+  for (let index = firstSegmentIndex; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    nearest = Math.min(
+      nearest,
+      pointToSegmentDistanceMeters(x, y, start.xMeters, start.yMeters, end.xMeters, end.yMeters),
+    );
+  }
+  return nearest;
 }
 
 function outsideDistanceFromAreaMeters(x: number, y: number, polygonPoints: ReadonlyArray<PathPoint>): number {

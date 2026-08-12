@@ -587,7 +587,8 @@ ${getAppDialogScript()}
       function currentDriveDistanceMeters(historyItem) {
         const dx = historyItem.targetPosition.xMeters - historyItem.startPosition.xMeters;
         const dy = historyItem.targetPosition.yMeters - historyItem.startPosition.yMeters;
-        return Math.hypot(dx, dy);
+        const directionSign = historyItem.driveDirectionSign === -1 ? -1 : 1;
+        return directionSign * Math.hypot(dx, dy);
       }
 
       const maxDriveResultRows = 500;

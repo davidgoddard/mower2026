@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "maximumCapacityAh": 10,
+  "returnToChargePercent": 15,
+  "usedAhSinceCharge": 4.255470833324113,
+  "combinedWheelMetersSinceCharge": 1312.8440616954613,
+  "lastChargedAt": "2026-08-11T14:21:03.877Z",
+  "updatedAt": "2026-08-12T07:23:42.117Z"
+}

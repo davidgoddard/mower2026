@@ -34,7 +34,7 @@ function encodeFrame(messageType, sequence, payload) {
 }
 
 function encodeFeedbackPayload() {
-  const payload = new Uint8Array(22);
+  const payload = new Uint8Array(21);
   const view = new DataView(payload.buffer);
   view.setUint32(0, 1000, true);
   view.setInt32(4, 123, true);
@@ -45,7 +45,6 @@ function encodeFeedbackPayload() {
   view.setUint16(16, 17, true);
   view.setUint8(18, 1);
   view.setUint16(19, 0x0004, true);
-  view.setUint8(21, 0);
   return payload;
 }
 
@@ -114,6 +113,91 @@ test('MotorNodeClient suppresses duplicate unchanged commands', async () => {
   assert.equal(writes[1].key, 'motor.stop');
 });
 
+test('MotorNodeClient refreshes only the latest active command from one resettable timer', async () => {
+  const writes = [];
+  let now = 100;
+  const timers = [];
+  const fakeController = {
+    async queueWrite(request) { writes.push(request); },
+    async queueRead() { throw new Error('not used in this test'); },
+  };
+  const client = new MotorNodeClient(fakeController, {
+    address: 0x66,
+    nowMillis: () => now,
+    setCommandRefreshTimer(callback, delayMs) {
+      const timer = { callback, delayMs, cancelled: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearCommandRefreshTimer(timer) { timer.cancelled = true; },
+  });
+
+  await client.sendWheelSpeedCommand(0.5, -0.5);
+  now = 500;
+  await client.sendWheelSpeedCommand(0.5, -0.5);
+  assert.equal(writes.length, 1);
+  assert.equal(timers.length, 1);
+
+  now = 600;
+  await client.sendWheelSpeedCommand(-0.5, 0.5);
+  assert.equal(writes.length, 2);
+  assert.equal(timers[0].cancelled, true);
+  assert.equal(timers.length, 2);
+
+  // Even if a cancelled callback is delivered, it cannot resend stale state.
+  timers[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writes.length, 2);
+
+  now = 1600;
+  timers[1].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(writes.length, 3);
+  const refreshed = new DataView(
+    writes[2].payload.buffer,
+    writes[2].payload.byteOffset,
+    writes[2].payload.byteLength,
+  );
+  assert.equal(refreshed.getInt16(13, true), -500);
+  assert.equal(refreshed.getInt16(15, true), 500);
+  assert.equal(timers.length, 3);
+});
+
+test('MotorNodeClient cancels command refresh when zero or disabled is requested', async () => {
+  const writes = [];
+  const timers = [];
+  const fakeController = {
+    async queueWrite(request) { writes.push(request); },
+    async queueRead() { throw new Error('not used in this test'); },
+  };
+  const client = new MotorNodeClient(fakeController, {
+    address: 0x66,
+    nowMillis: () => 100,
+    setCommandRefreshTimer(callback, delayMs) {
+      const timer = { callback, delayMs, cancelled: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearCommandRefreshTimer(timer) { timer.cancelled = true; },
+  });
+
+  await client.sendWheelSpeedCommand(0.5, -0.5);
+  assert.equal(timers.length, 1);
+  await client.sendWheelSpeedCommand(0, 0);
+  assert.equal(timers[0].cancelled, true);
+  assert.equal(timers.length, 1);
+
+  await client.sendWheelSpeedCommand(0.5, -0.5);
+  assert.equal(timers.length, 2);
+  await client.stop();
+  assert.equal(timers[1].cancelled, true);
+  assert.equal(timers.length, 2);
+  assert.deepEqual(writes.map((write) => write.key), [
+    'motor.speed', 'motor.speed', 'motor.speed', 'motor.stop',
+  ]);
+});
+
 test('MotorNodeClient encodes per-command ramp overrides', async () => {
   const writes = [];
   const fakeController = {
@@ -158,9 +242,11 @@ test('MotorNodeClient decodes motor feedback sample frame', async () => {
   const feedback = await client.refreshFeedback();
   assert.equal(queueReadCalls.length, 1);
   assert.equal(queueReadCalls[0].priority, I2C_PRIORITY.motorSpeed);
-  assert.equal(queueReadCalls[0].responseLength, 33);
+  assert.equal(queueReadCalls[0].requestPayload.length, 0);
+  assert.equal(queueReadCalls[0].responseLength, 32);
 
   assert.equal(feedback.timestampMillis, 1000);
+  assert.equal(feedback.sequence, 5);
   assert.equal(feedback.leftEncoderDelta, 123);
   assert.equal(feedback.rightEncoderDelta, -456);
   assert.equal(feedback.leftPwmAppliedPercent, 40);

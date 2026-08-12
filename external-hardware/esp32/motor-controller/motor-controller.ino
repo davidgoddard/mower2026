@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "driver/ledc.h"
+#include "esp_task_wdt.h"
+#include "esp_idf_version.h"
 
 // Second-generation motor controller for ESP32.
 // It accepts explicit left/right wheel percentage targets over I2C, applies
@@ -34,8 +36,9 @@ static const uint8_t MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
 static const size_t FRAME_HEADER_SIZE = 9;
 static const size_t FRAME_CRC_SIZE = 2;
 static const size_t WHEEL_COMMAND_PAYLOAD_SIZE = 15;
-static const size_t MOTOR_FEEDBACK_PAYLOAD_SIZE = 22;
-static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + MOTOR_FEEDBACK_PAYLOAD_SIZE + FRAME_CRC_SIZE;
+static const size_t MOTOR_FEEDBACK_PAYLOAD_SIZE = 21;
+static const size_t MOTOR_FEEDBACK_FRAME_SIZE = FRAME_HEADER_SIZE + MOTOR_FEEDBACK_PAYLOAD_SIZE + FRAME_CRC_SIZE;
+static const size_t MAX_FRAME_SIZE = MOTOR_FEEDBACK_FRAME_SIZE;
 
 // ===== Pins =====
 static const uint8_t SDA_PIN = 16;
@@ -63,6 +66,7 @@ static const int PWM_MAX_DUTY = 255;
 // ===== Control / reporting =====
 static const uint32_t CONTROL_PERIOD_MS = 10;      // 100 Hz
 static const uint32_t FEEDBACK_PERIOD_MS = 50;     // 20 Hz
+static const uint32_t TASK_WATCHDOG_TIMEOUT_SECONDS = 5;
 // Decel / accel rates in %/s.  At 100 Hz (10 ms ticks):
 //   stepPerTick = rate × elapsedMs / 1000 = rate × 0.010
 // DEFAULT_DECEL_PERCENT_PER_SECOND = 250  →  2.5 %/tick  →  40-tick (400 ms) full stop.
@@ -80,6 +84,7 @@ static const uint16_t ADC_MAX_COUNT = 4095;
 static const uint16_t MOTOR_FAULT_LEFT_DRIVER = (1u << 3);
 static const uint16_t MOTOR_FAULT_RIGHT_DRIVER = (1u << 4);
 static const uint16_t MOTOR_FAULT_OVERCURRENT = (1u << 5);
+static const uint16_t MOTOR_FAULT_COMMAND_TIMEOUT = (1u << 0);
 
 struct WheelSpeedCommand {
   uint32_t timestampMillis;
@@ -146,12 +151,14 @@ FeedbackSnapshot g_latestFeedback = { 0, 0, 0, 0, 0, 0.0f, 0.0f, false, 0 };
 CurrentSensorState g_leftCurrentSensor = { LEFT_CURRENT_SENSE_PIN, CURRENT_SENSOR_SUPPLY_VOLTS / 2.0f, 0.0f };
 CurrentSensorState g_rightCurrentSensor = { RIGHT_CURRENT_SENSE_PIN, CURRENT_SENSOR_SUPPLY_VOLTS / 2.0f, 0.0f };
 
-uint16_t g_lastFeedbackRequestSequence = 0;
-bool g_haveFeedbackRequest = false;
 portMUX_TYPE g_protocolStateMux = portMUX_INITIALIZER_UNLOCKED;
 
-uint8_t g_txFrame[MAX_FRAME_SIZE];
-size_t g_txFrameLength = 0;
+uint8_t g_txFrames[2][MOTOR_FEEDBACK_FRAME_SIZE];
+volatile uint8_t g_activeTxFrameIndex = 0;
+uint16_t g_feedbackSequence = 0;
+uint32_t g_lastValidCommandMillis = 0;
+bool g_haveValidCommand = false;
+bool g_commandLeaseHealthy = false;
 
 uint32_t g_lastControlMillis = 0;
 uint32_t g_lastFeedbackMillis = 0;
@@ -327,7 +334,6 @@ void encodeMotorFeedbackPayload(const FeedbackSnapshot &feedback, uint8_t *paylo
   writeU16LE(&payloadOut[16], encodeCurrentTenths(feedback.rightMotorCurrentAmps));
   payloadOut[18] = feedback.watchdogHealthy ? 1 : 0;
   writeU16LE(&payloadOut[19], feedback.faultFlags);
-  payloadOut[21] = 0;
 }
 
 // ===== Low-level motor output =====
@@ -488,37 +494,23 @@ void refreshFeedbackSnapshot(uint32_t nowMillis) {
   g_latestFeedback.rightPwmAppliedPercent = g_rightMotor.appliedPwmPercent;
   g_latestFeedback.leftMotorCurrentAmps = readCurrentSensor(g_leftCurrentSensor);
   g_latestFeedback.rightMotorCurrentAmps = readCurrentSensor(g_rightCurrentSensor);
-  g_latestFeedback.faultFlags = 0;
-  g_latestFeedback.watchdogHealthy = g_latestCommand.enableDrive;
+  g_latestFeedback.faultFlags = g_commandLeaseHealthy ? 0 : MOTOR_FAULT_COMMAND_TIMEOUT;
+  g_latestFeedback.watchdogHealthy = g_commandLeaseHealthy;
 
-  // Snapshot the sequence number under the protocol lock so we don't race
-  // with onReceive() updating g_lastFeedbackRequestSequence concurrently.
-  portENTER_CRITICAL(&g_protocolStateMux);
-  uint16_t seqSnapshot = g_lastFeedbackRequestSequence;
-  portEXIT_CRITICAL(&g_protocolStateMux);
-
-  // Encode into a local buffer first, then copy into g_txFrame under the
-  // protocol lock. onRequest() fires from the I2C interrupt and reads
-  // g_txFrame at any moment; without the lock it would observe a
-  // partially-written frame, producing "Invalid start of frame", "CRC
-  // mismatch", or "Frame length mismatch" errors on the Pi side.
   uint8_t payload[MOTOR_FEEDBACK_PAYLOAD_SIZE];
   encodeMotorFeedbackPayload(g_latestFeedback, payload);
 
-  uint8_t tempFrame[MAX_FRAME_SIZE];
-  size_t tempLength = encodeFrame(
+  const uint8_t inactiveIndex = static_cast<uint8_t>(1u - g_activeTxFrameIndex);
+  encodeFrame(
     MESSAGE_TYPE_MOTOR_FEEDBACK,
-    seqSnapshot,
+    g_feedbackSequence,
     g_latestFeedback.faultFlags == 0 ? 0 : 0x01,
     payload,
     MOTOR_FEEDBACK_PAYLOAD_SIZE,
-    tempFrame
+    g_txFrames[inactiveIndex]
   );
-
-  portENTER_CRITICAL(&g_protocolStateMux);
-  memcpy(g_txFrame, tempFrame, tempLength);
-  g_txFrameLength = tempLength;
-  portEXIT_CRITICAL(&g_protocolStateMux);
+  g_feedbackSequence = static_cast<uint16_t>(g_feedbackSequence + 1u);
+  g_activeTxFrameIndex = inactiveIndex;
 }
 
 void runControlStep(uint32_t nowMillis) {
@@ -526,9 +518,15 @@ void runControlStep(uint32_t nowMillis) {
   WheelSpeedCommand commandSnapshot;
   portENTER_CRITICAL(&g_protocolStateMux);
   commandSnapshot = g_latestCommand;
+  const uint32_t lastValidCommandMillis = g_lastValidCommandMillis;
+  const bool haveValidCommand = g_haveValidCommand;
   portEXIT_CRITICAL(&g_protocolStateMux);
 
-  bool allowDrive = commandSnapshot.enableDrive;
+  const bool commandLeaseHealthy = haveValidCommand
+    && commandSnapshot.commandTimeoutMillis > 0
+    && nowMillis - lastValidCommandMillis <= commandSnapshot.commandTimeoutMillis;
+  g_commandLeaseHealthy = commandLeaseHealthy;
+  bool allowDrive = commandSnapshot.enableDrive && commandLeaseHealthy;
 
   float leftTarget = allowDrive ? commandSnapshot.leftWheelTargetPercent : 0.0f;
   float rightTarget = allowDrive ? commandSnapshot.rightWheelTargetPercent : 0.0f;
@@ -588,40 +586,30 @@ void onReceive(int numBytes) {
     if (decodeWheelSpeedCommandPayload(payload, payloadLength, decoded)) {
       portENTER_CRITICAL(&g_protocolStateMux);
       g_latestCommand = decoded;
+      g_lastValidCommandMillis = millis();
+      g_haveValidCommand = true;
       portEXIT_CRITICAL(&g_protocolStateMux);
     }
-  } else if (messageType == MESSAGE_TYPE_MOTOR_FEEDBACK) {
-    portENTER_CRITICAL(&g_protocolStateMux);
-    g_lastFeedbackRequestSequence = sequence;
-    g_haveFeedbackRequest = true;
-    portEXIT_CRITICAL(&g_protocolStateMux);
   }
 }
 
 void onRequest() {
-  // Copy g_txFrame into a local buffer under the protocol lock so we never
-  // hand the Pi a torn frame that was being written by refreshFeedbackSnapshot()
-  // in loop() at the moment this interrupt fired.
-  uint8_t localFrame[MAX_FRAME_SIZE];
-  size_t localLength;
+  const uint8_t activeIndex = g_activeTxFrameIndex;
+  Wire.write(g_txFrames[activeIndex], MOTOR_FEEDBACK_FRAME_SIZE);
+}
 
-  portENTER_CRITICAL(&g_protocolStateMux);
-  bool hadRequest = g_haveFeedbackRequest;
-  g_haveFeedbackRequest = false;
-  localLength = g_txFrameLength;
-  memcpy(localFrame, g_txFrame, localLength);
-  portEXIT_CRITICAL(&g_protocolStateMux);
-
-  if (!hadRequest) {
-    // No request arrived since the last snapshot; the frame is still valid
-    // but we refresh it in-place via the normal loop path. Nothing to do
-    // here — just send whatever is already prepared.
-    (void)hadRequest;
-  }
-
-  if (localLength > 0) {
-    Wire.write(localFrame, localLength);
-  }
+void configureTaskWatchdog() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_task_wdt_config_t config = {
+    .timeout_ms = TASK_WATCHDOG_TIMEOUT_SECONDS * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic = true,
+  };
+  esp_task_wdt_init(&config);
+#else
+  esp_task_wdt_init(TASK_WATCHDOG_TIMEOUT_SECONDS, true);
+#endif
+  esp_task_wdt_add(nullptr);
 }
 
 // ===== Setup / loop =====
@@ -679,9 +667,12 @@ void setup() {
   Wire.onRequest(onRequest);
 
   refreshFeedbackSnapshot(millis());
+  refreshFeedbackSnapshot(millis());
+  configureTaskWatchdog();
 }
 
 void loop() {
+  esp_task_wdt_reset();
   uint32_t nowMillis = millis();
   if ((nowMillis - g_lastControlMillis) >= CONTROL_PERIOD_MS) {
     g_lastControlMillis = nowMillis;

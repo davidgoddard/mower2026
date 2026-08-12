@@ -169,6 +169,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(drivePage.includes('appendDriveRows(history);'), true);
   assert.equal(drivePage.includes('appendDriveRows(liveResults);'), true);
   assert.equal(drivePage.includes('driveResultRows.slice(-maxDriveResultRows).reverse()'), true);
+  assert.equal(drivePage.includes('historyItem.driveDirectionSign === -1 ? -1 : 1'), true);
+  assert.equal(drivePage.includes('return directionSign * Math.hypot(dx, dy);'), true);
   assert.equal(drivePage.includes('Distance</th>'), true);
   assert.equal(drivePage.includes('Avg CTE</th>'), true);
   assert.equal(drivePage.includes('Max CTE</th>'), true);
@@ -257,6 +259,9 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('function sanitizeStoredPathCollection(paths, warningLabel)'), true);
   assert.equal(manualPage.includes('function markMowingPlanPreviewStale()'), true);
   assert.equal(manualPage.includes('function schedulePageStatePoll(delayMs = PRIMITIVES_POLL_MS)'), true);
+  assert.equal(manualPage.includes('Promise.allSettled(['), true);
+  assert.equal(manualPage.includes('mowingStatusNeedsPolling ? pollMowingStatus()'), false);
+  assert.equal(manualPage.includes('if (mowingActionInFlight)'), true);
   assert.equal(manualPage.includes('function scheduleListRefresh(delayMs = LIST_REFRESH_MS)'), true);
   assert.equal(manualPage.includes("document.addEventListener('visibilitychange'"), true);
   assert.equal(manualPage.includes("fetchJson('/api/primitives')"), true);
@@ -273,6 +278,9 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(deadReckoningPage.includes('Straight distance'), true);
   assert.equal(deadReckoningPage.includes('Arc sweep'), true);
   assert.equal(deadReckoningPage.includes("window.operatorPage.postJson('/api/dead-reckoning/start', { lineDistanceMeters, arcSweepDegrees })"), true);
+  assert.equal(deadReckoningPage.includes('value="10"'), true);
+  assert.equal(deadReckoningPage.includes('value="180"'), true);
+  assert.equal(deadReckoningPage.includes("getElementById('canvasSection').style"), false);
 
   const pathPage = renderPathTracingPage();
   assert.equal(pathPage, manualPageHtml);

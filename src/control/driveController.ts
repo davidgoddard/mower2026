@@ -223,6 +223,7 @@ export class DriveController {
             minimumDriveDistanceMeters,
           });
           const skippedResult: DriveResult = {
+            driveDirectionSign,
             startPosition: this.driveStartPosition ?? postTurnPose.position,
             targetPosition: request.targetPosition,
             finalPosition: postTurnPose.position,
@@ -253,6 +254,7 @@ export class DriveController {
           learningSource: request.learningSource,
           driveDirectionSign,
           maxCrossTrackErrorMeters: request.maxCrossTrackErrorMeters,
+          maximumWheelOutputPercent: request.maximumWheelOutputPercent,
           allowRotateToHeading: request.skipInitialTurn !== true,
         });
 

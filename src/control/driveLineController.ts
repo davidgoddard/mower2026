@@ -426,7 +426,7 @@ export class DriveLineController {
       plannedDistanceMeters: this.driveLineStart !== null && this.driveLineEnd !== null
         ? unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd))
         : 0,
-      fullPowerCommand: this.fullSpeedCommand,
+      fullPowerCommand: this.activeFullSpeedCommand(),
       calibrationFingerprintAtRun: null,
       params: inst.paramsSnapshot,
       anchor: inst.anchor,
@@ -1104,6 +1104,7 @@ export class DriveLineController {
       this.endRunInstrumentationListeners();
       this.runInstrumentation = null;
       this.driveResolve?.({
+        driveDirectionSign: this.driveDirectionSign,
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
         finalPosition: pose.position,
@@ -1149,6 +1150,7 @@ export class DriveLineController {
       this.endRunInstrumentationListeners();
       this.runInstrumentation = null;
       this.driveResolve?.({
+        driveDirectionSign: this.driveDirectionSign,
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
         finalPosition: pose.position,
@@ -1343,7 +1345,7 @@ export class DriveLineController {
       DRIVE_STEERING_MAX_TRIM_PERCENT,
     );
 
-    const baseCommand = this.driveDirectionSign * this.fullSpeedCommand;
+    const baseCommand = this.driveDirectionSign * this.activeFullSpeedCommand();
     const leftCommand = this.clampNormalizedSpeed(baseCommand - trim);
     const rightCommand = this.clampNormalizedSpeed(baseCommand + trim);
     const normalizedCommands = this.enforceMinimumActiveArcCommands(
@@ -1387,7 +1389,15 @@ export class DriveLineController {
   }
 
   private clampNormalizedSpeed(speed: number): number {
-    return this.clamp(speed, -this.fullSpeedCommand, this.fullSpeedCommand);
+    const maximum = this.activeFullSpeedCommand();
+    return this.clamp(speed, -maximum, maximum);
+  }
+
+  private activeFullSpeedCommand(): number {
+    const requested = this.currentDrive?.maximumWheelOutputPercent;
+    return Number.isFinite(requested)
+      ? Math.min(this.fullSpeedCommand, Math.max(0.1, Math.abs(requested!)))
+      : this.fullSpeedCommand;
   }
 
   /**
@@ -1581,6 +1591,7 @@ export class DriveLineController {
       this.status = "idle";
       this.currentDrive = null;
       const result: DriveResult = {
+        driveDirectionSign: this.driveDirectionSign,
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
         finalPosition,
@@ -1649,6 +1660,7 @@ export class DriveLineController {
       this.runInstrumentation = null;
 
       this.driveResolve?.({
+        driveDirectionSign: this.driveDirectionSign,
         startPosition: this.driveStartPosition,
         targetPosition: this.driveTargetPosition,
         finalPosition: this.driveStartPosition,
@@ -1706,6 +1718,7 @@ export class DriveLineController {
     this.runInstrumentation = null;
 
     this.driveResolve?.({
+      driveDirectionSign: this.driveDirectionSign,
       startPosition: this.driveStartPosition ?? createPosition(0, 0),
       targetPosition: stoppedDrive.targetPosition,
       finalPosition,

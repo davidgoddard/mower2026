@@ -57,6 +57,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/server/manual-drive-page/page.html`: Drive & Paths HTML shell.
 - `src/server/manual-drive-page/page.css`: Drive & Paths styles, including map/layout styling and the responsive stored-perimeter editor modal.
 - `src/server/manual-drive-page/page.js`: Drive & Paths browser logic for map drawing, mowing preview, recording, and path actions.
+  - initial page loading tolerates individual request failures and always starts the recurring state/status poll, so a brief server restart cannot leave Carry On hidden permanently; mowing Start and Carry On requests are single-flight to prevent duplicate submissions
   - mowing previews shade the strips by planned region so the selected regional traversal is visible before motion
   - served as the `/` home screen (and at `/manual-drive`) with compact live IMU, GNSS, and motor-odometry widgets linking to `/dashboard`
   - area-perimeter saves include the current mowing strip heading and strip spacing, and selecting an area restores those saved defaults into the preview controls
@@ -83,7 +84,7 @@ This document maps problem domains to candidate files removing the need for Code
   - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
   - live HID input while manual drive is armed clears a latched global stop so the operator can consciously recover from a stall/stop during manual manoeuvring
-  - unchanged held-stick commands are periodically re-sent at the configured keepalive cadence, and HID snapshots now tolerate a longer documented stale window before gentle-halt/disarm logic starts
+  - unchanged held-stick commands are coalesced; the motor I2C client is the sole owner of active-command heartbeat refreshes, while HID snapshots retain their independent stale-input halt window
   - shutdown now unregisters HID event listeners and closes the controller before awaiting the control-loop drain, so tests and process shutdown do not stay alive on stale manual-drive events
 - `src/control/turnController.ts`: turn stop checks and stop handling.
   - IMU heading watchdog timers are internal safety timers only and are `unref()`'d so an abandoned turn test does not keep Node alive by itself
@@ -97,8 +98,8 @@ This document maps problem domains to candidate files removing the need for Code
   - all mowing segment requests use the 15 cm post-pivot minimum translation; routed connectors and perimeter traces use the conservative continuous follower
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
   - after the final strip, follows the shorter direction around the recorded area perimeter and then returns to the session's original GNSS start position; the return path and start point are persisted for stop/resume recovery
-- `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, assigns stable obstacle-relative regions, builds both sweep orientations for every region, and globally selects a start-aware region order before safe connectors are generated. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
-- `src/pathfollowing/continuousPathFollower.ts`: 50Hz continuous perimeter and routed-connector control with elapsed-time wheel-command slew limiting, learned forward CTE/heading gains, ordered local-path projection, a stable route-wide moving lookahead, and a locked stop/pivot/outgoing-edge capture fallback at genuine corners.
+- `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, assigns stable sweep-topology regions, builds both sweep orientations for every region, optimises a closed regional cycle, and rotates that cycle to the nearest preferred entry without changing its transitions. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
+- `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control that performs one TurnController-owned entry alignment before starting, then runs 50Hz forward-only differential steering with elapsed-time wheel-command slew limiting, learned forward CTE/heading gains, ordered local-path projection, and a stable route-wide moving lookahead. The single execution-level genuine-corner test delegates outgoing-edge capture through `DriveController`/`TurnController`, and sustained route-deviation confirmation owns abort decisions.
 - `src/pathfollowing/conservativeLookahead.ts`: samples the complete stored boundary at 5cm spacing before motion, independently of the mower's arrival section, and selects the longest stable 25cm-to-1m lookahead whose chords remain within the configured path-deviation budget everywhere; reports when genuine corners require the pivot/capture fallback rather than relaxing safety.
 
 ## Pose Fusion
@@ -131,7 +132,7 @@ This document maps problem domains to candidate files removing the need for Code
 ## GNSS ESP32 Firmware
 - `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover-side GNSS ESP32 firmware; receives RTCM over ESP-NOW, relays corrections to the UM982, parses receiver logs, and serves compact GNSS frames to the Pi over I2C.
 - `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`: base-side GNSS ESP32 firmware; reads RTCM from the UM980 base receiver and forwards it to rover peers over the current fragmented ESP-NOW RTCM transport.
-- `external-hardware/esp32/gnss-relay-v1/gnss-relay-v1.ino`: optional ESP-NOW range relay; filters packets by the configured base MAC and forwards each packet unchanged so the rover can deduplicate direct and relayed copies.
+- `external-hardware/esp32/gnss-relay-v1/gnss-relay-v1.ino`: optional ESP-NOW range relay; filters packets by the configured base MAC, forwards each packet unchanged so the rover can deduplicate direct and relayed copies, and pulses the onboard GPIO2 blue LED after each successful forward.
 - `external-hardware/esp32/gnss-base-station-v1/README.md`: base-station wiring and peer-configuration notes.
 
 ## Turn Controller
@@ -299,15 +300,21 @@ This document maps problem domains to candidate files removing the need for Code
   - supports ordered-progress protection so projection stays on the local segment window instead of jumping ahead to a later non-adjacent segment
   - supports sharp-corner waypoint pivots: when close to a waypoint that implies a steep outgoing turn, it pivots to the new heading instead of trying to arc-cut outside the perimeter
   - supports a caller-supplied minimum trace speed so perimeter loops do not slow into near-stall commands
-  - can also pivot when the requested arc would drive the inner wheel below a healthy floor, preventing long stall-prone crawl turns during perimeter tracing
-  - pivot/forward handoff uses hysteresis for heading and the minimum-inner-wheel rule, avoiding repeated switching near the threshold
-  - perimeter traces and routed perimeter connectors use a steady 75% speed cap, approach within 15cm of meaningful 20° corners, lock and align to the outgoing edge, then complete a committed straight capture of up to 40cm before ordinary projection resumes; execution settings persist across mowing resume
+  - keeps the faster forward wheel at the requested mowing output while allowing the inner wheel to slow below that output, including to zero; a low inner-wheel command alone never triggers a pivot
+  - treats a lookahead target coincident with the current waypoint as incoming-segment guidance, avoiding a fictitious zero-vector outgoing heading
+  - ordered projection searches a bounded 50cm forward route window so dense samples cannot leave progress pinned to a stale waypoint behind the mower
+  - never turns accumulated lookahead curvature or ordinary heading error into a stop/pivot/segment fallback; continuous guidance has one output mode, a forward differential arc with either inner wheel permitted to reach zero
+  - aligns once to the initial moving-lookahead direction through the standard `TurnController` before any forward output, covering connector, resume, return-to-start, recharge, and manual continuous-route entry without adding mid-route branching
+  - confirms an ordinary route-corridor breach for ten consecutive 50Hz samples before aborting, while retaining an immediate abort at twice the corridor; it never converts route deviation into recovery motion and clears the stateful wheel command on every exit path
+  - obstacle encounters and displaced obstacle-boundary resumes up to 1.5m away use a safety-checked ordinary segment drive to a tangent-approach point, then the ordinary turn controller, before continuous following begins on genuine perimeter points; the live off-route pose is never inserted into the closed loop as a synthetic chord/corner
+  - the execution-level local waypoint test is the sole owner of genuine 20° corner stops; it delegates the outgoing-edge target (up to 40cm) to `DriveController`, and therefore to the standard `TurnController`, before ordinary projection resumes
+  - perimeter traces and routed perimeter connectors keep the faster wheel at their requested speed while allowing the inner wheel to slow to zero; execution settings persist across mowing resume
   - applies a per-control-cycle wheel-command slew limit so curvature, heading, and CTE corrections change motor demand progressively instead of jumping between fast and slow outputs
   - drives saved or planned polylines using direct left/right wheel outputs instead of turn-drive-turn segments
   - mowing traces/connectors can enable strict ordered progress so nearby non-adjacent segments, including the closing leg back to the join point, cannot falsely jump the follower far ahead in the route
   - advances ordered path progress using the same passed-waypoint logic, then projects the mower onto the ordered polyline and picks lookahead by true forward arc-length progress instead of only waypoint index
   - continuously steers with the learned forward CTE and heading gains shared by straight driving
-  - mowing execution bypasses continuous following for connectors up to 1m when a direct segment is obstacle-clear and stays within the area's 25cm outside allowance, using the segment controller's pivot-then-straight behavior instead
+  - mowing execution sends every safe two-point connector through `DriveController` regardless of length, and may similarly simplify a safe multi-point connector up to 1m; only genuinely routed multi-point geometry enters continuous following
   - closed-loop obstacle verify enables the start-target progression mode so the follower can leave the preserved join point after tangential departure instead of repeatedly steering back into a tight local loop
   - adaptively reduces forward speed on tighter local path curvature, larger live heading error, and larger live cross-track error, while allowing broader smoother perimeters to run faster
   - can pivot in place only as a fallback for very large heading errors and now uses pivot-entry / pivot-exit hysteresis so it does not flap between arc-drive and pivot-turn modes
@@ -337,7 +344,7 @@ This document maps problem domains to candidate files removing the need for Code
   - shifts mow-start perimeter joins away from sharp perimeter corners so the first tangent turn and follow do not begin on a fragile corner/kink
   - inside-area starts also require the straight approach midpoint to remain inside the mowing area, helping reject joins that would cut out through a concavity
   - performs sweep-topology decomposition: interval appearances, disappearances, splits and merges caused by either the area boundary or obstacles create stable visitable regions, including concave outer-boundary pockets
-  - globally optimises the small set of region templates from the preferred live start and back toward that start, while preserving boustrophedon order inside each region
+  - globally optimises the small set of region templates as a closed cycle, validates its last-to-first connector, and rotates the fixed cycle to the region entry nearest the preferred live start while preserving boustrophedon order inside each region
   - filters the regional optimisation graph through the production safe-connector builder, preventing oblique mowing angles from selecting an infeasible transition and failing later during preview connector generation
   - caches each oriented region-to-region connector evaluation so exact optimisation does not repeatedly run expensive geometry validation for the same edge
   - safe connectors treat repeated ground as a cost rather than a prohibition: they evaluate direct travel, both boundary directions, all intersecting obstacles, both area-perimeter directions, then a free-space visibility-graph fallback before declaring genuinely disconnected geometry
@@ -377,7 +384,7 @@ This document maps problem domains to candidate files removing the need for Code
   - on mow start, now tries to select a strip-adjacent area-perimeter anchor that is directly reachable without re-leaving the area after entry; when one is found it re-anchors the strip order to that perimeter point, drives to the associated inside standoff, traces the full area loop once, and then starts strip mowing from that same strip-adjacent point instead of re-planning again from the post-trace pose
   - that forced first area trace now injects the chosen strip-adjacent perimeter point into the traced loop itself and also refreshes the retry checkpoint with that ordered loop, so a stall during the first lap resumes on the same anchored perimeter order instead of falling back to a generic nearest-point boundary restart
   - initial area entry traces the full area perimeter before strip mowing begins; when no safe strip-adjacent area anchor can be chosen up front it falls back to re-anchoring strip order from the live post-trace pose
-  - perimeter tracing for areas and obstacles uses conservative continuous following on straight/gentle runs, with explicit locked pivots at sharp corners and when a curve would nearly stop the inner wheel
+  - perimeter tracing for areas and obstacles uses conservative continuous following on straight/gentle runs, with explicit locked pivots only at genuine sharp corners or extreme heading errors
   - perimeter tracing now uses a less aggressive tight-arc pivot fallback threshold so, after a corner, it prefers to settle onto the new edge instead of repeatedly flapping between pivot and arc drive
   - mowing-area perimeter tracing now follows the recorded area boundary verbatim at runtime rather than passing it through the obstacle/area shaper, so corner logic sees the operator-drawn perimeter instead of a synthetic convex/smoothed substitute
   - after an explicit perimeter corner turn, it now follows a short committed capture run on the outgoing recorded edge before continuing the main continuous follow, reducing the pivot/arc dithering that used to stall mid-perimeter
@@ -474,6 +481,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorMapping.ts`: app-facing forward-positive wheel convention mapping to/from raw motor node direction signs.
 - `src/motors/motorNodeClient.ts`: motor command send + feedback polling over framed I2C protocol.
   - includes motor current sensing data in feedback samples
+  - owns the ESP32 command heartbeat through one resettable timer: changed commands replace the latest value and restart the timer, callbacks resend only the current active command, and zero/disabled commands cancel refreshes
 - `src/controller/hidGameController.ts`: HID game controller input adapter and button event source.
 - `external-hardware/manual-tests/controller_inspector.js`: HID controller bring-up inspector; prints connection state, decoded axes/buttons, and raw packet data without depending on the legacy full-system parameter file.
 - `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
@@ -516,7 +524,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `test/liveI2cTransport.test.js`: transport reopen/retry behavior for recoverable bus faults.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
-- `test/motorNodeClient.test.js`: motor command priority and feedback-frame decode tests.
+- `test/motorNodeClient.test.js`: motor command priority, duplicate suppression, resettable latest-command heartbeat, timer cancellation, and feedback-frame decode tests.
 - `test/motorMapping.test.js`: motor direction sign mapping tests.
 - `test/manualDriveProfile.test.js`: manual-drive demand shaping tests.
 
@@ -554,9 +562,8 @@ This document maps problem domains to candidate files removing the need for Code
   - API endpoints: `GET /dead-reckoning`, `POST /api/dead-reckoning/start`, `POST /api/dead-reckoning/stop`, `POST /api/dead-reckoning/apply`
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`, `GET /api/mowing/progress`
 - `src/server/homePage.ts`: expanded dashboard served at `/dashboard`, including navigation to Drive & Paths and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
-- `src/server/deadReckoningPage.ts`: dead-reckoning arc-calibration page — three-phase calibration procedure UI (straight line, forward CW arc, forward CCW arc); live IMU, GNSS, and motor-odometry widgets in a scaled row across the top; controls panel and a 45°-step test-moves panel side-by-side beneath; phase progress indicators; GNSS quality warning banner; calibration result display and apply controls.
-  - Test-moves panel: 8 directional buttons (1 m at 45° increments) drive the mower to `current GNSS pose + Δ` via `POST /api/drive/execute` with learning disabled, snapshot pose before and after each move, and tabulate GNSS-measured Δx/Δy/Δheading vs encoder-DR Δx/Δy/Δheading plus their differences for direct comparison of motor-encoder dead-reckoning fidelity.
-- `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching.
+- `src/server/deadReckoningPage.ts`: focused three-phase dead-reckoning calibration page (GNSS-measured straight, long forward CW arc, long forward CCW arc); presents raw encoder totals, independently derived wheel scales, each arc's converted wheel distances and effective track width, followed by explicit apply controls.
+- `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching; result distances are signed, with reverse-learning legs displayed as negative values.
 - `src/server/sensorWidgets.js`: **WEB COMPONENT DEFINITIONS** — pure static JS served at `GET /sensor-widgets.js` (cached 1 hour).
   - `<imu-sensor-widget>`: custom element with shadow DOM; attributes: `status`, `error`, `heading-deg`, `pitch-deg`, `roll-deg`, `synced`
   - `<gnss-position-widget>`: custom element with shadow DOM; attributes: `status`, `error`, `heading-deg`, `heading-accuracy-deg`, `x-meters`, `y-meters`, `position-accuracy-meters`, `fix-type`, `satellites`, `synced`
@@ -583,15 +590,17 @@ This document maps problem domains to candidate files removing the need for Code
 
 ## Dead-Reckoning Calibration
 - `src/control/deadReckoningCalibrator.ts`: three-phase dead-reckoning calibration procedure
-  - Phase 1 (straight line): line-drives forward to derive first-pass left/right `metersPerTick` from GNSS chord and encoder totals
-  - Phase 2 (arc CW): drives a moderate constant-speed forward clockwise arc until the IMU reaches the requested sweep, derives effective moving-turn wheelbase from left/right travelled distance difference and IMU heading change, and rejects the phase when DR endpoint error indicates excessive mismatch
+  - Phase 1 (straight line, default 10 m): line-drives forward and independently derives left/right `metersPerTick` from the settled GNSS chord and each wheel's encoder total
+  - Phase 2 (arc CW, default 180 degrees): drives a constant-speed forward clockwise arc until the IMU reaches the requested sweep and derives effective moving-turn track width from the calibrated left/right travelled-distance difference divided by IMU heading change
   - Phase 3 (arc CCW): mirror of phase 2
-  - outputs suggested per-wheel m/tick, moving wheelbase, and DR endpoint error for operator review before applying
+  - arc endpoint disagreement and encoder/IMU progression remain diagnostic data and do not reject calibration or claim wheel slip; CW/CCW track-width spread above 20% is reported for operator review
+  - outputs the straight-derived per-wheel scales and mean CW/CCW effective track width for operator review before applying
+  - completed status retains phase anchors, counts and calculated values but removes the high-rate telemetry arrays before exposing the result to the one-second web poll
   - settle diagnostics: logs `dead_reckoning.pose_not_settled` with the live blocker reason plus pose-fusion diagnostics whenever the 2-second settle dwell is interrupted, logs `dead_reckoning.pose_settled_anchor_rejected` when the pose is settled but the raw GNSS anchor is unusable, and logs the final fused/gnss snapshot on timeout
   - integrates with `systemStop` for safe abort during any phase
   - API: `run()`, `requestStop()`, `getState()`
 - `src/server/deadReckoningPage.ts`: dead-reckoning calibration web UI (see Operation And Server Entry above)
-  - exposes a user-entered straight-line distance for phase 1 and posts it with the calibration start request
+  - defaults to a 10 m straight and 180-degree arcs, accepts 90–180-degree arc sweeps, and retains the completed result after motion stops
 
 ## Project Build And Test Tooling
 - `package.json`:

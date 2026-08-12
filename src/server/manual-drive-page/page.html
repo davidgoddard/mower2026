@@ -22,6 +22,7 @@ __APP_DIALOG_STYLE_TAG__
         <a href="/segment-testing" class="header-nav-link">Segment Testing</a>
         <a href="/dead-reckoning" class="header-nav-link">Dead Reckoning</a>
         <a href="/mowing-records" class="header-nav-link">Mowing Records</a>
+        <a href="/battery-management" class="header-nav-link">Battery</a>
         <a href="/dashboard" class="mini-widget-link" aria-label="Open full IMU dashboard">
           <span class="mini-widget-content">
             <imu-sensor-widget id="mini-imu-widget"></imu-sensor-widget>
@@ -84,6 +85,21 @@ __APP_DIALOG_STYLE_TAG__
       <div id="mowingStatusBar" class="mowing-status-bar">
         <div class="mowing-status-dot"></div>
         <span id="mowingStatusText">Idle</span>
+      </div>
+      <div class="section" style="margin:0.75rem 0">
+        <div class="section-title">Recharge Point</div>
+        <p class="section-description">Capture the clear drive-to point first, then the final charging position. The mower routes to the first point and reverses along the line between them.</p>
+        <div class="map-controls">
+          <button id="captureRechargeDriveToBtn" class="button button-primary" type="button">Capture drive-to point</button>
+          <span id="rechargeDriveToText">Not set</span>
+          <button id="captureRechargeChargingBtn" class="button button-primary" type="button">Capture charging point</button>
+          <span id="rechargeChargingText">Not set</span>
+          <div class="input-group"><label for="rechargeBudgetMeters">Combined wheel budget (m)</label><input id="rechargeBudgetMeters" type="number" min="10" step="10" value="1500"></div>
+          <button id="saveRechargeBtn" class="button button-primary" type="button">Save</button>
+          <button id="rechargeNowBtn" class="button button-primary" type="button">Recharge after this strip</button>
+          <button id="resetRechargeDistanceBtn" class="button" type="button">Reset distance</button>
+        </div>
+        <div class="section-description" id="rechargeStatusText">Loading recharge configuration…</div>
       </div>
       <canvas id="mapCanvas" width="1200" height="800"></canvas>
       <div class="map-stats" id="mapStats">Waiting for position data...</div>

@@ -38,6 +38,8 @@ export interface DriveRequest {
    * spinning the mower around mid-jam.
    */
   readonly driveDirectionSign?: 1 | -1;
+  /** Per-manoeuvre wheel-output ceiling, used for slow charger docking. */
+  readonly maximumWheelOutputPercent?: number;
   /**
    * Optional long-run heading learner mode. Short-distance training leaves
    * this unset; dedicated long-run tuning stages use it to update only the
@@ -49,6 +51,8 @@ export interface DriveRequest {
 export type DrivePoseQuality = "gnss" | "dead-reckoning" | "unknown";
 
 export interface DriveResult {
+  /** Signed travel direction used for this run; reverse results expose -1 to operator UIs. */
+  readonly driveDirectionSign?: 1 | -1;
   readonly startPosition: Position;
   readonly targetPosition: Position;
   readonly finalPosition: Position;

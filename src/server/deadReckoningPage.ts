@@ -9,7 +9,7 @@ export function getDeadReckoningPageHtml(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Dead-Reckoning Arc Calibration - Mower Control</title>
+    <title>Dead-Reckoning Calibration - Mower Control</title>
     <style>
 ${getSensorWidgetLayoutStyles()}
 ${getAppDialogStyles()}
@@ -92,7 +92,7 @@ ${getAppDialogStyles()}
         zoom: 0.82;
       }
 
-      /* Two-column layout for Controls + Test Moves */
+      /* Calibration controls layout */
       .work-row {
         display: grid;
         grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -536,7 +536,7 @@ ${getOperatorPageCommonScriptTag()}
   <body>
     <div class="header">
       <div class="header-content">
-        <h1>Dead-Reckoning Arc Calibration</h1>
+        <h1>Dead-Reckoning Calibration</h1>
         <a class="back-link" href="/dashboard">← Back to Dashboard</a>
       </div>
     </div>
@@ -552,23 +552,28 @@ ${getOperatorPageCommonScriptTag()}
       </section>
 
       <!-- ================================================================
-           Controls + Test Moves side-by-side
+           Calibration controls
       ================================================================ -->
       <div class="work-row">
         <!-- Calibration controls -->
         <section class="panel">
           <h2>Controls</h2>
 
+          <p style="font-size:0.85rem;color:var(--text-secondary);margin:-0.25rem 0 0.8rem">
+            Drive one GNSS-measured straight to establish each encoder scale, then use long CW and CCW
+            forward arcs to calculate the mower's effective moving track width.
+          </p>
+
           <div class="gnss-warn-banner" id="gnssWarnBanner"></div>
 
           <div class="input-row">
             <div class="field">
               <label for="lineDistanceMeters">Straight distance</label>
-              <input id="lineDistanceMeters" type="number" min="0.5" max="20" step="0.5" value="5" inputmode="decimal" />
+              <input id="lineDistanceMeters" type="number" min="1" max="20" step="0.5" value="10" inputmode="decimal" />
             </div>
             <div class="field">
               <label for="arcSweepDegrees">Arc sweep</label>
-              <input id="arcSweepDegrees" type="number" min="20" max="90" step="5" value="45" inputmode="decimal" />
+              <input id="arcSweepDegrees" type="number" min="90" max="180" step="10" value="180" inputmode="decimal" />
             </div>
           </div>
 
@@ -605,53 +610,6 @@ ${getOperatorPageCommonScriptTag()}
           </div>
         </section>
 
-        <!-- Test Moves panel -->
-        <section class="panel">
-          <h2>Test Moves (1 m, 45° steps)</h2>
-          <p style="font-size:0.8rem;color:var(--text-secondary);margin:-0.25rem 0 0.6rem">
-            Drives to <code>current&nbsp;pose&nbsp;+&nbsp;Δ</code>. Compares GNSS-measured vs encoder-DR
-            position and heading change.
-          </p>
-
-          <div class="move-pad">
-            <button data-dx="-0.7071" data-dy="0.7071"  data-label="–X +Y">–X +Y</button>
-            <button data-dx="0"       data-dy="1"       data-label="+Y">+Y</button>
-            <button data-dx="0.7071"  data-dy="0.7071"  data-label="+X +Y">+X +Y</button>
-            <button data-dx="-1"      data-dy="0"       data-label="–X">–X</button>
-            <button class="pad-center" disabled>Δ&nbsp;=&nbsp;1 m</button>
-            <button data-dx="1"       data-dy="0"       data-label="+X">+X</button>
-            <button data-dx="-0.7071" data-dy="-0.7071" data-label="–X –Y">–X –Y</button>
-            <button data-dx="0"       data-dy="-1"      data-label="–Y">–Y</button>
-            <button data-dx="0.7071"  data-dy="-0.7071" data-label="+X –Y">+X –Y</button>
-          </div>
-
-          <div class="move-controls">
-            <button id="moveStopBtn" class="danger" disabled>STOP MOVE</button>
-            <button id="moveClearBtn" class="secondary">Clear results</button>
-            <span class="move-status" id="moveStatus">Idle.</span>
-          </div>
-
-          <div class="move-results">
-            <table>
-              <thead>
-                <tr>
-                  <th>Cmd Δ</th>
-                  <th>GNSS Δx</th>
-                  <th>GNSS Δy</th>
-                  <th>DR Δx</th>
-                  <th>DR Δy</th>
-                  <th>Δ pos err</th>
-                  <th>GNSS Δhdg</th>
-                  <th>DR Δhdg</th>
-                  <th>Δ hdg err</th>
-                </tr>
-              </thead>
-              <tbody id="moveResultsBody">
-                <tr><td colspan="9" style="text-align:center;color:var(--text-secondary);font-style:italic">No moves yet.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
       </div>
 
       <!-- ================================================================
@@ -671,12 +629,8 @@ ${getOperatorPageCommonScriptTag()}
             <div class="suggestion-value" id="suggestedRight">—</div>
           </div>
           <div>
-            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Moving wheelbase</div>
+            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Effective track width</div>
             <div class="suggestion-value" id="suggestedWheelbase">—</div>
-          </div>
-          <div>
-            <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;color:#065f46;font-weight:600">Avg DR error</div>
-            <div class="suggestion-value" id="suggestedDrError">—</div>
           </div>
         </div>
         <div class="suggestion-prev" id="prevValue"></div>
@@ -690,23 +644,6 @@ ${getOperatorPageCommonScriptTag()}
       <!-- Phase result cards -->
       <div id="phaseResults"></div>
 
-      <!-- Arc tracking canvas -->
-      <section class="panel" id="canvasSection" style="display:none">
-        <h2>Arc Encoder Tracking</h2>
-        <p style="font-size:0.8rem;color:var(--text-secondary);margin:0 0 0.5rem">
-          Gentle forward-arc diagnostics. Used to derive the moving-turn wheelbase for line-tracing dead reckoning.
-        </p>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
-          <div>
-            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Arc CW</div>
-            <div class="canvas-wrap"><canvas id="canvasArcRight" width="400" height="400"></canvas></div>
-          </div>
-          <div>
-            <div style="font-size:0.78rem;font-weight:600;color:var(--text-secondary);margin-bottom:0.3rem">Arc CCW</div>
-            <div class="canvas-wrap"><canvas id="canvasArcLeft" width="400" height="400"></canvas></div>
-          </div>
-        </div>
-      </section>
     </div>
 
 ${getAppDialogHtml()}
@@ -836,11 +773,7 @@ ${getAppDialogScript()}
         if (!phase) return '';
         const acc = phase.startAnchor?.positionAccuracyMeters;
         const accClass = acc === null ? '' : acc <= 0.10 ? 'good' : acc <= 0.20 ? 'warn' : 'bad';
-        const rms = phase.arcTrackingRmsErrorFraction;
-        const rmsClass = rms === null ? '' : rms <= 0.05 ? 'good' : rms <= 0.10 ? 'warn' : 'bad';
         const geo = phase.arcGeometry;
-        const drErrCm = geo ? geo.drEndpointErrorMeters * 100 : null;
-        const drErrClass = drErrCm === null ? '' : drErrCm <= 2 ? 'good' : drErrCm <= 5 ? 'warn' : 'bad';
         return \`
           <div class="phase-result">
             <h3>\${title} <span class="phase-badge \${badgeClass}">\${badgeLabel}</span></h3>
@@ -863,30 +796,25 @@ ${getAppDialogScript()}
               </div>
               \${phase.derivedEncoderMetersPerTick !== null ? \`
               <div class="phase-metric">
-                <div class="phase-metric-label">Avg m/tick</div>
-                <div class="phase-metric-value">\${fmt(phase.derivedEncoderMetersPerTick, 6, '')}</div>
-              </div>\` : ''}
-              \${geo ? \`
-              <div class="phase-metric">
                 <div class="phase-metric-label">Left m/tick</div>
-                <div class="phase-metric-value">\${fmt(geo.leftMetersPerTick, 6, '')}</div>
+                <div class="phase-metric-value">\${fmt(phase.derivedLeftMetersPerTick, 8, '')}</div>
               </div>
               <div class="phase-metric">
                 <div class="phase-metric-label">Right m/tick</div>
-                <div class="phase-metric-value">\${fmt(geo.rightMetersPerTick, 6, '')}</div>
-              </div>
-              <div class="phase-metric">
-                <div class="phase-metric-label">Moving Wheelbase</div>
-                <div class="phase-metric-value">\${fmt(geo.wheelbaseMeters, 4, ' m')}</div>
-              </div>
-              <div class="phase-metric">
-                <div class="phase-metric-label">DR endpoint error</div>
-                <div class="phase-metric-value \${drErrClass}">\${fmt(drErrCm, 1, ' cm')}</div>
+                <div class="phase-metric-value">\${fmt(phase.derivedRightMetersPerTick, 8, '')}</div>
               </div>\` : ''}
-              \${rms !== null ? \`
+              \${geo ? \`
               <div class="phase-metric">
-                <div class="phase-metric-label">Arc RMS Error</div>
-                <div class="phase-metric-value \${rmsClass}">\${fmt(rms * 100, 2, '%')}</div>
+                <div class="phase-metric-label">Left distance</div>
+                <div class="phase-metric-value">\${fmt(phase.leftTotalTicks * geo.leftMetersPerTick, 3, ' m')}</div>
+              </div>
+              <div class="phase-metric">
+                <div class="phase-metric-label">Right distance</div>
+                <div class="phase-metric-value">\${fmt(phase.rightTotalTicks * geo.rightMetersPerTick, 3, ' m')}</div>
+              </div>
+              <div class="phase-metric">
+                <div class="phase-metric-label">Effective Track Width</div>
+                <div class="phase-metric-value">\${fmt(geo.wheelbaseMeters, 4, ' m')}</div>
               </div>\` : ''}
               <div class="phase-metric">
                 <div class="phase-metric-label">Start Accuracy</div>
@@ -1009,7 +937,9 @@ ${getAppDialogScript()}
         applyNote.textContent = '';
 
         const hasValues = result &&
-          (result.suggestedLeftMetersPerTick !== null || result.suggestedEncoderMetersPerTick !== null);
+          result.suggestedLeftMetersPerTick !== null &&
+          result.suggestedRightMetersPerTick !== null &&
+          result.suggestedWheelbaseMeters !== null;
 
         if (!hasValues) {
           banner.classList.remove('visible');
@@ -1031,9 +961,6 @@ ${getAppDialogScript()}
         setEl('suggestedLeft',      result.suggestedLeftMetersPerTick,       6, ' m/tick');
         setEl('suggestedRight',     result.suggestedRightMetersPerTick,      6, ' m/tick');
         setEl('suggestedWheelbase', result.suggestedWheelbaseMeters,         4, ' m');
-        const drErrCm = result.averageDrEndpointErrorMeters !== null ? result.averageDrEndpointErrorMeters * 100 : null;
-        setEl('suggestedDrError',   drErrCm,                                 1, ' cm');
-
         prevEl.textContent = \`Previous: left \${result.previousLeftMetersPerTick.toFixed(6)}, right \${result.previousRightMetersPerTick.toFixed(6)}, wheelbase \${result.previousWheelbaseMeters.toFixed(4)} m\`;
 
         if (result.warnings && result.warnings.length > 0) {
@@ -1088,33 +1015,21 @@ ${getAppDialogScript()}
           }
 
           const summaryStats = document.getElementById('summaryStats');
-          if (summaryStats) summaryStats.style.display = running ? 'grid' : 'none';
+          if (summaryStats) summaryStats.style.display = (running || result) ? 'grid' : 'none';
 
           const statPhase = document.getElementById('statPhase');
           if (statPhase) statPhase.textContent = phase;
 
-          document.getElementById('startBtn').disabled = running || moveRunning;
+          document.getElementById('startBtn').disabled = running;
           document.getElementById('stopBtn').disabled = false;
           const lineDistanceInput = document.getElementById('lineDistanceMeters');
           const arcSweepInput = document.getElementById('arcSweepDegrees');
           if (lineDistanceInput) lineDistanceInput.disabled = running;
           if (arcSweepInput) arcSweepInput.disabled = running;
 
-          // Disable test-move pad while calibration is running
-          updateMoveButtonsEnabled();
-
           if (result) {
             renderPhaseResults(result);
             updateSuggestionBanner(result);
-
-            const canvasSection = document.getElementById('canvasSection');
-            if (canvasSection) canvasSection.style.display = '';
-            if (result.arcRightPhase) {
-              drawArcCanvas('canvasArcRight', result.arcRightPhase.steadyStateSamples);
-            }
-            if (result.arcLeftPhase) {
-              drawArcCanvas('canvasArcLeft', result.arcLeftPhase.steadyStateSamples);
-            }
           }
         } catch (err) {
           console.error('Status update failed:', err);
@@ -1132,7 +1047,6 @@ ${getAppDialogScript()}
         arcSweepInput.disabled = true;
         document.getElementById('phaseResults').innerHTML = '';
         document.getElementById('suggestionBanner').classList.remove('visible');
-        document.getElementById('canvasSection').style.display = 'none';
         try {
           const lineDistanceMeters = Number(lineDistanceInput.value);
           const arcSweepDegrees = Number(arcSweepInput.value);
@@ -1143,11 +1057,11 @@ ${getAppDialogScript()}
             await appAlert('Please enter a valid straight distance in metres.');
             return;
           }
-          if (!Number.isFinite(arcSweepDegrees) || arcSweepDegrees < 20 || arcSweepDegrees > 90) {
+          if (!Number.isFinite(arcSweepDegrees) || arcSweepDegrees < 90 || arcSweepDegrees > 180) {
             document.getElementById('startBtn').disabled = false;
             lineDistanceInput.disabled = false;
             arcSweepInput.disabled = false;
-            await appAlert('Please enter a valid arc sweep between 20° and 90°.');
+            await appAlert('Please enter a valid arc sweep between 90° and 180°.');
             return;
           }
           await window.operatorPage.postJson('/api/dead-reckoning/start', { lineDistanceMeters, arcSweepDegrees });
@@ -1213,7 +1127,8 @@ ${getAppDialogScript()}
         const padButtons = document.querySelectorAll('.move-pad button[data-dx]');
         const disable = moveRunning || calibrationRunning;
         padButtons.forEach((btn) => { btn.disabled = disable; });
-        document.getElementById('moveStopBtn').disabled = !moveRunning;
+        const stopButton = document.getElementById('moveStopBtn');
+        if (stopButton) stopButton.disabled = !moveRunning;
       }
 
       function readPoseSnapshot(prim) {
@@ -1375,7 +1290,7 @@ ${getAppDialogScript()}
         });
       });
 
-      document.getElementById('moveStopBtn').addEventListener('click', async () => {
+      document.getElementById('moveStopBtn')?.addEventListener('click', async () => {
         try {
           await window.operatorPage.stopAll();
           setMoveStatus('Stop requested.', 'error');
@@ -1384,8 +1299,9 @@ ${getAppDialogScript()}
         }
       });
 
-      document.getElementById('moveClearBtn').addEventListener('click', () => {
-        document.getElementById('moveResultsBody').innerHTML =
+      document.getElementById('moveClearBtn')?.addEventListener('click', () => {
+        const body = document.getElementById('moveResultsBody');
+        if (body) body.innerHTML =
           '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);font-style:italic">No moves yet.</td></tr>';
       });
 

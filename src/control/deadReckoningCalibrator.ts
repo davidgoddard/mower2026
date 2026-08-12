@@ -15,8 +15,9 @@
  *  Phase 3 – Forward arc left / CCW
  *    Mirror of phase 2.
  *
- * Results include suggested per-wheel m/tick, moving wheelbase, and DR
- * endpoint error. In-place pivots are intentionally excluded.
+ * The straight phase establishes independent left/right metres-per-tick.
+ * The arcs then use those scales and IMU heading change to establish the
+ * effective moving-turn track width. In-place pivots are intentionally excluded.
  */
 
 import { SessionLogger } from "../logging/index.js";
@@ -39,10 +40,8 @@ import { systemStop } from "./systemStop.js";
 
 const DEG_TO_RAD = Math.PI / 180;
 const DEAD_RECKONING_ARC_SWEEP_MIN_DEG = 20;
-const DEAD_RECKONING_ARC_SWEEP_MAX_DEG = 90;
-const DEAD_RECKONING_ARC_SWEEP_DEFAULT_DEG = 45;
-const MAX_ARC_DR_ENDPOINT_ERROR_METERS = 0.25;
-const MAX_ARC_TRACKING_RMS_ERROR_FRACTION = 0.15;
+const DEAD_RECKONING_ARC_SWEEP_MAX_DEG = 180;
+const DEAD_RECKONING_ARC_SWEEP_DEFAULT_DEG = 180;
 const ARC_DIRECTION_POLL_INTERVAL_MS = 50;
 const ARC_HEADING_STEADY_MARGIN_DEG = 5;
 const ARC_OUTER_WHEEL_OUTPUT_DEFAULT = 0.60;
@@ -89,8 +88,6 @@ export interface DerivedArcGeometry {
   readonly leftMetersPerTick: number;
   /** m/tick for right wheel */
   readonly rightMetersPerTick: number;
-  /** DR-integrated endpoint error vs GNSS end anchor (metres) */
-  readonly drEndpointErrorMeters: number;
   /** Chord from GNSS start→end anchors (metres) */
   readonly gnssChordMeters: number;
   /** IMU heading change over the full phase (degrees) */
@@ -110,9 +107,13 @@ export interface RunPhaseResult {
   readonly steadyStateSamples: ArcSample[];
   /** Derived from straight phase only */
   readonly derivedEncoderMetersPerTick: number | null;
+  /** Independent left-wheel scale derived from the straight phase only */
+  readonly derivedLeftMetersPerTick: number | null;
+  /** Independent right-wheel scale derived from the straight phase only */
+  readonly derivedRightMetersPerTick: number | null;
   /** RMS error between encoder arc-fraction and IMU arc-fraction (steady-state) */
   readonly arcTrackingRmsErrorFraction: number | null;
-  /** Full arc geometry + DR position error (arc phases only) */
+  /** Full arc geometry (arc phases only) */
   readonly arcGeometry: DerivedArcGeometry | null;
 }
 
@@ -126,8 +127,6 @@ export interface DeadReckoningCalibrationResult {
   readonly suggestedWheelbaseMeters: number | null;
   /** Shared scalar (average of left+right) for callers that need one value */
   readonly suggestedEncoderMetersPerTick: number | null;
-  /** DR endpoint error averaged across both arc phases (metres) */
-  readonly averageDrEndpointErrorMeters: number | null;
   readonly previousEncoderMetersPerTick: number;
   readonly previousLeftMetersPerTick: number;
   readonly previousRightMetersPerTick: number;
@@ -243,7 +242,7 @@ export class DeadReckoningCalibrator {
     this.maxAnchorAccuracyMeters = options.maxAnchorAccuracyMeters ?? 0.10;
     this.fullSpeed = options.fullSpeed ?? ARC_OUTER_WHEEL_OUTPUT_DEFAULT;
     this.arcInnerSpeed = options.arcInnerSpeed ?? ARC_INNER_WHEEL_OUTPUT_DEFAULT;
-    this.lineDistanceMeters = options.lineDistanceMeters ?? 5.0;
+    this.lineDistanceMeters = options.lineDistanceMeters ?? 10.0;
     this.spinsPerDirection = Math.max(1, options.spinsPerDirection ?? 1);
     this.pivotTurnTimeoutMs = Math.max(5_000, options.pivotTurnTimeoutMs ?? 20_000);
     this.drPivotSpeedScale = Math.max(0.1, Math.min(1, options.drPivotSpeedScale ?? 0.5));
@@ -251,7 +250,7 @@ export class DeadReckoningCalibrator {
       DEAD_RECKONING_ARC_SWEEP_MIN_DEG,
       Math.min(DEAD_RECKONING_ARC_SWEEP_MAX_DEG, options.arcSweepDegrees ?? DEAD_RECKONING_ARC_SWEEP_DEFAULT_DEG),
     );
-    this.arcDriveTimeoutMs = Math.max(5_000, options.arcDriveTimeoutMs ?? 20_000);
+    this.arcDriveTimeoutMs = Math.max(5_000, options.arcDriveTimeoutMs ?? 60_000);
     this.sleep = options.sleep ?? defaultSleep;
 
     this.onGnssUpdate = this.onGnssUpdate.bind(this);
@@ -335,7 +334,7 @@ export class DeadReckoningCalibrator {
       }
 
       // ------------------------------------------------------------------
-      // Phase 1 – 5m straight line using the line driver (no pivot pre-turn)
+      // Phase 1 – GNSS-measured straight line using the line driver (no pivot pre-turn)
       // ------------------------------------------------------------------
       this.setPhase("straight", `Phase 1: Line-drive ${lineDistanceMeters.toFixed(1)} m…`);
       straightPhase = await this.runLinePhase(preRunAnchor, lineDistanceMeters);
@@ -460,6 +459,8 @@ export class DeadReckoningCalibrator {
         arcSamples: [...this.arcSamples],
         steadyStateSamples: steadySamples,
         derivedEncoderMetersPerTick: null,
+        derivedLeftMetersPerTick: null,
+        derivedRightMetersPerTick: null,
         arcTrackingRmsErrorFraction: null,
         arcGeometry: null,
       };
@@ -540,6 +541,8 @@ export class DeadReckoningCalibrator {
         arcSamples: [...this.arcSamples],
         steadyStateSamples: steadySamples,
         derivedEncoderMetersPerTick: null,
+        derivedLeftMetersPerTick: null,
+        derivedRightMetersPerTick: null,
         arcTrackingRmsErrorFraction: null,
         arcGeometry: null,
       };
@@ -573,8 +576,15 @@ export class DeadReckoningCalibrator {
     if (phase.startAnchor.positionAccuracyMeters !== null && phase.startAnchor.positionAccuracyMeters > 0.10) {
       warnings.push(`Straight phase GNSS accuracy was ${(phase.startAnchor.positionAccuracyMeters * 100).toFixed(1)} cm (>10 cm). Calibration may be inaccurate.`);
     }
-    const derivedEncoderMetersPerTick = gnssDistanceMeters / avgTicks;
-    return { ...phase, derivedEncoderMetersPerTick };
+    const derivedLeftMetersPerTick = gnssDistanceMeters / leftTotalTicks;
+    const derivedRightMetersPerTick = gnssDistanceMeters / rightTotalTicks;
+    const derivedEncoderMetersPerTick = (derivedLeftMetersPerTick + derivedRightMetersPerTick) / 2;
+    return {
+      ...phase,
+      derivedEncoderMetersPerTick,
+      derivedLeftMetersPerTick,
+      derivedRightMetersPerTick,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -605,12 +615,8 @@ export class DeadReckoningCalibrator {
       return phase;
     }
 
-    const leftMpt = straightPhase?.leftTotalTicks && straightPhase.leftTotalTicks > 0
-      ? straightPhase.gnssDistanceMeters / straightPhase.leftTotalTicks
-      : null;
-    const rightMpt = straightPhase?.rightTotalTicks && straightPhase.rightTotalTicks > 0
-      ? straightPhase.gnssDistanceMeters / straightPhase.rightTotalTicks
-      : null;
+    const leftMpt = straightPhase?.derivedLeftMetersPerTick ?? null;
+    const rightMpt = straightPhase?.derivedRightMetersPerTick ?? null;
     if (!leftMpt || !rightMpt) {
       warnings.push(`Arc-${direction}: no valid straight-line m/tick estimate.`);
       return phase;
@@ -620,7 +626,6 @@ export class DeadReckoningCalibrator {
     const rightDistance = phase.rightTotalTicks * rightMpt;
     const headingRad = imuHeadingChangeDeg * DEG_TO_RAD;
     const wheelbaseMeters = Math.abs(rightDistance - leftDistance) / headingRad;
-    const drError = this.computeDrPositionError(phase, leftMpt, rightMpt);
     const arcTrackingRmsErrorFraction = this.computeArcTrackingRms(
       phase.steadyStateSamples,
       leftTicks,
@@ -628,93 +633,17 @@ export class DeadReckoningCalibrator {
       imuHeadingChangeDeg,
     );
 
-    if (drError > MAX_ARC_DR_ENDPOINT_ERROR_METERS) {
-      warnings.push(
-        `Arc-${direction}: DR endpoint error too large (${(drError * 100).toFixed(1)} cm); wheelbase rejected as likely slip.`,
-      );
-      this.logger.warn("dead_reckoning.arc_geometry_rejected", {
-        direction,
-        reason: "dr_endpoint_error",
-        wheelbaseMeters,
-        drEndpointErrorMeters: drError,
-      });
-      return {
-        ...phase,
-        arcTrackingRmsErrorFraction,
-        arcGeometry: null,
-      };
-    }
-
-    if (arcTrackingRmsErrorFraction !== null && arcTrackingRmsErrorFraction > MAX_ARC_TRACKING_RMS_ERROR_FRACTION) {
-      warnings.push(
-        `Arc-${direction}: arc tracking error too large (${(arcTrackingRmsErrorFraction * 100).toFixed(1)}%); wheelbase rejected as unreliable.`,
-      );
-      this.logger.warn("dead_reckoning.arc_geometry_rejected", {
-        direction,
-        reason: "arc_tracking_rms_error",
-        wheelbaseMeters,
-        arcTrackingRmsErrorFraction,
-      });
-      return {
-        ...phase,
-        arcTrackingRmsErrorFraction,
-        arcGeometry: null,
-      };
-    }
-
     const arcGeometry: DerivedArcGeometry = {
       wheelbaseMeters,
       outerArcLengthMeters: Math.max(leftDistance, rightDistance),
       innerArcLengthMeters: Math.min(leftDistance, rightDistance),
       leftMetersPerTick: leftMpt,
       rightMetersPerTick: rightMpt,
-      drEndpointErrorMeters: drError,
       gnssChordMeters: phase.gnssDistanceMeters,
       imuHeadingChangeDeg,
     };
 
     return { ...phase, arcTrackingRmsErrorFraction, arcGeometry };
-  }
-
-  // ---------------------------------------------------------------------------
-  // DR position integration — integrate steady-state samples and compare
-  // endpoint against GNSS end anchor.
-  // ---------------------------------------------------------------------------
-
-  private computeDrPositionError(
-    phase: RunPhaseResult,
-    leftMetersPerTick: number,
-    rightMetersPerTick: number,
-  ): number {
-    const steady = phase.steadyStateSamples;
-    if (steady.length < 2) {
-      return 0;
-    }
-
-    const first = steady[0];
-    let x = phase.startAnchor.xMeters;
-    let y = phase.startAnchor.yMeters;
-    let prevLeft  = first.leftSignedTicksTotal;
-    let prevRight = first.rightSignedTicksTotal;
-
-    for (let i = 1; i < steady.length; i++) {
-      const s = steady[i];
-      const dLeft  = (s.leftSignedTicksTotal  - prevLeft)  * leftMetersPerTick;
-      const dRight = (s.rightSignedTicksTotal - prevRight) * rightMetersPerTick;
-      const dDist  = (dLeft + dRight) / 2;
-
-      // IMU heading at this sample owns direction
-      const headingRad = s.imuHeadingDeg * DEG_TO_RAD;
-      x += dDist * Math.cos(headingRad);
-      y += dDist * Math.sin(headingRad);
-
-      prevLeft  = s.leftSignedTicksTotal;
-      prevRight = s.rightSignedTicksTotal;
-    }
-
-    const ex = phase.endAnchor.xMeters - x;
-    const ey = phase.endAnchor.yMeters - y;
-    return Math.hypot(ex, ey);
   }
 
   // ---------------------------------------------------------------------------
@@ -820,30 +749,37 @@ export class DeadReckoningCalibrator {
     let suggestedRight: number | null = null;
     let suggestedWheelbase: number | null = null;
     let suggestedShared: number | null = null;
-    let avgDrError: number | null = null;
+
+    if (straight?.derivedLeftMetersPerTick && straight.derivedRightMetersPerTick) {
+      suggestedLeft = straight.derivedLeftMetersPerTick;
+      suggestedRight = straight.derivedRightMetersPerTick;
+      suggestedShared = (suggestedLeft + suggestedRight) / 2;
+    }
 
     if (arcGeometries.length > 0) {
-      suggestedLeft     = arcGeometries.reduce((s, g) => s + g.leftMetersPerTick,  0) / arcGeometries.length;
-      suggestedRight    = arcGeometries.reduce((s, g) => s + g.rightMetersPerTick, 0) / arcGeometries.length;
       suggestedWheelbase = arcGeometries.reduce((s, g) => s + g.wheelbaseMeters,   0) / arcGeometries.length;
-      suggestedShared   = (suggestedLeft + suggestedRight) / 2;
-      avgDrError        = arcGeometries.reduce((s, g) => s + g.drEndpointErrorMeters, 0) / arcGeometries.length;
+      if (arcGeometries.length === 2) {
+        const [first, second] = arcGeometries;
+        const mean = (first.wheelbaseMeters + second.wheelbaseMeters) / 2;
+        const spreadFraction = mean > 0 ? Math.abs(first.wheelbaseMeters - second.wheelbaseMeters) / mean : 0;
+        if (spreadFraction > 0.20) {
+          warnings.push(`CW and CCW effective track widths differ by ${(spreadFraction * 100).toFixed(1)}%. Review the raw counts before applying.`);
+        }
+      }
     } else if (straight?.derivedEncoderMetersPerTick !== null && straight?.derivedEncoderMetersPerTick !== undefined) {
-      // Fall back to straight-phase scalar if arcs failed
       suggestedShared = straight.derivedEncoderMetersPerTick;
-      suggestedLeft   = suggestedShared;
-      suggestedRight  = suggestedShared;
+      suggestedLeft ??= suggestedShared;
+      suggestedRight ??= suggestedShared;
     }
 
     const result: DeadReckoningCalibrationResult = {
-      straightPhase: straight,
-      arcRightPhase: arcRight,
-      arcLeftPhase: arcLeft,
+      straightPhase: this.withoutTelemetrySamples(straight),
+      arcRightPhase: this.withoutTelemetrySamples(arcRight),
+      arcLeftPhase: this.withoutTelemetrySamples(arcLeft),
       suggestedLeftMetersPerTick: suggestedLeft,
       suggestedRightMetersPerTick: suggestedRight,
       suggestedWheelbaseMeters: suggestedWheelbase,
       suggestedEncoderMetersPerTick: suggestedShared,
-      averageDrEndpointErrorMeters: avgDrError,
       previousEncoderMetersPerTick: prevShared,
       previousLeftMetersPerTick: prevLeft,
       previousRightMetersPerTick: prevRight,
@@ -855,6 +791,13 @@ export class DeadReckoningCalibrator {
     this.result = result;
     this.lastUpdated = new Date().toISOString();
     return result;
+  }
+
+  /** Status polling needs the calibration totals, not tens of thousands of raw 100 Hz samples. */
+  private withoutTelemetrySamples(phase: RunPhaseResult | null): RunPhaseResult | null {
+    return phase === null
+      ? null
+      : { ...phase, arcSamples: [], steadyStateSamples: [] };
   }
 
   // ---------------------------------------------------------------------------

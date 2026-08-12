@@ -161,7 +161,6 @@
     let mowingPlanPreviewError = '';
     let mapTransform = null;
     let headingDragStart = null;
-    let mowingStatusNeedsPolling = false;
     let pageStatePollTimer = null;
     let pageStatePollInFlight = false;
     let pageStatePollFailureCount = 0;
@@ -172,6 +171,7 @@
     let pathRecordingStatusInFlight = false;
     let areaRecordingStatusInFlight = false;
     let mowingStatusInFlight = false;
+    let mowingActionInFlight = false;
     let perimeterEdit = null;
 
     const PRIMITIVES_POLL_MS = 1000;
@@ -800,7 +800,7 @@
     async function loadStoredPaths() {
       try {
         const data = await fetchJson('/api/paths?includePoints=1');
-        storedPaths = sanitizeStoredPathCollection(data.paths, 'stored path');
+        storedPaths = sanitizeStoredPathCollection(data?.paths, 'stored path');
         renderPaths();
         drawMap();
       } catch (error) {
@@ -811,7 +811,7 @@
     async function loadStoredAreaPerimeters() {
       try {
         const data = await fetchJson('/api/area-perimeters?includePoints=1');
-        storedAreaPerimeters = sanitizeStoredPathCollection(data.paths, 'stored area perimeter');
+        storedAreaPerimeters = sanitizeStoredPathCollection(data?.paths, 'stored area perimeter');
         renderAreaPerimeters();
         renderMowingPlanAreaOptions();
         drawMap();
@@ -1368,6 +1368,41 @@
     const stopMowingBtn = $("stopMowingBtn");
     const mowingStatusBar = $("mowingStatusBar");
     const mowingStatusText = $("mowingStatusText");
+    const rechargeBudgetMeters = $("rechargeBudgetMeters");
+    const rechargeDriveToText = $("rechargeDriveToText");
+    const rechargeChargingText = $("rechargeChargingText");
+    const rechargeStatusText = $("rechargeStatusText");
+    let rechargeConfiguration = null;
+
+    function formatRechargePoint(point) {
+      return point ? `${Number(point.xMeters).toFixed(2)}, ${Number(point.yMeters).toFixed(2)} m` : 'Not set';
+    }
+
+    async function loadRechargeStatus() {
+      const status = await fetchJson('/api/recharge/status');
+      rechargeConfiguration = status.configuration;
+      rechargeBudgetMeters.value = String(status.configuration.combinedWheelBudgetMeters);
+      rechargeDriveToText.textContent = formatRechargePoint(status.configuration.driveToPosition);
+      rechargeChargingText.textContent = formatRechargePoint(status.configuration.chargingPosition);
+      rechargeStatusText.textContent = status.waitingForCharge
+        ? 'Charging — press Carry On Mowing when ready.'
+        : `${Number(status.combinedWheelTravelMeters).toFixed(0)} / ${Number(status.configuration.combinedWheelBudgetMeters).toFixed(0)} combined wheel metres${status.rechargeDue ? ' — recharge due' : ''}`;
+    }
+
+    async function captureRechargePoint(point) {
+      await postJson('/api/recharge/capture', { point });
+      await loadRechargeStatus();
+    }
+    $("captureRechargeDriveToBtn").addEventListener('click', () => captureRechargePoint('driveTo').catch((error) => alert(error.message)));
+    $("captureRechargeChargingBtn").addEventListener('click', () => captureRechargePoint('charging').catch((error) => alert(error.message)));
+    $("saveRechargeBtn").addEventListener('click', async () => {
+      try {
+        await postJson('/api/recharge/config', { ...rechargeConfiguration, combinedWheelBudgetMeters: Number(rechargeBudgetMeters.value) });
+        await loadRechargeStatus();
+      } catch (error) { alert('Failed to save recharge settings: ' + error.message); }
+    });
+    $("rechargeNowBtn").addEventListener('click', () => postJson('/api/recharge/request', {}).then(loadRechargeStatus).catch((error) => alert(error.message)));
+    $("resetRechargeDistanceBtn").addEventListener('click', () => postJson('/api/recharge/reset-distance', {}).then(loadRechargeStatus).catch((error) => alert(error.message)));
 
     const MOWING_PHASE_LABELS = {
       idle: 'Idle',
@@ -1376,6 +1411,11 @@
       tracing_boundary: 'Tracing boundary',
       mowing_strip: 'Mowing strip',
       following_connector: 'Following connector',
+      travelling_to_charger: 'Travelling to charger',
+      docking: 'Reversing onto charger',
+      waiting_for_charge: 'Waiting for charge',
+      undocking: 'Driving clear of charger',
+      returning_to_mow: 'Returning to interrupted point',
       complete: 'Complete',
       stopped: 'Stopped',
       error: 'Error',
@@ -1397,14 +1437,12 @@
       const isRunning = status.phase !== 'idle' && status.phase !== 'complete' && status.phase !== 'stopped' && status.phase !== 'error';
       startMowingBtn.style.display = isRunning ? 'none' : '';
       startMowingNoPerimeterBtn.style.display = isRunning ? 'none' : '';
-      const canResume = !isRunning && Boolean(status.resumeAvailable);
+      startMowingBtn.disabled = mowingActionInFlight;
+      startMowingNoPerimeterBtn.disabled = mowingActionInFlight;
+      const canResume = status.phase === 'waiting_for_charge' || (!isRunning && Boolean(status.resumeAvailable));
       resumeMowingBtn.style.display = canResume ? '' : 'none';
-      resumeMowingBtn.disabled = !canResume;
+      resumeMowingBtn.disabled = !canResume || mowingActionInFlight;
       stopMowingBtn.style.display = '';
-      const isTerminal = status.phase === 'complete' || status.phase === 'stopped' || status.phase === 'error';
-      const terminalWithStableUi = status.phase === 'complete'
-        || ((status.phase === 'stopped' || status.phase === 'error') && Boolean(status.resumeAvailable));
-      mowingStatusNeedsPolling = isRunning || (isTerminal && !terminalWithStableUi);
     }
 
     async function pollMowingStatus() {
@@ -1465,7 +1503,8 @@
         await Promise.all([
           refreshPathRecordingStatus(),
           refreshAreaRecordingStatus(),
-          mowingStatusNeedsPolling ? pollMowingStatus() : Promise.resolve(),
+          pollMowingStatus(),
+          loadRechargeStatus(),
         ]);
         pageStatePollFailureCount = 0;
         if (!listsLoadedOnce || Date.now() - lastListRefreshAt >= LIST_REFRESH_MS) {
@@ -1481,6 +1520,9 @@
     }
 
     async function startMowing(skipInitialBoundaryTrace) {
+      if (mowingActionInFlight) {
+        return;
+      }
       const areaName = mowingPlanAreaSelect.value;
       if (!areaName) {
         alert('Please select a mowing area first.');
@@ -1494,6 +1536,10 @@
       const headingDeg = normalizeAxisHeading(mowingHeadingInput.value);
       const stripSpacingMeters = Number(stripSpacingInput.value) / 100;
 
+      mowingActionInFlight = true;
+      startMowingBtn.disabled = true;
+      startMowingNoPerimeterBtn.disabled = true;
+      resumeMowingBtn.disabled = true;
       try {
         const result = await postJson('/api/mowing/start', {
           areaName,
@@ -1507,6 +1553,12 @@
         schedulePageStatePoll(0);
       } catch (error) {
         alert('Failed to start mowing: ' + error.message);
+      } finally {
+        mowingActionInFlight = false;
+        startMowingBtn.disabled = false;
+        startMowingNoPerimeterBtn.disabled = false;
+        resumeMowingBtn.disabled = resumeMowingBtn.style.display === 'none';
+        schedulePageStatePoll(0);
       }
     }
 
@@ -1519,6 +1571,13 @@
     });
 
     resumeMowingBtn.addEventListener('click', async () => {
+      if (mowingActionInFlight) {
+        return;
+      }
+      mowingActionInFlight = true;
+      startMowingBtn.disabled = true;
+      startMowingNoPerimeterBtn.disabled = true;
+      resumeMowingBtn.disabled = true;
       try {
         const result = await postJson('/api/mowing/resume', {});
 
@@ -1532,6 +1591,12 @@
         schedulePageStatePoll(0);
       } catch (error) {
         alert('Failed to resume mowing: ' + error.message);
+      } finally {
+        mowingActionInFlight = false;
+        startMowingBtn.disabled = false;
+        startMowingNoPerimeterBtn.disabled = false;
+        resumeMowingBtn.disabled = resumeMowingBtn.style.display === 'none';
+        schedulePageStatePoll(0);
       }
     });
 
@@ -1887,7 +1952,7 @@
       storeMowingProgress(true);
     });
 
-    Promise.all([
+    Promise.allSettled([
       loadMowerMowingProgress(),
       loadStoredPaths(),
       loadStoredAreaPerimeters(),

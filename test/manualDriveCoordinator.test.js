@@ -80,7 +80,7 @@ async function stopCoordinatorSilently(coordinator) {
   }
 }
 
-test('manual drive periodically refreshes an unchanged held moving command', async () => {
+test('manual drive sends an unchanged held moving command only once', async () => {
   systemStop.clearStop('manual-drive-test');
   let now = 0;
   const hidController = new FakeHidController();
@@ -90,7 +90,6 @@ test('manual drive periodically refreshes an unchanged held moving command', asy
     sensorController,
     hidController,
     controlIntervalMs: 100,
-    commandRefreshIntervalMs: 150,
     nowMillis: () => now,
     sleep: async (delayMs) => {
       now += delayMs;
@@ -104,15 +103,15 @@ test('manual drive periodically refreshes an unchanged held moving command', asy
     hidController.emit('update', createSnapshot());
     hidController.emit('right-top');
 
-    await waitFor(() => commands.filter((command) => command.length >= 2 && typeof command[0] === 'number').length >= 2);
+    await waitFor(() => commands.filter((command) => command.length >= 2 && typeof command[0] === 'number').length >= 1);
+    await waitFor(() => now >= 500);
+
+    const wheelCommands = commands.filter((command) => command.length >= 2 && typeof command[0] === 'number');
+    assert.equal(wheelCommands.length, 1);
+    assert.deepEqual(wheelCommands[0], [0.6, 0.6, { rampUpTimeMs: MANUAL_DRIVE_RAMP_UP_TIME_MS, rampDownTimeMs: MANUAL_DRIVE_RAMP_DOWN_TIME_MS }]);
   } finally {
     await stopCoordinatorSilently(coordinator);
   }
-
-  const wheelCommands = commands.filter((command) => command.length >= 2 && typeof command[0] === 'number');
-  assert.equal(wheelCommands.length >= 2, true);
-  assert.deepEqual(wheelCommands[0], [0.6, 0.6, { rampUpTimeMs: MANUAL_DRIVE_RAMP_UP_TIME_MS, rampDownTimeMs: MANUAL_DRIVE_RAMP_DOWN_TIME_MS }]);
-  assert.deepEqual(wheelCommands[1], [0.6, 0.6, { rampUpTimeMs: MANUAL_DRIVE_RAMP_UP_TIME_MS, rampDownTimeMs: MANUAL_DRIVE_RAMP_DOWN_TIME_MS }]);
 });
 
 test('manual drive coalesces tiny held-stick output jitter', async () => {

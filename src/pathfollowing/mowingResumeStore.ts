@@ -29,7 +29,6 @@ export interface MowingResumeFollowOptions {
   readonly pivotAtWaypointDistanceMeters?: number;
   readonly minimumSpeed?: number;
   readonly maximumSpeed?: number;
-  readonly pivotIfInnerWheelBelow?: number;
   readonly routeLookaheadMeters?: number;
   readonly completionToleranceMeters?: number;
   readonly initialTargetIndex?: number;

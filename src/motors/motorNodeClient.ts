@@ -1,7 +1,12 @@
 import { decodeFrame, encodeFrame, frameLengthForPayload } from "../bus/frameCodec.js";
 import { I2cBusController, I2cTaskReplacedError } from "../i2c/i2cBusController.js";
 import { I2C_PRIORITY } from "../i2c/priorities.js";
-import { MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS, MOTOR_DECEL_PERCENT_PER_SECOND, MOTOR_ACCEL_PERCENT_PER_SECOND } from "../constants.js";
+import {
+  MOTOR_COMMAND_REFRESH_INTERVAL_MS,
+  MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS,
+  MOTOR_DECEL_PERCENT_PER_SECOND,
+  MOTOR_ACCEL_PERCENT_PER_SECOND,
+} from "../constants.js";
 import { MessageType, NodeId, PROTOCOL_VERSION } from "../protocols/commonProtocol.js";
 import { decodeMotorFeedbackSample, encodeWheelSpeedCommand, motorFeedbackSampleLength } from "./motorCodec.js";
 import type { MotorFeedbackSample, WheelSpeedCommand } from "./motorProtocol.js";
@@ -15,6 +20,8 @@ interface MotorNodeClientOptions {
   maxReadAttempts?: number;
   retryDelayMs?: number;
   sleep?: (delayMs: number) => Promise<void>;
+  setCommandRefreshTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearCommandRefreshTimer?: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
 interface WheelSpeedCommandOptions {
@@ -60,7 +67,13 @@ export class MotorNodeClient {
   private readonly maxReadAttempts: number;
   private readonly retryDelayMs: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly setCommandRefreshTimer: (
+    callback: () => void,
+    delayMs: number,
+  ) => ReturnType<typeof setTimeout>;
+  private readonly clearCommandRefreshTimer: (timer: ReturnType<typeof setTimeout>) => void;
   private lastSentCommand: WheelSpeedCommand | null = null;
+  private commandRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(controller: I2cBusController, options: MotorNodeClientOptions) {
     this.controller = controller;
@@ -71,6 +84,8 @@ export class MotorNodeClient {
     this.maxReadAttempts = options.maxReadAttempts ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 20;
     this.sleep = options.sleep ?? defaultSleep;
+    this.setCommandRefreshTimer = options.setCommandRefreshTimer ?? setTimeout;
+    this.clearCommandRefreshTimer = options.clearCommandRefreshTimer ?? clearTimeout;
   }
 
   async sendWheelSpeedCommand(
@@ -112,8 +127,12 @@ export class MotorNodeClient {
       return;
     }
 
-    await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
+    this.cancelCommandRefresh();
     this.lastSentCommand = command;
+    await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
+    if (this.lastSentCommand === command) {
+      this.scheduleCommandRefresh();
+    }
   }
 
   async stop(): Promise<void> {
@@ -129,8 +148,9 @@ export class MotorNodeClient {
       return;
     }
 
-    await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
+    this.cancelCommandRefresh();
     this.lastSentCommand = command;
+    await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
   }
 
   async refreshFeedback(): Promise<MotorFeedbackSample> {
@@ -138,23 +158,13 @@ export class MotorNodeClient {
 
     for (let attempt = 1; attempt <= this.maxReadAttempts; attempt += 1) {
       try {
-        const requestFrame = encodeFrame(
-          {
-            version: PROTOCOL_VERSION,
-            nodeId: NodeId.Motor,
-            messageType: MessageType.MotorFeedbackSample,
-            flags: 0,
-            sequence: this.sequence,
-          },
-          new Uint8Array(0),
-        );
-        this.sequence = (this.sequence + 1) & 0xffff;
-
         const responseFrame = await this.controller.queueRead({
           key: "motor.feedback",
           priority: I2C_PRIORITY.motorSpeed,
           address: this.address,
-          requestPayload: requestFrame,
+          // The motor ESP always exposes its latest pre-encoded snapshot.
+          // An empty request makes LiveI2cTransport perform a direct read.
+          requestPayload: new Uint8Array(0),
           responseLength: frameLengthForPayload(motorFeedbackSampleLength()),
         });
 
@@ -171,7 +181,10 @@ export class MotorNodeClient {
         if (decoded.header.nodeId !== NodeId.Motor || decoded.header.messageType !== MessageType.MotorFeedbackSample) {
           throw new Error("Unexpected motor response frame");
         }
-        return decodeMotorFeedbackSample(decoded.payload);
+        return {
+          ...decodeMotorFeedbackSample(decoded.payload),
+          sequence: decoded.header.sequence,
+        };
       } catch (error) {
         lastError = error;
         if (attempt < this.maxReadAttempts) {
@@ -181,6 +194,52 @@ export class MotorNodeClient {
     }
 
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private scheduleCommandRefresh(): void {
+    const command = this.lastSentCommand;
+    if (!this.isActiveDriveCommand(command)) {
+      return;
+    }
+
+    this.cancelCommandRefresh();
+    const timer = this.setCommandRefreshTimer(() => {
+      if (this.commandRefreshTimer !== timer) return;
+      this.commandRefreshTimer = null;
+      void this.refreshLatestCommand().catch(() => {});
+    }, MOTOR_COMMAND_REFRESH_INTERVAL_MS);
+    timer.unref?.();
+    this.commandRefreshTimer = timer;
+  }
+
+  private cancelCommandRefresh(): void {
+    if (this.commandRefreshTimer === null) return;
+    this.clearCommandRefreshTimer(this.commandRefreshTimer);
+    this.commandRefreshTimer = null;
+  }
+
+  private async refreshLatestCommand(): Promise<void> {
+    const current = this.lastSentCommand;
+    if (!this.isActiveDriveCommand(current)) return;
+
+    const command: WheelSpeedCommand = {
+      ...current,
+      timestampMillis: this.nowMillis(),
+    };
+    this.lastSentCommand = command;
+    try {
+      await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
+    } finally {
+      if (this.lastSentCommand === command) {
+        this.scheduleCommandRefresh();
+      }
+    }
+  }
+
+  private isActiveDriveCommand(command: WheelSpeedCommand | null): command is WheelSpeedCommand {
+    return command !== null
+      && command.enableDrive
+      && (command.leftWheelTargetPercent !== 0 || command.rightWheelTargetPercent !== 0);
   }
 
   private async writeCommand(command: WheelSpeedCommand, key: string, priority: number): Promise<void> {

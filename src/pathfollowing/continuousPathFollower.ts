@@ -11,6 +11,8 @@ import { PathFollowResult, PathPoint } from "./pathFollowerApi.js";
 import { advancePassedTargets } from "./segmentedBoundaryExecutor.js";
 import { planConservativeRouteLookahead } from "./conservativeLookahead.js";
 import type { DriveLearningModel } from "../control/driveLearningModel.js";
+import type { DriveController } from "../control/driveController.js";
+import type { TurnController } from "../control/turnController.js";
 
 const CONTINUOUS_CONTROL_INTERVAL_MS = 20;
 const CONTINUOUS_TRACE_SPEED = 1.0;
@@ -21,18 +23,17 @@ const CONTINUOUS_TRACE_SPEED_CTE_GAIN = 0.9;
 const CONTINUOUS_CORNER_LOOKAHEAD_LIMIT_DEG = 20;
 const CONTINUOUS_CTE_GAIN = 1.8;
 const CONTINUOUS_HEADING_GAIN = 0.02;
-const CONTINUOUS_MAX_TRIM = 0.55;
-const CONTINUOUS_PIVOT_ENTER_HEADING_THRESHOLD_DEG = 100;
-const CONTINUOUS_PIVOT_EXIT_HEADING_THRESHOLD_DEG = 25;
-const CONTINUOUS_PIVOT_OUTPUT = 0.45;
-const CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG = 12;
-const CONTINUOUS_PIVOT_INNER_WHEEL_HYSTERESIS = 0.1;
 const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND = 0.8;
 const CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS = 0.4;
+const CONTINUOUS_ORDERED_PROJECTION_FORWARD_WINDOW_METERS = 0.5;
+const CONTINUOUS_ROUTE_DEVIATION_CONFIRMATION_SAMPLES = 10;
+const CONTINUOUS_ROUTE_DEVIATION_IMMEDIATE_ABORT_MULTIPLIER = 2;
 
 export interface ContinuousPathFollowerOptions {
   readonly sensorController: SensorController;
   readonly poseFusion: PoseFusion;
+  readonly driveController: DriveController;
+  readonly turnController: TurnController;
   readonly logger: LoggerScope;
   readonly baseSpeed?: number;
   readonly learningModel?: DriveLearningModel;
@@ -53,7 +54,6 @@ export interface ContinuousPathExecutionOptions {
   readonly pivotAtWaypointDistanceMeters?: number;
   readonly minimumSpeed?: number;
   readonly maximumSpeed?: number;
-  readonly pivotIfInnerWheelBelow?: number;
   /** Pre-analysed complete-route lookahead, persisted across mowing resume. */
   readonly routeLookaheadMeters?: number;
   /**
@@ -73,21 +73,11 @@ export interface ContinuousPathFollowResult extends PathFollowResult {
   readonly completedWaypoints: number;
 }
 
-interface SegmentCommitment {
-  readonly kind: "corner" | "recovery";
-  readonly segmentStartIndex: number;
-  readonly segmentStart: PathPoint;
-  readonly segmentEnd: PathPoint;
-  captureTarget: PathPoint;
-  startingProgressMeters: number;
-  requiredProgressMeters: number;
-  readonly turnSign: number;
-  phase: "align" | "capture";
-}
-
 export class ContinuousPathFollower {
   private readonly sensorController: SensorController;
   private readonly poseFusion: PoseFusion;
+  private readonly driveController: DriveController;
+  private readonly turnController: TurnController;
   private readonly logger: LoggerScope;
   private readonly baseSpeed: number;
   private readonly learningModel: DriveLearningModel | null;
@@ -95,6 +85,8 @@ export class ContinuousPathFollower {
   constructor(options: ContinuousPathFollowerOptions) {
     this.sensorController = options.sensorController;
     this.poseFusion = options.poseFusion;
+    this.driveController = options.driveController;
+    this.turnController = options.turnController;
     this.logger = options.logger;
     this.baseSpeed = Math.max(0.2, Math.min(DRIVE_FULL_SPEED_COMMAND_DEFAULT, options.baseSpeed ?? CONTINUOUS_TRACE_SPEED));
     this.learningModel = options.learningModel ?? null;
@@ -120,10 +112,9 @@ export class ContinuousPathFollower {
 
     let currentIndex = clampIndex(options.initialTargetIndex ?? 0, pathPoints.length);
     let preserveCurrentTargetAtPose = currentIndex === 0 && (options.preserveFirstTargetAtPose ?? false);
-    let pivoting = false;
     let appliedLeftCommand = 0;
     let appliedRightCommand = 0;
-    let segmentCommitment: SegmentCommitment | null = null;
+    let consecutiveRouteDeviationSamples = 0;
     const analysedLookaheadPlan = planConservativeRouteLookahead(pathPoints, {
       minimumLookaheadMeters: parameters.continuousPathMinimumLookaheadMeters,
       maximumLookaheadMeters: parameters.continuousPathMaximumLookaheadMeters,
@@ -141,9 +132,64 @@ export class ContinuousPathFollower {
       : analysedLookaheadPlan;
     this.logger.info("continuous_path.lookahead_planned", lookaheadPlan);
 
+    const cumulativeDistances = buildCumulativeDistances(pathPoints);
+    const entryPose = this.poseFusion.getCurrentPose();
+    const alreadyWithinCompletionTolerance = Number.isFinite(options.completionToleranceMeters)
+      && currentIndex >= pathPoints.length - 1
+      && distanceFromPoseToPoint(entryPose, pathPoints[pathPoints.length - 1])
+        <= Math.max(0, options.completionToleranceMeters ?? 0);
+    if (!alreadyWithinCompletionTolerance) {
+      const entryProjection = projectPoseOntoPath(
+        pathPoints,
+        entryPose,
+        currentIndex,
+        options.strictOrderedProgress ?? false,
+      );
+      const entryGuidance = buildContinuousGuidance(
+        pathPoints,
+        cumulativeDistances,
+        entryProjection,
+        lookaheadPlan.lookaheadMeters,
+      );
+      const entryHeading = angleTo(entryPose.position, pointToPosition(entryGuidance.lookaheadTarget));
+      const entryHeadingError = headingDifference(entryPose.heading, entryHeading);
+      const entryHeadingErrorDeg = unwrapRelativeAngle(entryHeadingError);
+      const maximumEntryAlignmentDistanceMeters = Math.max(
+        parameters.mowingStandoffMeters,
+        parameters.continuousPathMinimumLookaheadMeters,
+      );
+      if (
+        entryProjection.distanceToPathMeters <= maximumEntryAlignmentDistanceMeters
+        && Math.abs(entryHeadingErrorDeg) > parameters.turnAlignmentThresholdDeg
+      ) {
+        this.logger.info("continuous_path.entry_alignment_started", {
+          headingErrorDeg: entryHeadingErrorDeg,
+          lookaheadX: entryGuidance.lookaheadTarget.xMeters,
+          lookaheadY: entryGuidance.lookaheadTarget.yMeters,
+        });
+        const turnResult = await this.turnController.executeTurn({
+          targetAngle: entryHeadingError,
+          direction: entryHeadingErrorDeg >= 0 ? "ccw" : "cw",
+          learningEnabled: false,
+        });
+        if (turnResult.status !== "success") {
+          return {
+            algorithm: "continuous_path_follow",
+            completed: false,
+            reason: turnResult.status === "stopped" ? "user_stopped" : "error",
+            error: turnResult.errorMessage ?? "continuous_path_entry_alignment_failed",
+            pointCount: pathPoints.length,
+            completedWaypoints: currentIndex,
+          };
+        }
+        this.logger.info("continuous_path.entry_alignment_completed", {
+          headingErrorDeg: entryHeadingErrorDeg,
+        });
+      }
+    }
+
     this.sensorController.beginMotionSession();
     try {
-      const cumulativeDistances = buildCumulativeDistances(pathPoints);
       while (currentIndex < pathPoints.length) {
         if (systemStop.isStopped()) {
           await this.sensorController.requestNeutralMotorOutputs();
@@ -172,87 +218,6 @@ export class ContinuousPathFollower {
           });
           break;
         }
-        if (segmentCommitment !== null) {
-          const commitment = segmentCommitment;
-          const segmentHeading = angleTo(
-            pointToPosition(commitment.segmentStart),
-            pointToPosition(commitment.segmentEnd),
-          );
-          const segmentHeadingErrorDeg = unwrapRelativeAngle(headingDifference(pose.heading, segmentHeading));
-          let committedCommands: { left: number; right: number; pivoting: boolean };
-
-          if (
-            commitment.phase === "align"
-            && Math.abs(segmentHeadingErrorDeg) <= CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG
-          ) {
-            anchorCommitmentCaptureAtPose(commitment, pose);
-            commitment.phase = "capture";
-            pivoting = false;
-            this.logger.info(`continuous_path.${commitment.kind}_capture_started`, {
-              segmentStartIndex: commitment.segmentStartIndex,
-              headingErrorDeg: segmentHeadingErrorDeg,
-            });
-          }
-
-          if (commitment.phase === "align") {
-            committedCommands = {
-              left: -commitment.turnSign * CONTINUOUS_PIVOT_OUTPUT,
-              right: commitment.turnSign * CONTINUOUS_PIVOT_OUTPUT,
-              pivoting: true,
-            };
-          } else {
-            const segmentProgressMeters = progressAlongSegmentMeters(
-              pose,
-              commitment.segmentStart,
-              commitment.segmentEnd,
-            );
-            const capturedProgressMeters = segmentProgressMeters - commitment.startingProgressMeters;
-            if (capturedProgressMeters >= commitment.requiredProgressMeters) {
-              this.logger.info(`continuous_path.${commitment.kind}_capture_completed`, {
-                segmentStartIndex: commitment.segmentStartIndex,
-                capturedProgressMeters,
-              });
-              currentIndex = Math.max(currentIndex, commitment.segmentStartIndex + 1);
-              segmentCommitment = null;
-              pivoting = false;
-              await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
-              continue;
-            }
-            committedCommands = computeContinuousPathWheelCommands(
-              pose,
-              commitment.segmentStart,
-              commitment.captureTarget,
-              commitment.segmentEnd,
-              Math.max(0.2, Math.min(this.baseSpeed, options.maximumSpeed ?? this.baseSpeed)),
-              false,
-              {
-                minimumSpeed: options.minimumSpeed,
-                cteGain: this.learningModel?.getCteGainForDirection(1),
-                headingGain: this.learningModel?.getLongHeadingGainForDirection(1),
-              },
-            );
-            committedCommands = { ...committedCommands, pivoting: false };
-          }
-
-          const cappedCommands = capContinuousWheelCommands(committedCommands, options.maximumSpeed);
-          appliedLeftCommand = limitContinuousWheelCommandChange(
-            appliedLeftCommand,
-            cappedCommands.left,
-            CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
-            CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
-          );
-          appliedRightCommand = limitContinuousWheelCommandChange(
-            appliedRightCommand,
-            cappedCommands.right,
-            CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND,
-            CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
-          );
-          pivoting = cappedCommands.pivoting;
-          await this.sensorController.setMotorWheelOutputs(appliedLeftCommand, appliedRightCommand);
-          await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
-          continue;
-        }
-
         currentIndex = advancePassedTargets(
           pathPoints,
           pose,
@@ -272,6 +237,52 @@ export class ContinuousPathFollower {
           currentIndex,
           options.strictOrderedProgress ?? false,
         );
+        const maximumRouteJoinDistanceMeters = Math.max(
+          parameters.mowingStandoffMeters,
+          parameters.continuousPathMinimumLookaheadMeters,
+        );
+        if (projection.distanceToPathMeters > maximumRouteJoinDistanceMeters) {
+          consecutiveRouteDeviationSamples += 1;
+          if (consecutiveRouteDeviationSamples === 1) {
+            this.logger.warn("continuous_path.route_deviation_detected", {
+              currentIndex,
+              projectionSegmentStartIndex: projection.segmentStartIndex,
+              distanceToPathMeters: projection.distanceToPathMeters,
+              maximumRouteJoinDistanceMeters,
+            });
+          }
+        } else {
+          if (consecutiveRouteDeviationSamples > 0) {
+            this.logger.info("continuous_path.route_deviation_cleared", {
+              sampleCount: consecutiveRouteDeviationSamples,
+              distanceToPathMeters: projection.distanceToPathMeters,
+            });
+          }
+          consecutiveRouteDeviationSamples = 0;
+        }
+        const immediateDeviationAbortDistanceMeters = maximumRouteJoinDistanceMeters
+          * CONTINUOUS_ROUTE_DEVIATION_IMMEDIATE_ABORT_MULTIPLIER;
+        if (
+          projection.distanceToPathMeters > immediateDeviationAbortDistanceMeters
+          || consecutiveRouteDeviationSamples >= CONTINUOUS_ROUTE_DEVIATION_CONFIRMATION_SAMPLES
+        ) {
+          this.logger.warn("continuous_path.pose_too_far_from_route", {
+            currentIndex,
+            projectionSegmentStartIndex: projection.segmentStartIndex,
+            distanceToPathMeters: projection.distanceToPathMeters,
+            maximumRouteJoinDistanceMeters,
+            consecutiveRouteDeviationSamples,
+            immediateDeviationAbortDistanceMeters,
+          });
+          return {
+            algorithm: "continuous_path_follow",
+            completed: false,
+            reason: "error",
+            error: "continuous_path_pose_too_far_from_route",
+            pointCount: pathPoints.length,
+            completedWaypoints: currentIndex,
+          };
+        }
         currentIndex = Math.max(currentIndex, projection.segmentStartIndex + 1);
         const cornerVertexIndex = projection.segmentStartIndex + 1;
         if (
@@ -286,20 +297,48 @@ export class ContinuousPathFollower {
           appliedLeftCommand = 0;
           appliedRightCommand = 0;
           await this.sleep(MOTOR_RAMP_DOWN_TIME_MS * 2);
-          segmentCommitment = buildCornerCommitment(
-            pathPoints,
-            cornerVertexIndex,
-            this.poseFusion.getCurrentPose(),
+          const cornerCaptureTarget = buildCommittedCornerCaptureTarget(
+            pathPoints[cornerVertexIndex],
+            pathPoints[cornerVertexIndex + 1],
           );
-          pivoting = true;
           this.logger.info("continuous_path.corner_align_started", {
             vertexIndex: cornerVertexIndex,
             cornerX: pathPoints[cornerVertexIndex].xMeters,
             cornerY: pathPoints[cornerVertexIndex].yMeters,
-            captureTargetX: segmentCommitment.captureTarget.xMeters,
-            captureTargetY: segmentCommitment.captureTarget.yMeters,
+            captureTargetX: cornerCaptureTarget.xMeters,
+            captureTargetY: cornerCaptureTarget.yMeters,
           });
-          await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
+          const cornerResult = await this.driveController.executeDrive({
+            targetPosition: createPosition(cornerCaptureTarget.xMeters, cornerCaptureTarget.yMeters),
+            learningEnabled: false,
+            maxCrossTrackErrorMeters: parameters.segmentedDriveMaxCteMeters,
+            alwaysTurnToFaceTarget: true,
+            minimumDriveDistanceMeters: Math.max(
+              parameters.mowingStandoffMeters,
+              parameters.segmentedDriveMinSegmentLengthMeters,
+            ),
+            maximumWheelOutputPercent: options.maximumSpeed,
+          });
+          if (cornerResult.status !== "success") {
+            this.logger.warn("continuous_path.corner_drive_failed", {
+              vertexIndex: cornerVertexIndex,
+              status: cornerResult.status,
+              error: cornerResult.errorMessage,
+            });
+            return {
+              algorithm: "continuous_path_follow",
+              completed: false,
+              reason: cornerResult.status === "stopped" ? "user_stopped" : "error",
+              error: cornerResult.errorMessage ?? "continuous_path_corner_drive_failed",
+              pointCount: pathPoints.length,
+              completedWaypoints: currentIndex,
+            };
+          }
+          currentIndex = cornerVertexIndex + 1;
+          this.logger.info("continuous_path.corner_drive_completed", {
+            vertexIndex: cornerVertexIndex,
+            nextTargetIndex: currentIndex,
+          });
           continue;
         }
 
@@ -319,12 +358,8 @@ export class ContinuousPathFollower {
           guidance.segmentEnd,
           guidance.lookaheadTarget,
           executionBaseSpeed,
-          pivoting,
           {
-            pivotAtWaypointTurnDeg: options.pivotAtWaypointTurnDeg,
-            pivotAtWaypointDistanceMeters: options.pivotAtWaypointDistanceMeters,
             minimumSpeed: options.minimumSpeed,
-            pivotIfInnerWheelBelow: options.pivotIfInnerWheelBelow,
             cteGain: this.learningModel?.getCteGainForDirection(1),
             headingGain: this.learningModel?.getLongHeadingGainForDirection(1),
           },
@@ -333,31 +368,6 @@ export class ContinuousPathFollower {
           computedCommands,
           options.maximumSpeed,
         );
-        if (requestedCommands.pivoting) {
-          await this.sensorController.requestNeutralMotorOutputs();
-          appliedLeftCommand = 0;
-          appliedRightCommand = 0;
-          await this.sleep(MOTOR_RAMP_DOWN_TIME_MS * 2);
-          segmentCommitment = buildRecoveryCommitment(
-            guidance.segmentStart,
-            guidance.segmentEnd,
-            projection.segmentStartIndex,
-            this.poseFusion.getCurrentPose(),
-          );
-          pivoting = true;
-          this.logger.info("continuous_path.recovery_align_started", {
-            segmentStartIndex: projection.segmentStartIndex,
-            segmentStartX: guidance.segmentStart.xMeters,
-            segmentStartY: guidance.segmentStart.yMeters,
-            segmentEndX: guidance.segmentEnd.xMeters,
-            segmentEndY: guidance.segmentEnd.yMeters,
-            captureTargetX: segmentCommitment.captureTarget.xMeters,
-            captureTargetY: segmentCommitment.captureTarget.yMeters,
-          });
-          await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
-          continue;
-        }
-        pivoting = requestedCommands.pivoting;
         appliedLeftCommand = limitContinuousWheelCommandChange(
           appliedLeftCommand,
           requestedCommands.left,
@@ -383,13 +393,12 @@ export class ContinuousPathFollower {
           requestedRight: requestedCommands.right,
           left: appliedLeftCommand,
           right: appliedRightCommand,
-          pivoting,
+          pivoting: false,
         });
         await this.sensorController.setMotorWheelOutputs(appliedLeftCommand, appliedRightCommand);
         await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
       }
 
-      await this.sensorController.requestNeutralMotorOutputs();
       return {
         algorithm: "continuous_path_follow",
         completed: true,
@@ -398,7 +407,6 @@ export class ContinuousPathFollower {
         completedWaypoints: pathPoints.length,
       };
     } catch (error) {
-      await this.sensorController.requestNeutralMotorOutputs().catch(() => {});
       return {
         algorithm: "continuous_path_follow",
         completed: false,
@@ -408,6 +416,10 @@ export class ContinuousPathFollower {
         completedWaypoints: currentIndex,
       };
     } finally {
+      // Motor outputs are stateful in the sensor loop. Every return path,
+      // including deliberate guard failures, must explicitly clear the last
+      // command before the motion session is released.
+      await this.sensorController.requestNeutralMotorOutputs().catch(() => {});
       this.sensorController.endMotionSession();
     }
   }
@@ -451,12 +463,8 @@ export function computeContinuousPathWheelCommands(
   currentTarget: PathPoint,
   lookaheadTarget: PathPoint,
   baseSpeed: number,
-  pivoting = false,
   options: {
-    readonly pivotAtWaypointTurnDeg?: number;
-    readonly pivotAtWaypointDistanceMeters?: number;
     readonly minimumSpeed?: number;
-    readonly pivotIfInnerWheelBelow?: number;
     readonly cteGain?: number;
     readonly headingGain?: number;
   } = {},
@@ -465,17 +473,15 @@ export function computeContinuousPathWheelCommands(
   const localEnd = pointToPosition(currentTarget);
   const lookaheadHeading = angleTo(pose.position, pointToPosition(lookaheadTarget));
   const headingErrorDeg = unwrapRelativeAngle(headingDifference(pose.heading, lookaheadHeading));
-  const outgoingHeading = angleTo(pointToPosition(currentTarget), pointToPosition(lookaheadTarget));
-  const outgoingHeadingErrorDeg = unwrapRelativeAngle(headingDifference(pose.heading, outgoingHeading));
+  const hasOutgoingLookahead = distance(currentTarget, lookaheadTarget) > 1e-9;
+  const incomingHeading = angleTo(pointToPosition(previousPoint), pointToPosition(currentTarget));
   const cteMeters = unwrapMeters(crossTrackError(pose.position, localStart, localEnd));
-  const distanceToCurrentTargetMeters = Math.hypot(
-    unwrapMeters(pose.position.xMeters) - currentTarget.xMeters,
-    unwrapMeters(pose.position.yMeters) - currentTarget.yMeters,
-  );
-  const localPathHeading = unwrapRelativeAngle(headingDifference(
-    angleTo(pointToPosition(previousPoint), pointToPosition(currentTarget)),
-    angleTo(pointToPosition(currentTarget), pointToPosition(lookaheadTarget)),
-  ));
+  const localPathHeading = hasOutgoingLookahead
+    ? unwrapRelativeAngle(headingDifference(
+      incomingHeading,
+      angleTo(pointToPosition(currentTarget), pointToPosition(lookaheadTarget)),
+    ))
+    : 0;
   const adaptiveBaseSpeed = computeContinuousPathBaseSpeed(
     baseSpeed,
     localPathHeading,
@@ -483,46 +489,16 @@ export function computeContinuousPathWheelCommands(
     cteMeters,
     options.minimumSpeed,
   );
-  const shouldPivotAtCorner = Number.isFinite(options.pivotAtWaypointTurnDeg)
-    && Number.isFinite(options.pivotAtWaypointDistanceMeters)
-    && Math.abs(localPathHeading) >= Math.abs(options.pivotAtWaypointTurnDeg ?? 0)
-    && distanceToCurrentTargetMeters <= Math.max(0, options.pivotAtWaypointDistanceMeters ?? 0)
-    && Math.abs(outgoingHeadingErrorDeg) > CONTINUOUS_CORNER_PIVOT_ALIGN_TOLERANCE_DEG;
-  const predictedInnerWheelCommand = adaptiveBaseSpeed - Math.abs(clamp(
-    (cteMeters * (options.cteGain ?? CONTINUOUS_CTE_GAIN))
-      + (headingErrorDeg * (options.headingGain ?? CONTINUOUS_HEADING_GAIN)),
-    -CONTINUOUS_MAX_TRIM,
-    CONTINUOUS_MAX_TRIM,
-  ));
-  const tightArcEnterThreshold = Math.max(0, options.pivotIfInnerWheelBelow ?? 0);
-  const tightArcExitThreshold = Math.min(1, tightArcEnterThreshold + CONTINUOUS_PIVOT_INNER_WHEEL_HYSTERESIS);
-  const tightArcThreshold = pivoting ? tightArcExitThreshold : tightArcEnterThreshold;
-  const shouldPivotForTightArc = Number.isFinite(options.pivotIfInnerWheelBelow)
-    && predictedInnerWheelCommand < tightArcThreshold;
-
-  const pivotThresholdDeg = pivoting
-    ? CONTINUOUS_PIVOT_EXIT_HEADING_THRESHOLD_DEG
-    : CONTINUOUS_PIVOT_ENTER_HEADING_THRESHOLD_DEG;
-  if (Math.abs(headingErrorDeg) >= pivotThresholdDeg || shouldPivotAtCorner || shouldPivotForTightArc) {
-    const pivotHeadingErrorDeg = shouldPivotAtCorner ? outgoingHeadingErrorDeg : headingErrorDeg;
-    const turnSign = pivotHeadingErrorDeg >= 0 ? 1 : -1;
-    return {
-      left: -turnSign * CONTINUOUS_PIVOT_OUTPUT,
-      right: turnSign * CONTINUOUS_PIVOT_OUTPUT,
-      pivoting: true,
-    };
-  }
-
   const trim = clamp(
     (cteMeters * (options.cteGain ?? CONTINUOUS_CTE_GAIN))
       + (headingErrorDeg * (options.headingGain ?? CONTINUOUS_HEADING_GAIN)),
-    -CONTINUOUS_MAX_TRIM,
-    CONTINUOUS_MAX_TRIM,
+    -adaptiveBaseSpeed,
+    adaptiveBaseSpeed,
   );
 
   return preserveForwardPeakOutput({
-    left: clamp(adaptiveBaseSpeed - trim, -1, 1),
-    right: clamp(adaptiveBaseSpeed + trim, -1, 1),
+    left: clamp(adaptiveBaseSpeed - trim, 0, 1),
+    right: clamp(adaptiveBaseSpeed + trim, 0, 1),
     pivoting: false,
   }, baseSpeed);
 }
@@ -609,6 +585,7 @@ function buildCumulativeDistances(points: PathPoint[]): number[] {
 interface ContinuousPathProjection {
   readonly segmentStartIndex: number;
   readonly distanceAlongPathMeters: number;
+  readonly distanceToPathMeters: number;
 }
 
 interface ContinuousGuidance {
@@ -617,7 +594,7 @@ interface ContinuousGuidance {
   readonly lookaheadTarget: PathPoint;
 }
 
-function projectPoseOntoPath(
+export function projectPoseOntoPath(
   points: PathPoint[],
   pose: Pose,
   startIndex: number,
@@ -628,9 +605,17 @@ function projectPoseOntoPath(
   const minSegmentStartIndex = strictOrderedProgress
     ? Math.max(0, clampedStartIndex - 1)
     : clampedStartIndex;
-  const maxSegmentStartIndex = strictOrderedProgress
-    ? Math.min(points.length - 2, clampedStartIndex + 1)
-    : points.length - 2;
+  let maxSegmentStartIndex = points.length - 2;
+  if (strictOrderedProgress) {
+    maxSegmentStartIndex = Math.min(points.length - 2, clampedStartIndex + 1);
+    while (
+      maxSegmentStartIndex < points.length - 2
+      && cumulativeDistances[maxSegmentStartIndex + 1] - cumulativeDistances[clampedStartIndex]
+        <= CONTINUOUS_ORDERED_PROJECTION_FORWARD_WINDOW_METERS
+    ) {
+      maxSegmentStartIndex += 1;
+    }
+  }
   let bestSegmentStartIndex = clampedStartIndex;
   let bestDistanceSq = Number.POSITIVE_INFINITY;
   let bestDistanceAlongPathMeters = cumulativeDistances[bestSegmentStartIndex];
@@ -660,6 +645,7 @@ function projectPoseOntoPath(
   return {
     segmentStartIndex: bestSegmentStartIndex,
     distanceAlongPathMeters: bestDistanceAlongPathMeters,
+    distanceToPathMeters: Math.sqrt(bestDistanceSq),
   };
 }
 
@@ -736,79 +722,6 @@ function isCornerAtLeast(points: PathPoint[], vertexIndex: number, thresholdDeg:
   return Math.abs(unwrapRelativeAngle(headingDifference(incomingHeading, outgoingHeading))) >= thresholdDeg;
 }
 
-function buildCornerCommitment(points: PathPoint[], vertexIndex: number, pose: Pose): SegmentCommitment {
-  const vertex = points[vertexIndex];
-  const outgoing = points[vertexIndex + 1];
-  const segmentLength = distance(vertex, outgoing);
-  const requiredProgressMeters = Math.min(CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS, segmentLength);
-  const outgoingHeading = angleTo(pointToPosition(vertex), pointToPosition(outgoing));
-  const headingErrorDeg = unwrapRelativeAngle(headingDifference(pose.heading, outgoingHeading));
-  return {
-    kind: "corner",
-    segmentStartIndex: vertexIndex,
-    segmentStart: vertex,
-    segmentEnd: outgoing,
-    startingProgressMeters: 0,
-    requiredProgressMeters,
-    turnSign: headingErrorDeg >= 0 ? 1 : -1,
-    phase: "align",
-    captureTarget: buildCommittedCornerCaptureTarget(vertex, outgoing),
-  };
-}
-
-function buildRecoveryCommitment(
-  segmentStart: PathPoint,
-  segmentEnd: PathPoint,
-  segmentStartIndex: number,
-  pose: Pose,
-): SegmentCommitment {
-  const segmentLength = distance(segmentStart, segmentEnd);
-  const startingProgressMeters = clamp(
-    progressAlongSegmentMeters(pose, segmentStart, segmentEnd),
-    0,
-    segmentLength,
-  );
-  const requiredProgressMeters = Math.min(
-    CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS,
-    Math.max(0, segmentLength - startingProgressMeters),
-  );
-  const segmentHeading = angleTo(pointToPosition(segmentStart), pointToPosition(segmentEnd));
-  const headingErrorDeg = unwrapRelativeAngle(headingDifference(pose.heading, segmentHeading));
-  return {
-    kind: "recovery",
-    segmentStartIndex,
-    segmentStart,
-    segmentEnd,
-    captureTarget: buildCommittedCornerCaptureTarget(
-      segmentStart,
-      segmentEnd,
-      startingProgressMeters + requiredProgressMeters,
-    ),
-    startingProgressMeters,
-    requiredProgressMeters,
-    turnSign: headingErrorDeg >= 0 ? 1 : -1,
-    phase: "align",
-  };
-}
-
-function anchorCommitmentCaptureAtPose(commitment: SegmentCommitment, pose: Pose): void {
-  const segmentLength = distance(commitment.segmentStart, commitment.segmentEnd);
-  commitment.startingProgressMeters = clamp(
-    progressAlongSegmentMeters(pose, commitment.segmentStart, commitment.segmentEnd),
-    0,
-    segmentLength,
-  );
-  commitment.requiredProgressMeters = Math.min(
-    CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS,
-    Math.max(0, segmentLength - commitment.startingProgressMeters),
-  );
-  commitment.captureTarget = buildCommittedCornerCaptureTarget(
-    commitment.segmentStart,
-    commitment.segmentEnd,
-    commitment.startingProgressMeters + commitment.requiredProgressMeters,
-  );
-}
-
 export function buildCommittedCornerCaptureTarget(
   vertex: PathPoint,
   outgoing: PathPoint,
@@ -829,19 +742,6 @@ function distanceFromPoseToPoint(pose: Pose, point: PathPoint): number {
     unwrapMeters(pose.position.xMeters) - point.xMeters,
     unwrapMeters(pose.position.yMeters) - point.yMeters,
   );
-}
-
-function progressAlongSegmentMeters(pose: Pose, start: PathPoint, end: PathPoint): number {
-  const dx = end.xMeters - start.xMeters;
-  const dy = end.yMeters - start.yMeters;
-  const length = Math.hypot(dx, dy);
-  if (length <= 1e-9) {
-    return 0;
-  }
-  return (
-    ((unwrapMeters(pose.position.xMeters) - start.xMeters) * dx)
-    + ((unwrapMeters(pose.position.yMeters) - start.yMeters) * dy)
-  ) / length;
 }
 
 function interpolatePathPointAtDistance(

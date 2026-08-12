@@ -1,8 +1,8 @@
 {
   "version": 1,
   "encoderMetersPerTick": 0.00022942063962438252,
-  "leftEncoderMetersPerTick": 0.0002303303920862758,
-  "rightEncoderMetersPerTick": 0.00022851088716248924,
+  "leftEncoderMetersPerTick": 0.000457,
+  "rightEncoderMetersPerTick": 0.000457,
   "wheelbaseMeters": 0.55,
   "updatedAt": "2026-08-06T00:00:00.000Z"
 }

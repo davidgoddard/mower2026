@@ -258,7 +258,7 @@ test("MowingExecutor traces the full boundary back to the original encounter poi
   assert.equal(followCalls[0].options.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(followCalls[0].options.minimumSpeed, 1);
   assert.equal(followCalls[0].options.maximumSpeed, 1);
-  assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.4);
+  assert.equal("pivotIfInnerWheelBelow" in followCalls[0].options, false);
   assert.equal(followCalls[0].options.completionToleranceMeters, 0.35);
   assert.equal(turnCalls.length >= 1, true);
   const traversedPoints = followCalls.flatMap((call) => call.pathPoints.map((point) => [point.xMeters, point.yMeters]));
@@ -526,7 +526,58 @@ test("MowingExecutor follows longer multi-point connectors with the continuous f
   assert.equal(followCalls.at(-1).options.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(followCalls.at(-1).options.minimumSpeed, 1);
   assert.equal(followCalls.at(-1).options.maximumSpeed, 1);
-  assert.equal(followCalls.at(-1).options.pivotIfInnerWheelBelow, 0.2);
+  assert.equal("pivotIfInnerWheelBelow" in followCalls.at(-1).options, false);
+});
+
+test("MowingExecutor uses the turn-and-line drive controller for a long two-point connector", async () => {
+  const driveRequests = [];
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 26,
+      stripSpacingMeters: 0.38,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 20, yMeters: 0, capturedAt: 2 },
+      { xMeters: 20, yMeters: 20, capturedAt: 3 },
+      { xMeters: 0, yMeters: 20, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive(request) {
+        driveRequests.push(request);
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    poseFusion: {
+      getCurrentPose() {
+        return createPose(15.734661679079084, 17.384028260956246, createInternalHeading(24.04), "gnss");
+      },
+    },
+    continuousPathFollower: {
+      async executePath() {
+        assert.fail("a two-point connector must not enter continuous following");
+      },
+    },
+    logger: createLogger(),
+  });
+
+  const result = await executor["followConnector"]([
+    { xMeters: 15.744475424812707, yMeters: 17.403234714308642, capturedAt: 1 },
+    { xMeters: 12.48110393941283, yMeters: 14.966004617521396, capturedAt: 2 },
+  ], 3, { stage: "strip_approach", stripIndex: 4 });
+
+  assert.equal(result.completed, true);
+  assert.equal(driveRequests.length, 1);
+  assert.equal(driveRequests[0].targetPosition.xMeters, 12.48110393941283);
+  assert.equal(driveRequests[0].targetPosition.yMeters, 14.966004617521396);
+  assert.equal(driveRequests[0].minimumDriveDistanceMeters, 0.15);
 });
 
 test("MowingExecutor simplifies a safe short multi-point connector to a direct transfer", async () => {
@@ -966,6 +1017,7 @@ test("MowingExecutor traces the boundary referenced by the strip, not whichever 
 
   const executor = new MowingExecutor({
     plan,
+    skipInitialBoundaryTrace: true,
     initialEntryPlan: {
       entryPoint: { xMeters: 3, yMeters: 0, capturedAt: 13 },
       approachTarget: { xMeters: 3, yMeters: 0.15 },
@@ -985,7 +1037,7 @@ test("MowingExecutor traces the boundary referenced by the strip, not whichever 
   const status = await executor.execute();
 
   assert.equal(status.phase, "complete");
-  assert.equal(followCalls.length >= 2, true);
+  assert.equal(followCalls.length, 1);
   const lastTrace = followCalls.at(-1);
   assert.equal(lastTrace.every((point) => point.xMeters >= 2.75 && point.xMeters <= 3.25), true);
   assert.equal(lastTrace.every((point) => point.yMeters >= 1.15 && point.yMeters <= 1.85), true);
@@ -1000,13 +1052,20 @@ test("MowingExecutor adjusts an outside initial entry target to a point inside t
     { xMeters: 0, yMeters: 0, capturedAt: 5 },
   ];
   const driveTargets = [];
+  let pose = createPose(1, 2.2, createInternalHeading(270), "gnss");
   const driveController = {
     async executeDrive(options) {
       driveTargets.push([options.targetPosition.xMeters, options.targetPosition.yMeters]);
+      pose = createPose(
+        options.targetPosition.xMeters,
+        options.targetPosition.yMeters,
+        pose.heading,
+        "gnss",
+      );
       return { status: "success", maxCteMeters: 0 };
     },
     getCurrentPose() {
-      return createPose(1, 2.2, createInternalHeading(270), "gnss");
+      return pose;
     },
   };
   const turnController = {
@@ -1016,7 +1075,7 @@ test("MowingExecutor adjusts an outside initial entry target to a point inside t
   };
   const poseFusion = {
     getCurrentPose() {
-      return createPose(1, 2.2, createInternalHeading(270), "gnss");
+      return pose;
     },
   };
   const continuousPathFollower = {
@@ -1222,9 +1281,9 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
   const savedStates = [];
   const connector = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
-    { xMeters: 0.2, yMeters: 0, capturedAt: 2 },
-    { xMeters: 0.4, yMeters: 0, capturedAt: 3 },
-    { xMeters: 0.6, yMeters: 0, capturedAt: 4 },
+    { xMeters: 0.4, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.8, yMeters: 0, capturedAt: 3 },
+    { xMeters: 1.2, yMeters: 0, capturedAt: 4 },
   ];
   const executor = new MowingExecutor({
     areaName: "Back lawn",
@@ -1236,7 +1295,13 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
       strips: [],
       connectors: [],
     },
-    areaPoints: [],
+    areaPoints: [
+      { xMeters: -1, yMeters: -1, capturedAt: 5 },
+      { xMeters: 2, yMeters: -1, capturedAt: 6 },
+      { xMeters: 2, yMeters: 1, capturedAt: 7 },
+      { xMeters: -1, yMeters: 1, capturedAt: 8 },
+      { xMeters: -1, yMeters: -1, capturedAt: 9 },
+    ],
     obstaclePointsArray: [],
     driveController: {
       async executeDrive() { return { status: "success", maxCteMeters: 0 }; },
@@ -1245,7 +1310,7 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
       async executeTurn() { return { status: "success" }; },
     },
     poseFusion: {
-      getCurrentPose() { return createPose(0.3, 0, createInternalHeading(0), "gnss"); },
+      getCurrentPose() { return createPose(0.1, 0, createInternalHeading(0), "gnss"); },
     },
     continuousPathFollower: {
       async executePath() {
@@ -1270,13 +1335,13 @@ test("MowingExecutor persists the completed waypoint index when a continuous fol
   assert.equal(result.completed, false);
   const saved = savedStates.at(-1);
   assert.equal(saved.activeOperation.kind, "follow_path");
-  assert.equal(saved.activeOperation.pathPoints.length, 2);
+  assert.equal(saved.activeOperation.pathPoints.length, 4);
   assert.equal(saved.activeOperation.followOptions.initialTargetIndex, 1);
   assert.equal(saved.activeOperation.followOptions.pivotAtWaypointTurnDeg, 20);
   assert.equal(saved.activeOperation.followOptions.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(saved.activeOperation.followOptions.minimumSpeed, 1);
   assert.equal(saved.activeOperation.followOptions.maximumSpeed, 1);
-  assert.equal(saved.activeOperation.followOptions.pivotIfInnerWheelBelow, 0.2);
+  assert.equal("pivotIfInnerWheelBelow" in saved.activeOperation.followOptions, false);
 });
 
 test("MowingExecutor passes saved continuous-follow progress back to the follower on resume", async () => {
@@ -1366,7 +1431,155 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
   assert.equal(followCalls[0].options.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(followCalls[0].options.minimumSpeed, 1);
   assert.equal(followCalls[0].options.maximumSpeed, 1);
-  assert.equal(followCalls[0].options.pivotIfInnerWheelBelow, 0.2);
+  assert.equal("pivotIfInnerWheelBelow" in followCalls[0].options, false);
+});
+
+test("MowingExecutor resumes a saved two-point connector through DriveController", async () => {
+  const driveRequests = [];
+  const operation = {
+    kind: "follow_path",
+    phase: "following_connector",
+    stripIndex: 3,
+    pathPoints: [
+      { xMeters: 15.744475424812707, yMeters: 17.403234714308642, capturedAt: 1 },
+      { xMeters: 12.48110393941283, yMeters: 14.966004617521396, capturedAt: 2 },
+    ],
+    followOptions: { loopPath: false, strictOrderedProgress: true, initialTargetIndex: 1 },
+    errorCode: "connector_failed",
+    continuation: { stage: "strip_approach", stripIndex: 4 },
+  };
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 26,
+      stripSpacingMeters: 0.38,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 20, yMeters: 0, capturedAt: 2 },
+      { xMeters: 20, yMeters: 20, capturedAt: 3 },
+      { xMeters: 0, yMeters: 20, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive(request) {
+        driveRequests.push(request);
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    poseFusion: {
+      getCurrentPose() {
+        return createPose(15.5, 17.2, createInternalHeading(24), "gnss");
+      },
+    },
+    continuousPathFollower: {
+      async executePath() {
+        assert.fail("a resumed two-point connector must not enter continuous following");
+      },
+    },
+    logger: createLogger(),
+  });
+
+  const continuation = await executor["executeResumeOperation"](operation);
+
+  assert.deepEqual(continuation, operation.continuation);
+  assert.equal(driveRequests.length, 1);
+  assert.equal(driveRequests[0].targetPosition.xMeters, 12.48110393941283);
+  assert.equal(driveRequests[0].targetPosition.yMeters, 14.966004617521396);
+});
+
+test("MowingExecutor stages a displaced obstacle-boundary resume before following only perimeter points", async () => {
+  const areaPoints = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 10, yMeters: 0, capturedAt: 2 },
+    { xMeters: 10, yMeters: 10, capturedAt: 3 },
+    { xMeters: 0, yMeters: 10, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const obstacle = [
+    { xMeters: 4, yMeters: 4, capturedAt: 10 },
+    { xMeters: 5, yMeters: 4, capturedAt: 11 },
+    { xMeters: 5, yMeters: 5, capturedAt: 12 },
+    { xMeters: 4, yMeters: 5, capturedAt: 13 },
+    { xMeters: 4, yMeters: 4, capturedAt: 14 },
+  ];
+  const followedPaths = [];
+  const driveTargets = [];
+  const turnRequests = [];
+  let pose = createPose(3, 4.5, createInternalHeading(90), "gnss");
+  const plan = { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] };
+  const resumeState = {
+    version: 2,
+    areaName: "Back lawn",
+    savedAt: Date.now(),
+    currentStripIndex: 0,
+    totalStrips: 0,
+    tracedBoundaryKeys: [],
+    plan,
+    areaPoints,
+    obstaclePointsArray: [obstacle],
+    initialEntryPlan: null,
+    activeOperation: {
+      kind: "follow_path",
+      phase: "tracing_boundary",
+      stripIndex: 0,
+      pathPoints: obstacle,
+      followOptions: { loopPath: false, strictOrderedProgress: true, initialTargetIndex: 1 },
+      errorCode: "boundary_trace_failed",
+      continuation: { stage: "complete", stripIndex: 0 },
+      markBoundaryTraced: "obstacle:0",
+    },
+  };
+  const executor = new MowingExecutor({
+    areaName: "Back lawn",
+    plan,
+    areaPoints,
+    obstaclePointsArray: [obstacle],
+    driveController: {
+      async executeDrive(request) {
+        driveTargets.push([request.targetPosition.xMeters, request.targetPosition.yMeters]);
+        pose = createPose(
+          request.targetPosition.xMeters,
+          request.targetPosition.yMeters,
+          pose.heading,
+          "gnss",
+        );
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: {
+      async executeTurn(request) {
+        turnRequests.push(request);
+        pose = createPose(pose.position.xMeters, pose.position.yMeters, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: {
+      async executePath(points) {
+        followedPaths.push(points);
+        return { completed: true, reason: "reached_end", completedWaypoints: points.length };
+      },
+    },
+    logger: createLogger(),
+    resumeState,
+  });
+
+  const status = await executor.execute();
+
+  assert.equal(status.phase, "complete");
+  assert.deepEqual(driveTargets, [[3.9, 4]]);
+  assert.equal(turnRequests.length, 1);
+  assert.equal(followedPaths.length, 1);
+  assert.equal(followedPaths[0][0].xMeters, 4);
+  assert.equal(followedPaths[0][0].yMeters, 4);
+  assert.equal(followedPaths[0].some((point) => point.xMeters === 3 && point.yMeters === 4.5), false);
+  assert.notEqual(followedPaths[0], obstacle);
 });
 
 test("MowingExecutor recovers a nearby outside resume pose before continuing", async () => {

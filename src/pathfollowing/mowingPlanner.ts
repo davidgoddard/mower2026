@@ -780,7 +780,12 @@ function buildRegionalTraversal(
 
   const orderedGroups = decomposeSweepRegions(strips, direction);
   const templates = orderedGroups.map((regionStrips, regionIndex) => {
-    const base = sequenceStripsForMowing(regionStrips, direction, obstaclePolygons).traversal;
+    const base = sequenceStripsForMowing(
+      regionStrips,
+      direction,
+      obstaclePolygons,
+      orderedGroups.length === 1 ? preferredStartPoint : undefined,
+    ).traversal;
     const reverse = base.slice().reverse().map((step) => ({ strip: step.strip, reversed: !step.reversed }));
     return {
       id: `region-${String(regionIndex + 1).padStart(2, "0")}`,
@@ -806,6 +811,25 @@ function buildRegionalTraversal(
       transitionCostCache.set(key, cost);
       return cost;
     },
+    preferredStartPoint
+      ? (choice) => {
+        const traversal = templates[choice.regionIndex].variants[choice.variantIndex];
+        const first = traversal[0];
+        if (stripTraversalStartBoundary(first.strip, first.reversed).kind !== "area") return Infinity;
+        const entry = stripTraversalStartStandoff(first.strip, first.reversed, mowingStandoffMeters);
+        const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
+        return pathStaysWithinAreaAndAvoidsObstacles([preferred, entry], areaPolygon, obstaclePolygons)
+          ? distance(preferred, entry)
+          : Infinity;
+      }
+      : undefined,
+  );
+  validateRegionalCycleClosure(
+    selected,
+    templates,
+    areaPolygon,
+    obstaclePolygons,
+    mowingStandoffMeters,
   );
   const traversal = selected.flatMap((choice) => templates[choice.regionIndex].variants[choice.variantIndex]);
   const regionByStrip = new Map<MowingStrip, string>();
@@ -911,10 +935,11 @@ function optimiseRegionTemplates(
   templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
   preferredStartPoint?: MowingInitialEntryPosition,
   transitionCost: (from: RegionTemplateChoice, to: RegionTemplateChoice) => number = () => 0,
+  preferredEntryCost?: (choice: RegionTemplateChoice) => number,
 ): RegionTemplateChoice[] {
   if (templates.length === 0) return [];
-  // Region counts are deliberately small. For unexpectedly complex gardens,
-  // cap exact search and retain deterministic nearest-region behaviour.
+  // Optimise a closed cycle first. The live start point only rotates that
+  // cycle; it must not change its energy-efficient region transitions.
   if (templates.length > 12) {
     const remaining = templates.map((_, regionIndex) => regionIndex);
     const result: RegionTemplateChoice[] = [];
@@ -923,14 +948,10 @@ function optimiseRegionTemplates(
       let best = { listIndex: 0, variantIndex: 0 as 0 | 1, cost: Infinity };
       remaining.forEach((regionIndex, listIndex) => {
         ([0, 1] as const).forEach((variantIndex) => {
-          const variant = templates[regionIndex].variants[variantIndex];
-          const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
           const choice = { regionIndex, variantIndex };
           const cost = previousChoice
             ? transitionCost(previousChoice, choice)
-            : preferredStartPoint
-              ? distance({ x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters }, start)
-              : regionIndex;
+            : regionIndex;
           if (cost < best.cost - EPSILON) best = { listIndex, variantIndex, cost };
         });
       });
@@ -941,39 +962,33 @@ function optimiseRegionTemplates(
       previousChoice = { regionIndex, variantIndex: best.variantIndex };
       result.push(previousChoice);
     }
-    return result;
+    return rotateRegionCycleToPreferredStart(result, templates, preferredStartPoint, preferredEntryCost);
   }
 
-  type State = { cost: number; choices: RegionTemplateChoice[]; end: Vector };
+  type State = { cost: number; choices: RegionTemplateChoice[] };
   let states = new Map<string, State>();
-  templates.forEach((template, regionIndex) => ([0, 1] as const).forEach((variantIndex) => {
-    const variant = template.variants[variantIndex];
-    const start = stripTraversalStart(variant[0].strip, variant[0].reversed);
-    const last = variant[variant.length - 1];
-    const cost = preferredStartPoint ? distance({ x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters }, start) : 0;
-    states.set(`${1 << regionIndex}:${regionIndex}:${variantIndex}`, {
-      cost,
-      choices: [{ regionIndex, variantIndex }],
-      end: stripTraversalEnd(last.strip, last.reversed),
+  // Every Hamiltonian cycle contains region zero, so fixing its position loses
+  // no possible cycle and removes rotational duplicates from the DP.
+  ([0, 1] as const).forEach((variantIndex) => {
+    states.set(`${1}:${0}:${variantIndex}`, {
+      cost: 0,
+      choices: [{ regionIndex: 0, variantIndex }],
     });
-  }));
+  });
   for (let size = 1; size < templates.length; size += 1) {
     const nextStates = new Map(states);
     for (const [key, state] of states) {
       const mask = Number(key.split(":", 1)[0]);
       if (state.choices.length !== size) continue;
-      templates.forEach((template, regionIndex) => {
+      templates.forEach((_template, regionIndex) => {
         if ((mask & (1 << regionIndex)) !== 0) return;
         ([0, 1] as const).forEach((variantIndex) => {
-          const variant = template.variants[variantIndex];
-          const last = variant[variant.length - 1];
           const nextChoice = { regionIndex, variantIndex };
           const edgeCost = transitionCost(state.choices[state.choices.length - 1], nextChoice);
           if (!Number.isFinite(edgeCost)) return;
           const candidate: State = {
             cost: state.cost + edgeCost,
             choices: [...state.choices, nextChoice],
-            end: stripTraversalEnd(last.strip, last.reversed),
           };
           const nextKey = `${mask | (1 << regionIndex)}:${regionIndex}:${variantIndex}`;
           const existing = nextStates.get(nextKey);
@@ -983,20 +998,69 @@ function optimiseRegionTemplates(
     }
     states = nextStates;
   }
-  const complete = [...states.values()].filter((state) => state.choices.length === templates.length);
+  const complete = [...states.values()]
+    .filter((state) => state.choices.length === templates.length)
+    .map((state) => ({
+      ...state,
+      cost: state.cost + transitionCost(state.choices[state.choices.length - 1], state.choices[0]),
+    }))
+    .filter((state) => Number.isFinite(state.cost));
   if (complete.length === 0) {
     throw new Error("mowing_regional_route_unavailable");
   }
-  complete.sort((left, right) => {
-    const leftReturn = preferredStartPoint
-      ? distance(left.end, { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters })
-      : 0;
-    const rightReturn = preferredStartPoint
-      ? distance(right.end, { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters })
-      : 0;
-    return (left.cost + leftReturn) - (right.cost + rightReturn);
+  complete.sort((left, right) => left.cost - right.cost);
+  return rotateRegionCycleToPreferredStart(complete[0].choices, templates, preferredStartPoint, preferredEntryCost);
+}
+
+function rotateRegionCycleToPreferredStart(
+  cycle: RegionTemplateChoice[],
+  templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
+  preferredStartPoint?: MowingInitialEntryPosition,
+  preferredEntryCost?: (choice: RegionTemplateChoice) => number,
+): RegionTemplateChoice[] {
+  if (!preferredStartPoint || cycle.length < 2) return cycle;
+  const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  cycle.forEach((choice, index) => {
+    const entryDistance = preferredEntryCost
+      ? preferredEntryCost(choice)
+      : (() => {
+        const traversal = templates[choice.regionIndex].variants[choice.variantIndex];
+        const entry = stripTraversalStart(traversal[0].strip, traversal[0].reversed);
+        return distance(preferred, entry);
+      })();
+    if (entryDistance < bestDistance - EPSILON) {
+      bestDistance = entryDistance;
+      bestIndex = index;
+    }
   });
-  return complete[0].choices;
+  return [...cycle.slice(bestIndex), ...cycle.slice(0, bestIndex)];
+}
+
+function validateRegionalCycleClosure(
+  cycle: RegionTemplateChoice[],
+  templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
+  areaPolygon: Vector[],
+  obstacles: Vector[][],
+  mowingStandoffMeters: number,
+): void {
+  if (cycle.length < 2) return;
+  const traversal = cycle.flatMap((choice) => templates[choice.regionIndex].variants[choice.variantIndex]);
+  const first = traversal[0];
+  const last = traversal[traversal.length - 1];
+  buildSafeStripConnector(
+    stripTraversalEnd(last.strip, last.reversed),
+    stripTraversalStart(first.strip, first.reversed),
+    stripTraversalEndBoundary(last.strip, last.reversed),
+    stripTraversalStartBoundary(first.strip, first.reversed),
+    stripTraversalEndStandoff(last.strip, last.reversed, mowingStandoffMeters),
+    stripTraversalStartStandoff(first.strip, first.reversed, mowingStandoffMeters),
+    areaPolygon,
+    obstacles,
+    mowingStandoffMeters,
+    buildStripRoutingWaypoints(traversal.map((step) => step.strip), mowingStandoffMeters),
+  );
 }
 
 function estimateTraversalTurnCost(traversal: TraversalStep[]): number {
@@ -1521,6 +1585,36 @@ function buildAreaBoundaryConnectorCandidates(
   const forward = [fromStandoff, ...walkObstacleVertices(offsetArea, fromIndex, toIndex, 1), toStandoff];
   const reverse = [fromStandoff, ...walkObstacleVertices(offsetArea, fromIndex, toIndex, -1), toStandoff];
   return [forward.map(toPathPoint), reverse.map(toPathPoint)];
+}
+
+export function buildMowingTransitPath(
+  areaPoints: ReadonlyArray<PathPoint>,
+  obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>,
+  from: Pick<PathPoint, "xMeters" | "yMeters">,
+  to: Pick<PathPoint, "xMeters" | "yMeters">,
+  standoffMeters: number,
+): PathPoint[] {
+  const areaPolygon = areaPoints.map((point) => ({ x: point.xMeters, y: point.yMeters }));
+  const obstacles = obstaclePointsArray.map((obstacle) => obstacle.map((point) => ({
+    x: point.xMeters,
+    y: point.yMeters,
+  })));
+  const fromVector = { x: from.xMeters, y: from.yMeters };
+  const toVector = { x: to.xMeters, y: to.yMeters };
+  if (pathStaysWithinAreaAndAvoidsObstacles([fromVector, toVector], areaPolygon, obstacles)) {
+    const capturedAt = Date.now();
+    return [{ ...from, capturedAt }, { ...to, capturedAt }];
+  }
+  const route = buildFreeSpaceConnector(
+    fromVector,
+    toVector,
+    areaPolygon,
+    obstacles,
+    standoffMeters,
+    EMPTY_ROUTING_ROADMAP,
+  );
+  if (!route) throw new Error("mowing_transit_no_safe_route");
+  return route;
 }
 
 function buildFreeSpaceConnector(

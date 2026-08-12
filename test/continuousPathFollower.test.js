@@ -12,31 +12,38 @@ import {
   selectContinuousLookaheadTargetIndex,
 } from "../dist/pathfollowing/continuousPathFollower.js";
 
-test("continuous follower locks one recovery segment through pivot and capture", async () => {
-  const poses = [
-    createPose(0, 0, createInternalHeading(180), "gnss"),
-    createPose(0, 0, createInternalHeading(180), "gnss"),
-    createPose(0, 0, createInternalHeading(0), "gnss"),
-    createPose(0.5, 0, createInternalHeading(0), "gnss"),
-    createPose(2, 0, createInternalHeading(0), "gnss"),
-  ];
-  let poseIndex = 0;
+test("continuous follower aligns excessive entry misalignment once without a fallback drive", async () => {
+  let pose = createPose(0, 0, createInternalHeading(180), "gnss");
+  let driveCalls = 0;
+  let turnCalls = 0;
   const commands = [];
-  const events = [];
   const follower = new ContinuousPathFollower({
     poseFusion: {
-      getCurrentPose: () => poses[Math.min(poseIndex++, poses.length - 1)],
+      getCurrentPose: () => pose,
+    },
+    driveController: {
+      executeDrive: async () => {
+        driveCalls += 1;
+        return { status: "success" };
+      },
+    },
+    turnController: {
+      executeTurn: async () => {
+        turnCalls += 1;
+        pose = createPose(0, 0, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
     },
     sensorController: {
       beginMotionSession: () => {},
       endMotionSession: () => {},
-      setMotorWheelOutputs: async (left, right) => commands.push({ left, right }),
+      setMotorWheelOutputs: async (left, right) => {
+        commands.push({ left, right });
+        pose = createPose(1, 0, createInternalHeading(0), "gnss");
+      },
       requestNeutralMotorOutputs: async () => {},
     },
-    logger: {
-      info: (message, data) => events.push({ message, data }),
-      debug: () => {},
-    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
     sleep: async () => {},
     baseSpeed: 0.65,
   });
@@ -44,75 +51,141 @@ test("continuous follower locks one recovery segment through pivot and capture",
   const result = await follower.executePath([
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
-    { xMeters: 2, yMeters: 0, capturedAt: 3 },
   ], {
     loopPath: false,
     strictOrderedProgress: true,
     initialTargetIndex: 1,
-    pivotIfInnerWheelBelow: 0.25,
     minimumSpeed: 0.65,
     maximumSpeed: 0.65,
   });
 
   assert.equal(result.completed, true);
-  assert.deepEqual(events.map((event) => event.message), [
-    "continuous_path.recovery_align_started",
-    "continuous_path.recovery_capture_started",
-    "continuous_path.recovery_capture_completed",
-  ]);
-  const pivotCommands = commands.filter(({ left, right }) => left * right < 0);
-  assert.equal(pivotCommands.length > 0, true);
-  assert.equal(pivotCommands.every(({ left, right }) => Math.sign(left) === -Math.sign(right)), true);
-  assert.equal(new Set(pivotCommands.map(({ left }) => Math.sign(left))).size, 1);
+  assert.equal(driveCalls, 0);
+  assert.equal(turnCalls, 1);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].left >= 0 && commands[0].right >= 0, true);
 });
 
-test("continuous follower measures recovery capture from the post-alignment pose", async () => {
-  const poses = [
-    createPose(0, 0, createInternalHeading(180), "gnss"),
-    createPose(0.5, 0, createInternalHeading(180), "gnss"),
-    createPose(0.5, 0, createInternalHeading(0), "gnss"),
-    createPose(0.95, 0, createInternalHeading(0), "gnss"),
-    createPose(2, 0, createInternalHeading(0), "gnss"),
-  ];
-  let poseIndex = 0;
-  const commands = [];
-  const events = [];
+test("continuous follower delegates one genuine waypoint corner through the drive controller", async () => {
+  let pose = createPose(0.86, 0, createInternalHeading(0), "gnss");
+  const driveRequests = [];
   const follower = new ContinuousPathFollower({
-    poseFusion: {
-      getCurrentPose: () => poses[Math.min(poseIndex++, poses.length - 1)],
+    poseFusion: { getCurrentPose: () => pose },
+    driveController: {
+      executeDrive: async (request) => {
+        driveRequests.push(request);
+        pose = createPose(1, 0.4, createInternalHeading(90), "gnss");
+        return { status: "success" };
+      },
     },
+    turnController: { executeTurn: async () => ({ status: "success" }) },
     sensorController: {
       beginMotionSession: () => {},
       endMotionSession: () => {},
-      setMotorWheelOutputs: async (left, right) => commands.push({ left, right }),
+      setMotorWheelOutputs: async () => {},
       requestNeutralMotorOutputs: async () => {},
     },
-    logger: {
-      info: (message, data) => events.push({ message, data }),
-      debug: () => {},
-    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
     sleep: async () => {},
-    baseSpeed: 0.65,
   });
 
   const result = await follower.executePath([
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 1, yMeters: 0, capturedAt: 2 },
-    { xMeters: 2, yMeters: 0, capturedAt: 3 },
+    { xMeters: 1, yMeters: 1, capturedAt: 3 },
   ], {
     loopPath: false,
     strictOrderedProgress: true,
     initialTargetIndex: 1,
-    pivotIfInnerWheelBelow: 0.25,
-    minimumSpeed: 0.65,
-    maximumSpeed: 0.65,
+    pivotAtWaypointTurnDeg: 20,
+    pivotAtWaypointDistanceMeters: 0.15,
+    completionToleranceMeters: 0.7,
   });
 
   assert.equal(result.completed, true);
-  assert.equal(events.filter(({ message }) => message === "continuous_path.recovery_align_started").length, 1);
-  assert.equal(events.filter(({ message }) => message === "continuous_path.recovery_capture_started").length, 1);
-  assert.equal(events.filter(({ message }) => message === "continuous_path.recovery_capture_completed").length, 1);
-  assert.equal(commands.some(({ left, right }) => left > 0 && right > 0), true);
+  assert.equal(driveRequests.length, 1);
+  assert.equal(driveRequests[0].targetPosition.xMeters, 1);
+  assert.equal(driveRequests[0].targetPosition.yMeters, 0.4);
+  assert.equal(driveRequests[0].alwaysTurnToFaceTarget, true);
+});
+
+test("continuous follower refuses recovery motion from materially outside the route", async () => {
+  let driveCalls = 0;
+  let neutralCalls = 0;
+  let motionSessionEnded = false;
+  const follower = new ContinuousPathFollower({
+    poseFusion: {
+      getCurrentPose: () => createPose(0, 0.8, createInternalHeading(180), "gnss"),
+    },
+    driveController: {
+      executeDrive: async () => {
+        driveCalls += 1;
+        return { status: "success" };
+      },
+    },
+    turnController: { executeTurn: async () => ({ status: "success" }) },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => { motionSessionEnded = true; },
+      setMotorWheelOutputs: async () => {},
+      requestNeutralMotorOutputs: async () => { neutralCalls += 1; },
+    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+  ], {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+  });
+
+  assert.equal(result.completed, false);
+  assert.equal(result.error, "continuous_path_pose_too_far_from_route");
+  assert.equal(driveCalls, 0);
+  assert.equal(neutralCalls, 1);
+  assert.equal(motionSessionEnded, true);
+});
+
+test("continuous follower does not abort for one route-deviation sample just over the limit", async () => {
+  let pose = createPose(0, 0.253, createInternalHeading(0), "gnss");
+  let driveCalls = 0;
+  const follower = new ContinuousPathFollower({
+    poseFusion: { getCurrentPose: () => pose },
+    driveController: {
+      executeDrive: async () => {
+        driveCalls += 1;
+        return { status: "success" };
+      },
+    },
+    turnController: { executeTurn: async () => ({ status: "success" }) },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async () => {
+        pose = createPose(1, 0, createInternalHeading(0), "gnss");
+      },
+      requestNeutralMotorOutputs: async () => {},
+    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+  ], {
+    parameters: TEST_PARAMETERS,
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(driveCalls, 0);
 });
 
 test("continuous follower completes a perimeter near its final target without entering final recovery", async () => {
@@ -122,6 +195,8 @@ test("continuous follower completes a perimeter near its final target without en
     poseFusion: {
       getCurrentPose: () => createPose(0.12, 0.08, createInternalHeading(180), "gnss"),
     },
+    driveController: { executeDrive: async () => ({ status: "success" }) },
+    turnController: { executeTurn: async () => ({ status: "success" }) },
     sensorController: {
       beginMotionSession: () => {},
       endMotionSession: () => {},
@@ -145,7 +220,6 @@ test("continuous follower completes a perimeter near its final target without en
     strictOrderedProgress: true,
     initialTargetIndex: 3,
     completionToleranceMeters: 0.35,
-    pivotIfInnerWheelBelow: 0.4,
   });
 
   assert.equal(result.completed, true);
@@ -245,7 +319,7 @@ test("computeContinuousPathWheelCommands steers right when lookahead lies to the
   assert.equal(commands.left > commands.right, true);
 });
 
-test("computeContinuousPathWheelCommands pivots when heading error is extreme", () => {
+test("computeContinuousPathWheelCommands uses a forward one-wheel arc when heading error is extreme", () => {
   const pose = createPose(0, 0, createInternalHeading(0), "gnss");
   const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
   const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
@@ -259,11 +333,12 @@ test("computeContinuousPathWheelCommands pivots when heading error is extreme", 
     0.65,
   );
 
-  assert.equal(commands.left < 0, true);
-  assert.equal(commands.right > 0, true);
+  assert.equal(commands.left >= 0 && commands.right >= 0, true);
+  assert.equal(commands.pivoting, false);
+  assert.equal(Math.min(commands.left, commands.right), 0);
 });
 
-test("computeContinuousPathWheelCommands pivots at a sharp corner near the waypoint", () => {
+test("computeContinuousPathWheelCommands does not independently pivot for accumulated lookahead curvature", () => {
   const pose = createPose(0.95, 0.02, createInternalHeading(0), "gnss");
   const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
   const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
@@ -275,19 +350,16 @@ test("computeContinuousPathWheelCommands pivots at a sharp corner near the waypo
     currentTarget,
     lookaheadTarget,
     0.75,
-    false,
     {
-      pivotAtWaypointTurnDeg: 35,
-      pivotAtWaypointDistanceMeters: 0.2,
       minimumSpeed: 0.6,
     },
   );
 
-  assert.equal(commands.left < 0, true);
-  assert.equal(commands.right > 0, true);
+  assert.equal(commands.left >= 0 && commands.right >= 0, true);
+  assert.equal(commands.pivoting, false);
 });
 
-test("computeContinuousPathWheelCommands pivots instead of demanding a crawl arc when the inner wheel would drop too low", () => {
+test("computeContinuousPathWheelCommands allows the inner wheel below mowing speed while preserving at least the requested outer-wheel speed", () => {
   const pose = createPose(0, 0, createInternalHeading(0), "gnss");
   const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
   const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
@@ -299,18 +371,35 @@ test("computeContinuousPathWheelCommands pivots instead of demanding a crawl arc
     currentTarget,
     lookaheadTarget,
     0.75,
-    false,
     {
       minimumSpeed: 0.6,
-      pivotIfInnerWheelBelow: 0.45,
     },
   );
 
-  assert.equal(commands.left < 0 || commands.right < 0, true);
-  assert.equal(commands.pivoting, true);
+  assert.equal(commands.left >= 0 && commands.right >= 0, true);
+  assert.equal(commands.pivoting, false);
+  assert.equal(Math.max(commands.left, commands.right) >= 0.75, true);
+  assert.equal(Math.min(commands.left, commands.right) < 0.45, true);
 });
 
-test("computeContinuousPathWheelCommands stays in pivot mode until heading error is substantially reduced", () => {
+test("computeContinuousPathWheelCommands treats a coincident protected-corner lookahead as incoming guidance", () => {
+  const commands = computeContinuousPathWheelCommands(
+    createPose(0.8, 0, createInternalHeading(0), "gnss"),
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 0, capturedAt: 3 },
+    1,
+    {
+      minimumSpeed: 1,
+    },
+  );
+
+  assert.equal(commands.pivoting, false);
+  assert.equal(commands.left > 0, true);
+  assert.equal(commands.right > 0, true);
+});
+
+test("computeContinuousPathWheelCommands always leaves pivot ownership outside continuous steering", () => {
   const pose = createPose(0, 0, createInternalHeading(0), "gnss");
   const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
   const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
@@ -322,11 +411,10 @@ test("computeContinuousPathWheelCommands stays in pivot mode until heading error
     currentTarget,
     lookaheadTarget,
     0.75,
-    true,
   );
 
-  assert.equal(commands.pivoting, true);
-  assert.equal(commands.left < 0 || commands.right < 0, true);
+  assert.equal(commands.pivoting, false);
+  assert.equal(commands.left >= 0 && commands.right >= 0, true);
 });
 
 test("computeContinuousPathBaseSpeed stays high on gentle clean path sections", () => {
@@ -369,10 +457,10 @@ test("continuous steering uses the learned CTE gain supplied by straight driving
   const pathTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
   const lookahead = { xMeters: 2, yMeters: 0, capturedAt: 3 };
   const gentle = computeContinuousPathWheelCommands(
-    pose, pathStart, pathTarget, lookahead, 1, false, { cteGain: 0.2, headingGain: 0 },
+    pose, pathStart, pathTarget, lookahead, 1, { cteGain: 0.2, headingGain: 0 },
   );
   const learned = computeContinuousPathWheelCommands(
-    pose, pathStart, pathTarget, lookahead, 1, false, { cteGain: 1.2, headingGain: 0 },
+    pose, pathStart, pathTarget, lookahead, 1, { cteGain: 1.2, headingGain: 0 },
   );
 
   assert.equal(Math.abs(learned.left - learned.right) > Math.abs(gentle.left - gentle.right), true);
@@ -383,22 +471,4 @@ test("limitContinuousWheelCommandChange slews abrupt speed changes", () => {
   assert.equal(Math.abs(limitContinuousWheelCommandChange(0.8, 0.2, 1, 0.1) - 0.7) < 1e-9, true);
   assert.equal(Math.abs(limitContinuousWheelCommandChange(-0.4, 0.4, 1, 0.1) + 0.3) < 1e-9, true);
   assert.equal(limitContinuousWheelCommandChange(0.5, 0.55, 1, 0.1), 0.55);
-});
-
-test("tight-arc pivot uses an exit margin to avoid pivot and arc chatter", () => {
-  const pose = createPose(0.9, 0, createInternalHeading(0), "gnss");
-  const previousPoint = { xMeters: 0, yMeters: 0, capturedAt: 1 };
-  const currentTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
-  const lookaheadTarget = { xMeters: 1.966, yMeters: 0.259, capturedAt: 3 };
-  const options = { minimumSpeed: 0.6, pivotIfInnerWheelBelow: 0.3 };
-
-  const entering = computeContinuousPathWheelCommands(
-    pose, previousPoint, currentTarget, lookaheadTarget, 0.75, false, options,
-  );
-  const staying = computeContinuousPathWheelCommands(
-    pose, previousPoint, currentTarget, lookaheadTarget, 0.75, true, options,
-  );
-
-  assert.equal(entering.pivoting, false);
-  assert.equal(staying.pivoting, true);
 });

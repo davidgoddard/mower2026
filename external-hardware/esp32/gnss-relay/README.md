@@ -26,6 +26,8 @@ It receives and broadcasts on ESP-NOW channel 1, matching the base and mower.
 - Forwarding is broadcast, so a mower MAC is not needed in the relay firmware.
 - Filtering by the base MAC prevents relays from repeating each other or their
   own broadcasts.
+- The onboard blue LED on GPIO2 pulses for 40 milliseconds after each packet
+  is successfully forwarded. Failed ESP-NOW sends do not trigger the LED.
 - Serial status reports accepted, forwarded, rejected, dropped, and failed
   packet counts once per second.
 

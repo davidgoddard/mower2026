@@ -6,20 +6,33 @@ This folder contains a self-contained ESP32 motor controller sketch for the seco
 
 File:
 
-- `motor-controller-v2.ino`
+- `motor-controller.ino`
 
 ## What it does
 
 - runs as I2C slave at address `0x66`
 - accepts explicit left/right wheel output commands (`-1.0..1.0`, where `1.0` is full output)
-- does not enforce the legacy watchdog timeout field; the Pi intentionally avoids
-  flooding the I2C bus with duplicate motor commands, so the ESP32 continues
-  applying the last accepted command until a new command arrives or drive is
-  explicitly disabled
+- accepts changed commands immediately and a refreshed unchanged command once
+  per second as the Pi drive heartbeat
+- disables drive if the command heartbeat exceeds its 2.5-second lease
+- uses an independent five-second ESP task watchdog to recover a stalled sketch
 - preserves asymmetric ramp-up / ramp-down behavior
 - preserves stop-before-reverse behavior
 - counts FG/tach pulses
-- returns a coherent fixed-size feedback snapshot
+- returns a direct-read, fixed 32-byte feedback snapshot at 20 Hz
+- builds feedback in an inactive buffer and atomically swaps buffers, leaving
+  the I2C request callback with only a fixed-size `Wire.write()`
+
+## I2C exchange
+
+- Command: Pi writes a framed command only when it changes or its one-second
+  refresh interval elapses.
+- Feedback: Pi directly reads the latest 32-byte snapshot; there is no preceding
+  feedback-request write.
+- The feedback sequence is owned by the ESP32 and increments for every newly
+  generated snapshot.
+- `watchdogHealthy` reports whether the command heartbeat lease is current;
+  fault bit 0 reports an expired or not-yet-established command lease.
 
 ## Important note
 
@@ -120,7 +133,8 @@ Expected result for a healthy idle run:
 
 - `PASS`
 - zero encoder deltas for the full run
-- `watchdogHealthy: false` and watchdog `faultFlags` may still appear while idle if the firmware is simply timing out at zero command
+- `watchdogHealthy: true` while the Pi command heartbeat is current, including
+  a current zero-output or disabled command
 
 ## Before flashing
 

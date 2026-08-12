@@ -266,3 +266,17 @@ Sensor VCC                   -> sensor supply appropriate to the module used
 - The left and right FG/tach lines pass through a `74132` Schmitt-trigger stage before reaching `GPIO21` and `GPIO22`.
 - Do not feed `5V` directly into ESP32 GPIO pins.
 - UM982 board power should follow the module board's power design rather than assuming bare-chip supply rules.
+## Raspberry Pi recharge-return indicator
+
+The recharge-return status LED is driven by Raspberry Pi **BCM GPIO23**, which
+is physical header **pin 16**. Wire it as:
+
+```text
+Pi pin 16 (BCM23) ---- 330 ohm resistor ---- LED anode
+Pi ground pin 14 --------------------------- LED cathode
+```
+
+The output is high while the mower is routing to the charging drive-to point
+and reversing onto the charging position. It goes low when docking completes,
+when the mower is waiting for charge, and during normal mowing. Do not connect
+an LED directly to the GPIO without a series resistor.

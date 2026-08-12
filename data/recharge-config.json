@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "chargingPosition": {
+    "xMeters": 2.150892414404852,
+    "yMeters": 2.298695496395302
+  },
+  "driveToPosition": {
+    "xMeters": 1.9679971359988029,
+    "yMeters": 2.7567642557362593
+  },
+  "combinedWheelBudgetMeters": 1500,
+  "dockingWheelOutputPercent": 0.3
+}

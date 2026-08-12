@@ -38,11 +38,11 @@ export const SENSOR_CONTROLLER_GNSS_POLL_INTERVAL_MS = 50;
 
 /**
  * Motor feedback polling interval in milliseconds.
- * Wheel encoder/current feedback remains fast enough for stop detection and
- * line driving without forcing every sensor-loop tick to hit the motor
- * node over I2C.
+ * The motor ESP refreshes its feedback snapshot at 20Hz, so polling any
+ * faster only rereads the same snapshot and adds avoidable I2C traffic.
+ * Keep this aligned with FEEDBACK_PERIOD_MS in motor-controller.ino.
  */
-export const SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS = 20;
+export const SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS = 50;
 
 /**
  * Manual drive control loop interval in milliseconds.
@@ -50,14 +50,6 @@ export const SENSOR_CONTROLLER_MOTOR_POLL_INTERVAL_MS = 20;
  * conservative autonomous loops.
  */
 export const MANUAL_DRIVE_LOOP_INTERVAL_MS = 20;
-
-/**
- * Manual drive keepalive interval in milliseconds.
- * While the operator holds a steady input, the manual-drive coordinator
- * re-sends the same wheel command at this cadence so the motor node keeps
- * seeing fresh commands even if the HID packet stream is bursty.
- */
-export const MANUAL_DRIVE_COMMAND_REFRESH_INTERVAL_MS = 150;
 
 /**
  * Manual drive HID snapshot stale threshold in milliseconds.
@@ -89,12 +81,14 @@ export const MANUAL_DRIVE_RAMP_DOWN_TIME_MS = 700;
 export const POSE_FUSION_EMIT_INTERVAL_MS = 20;
 
 /**
- * Legacy wheel-command timeout field value, in milliseconds.
- * The current ESP32 motor firmware ignores this field and simply latches the
- * last accepted command until a new command arrives, but the field remains in
- * the on-wire protocol for compatibility with older sketches and tools.
+ * Motor-controller drive lease, in milliseconds. Commands are refreshed once
+ * per second even when unchanged, leaving ample scheduling margin before the
+ * ESP32 disables drive after a lost Pi heartbeat.
  */
-export const MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS = 1000;
+export const MOTOR_COMMAND_WATCHDOG_TIMEOUT_MS = 2500;
+
+/** Maximum age of an unchanged motor command before it is resent. */
+export const MOTOR_COMMAND_REFRESH_INTERVAL_MS = 1000;
 
 /**
  * Manual drive controller-disconnect grace period in milliseconds.

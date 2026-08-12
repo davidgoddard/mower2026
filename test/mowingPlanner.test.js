@@ -127,6 +127,47 @@ test("buildMowingPlan plans obstacle-relative regions as one persisted route", (
   assert.ok(plan.routeCost.estimatedCombinedWheelTravelMeters > plan.routeCost.mowingDistanceMeters);
 });
 
+test("buildMowingPlan rotates one closed regional cycle to the nearest requested region entry", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0 }, { xMeters: 4, yMeters: 0 },
+    { xMeters: 4, yMeters: 4 }, { xMeters: 0, yMeters: 4 },
+    { xMeters: 0, yMeters: 0 },
+  ];
+  const obstacle = [
+    { xMeters: 1.5, yMeters: 1.5 }, { xMeters: 2.5, yMeters: 1.5 },
+    { xMeters: 2.5, yMeters: 2.5 }, { xMeters: 1.5, yMeters: 2.5 },
+    { xMeters: 1.5, yMeters: 1.5 },
+  ];
+  const base = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 0.4,
+    obstacles: [obstacle],
+  });
+  const requestedRegion = base.regions.slice(1).find((region) => {
+    const firstStrip = base.strips.find((strip) => strip.stableId === region.stripIds[0]);
+    return firstStrip && (firstStrip.traversalReversed ? firstStrip.endBoundary : firstStrip.startBoundary).kind === "area";
+  });
+  assert.ok(requestedRegion);
+  const rotated = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 0.4,
+    preferredStartPoint: requestedRegion.entryPoint,
+    obstacles: [obstacle],
+  });
+
+  assert.equal(rotated.regionOrder[0], requestedRegion.id);
+  const doubledBaseOrder = [...base.regionOrder, ...base.regionOrder].join(",");
+  assert.equal(
+    doubledBaseOrder.includes(rotated.regionOrder.join(",")),
+    true,
+    "anchoring should rotate rather than recalculate the regional cycle",
+  );
+  assert.deepEqual(
+    [...rotated.regionOrder].sort(),
+    [...base.regionOrder].sort(),
+  );
+});
+
 test("buildMowingPlan at an oblique heading selects only safe regional transitions", () => {
   const area = [
     { xMeters: 0, yMeters: 0 }, { xMeters: 8, yMeters: 0 },
