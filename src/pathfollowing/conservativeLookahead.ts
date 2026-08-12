@@ -103,7 +103,10 @@ function maximumRouteChordDeviation(
     }
   }
 
-  return testedWindowCount === 0 ? 0 : maximumDeviationMeters;
+  if (testedWindowCount === 0 || maximumDeviationMeters <= Number.EPSILON * 2) {
+    return 0;
+  }
+  return maximumDeviationMeters;
 }
 
 function resampleRoute(

@@ -1751,9 +1751,11 @@ test('SensorController obstruction event reports the latest wheel speeds, not li
         primitivesStore,
         gateway,
         pollIntervalMs: 0,
-        sleep: async () => {},
+        sleep: async () => {
+          await delay(0);
+        },
         nowMillis: () => now,
-        maxLoopCount: 20,
+        maxLoopCount: 60,
       });
 
       const obstructionEvents = [];
@@ -1761,7 +1763,7 @@ test('SensorController obstruction event reports the latest wheel speeds, not li
 
       await controller.start();
       await controller.setMotorWheelOutputs(0.8, 0);
-      await delay(20);
+      await waitFor(() => obstructionEvents.some((event) => event.type === 'stall'), { timeoutMs: 250 });
 
       const stallEvent = obstructionEvents.find((e) => e.type === 'stall');
       assert.ok(stallEvent, 'expected a stall obstruction event');

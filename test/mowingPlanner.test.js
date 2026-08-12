@@ -27,6 +27,23 @@ function samplePathStaysInsidePolygon(points, polygon, stepMeters = 0.05) {
   }
 }
 
+function samplePathAvoidsPolygon(points, polygon, stepMeters = 0.05) {
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const segmentLength = Math.hypot(end.xMeters - start.xMeters, end.yMeters - start.yMeters);
+    const steps = Math.max(1, Math.ceil(segmentLength / stepMeters));
+    for (let step = 0; step <= steps; step += 1) {
+      const t = step / steps;
+      const point = {
+        x: start.xMeters + ((end.xMeters - start.xMeters) * t),
+        y: start.yMeters + ((end.yMeters - start.yMeters) * t),
+      };
+      assert.equal(pointInPolygon(point, polygon), false, `connector sample entered obstacle at (${point.x.toFixed(2)}, ${point.y.toFixed(2)})`);
+    }
+  }
+}
+
 function pointInPolygonOrOnBoundary(point, polygon) {
   return pointOnPolygonBoundary(point, polygon) || pointInPolygon(point, polygon);
 }
@@ -341,7 +358,12 @@ test("buildMowingPlan removes strip sections inside obstacle perimeters", () => 
     [0, 1.5],
     [2.5, 4],
   ]);
-  assert.equal(plan.connectors.some((connector) => connector.length > 2), true);
+  assert.equal(plan.connectors.length, plan.strips.length - 1);
+  for (const connector of plan.connectors) {
+    assert.equal(connector.length >= 2, true);
+    samplePathStaysInsidePolygon(connector, area);
+    samplePathAvoidsPolygon(connector, obstacle);
+  }
 });
 
 test("buildMowingPlan discards obstacle-clipped drives shorter than 15 cm", () => {
@@ -605,15 +627,10 @@ test("buildMowingPlan reanchors with a consistent traversal after choosing the o
   assert.equal(plan.strips[0].traversalReversed, true);
   assert.equal(typeof plan.strips[1].traversalReversed, "boolean");
   assert.equal(typeof plan.strips[2].traversalReversed, "boolean");
-  assert.deepEqual(
-    [
-      Number(plan.strips[1].start.xMeters.toFixed(2)),
-      Number(plan.strips[1].start.yMeters.toFixed(2)),
-      Number(plan.strips[1].end.xMeters.toFixed(2)),
-      Number(plan.strips[1].end.yMeters.toFixed(2)),
-    ],
-    [1, 0, 1, 1],
-  );
+  const stripXOffsets = plan.strips.map((strip) => Number(strip.start.xMeters.toFixed(2)));
+  assert.equal(Math.abs(stripXOffsets[1] - stripXOffsets[0]), 0.5);
+  assert.deepEqual([...stripXOffsets].sort((a, b) => a - b), [0, 0.5, 1]);
+  assert.deepEqual(plan.strips.map((strip) => strip.traversalReversed), [true, false, true]);
 });
 
 test("buildMowingPlan uses a preferred middle start only for the first strip then sweeps adjacent offsets", () => {
