@@ -83,13 +83,23 @@ const ROUTED_OBSTACLE_PENALTY = 2;
 const SAME_OFFSET_ROUTED_OBSTACLE_PENALTY = 5;
 const TURN_COST_METERS_PER_RADIAN = 0.4;
 const CONNECTOR_VERTEX_COST_METERS = 0.15;
-const UNRESOLVED_TRANSITION_COST_METERS = 10_000;
-const MINIMUM_MOWING_STRIP_DRIVE_METERS = 0.15;
+const REGIONAL_ROUTED_TRANSITION_PENALTY_METERS = 2;
+// Exact open-route optimisation grows exponentially with the region count.
+// Twelve regions produced a 100+ second synchronous planning pause on the
+// mower, starving GNSS and motor feedback. Keep exact optimisation for small
+// plans and use the bounded nearest-region traversal above this limit.
+const MAX_EXACT_REGION_OPTIMISATION_REGIONS = 8;
+/**
+ * A planned pass needs margin above the executor's 15 cm minimum command.
+ * Shorter geometric slivers are covered by the mandatory perimeter trace;
+ * retaining them would create turns and connectors without a reliable cut.
+ */
+export const MINIMUM_EXECUTABLE_MOWING_STRIP_METERS = 0.3;
 
 export function effectiveMowingStripStandoffMeters(stripLengthMeters: number, configuredStandoffMeters: number): number {
   return Math.min(
     configuredStandoffMeters,
-    Math.max(0, (stripLengthMeters - MINIMUM_MOWING_STRIP_DRIVE_METERS) / 2),
+    Math.max(0, (stripLengthMeters - MINIMUM_EXECUTABLE_MOWING_STRIP_METERS) / 2),
   );
 }
 
@@ -434,7 +444,7 @@ function obstacleMayIntersectOffset(obstacle: PreparedObstacle, offset: number):
 function buildStripFromInterval(interval: Interval, offset: number, sequenceIndex: number): MowingStrip | null {
   const start = interval.start;
   const end = interval.end;
-  if (distance(start.point, end.point) < MINIMUM_MOWING_STRIP_DRIVE_METERS - EPSILON) {
+  if (distance(start.point, end.point) < MINIMUM_EXECUTABLE_MOWING_STRIP_METERS - EPSILON) {
     return null;
   }
 
@@ -815,21 +825,14 @@ function buildRegionalTraversal(
       ? (choice) => {
         const traversal = templates[choice.regionIndex].variants[choice.variantIndex];
         const first = traversal[0];
-        if (stripTraversalStartBoundary(first.strip, first.reversed).kind !== "area") return Infinity;
         const entry = stripTraversalStartStandoff(first.strip, first.reversed, mowingStandoffMeters);
         const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
-        return pathStaysWithinAreaAndAvoidsObstacles([preferred, entry], areaPolygon, obstaclePolygons)
-          ? distance(preferred, entry)
-          : Infinity;
+        const obstaclePenalty = obstaclePolygons.some((obstacle) => segmentIntersectsPolygon(preferred, entry, obstacle))
+          ? 1_000
+          : 0;
+        return distance(preferred, entry) + obstaclePenalty;
       }
       : undefined,
-  );
-  validateRegionalCycleClosure(
-    selected,
-    templates,
-    areaPolygon,
-    obstaclePolygons,
-    mowingStandoffMeters,
   );
   const traversal = selected.flatMap((choice) => templates[choice.regionIndex].variants[choice.variantIndex]);
   const regionByStrip = new Map<MowingStrip, string>();
@@ -913,22 +916,23 @@ interface RegionTemplateChoice {
 function safeRegionTransitionCost(
   fromTraversal: TraversalStep[],
   toTraversal: TraversalStep[],
-  areaPolygon: Vector[],
-  obstacles: Vector[][],
+  _areaPolygon: Vector[],
+  _obstacles: Vector[][],
   mowingStandoffMeters: number,
 ): number {
   const from = fromTraversal[fromTraversal.length - 1];
   const to = toTraversal[0];
   const fromStandoff = stripTraversalEndStandoff(from.strip, from.reversed, mowingStandoffMeters);
   const toStandoff = stripTraversalStartStandoff(to.strip, to.reversed, mowingStandoffMeters);
-  if (pathStaysWithinAreaAndAvoidsObstacles([fromStandoff, toStandoff], areaPolygon, obstacles)) {
-    return distance(fromStandoff, toStandoff) * 2;
-  }
-  // Full perimeter/visibility routing is deliberately deferred until the
-  // chosen traversal is known. Running it for every DP edge makes preview
-  // latency grow with every possible region ordering. The large finite cost
-  // keeps the graph connected while strongly preferring directly safe edges.
-  return UNRESOLVED_TRANSITION_COST_METERS + (distance(fromStandoff, toStandoff) * 2);
+  // Region ordering can evaluate hundreds of directed alternatives. Even the
+  // sampled direct-path validation starves the live sensor loop on a detailed
+  // lawn boundary. Rank candidates with a constant-time geometric estimate;
+  // buildStripConnectors still constructs and fully validates every selected
+  // transition before the plan can execute.
+  const obstaclePenalty = _obstacles.some((obstacle) => segmentIntersectsPolygon(fromStandoff, toStandoff, obstacle))
+    ? REGIONAL_ROUTED_TRANSITION_PENALTY_METERS
+    : 0;
+  return distance(fromStandoff, toStandoff) * 2 + obstaclePenalty;
 }
 
 function optimiseRegionTemplates(
@@ -938,9 +942,14 @@ function optimiseRegionTemplates(
   preferredEntryCost?: (choice: RegionTemplateChoice) => number,
 ): RegionTemplateChoice[] {
   if (templates.length === 0) return [];
-  // Optimise a closed cycle first. The live start point only rotates that
-  // cycle; it must not change its energy-efficient region transitions.
-  if (templates.length > 12) {
+  const entryCost = (choice: RegionTemplateChoice): number => {
+    if (!preferredStartPoint) return 0;
+    return preferredEntryCost?.(choice) ?? 0;
+  };
+  // Optimise the route actually executed: an open traversal beginning at the
+  // live entry. Closing an artificial cycle can retain a very long transition
+  // that the mower never executes.
+  if (templates.length > MAX_EXACT_REGION_OPTIMISATION_REGIONS) {
     const remaining = templates.map((_, regionIndex) => regionIndex);
     const result: RegionTemplateChoice[] = [];
     let previousChoice: RegionTemplateChoice | null = null;
@@ -949,9 +958,7 @@ function optimiseRegionTemplates(
       remaining.forEach((regionIndex, listIndex) => {
         ([0, 1] as const).forEach((variantIndex) => {
           const choice = { regionIndex, variantIndex };
-          const cost = previousChoice
-            ? transitionCost(previousChoice, choice)
-            : regionIndex;
+          const cost = previousChoice ? transitionCost(previousChoice, choice) : entryCost(choice);
           if (cost < best.cost - EPSILON) best = { listIndex, variantIndex, cost };
         });
       });
@@ -962,17 +969,20 @@ function optimiseRegionTemplates(
       previousChoice = { regionIndex, variantIndex: best.variantIndex };
       result.push(previousChoice);
     }
-    return rotateRegionCycleToPreferredStart(result, templates, preferredStartPoint, preferredEntryCost);
+    return result;
   }
 
   type State = { cost: number; choices: RegionTemplateChoice[] };
   let states = new Map<string, State>();
-  // Every Hamiltonian cycle contains region zero, so fixing its position loses
-  // no possible cycle and removes rotational duplicates from the DP.
-  ([0, 1] as const).forEach((variantIndex) => {
-    states.set(`${1}:${0}:${variantIndex}`, {
-      cost: 0,
-      choices: [{ regionIndex: 0, variantIndex }],
+  templates.forEach((_template, regionIndex) => {
+    ([0, 1] as const).forEach((variantIndex) => {
+      const choice = { regionIndex, variantIndex };
+      const cost = entryCost(choice);
+      if (!Number.isFinite(cost)) return;
+      states.set(`${1 << regionIndex}:${regionIndex}:${variantIndex}`, {
+        cost,
+        choices: [choice],
+      });
     });
   });
   for (let size = 1; size < templates.length; size += 1) {
@@ -1000,67 +1010,12 @@ function optimiseRegionTemplates(
   }
   const complete = [...states.values()]
     .filter((state) => state.choices.length === templates.length)
-    .map((state) => ({
-      ...state,
-      cost: state.cost + transitionCost(state.choices[state.choices.length - 1], state.choices[0]),
-    }))
     .filter((state) => Number.isFinite(state.cost));
   if (complete.length === 0) {
     throw new Error("mowing_regional_route_unavailable");
   }
   complete.sort((left, right) => left.cost - right.cost);
-  return rotateRegionCycleToPreferredStart(complete[0].choices, templates, preferredStartPoint, preferredEntryCost);
-}
-
-function rotateRegionCycleToPreferredStart(
-  cycle: RegionTemplateChoice[],
-  templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
-  preferredStartPoint?: MowingInitialEntryPosition,
-  preferredEntryCost?: (choice: RegionTemplateChoice) => number,
-): RegionTemplateChoice[] {
-  if (!preferredStartPoint || cycle.length < 2) return cycle;
-  const preferred = { x: preferredStartPoint.xMeters, y: preferredStartPoint.yMeters };
-  let bestIndex = 0;
-  let bestDistance = Infinity;
-  cycle.forEach((choice, index) => {
-    const entryDistance = preferredEntryCost
-      ? preferredEntryCost(choice)
-      : (() => {
-        const traversal = templates[choice.regionIndex].variants[choice.variantIndex];
-        const entry = stripTraversalStart(traversal[0].strip, traversal[0].reversed);
-        return distance(preferred, entry);
-      })();
-    if (entryDistance < bestDistance - EPSILON) {
-      bestDistance = entryDistance;
-      bestIndex = index;
-    }
-  });
-  return [...cycle.slice(bestIndex), ...cycle.slice(0, bestIndex)];
-}
-
-function validateRegionalCycleClosure(
-  cycle: RegionTemplateChoice[],
-  templates: ReadonlyArray<{ readonly variants: readonly [TraversalStep[], TraversalStep[]] }>,
-  areaPolygon: Vector[],
-  obstacles: Vector[][],
-  mowingStandoffMeters: number,
-): void {
-  if (cycle.length < 2) return;
-  const traversal = cycle.flatMap((choice) => templates[choice.regionIndex].variants[choice.variantIndex]);
-  const first = traversal[0];
-  const last = traversal[traversal.length - 1];
-  buildSafeStripConnector(
-    stripTraversalEnd(last.strip, last.reversed),
-    stripTraversalStart(first.strip, first.reversed),
-    stripTraversalEndBoundary(last.strip, last.reversed),
-    stripTraversalStartBoundary(first.strip, first.reversed),
-    stripTraversalEndStandoff(last.strip, last.reversed, mowingStandoffMeters),
-    stripTraversalStartStandoff(first.strip, first.reversed, mowingStandoffMeters),
-    areaPolygon,
-    obstacles,
-    mowingStandoffMeters,
-    buildStripRoutingWaypoints(traversal.map((step) => step.strip), mowingStandoffMeters),
-  );
+  return complete[0].choices;
 }
 
 function estimateTraversalTurnCost(traversal: TraversalStep[]): number {
@@ -1634,7 +1589,6 @@ function buildFreeSpaceConnector(
   const candidateNodes = [
     from,
     to,
-    ...areaPolygon,
     ...offsetArea,
     ...offsetObstacles.flat(),
     ...routingRoadmap.points,
@@ -1728,17 +1682,22 @@ function buildFreeSpaceConnector(
       );
     }
   }
-  // Consecutive recorded area vertices are the authoritative perimeter. Keep
-  // that loop connected even at a zero-width concave join where sampled
-  // point-in-polygon tests can be numerically ambiguous.
-  for (let index = 0; index < areaPolygon.length; index += 1) {
-    const nextIndex = (index + 1) % areaPolygon.length;
-    if (obstacles.some((obstacle) => segmentIntersectsPolygon(areaPolygon[index], areaPolygon[nextIndex], obstacle))) {
+  // The inward-offset area perimeter is the safe routing loop. Raw area
+  // vertices describe the physical edge and must never be offered to the
+  // shortest-path search: doing so can produce a mathematically in-bounds
+  // route that runs the mower body along a wall or recorded lawn boundary.
+  for (let index = 0; index < offsetArea.length; index += 1) {
+    const nextIndex = (index + 1) % offsetArea.length;
+    if (!pathStaysWithinAreaAndAvoidsObstacles(
+      [offsetArea[index], offsetArea[nextIndex]],
+      areaPolygon,
+      obstacles,
+    )) {
       continue;
     }
     addEdge(
-      nodes.findIndex((node) => distance(node, areaPolygon[index]) <= 0.01),
-      nodes.findIndex((node) => distance(node, areaPolygon[nextIndex]) <= 0.01),
+      nodes.findIndex((node) => distance(node, offsetArea[index]) <= 0.01),
+      nodes.findIndex((node) => distance(node, offsetArea[nextIndex]) <= 0.01),
     );
   }
 

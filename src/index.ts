@@ -22,7 +22,13 @@ export type { SystemStopState } from "./control/systemStop.js";
 
 // Export all constants for external use
 export * from "./constants.js";
-export { routeServerRequest, startMowerServer, resolveServerPort, shouldClearSystemStopForPost } from "./server/appServer.js";
+export {
+  routeServerRequest,
+  startMowerServer,
+  resolveServerPort,
+  shouldClearSystemStopForPost,
+  shouldStartRechargeDiversion,
+} from "./server/appServer.js";
 export { startMowerWebServer } from "./server/webServer.js";
 export { PrimitivesStore } from "./server/primitivesStore.js";
 export { getSegmentTestingPageHtml } from "./server/segmentTestingPage.js";

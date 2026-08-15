@@ -72,6 +72,8 @@ export interface DriveControllerOptions {
   sleep?: (delayMs: number) => Promise<void>;
 }
 
+const MAX_POST_TURN_REALIGNMENTS = 2;
+
 export class DriveController {
   private readonly logger: LoggerScope;
   private readonly sensorController: SensorController;
@@ -195,6 +197,7 @@ export class DriveController {
         // 3. Turn to face the desired heading — always when alwaysTurnToFaceTarget
         //    is set (e.g. short boundary segments), otherwise only when error
         //    exceeds the threshold.
+        let performedInitialTurn = false;
         if (!shouldSkipInitialTurn
           && (request.alwaysTurnToFaceTarget || headingErrorDeg > DRIVE_INITIAL_TURN_THRESHOLD_DEG)) {
           this.status = "turning";
@@ -203,20 +206,82 @@ export class DriveController {
             driveDirectionSign,
           });
 
-          await this.turnController.executeTurn({
+          const turnResult = await this.turnController.executeTurn({
             targetAngle: headingError,
             direction: unwrapRelativeAngle(headingError) > 0 ? "ccw" : "cw",
             learningEnabled: true,
             learningSource: request.learningSource,
           });
+          if (turnResult.status !== "success") {
+            throw new Error(`drive_initial_turn_failed:${turnResult.status}${
+              turnResult.errorMessage ? `:${turnResult.errorMessage}` : ""
+            }`);
+          }
+          performedInitialTurn = true;
         }
 
-        const postTurnPose = this.poseFusion.getCurrentPose();
-        const postTurnDistanceMeters = unwrapMeters(distanceBetween(
+        let postTurnPose = this.poseFusion.getCurrentPose();
+        let postTurnDistanceMeters = unwrapMeters(distanceBetween(
           postTurnPose.position,
           request.targetPosition,
         ));
         const minimumDriveDistanceMeters = Math.max(0, request.minimumDriveDistanceMeters ?? 0);
+
+        // A pivot can move the fused control point by several centimetres even
+        // after TurnController has ramped down and settled. On a short hop that
+        // changes the bearing to the fixed target materially. Recompute the
+        // bearing from each settled pose. Let the short-drive heading arc own a
+        // residual that fits its CTE envelope; otherwise realign before the
+        // straight line would violate that envelope by design.
+        for (
+          let realignment = 0;
+          performedInitialTurn
+            && realignment < MAX_POST_TURN_REALIGNMENTS
+            && !(minimumDriveDistanceMeters > 0 && postTurnDistanceMeters < minimumDriveDistanceMeters);
+          realignment += 1
+        ) {
+          const settledTargetHeading = angleTo(postTurnPose.position, request.targetPosition);
+          const settledDesiredHeading: InternalHeading = driveDirectionSign === 1
+            ? settledTargetHeading
+            : addRelativeAngle(settledTargetHeading, createRelativeAngle(180));
+          const settledHeadingError = headingDifference(postTurnPose.heading, settledDesiredHeading);
+          const settledHeadingErrorDeg = Math.abs(unwrapRelativeAngle(settledHeadingError));
+          const predictedUncorrectedCteMeters = postTurnDistanceMeters * Math.sin(
+            Math.min(90, settledHeadingErrorDeg) * (Math.PI / 180),
+          );
+          const arcFitsRequestedCte = request.maxCrossTrackErrorMeters !== undefined
+            && predictedUncorrectedCteMeters <= request.maxCrossTrackErrorMeters;
+          if (settledHeadingErrorDeg <= DRIVE_INITIAL_TURN_THRESHOLD_DEG || arcFitsRequestedCte) {
+            break;
+          }
+
+          this.status = "turning";
+          this.logger.info("drive.post_turn_realigning", {
+            attempt: realignment + 1,
+            headingError: unwrapRelativeAngle(settledHeadingError),
+            postTurnDistanceMeters,
+            predictedUncorrectedCteMeters,
+            requestedMaxCteMeters: request.maxCrossTrackErrorMeters ?? null,
+            driveDirectionSign,
+          });
+          const turnResult = await this.turnController.executeTurn({
+            targetAngle: settledHeadingError,
+            direction: unwrapRelativeAngle(settledHeadingError) > 0 ? "ccw" : "cw",
+            learningEnabled: true,
+            learningSource: request.learningSource,
+          });
+          if (turnResult.status !== "success") {
+            throw new Error(`drive_realignment_turn_failed:${turnResult.status}${
+              turnResult.errorMessage ? `:${turnResult.errorMessage}` : ""
+            }`);
+          }
+          postTurnPose = this.poseFusion.getCurrentPose();
+          postTurnDistanceMeters = unwrapMeters(distanceBetween(
+            postTurnPose.position,
+            request.targetPosition,
+          ));
+        }
+
         if (minimumDriveDistanceMeters > 0 && postTurnDistanceMeters < minimumDriveDistanceMeters) {
           this.logger.info("drive.translation_skipped_near_target", {
             postTurnDistanceMeters,
@@ -255,7 +320,6 @@ export class DriveController {
           driveDirectionSign,
           maxCrossTrackErrorMeters: request.maxCrossTrackErrorMeters,
           maximumWheelOutputPercent: request.maximumWheelOutputPercent,
-          allowRotateToHeading: request.skipInitialTurn !== true,
         });
 
         if (lineResult.status === "success") {

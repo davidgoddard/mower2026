@@ -5,7 +5,6 @@ export interface RechargeConfiguration {
   readonly enabled: boolean;
   readonly chargingPosition: RechargePoint | null;
   readonly driveToPosition: RechargePoint | null;
-  readonly combinedWheelBudgetMeters: number;
   readonly dockingWheelOutputPercent: number;
 }
 
@@ -13,7 +12,6 @@ export const DEFAULT_RECHARGE_CONFIGURATION: RechargeConfiguration = {
   enabled: true,
   chargingPosition: null,
   driveToPosition: null,
-  combinedWheelBudgetMeters: 1500,
   dockingWheelOutputPercent: 0.3,
 };
 
@@ -37,13 +35,11 @@ export class RechargeConfigStore {
     const point = (candidate: RechargePoint | null | undefined): RechargePoint | null => candidate
       && Number.isFinite(candidate.xMeters) && Number.isFinite(candidate.yMeters)
       ? { xMeters: candidate.xMeters, yMeters: candidate.yMeters } : null;
-    const budget = Number(value.combinedWheelBudgetMeters);
     const speed = Number(value.dockingWheelOutputPercent);
     return {
       enabled: value.enabled !== false,
       chargingPosition: point(value.chargingPosition),
       driveToPosition: point(value.driveToPosition),
-      combinedWheelBudgetMeters: Number.isFinite(budget) && budget > 0 ? budget : 1500,
       dockingWheelOutputPercent: Number.isFinite(speed) ? Math.min(1, Math.max(0.1, speed)) : 0.3,
     };
   }

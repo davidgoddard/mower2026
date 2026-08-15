@@ -40,6 +40,7 @@
     const STRIP_SPACING_STORAGE_KEY = 'manualDrivePage.stripSpacingCm';
     const MOWING_PRESET_STORAGE_KEY = 'manualDrivePage.mowingPresetId';
     const MOWING_PROGRESS_STORAGE_KEY = 'manualDrivePage.mowingProgress';
+    const MOWING_PLAN_PREVIEW_STORAGE_KEY = 'manualDrivePage.mowingPlanPreview.v1';
     const DEFAULT_STRIP_SPACING_CM = 30;
     function loadStoredMowingHeading() {
       try {
@@ -95,6 +96,50 @@
         }
       } catch (_error) {
         // Ignore storage failures; the page still works without persistence.
+      }
+    }
+
+    function isStoredMowingPlanPreview(value) {
+      return typeof value === 'object'
+        && value !== null
+        && typeof value.areaName === 'string'
+        && value.areaName.length > 0
+        && Number.isFinite(value.headingDeg)
+        && Number.isFinite(value.stripSpacingMeters)
+        && Array.isArray(value.strips)
+        && Array.isArray(value.connectors)
+        && Array.isArray(value.rawAreaPoints);
+    }
+
+    function loadStoredMowingPlanPreview() {
+      try {
+        const value = JSON.parse(window.localStorage.getItem(MOWING_PLAN_PREVIEW_STORAGE_KEY) || 'null');
+        if (isStoredMowingPlanPreview(value)) {
+          return value;
+        }
+        window.localStorage.removeItem(MOWING_PLAN_PREVIEW_STORAGE_KEY);
+      } catch (_error) {
+        // Ignore invalid or unavailable storage and wait for a fresh preview.
+      }
+      return null;
+    }
+
+    function storeMowingPlanPreview(preview) {
+      if (!isStoredMowingPlanPreview(preview)) {
+        return;
+      }
+      try {
+        window.localStorage.setItem(MOWING_PLAN_PREVIEW_STORAGE_KEY, JSON.stringify(preview));
+      } catch (_error) {
+        // The live preview remains usable if browser storage is unavailable or full.
+      }
+    }
+
+    function clearStoredMowingPlanPreview() {
+      try {
+        window.localStorage.removeItem(MOWING_PLAN_PREVIEW_STORAGE_KEY);
+      } catch (_error) {
+        // Ignore storage failures.
       }
     }
 
@@ -156,9 +201,12 @@
     let areaPointCount = 0;
     let storedAreaPerimeters = [];
     let mowingPresets = [];
-    let mowingPlanPreview = null;
-    let selectedMowingPlanArea = '';
+    let mowingPlanPreview = loadStoredMowingPlanPreview();
+    let selectedMowingPlanArea = mowingPlanPreview?.areaName ?? '';
     let mowingPlanPreviewError = '';
+    let mowingPlanEditing = false;
+    let committedMowingPlanFields = null;
+    let mowingPlanEditSnapshot = null;
     let mapTransform = null;
     let headingDragStart = null;
     let pageStatePollTimer = null;
@@ -236,6 +284,20 @@
       }
     }
 
+    async function loadFrozenMowingPlanPreview() {
+      try {
+        const data = await fetchJson('/api/mowing/plan');
+        if (!isStoredMowingPlanPreview(data?.preview)) {
+          return;
+        }
+        mowingPlanPreview = data.preview;
+        selectedMowingPlanArea = data.preview.areaName;
+        storeMowingPlanPreview(data.preview);
+      } catch (error) {
+        console.error('Failed to load frozen mowing plan:', error);
+      }
+    }
+
     function storeMowingProgress(force = false) {
       const now = Date.now();
       if (!force && now - lastMowingProgressStoreAt < MOWING_PROGRESS_STORE_INTERVAL_MS) {
@@ -281,6 +343,7 @@
     const mowingHeadingValue = $("mowingHeadingValue");
     const stripSpacingInput = $("stripSpacingCm");
     const previewMowingPlanBtn = $("previewMowingPlanBtn");
+    const cancelMowingPlanEditBtn = $("cancelMowingPlanEditBtn");
     const resumeMowingBtn = $("resumeMowingBtn");
     const perimeterEditorBackdrop = $("perimeterEditorBackdrop");
     const perimeterEditorCanvas = $("perimeterEditorCanvas");
@@ -865,6 +928,9 @@
     }
 
     function renderMowingPlanAreaOptions() {
+      if (mowingPlanEditing) {
+        return;
+      }
       const previousSelection = selectedMowingPlanArea || mowingPlanAreaSelect.value;
       mowingPlanAreaSelect.innerHTML = storedAreaPerimeters.map((path) => {
         const selected = path.name === previousSelection ? ' selected' : '';
@@ -881,6 +947,10 @@
 
       selectedMowingPlanArea = mowingPlanAreaSelect.value || storedAreaPerimeters[0].name;
       mowingPlanAreaSelect.value = selectedMowingPlanArea;
+      if (mowingPlanPreview?.areaName === selectedMowingPlanArea) {
+        restoreStoredMowingPlanPreview();
+        return;
+      }
       applyAreaMowingDefaults(selectedMowingPlanArea);
       if (mowingPlanPreviewError) {
         mowingPlanStatusEl.textContent = mowingPlanPreviewError;
@@ -900,6 +970,88 @@
       }
       mowingPlanStatusEl.textContent = `Selected area: ${areaName}. Click Preview to inspect the plan.`;
       drawMap();
+    }
+
+    function readMowingPlanFields() {
+      return {
+        areaName: mowingPlanAreaSelect.value,
+        presetId: mowingPresetSelect.value,
+        headingDeg: mowingHeadingInput.value,
+        stripSpacingCm: stripSpacingInput.value,
+        preview: mowingPlanPreview,
+      };
+    }
+
+    function commitMowingPlanFields() {
+      mowingPlanEditing = false;
+      mowingPlanEditSnapshot = null;
+      committedMowingPlanFields = readMowingPlanFields();
+      cancelMowingPlanEditBtn.hidden = true;
+    }
+
+    function beginMowingPlanEdit() {
+      if (mowingPlanEditing) {
+        return;
+      }
+      mowingPlanEditSnapshot = committedMowingPlanFields ?? readMowingPlanFields();
+      mowingPlanEditing = true;
+      cancelMowingPlanEditBtn.hidden = false;
+    }
+
+    async function cancelMowingPlanEdit() {
+      const snapshot = mowingPlanEditSnapshot ?? committedMowingPlanFields;
+      mowingPlanEditing = false;
+      cancelMowingPlanEditBtn.hidden = true;
+      await Promise.all([
+        loadStoredAreaPerimeters(),
+        loadMowingPresets(),
+      ]);
+      if (snapshot) {
+        selectedMowingPlanArea = snapshot.areaName;
+        mowingPlanAreaSelect.value = snapshot.areaName;
+        mowingPresetSelect.value = snapshot.presetId;
+        mowingHeadingInput.value = snapshot.headingDeg;
+        stripSpacingInput.value = snapshot.stripSpacingCm;
+        mowingPlanPreview = snapshot.preview;
+        storeMowingPresetId(snapshot.presetId);
+        storeMowingHeading(snapshot.headingDeg);
+        storeStripSpacingCm(snapshot.stripSpacingCm);
+        updateHeadingLabel();
+      }
+      if (!restoreStoredMowingPlanPreview()) {
+        mowingPlanPreview = snapshot?.preview ?? null;
+        if (mowingPlanPreview) {
+          drawMap();
+        } else {
+          markMowingPlanPreviewStale();
+        }
+      }
+      commitMowingPlanFields();
+    }
+
+    function restoreStoredMowingPlanPreview() {
+      const preview = mowingPlanPreview ?? loadStoredMowingPlanPreview();
+      if (!preview) {
+        return false;
+      }
+      if (!storedAreaPerimeters.some((area) => area.name === preview.areaName)) {
+        mowingPlanPreview = null;
+        clearStoredMowingPlanPreview();
+        return false;
+      }
+
+      mowingPlanPreview = preview;
+      mowingPlanPreviewError = '';
+      selectedMowingPlanArea = preview.areaName;
+      mowingPlanAreaSelect.value = preview.areaName;
+      mowingHeadingInput.value = String(Math.round(normalizeAxisHeading(preview.headingDeg)));
+      stripSpacingInput.value = String(Math.round(preview.stripSpacingMeters * 100));
+      storeMowingHeading(mowingHeadingInput.value);
+      storeStripSpacingCm(stripSpacingInput.value);
+      updateHeadingLabel();
+      mowingPlanStatusEl.textContent = `${preview.stripCount ?? preview.strips.length} strips restored for ${preview.areaName}. This is the last generated plan; it has not been recalculated from the mower's current position.`;
+      drawMap();
+      return true;
     }
 
     async function requestMowingPlanPreview() {
@@ -928,6 +1080,7 @@
         });
 
         mowingPlanPreview = result;
+        storeMowingPlanPreview(result);
         mowingPlanPreviewError = '';
         const stats = result.areaGeometryStats;
         const timing = result.areaGeometryTiming;
@@ -942,6 +1095,7 @@
           ? ` | prep ${planPerformance.prepareMs}ms | strips ${planPerformance.stripBuildMs}ms | sequence ${planPerformance.sequenceMs}ms | connectors ${planPerformance.connectorBuildMs}ms`
           : '';
         mowingPlanStatusEl.textContent = `${result.stripCount} strips ready for ${areaName}.${areaDetail}${timingDetail}${planDetail}`;
+        commitMowingPlanFields();
         drawMap();
       } catch (error) {
         mowingPlanPreview = null;
@@ -1368,7 +1522,6 @@
     const stopMowingBtn = $("stopMowingBtn");
     const mowingStatusBar = $("mowingStatusBar");
     const mowingStatusText = $("mowingStatusText");
-    const rechargeBudgetMeters = $("rechargeBudgetMeters");
     const rechargeDriveToText = $("rechargeDriveToText");
     const rechargeChargingText = $("rechargeChargingText");
     const rechargeStatusText = $("rechargeStatusText");
@@ -1381,12 +1534,11 @@
     async function loadRechargeStatus() {
       const status = await fetchJson('/api/recharge/status');
       rechargeConfiguration = status.configuration;
-      rechargeBudgetMeters.value = String(status.configuration.combinedWheelBudgetMeters);
       rechargeDriveToText.textContent = formatRechargePoint(status.configuration.driveToPosition);
       rechargeChargingText.textContent = formatRechargePoint(status.configuration.chargingPosition);
       rechargeStatusText.textContent = status.waitingForCharge
         ? 'Charging — press Carry On Mowing when ready.'
-        : `${Number(status.combinedWheelTravelMeters).toFixed(0)} / ${Number(status.configuration.combinedWheelBudgetMeters).toFixed(0)} combined wheel metres${status.rechargeDue ? ' — recharge due' : ''}`;
+        : `${status.batteryRemainingPercent == null ? 'Battery estimate unavailable' : Number(status.batteryRemainingPercent).toFixed(1) + '% battery remaining'}${status.rechargeDue ? ' — recharge due' : ''}. Automatic recharge uses monitored motor power only.`;
     }
 
     async function captureRechargePoint(point) {
@@ -1395,14 +1547,7 @@
     }
     $("captureRechargeDriveToBtn").addEventListener('click', () => captureRechargePoint('driveTo').catch((error) => alert(error.message)));
     $("captureRechargeChargingBtn").addEventListener('click', () => captureRechargePoint('charging').catch((error) => alert(error.message)));
-    $("saveRechargeBtn").addEventListener('click', async () => {
-      try {
-        await postJson('/api/recharge/config', { ...rechargeConfiguration, combinedWheelBudgetMeters: Number(rechargeBudgetMeters.value) });
-        await loadRechargeStatus();
-      } catch (error) { alert('Failed to save recharge settings: ' + error.message); }
-    });
     $("rechargeNowBtn").addEventListener('click', () => postJson('/api/recharge/request', {}).then(loadRechargeStatus).catch((error) => alert(error.message)));
-    $("resetRechargeDistanceBtn").addEventListener('click', () => postJson('/api/recharge/reset-distance', {}).then(loadRechargeStatus).catch((error) => alert(error.message)));
 
     const MOWING_PHASE_LABELS = {
       idle: 'Idle',
@@ -1549,6 +1694,7 @@
         });
 
         clearMowingProgress();
+        commitMowingPlanFields();
         updateMowingStatusUi({ phase: 'approaching_area_perimeter', currentStripIndex: 0, totalStrips: result.stripCount, tracedBoundaryCount: 0 });
         schedulePageStatePoll(0);
       } catch (error) {
@@ -1717,6 +1863,7 @@
     });
 
     mowingPlanAreaSelect.addEventListener('change', () => {
+      beginMowingPlanEdit();
       mowingPresetSelect.value = '';
       storeMowingPresetId('');
       selectedMowingPlanArea = mowingPlanAreaSelect.value;
@@ -1725,6 +1872,7 @@
     });
 
     mowingPresetSelect.addEventListener('change', () => {
+      beginMowingPlanEdit();
       const preset = mowingPresets.find((entry) => entry.id === mowingPresetSelect.value);
       storeMowingPresetId(preset?.id || '');
       if (!applyMowingPreset(preset)) return;
@@ -1732,6 +1880,7 @@
     });
 
     mowingHeadingInput.addEventListener('input', () => {
+      beginMowingPlanEdit();
       mowingPresetSelect.value = '';
       storeMowingPresetId('');
       storeMowingHeading(mowingHeadingInput.value);
@@ -1740,6 +1889,7 @@
     });
 
     stripSpacingInput.addEventListener('input', () => {
+      beginMowingPlanEdit();
       mowingPresetSelect.value = '';
       storeMowingPresetId('');
       storeStripSpacingCm(stripSpacingInput.value);
@@ -1748,6 +1898,12 @@
 
     previewMowingPlanBtn.addEventListener('click', () => {
       requestMowingPlanPreview();
+    });
+
+    cancelMowingPlanEditBtn.addEventListener('click', () => {
+      cancelMowingPlanEdit().catch((error) => {
+        console.error('Failed to cancel mowing plan changes:', error);
+      });
     });
 
     canvas.addEventListener('mousedown', (event) => {
@@ -1787,6 +1943,7 @@
         return;
       }
 
+      beginMowingPlanEdit();
       setMowingHeading((Math.atan2(dy, dx) * 180) / Math.PI);
     });
 
@@ -1954,6 +2111,7 @@
 
     Promise.allSettled([
       loadMowerMowingProgress(),
+      loadFrozenMowingPlanPreview(),
       loadStoredPaths(),
       loadStoredAreaPerimeters(),
       loadMowingPresets(),
@@ -1970,7 +2128,10 @@
       }
       updateRecordingUi();
       updateAreaRecordingUi();
-      markMowingPlanPreviewStale();
+      if (!restoreStoredMowingPlanPreview()) {
+        markMowingPlanPreviewStale();
+      }
+      commitMowingPlanFields();
       scheduleListRefresh();
       schedulePageStatePoll(0);
     });

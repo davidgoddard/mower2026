@@ -66,6 +66,46 @@ test("continuous follower aligns excessive entry misalignment once without a fal
   assert.equal(commands[0].left >= 0 && commands[0].right >= 0, true);
 });
 
+test("continuous follower retains the incoming segment after consuming a transit route start", async () => {
+  const route = [
+    { xMeters: 11.848055354362831, yMeters: 27.33609717910012, capturedAt: 1 },
+    { xMeters: 3.1461631976923328, yMeters: 8.720711742959288, capturedAt: 2 },
+    { xMeters: 1.6692321689946508, yMeters: 5.243069324585817, capturedAt: 3 },
+  ];
+  let pose = createPose(route[0].xMeters, route[0].yMeters, createInternalHeading(24.12), "gnss");
+  let turnCalls = 0;
+  const commands = [];
+  const follower = new ContinuousPathFollower({
+    poseFusion: { getCurrentPose: () => pose },
+    driveController: { executeDrive: async () => ({ status: "success" }) },
+    turnController: {
+      executeTurn: async () => {
+        turnCalls += 1;
+        pose = createPose(route[0].xMeters, route[0].yMeters, createInternalHeading(-115), "gnss");
+        return { status: "success" };
+      },
+    },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async (left, right) => {
+        commands.push({ left, right });
+        pose = createPose(route[2].xMeters, route[2].yMeters, createInternalHeading(-115), "gnss");
+      },
+      requestNeutralMotorOutputs: async () => {},
+    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath(route, { loopPath: false });
+
+  assert.equal(result.completed, true);
+  assert.equal(turnCalls, 1);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].left >= 0 && commands[0].right >= 0, true);
+});
+
 test("continuous follower delegates one genuine waypoint corner through the drive controller", async () => {
   let pose = createPose(0.86, 0, createInternalHeading(0), "gnss");
   const driveRequests = [];
@@ -107,6 +147,62 @@ test("continuous follower delegates one genuine waypoint corner through the driv
   assert.equal(driveRequests[0].targetPosition.xMeters, 1);
   assert.equal(driveRequests[0].targetPosition.yMeters, 0.4);
   assert.equal(driveRequests[0].alwaysTurnToFaceTarget, true);
+  assert.ok(Math.abs(driveRequests[0].maxCrossTrackErrorMeters - 0.075) < 1e-9);
+});
+
+test("continuous follower does not pass over consecutive nearby corners before capturing them", async () => {
+  let pose = createPose(0.86, 0, createInternalHeading(0), "gnss");
+  const driveRequests = [];
+  const follower = new ContinuousPathFollower({
+    poseFusion: { getCurrentPose: () => pose },
+    driveController: {
+      executeDrive: async (request) => {
+        driveRequests.push(request);
+        pose = createPose(
+          driveRequests.length === 1
+            ? request.targetPosition.xMeters + 0.05
+            : request.targetPosition.xMeters,
+          request.targetPosition.yMeters,
+          createInternalHeading(driveRequests.length === 1 ? 90 : 0),
+          "gnss",
+        );
+        return { status: "success" };
+      },
+    },
+    turnController: { executeTurn: async () => ({ status: "success" }) },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async () => {},
+      requestNeutralMotorOutputs: async () => {},
+    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 1, yMeters: 0.1, capturedAt: 3 },
+    { xMeters: 1.5, yMeters: 0.1, capturedAt: 4 },
+  ], {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+    pivotAtWaypointTurnDeg: 20,
+    pivotAtWaypointDistanceMeters: 0.15,
+    completionToleranceMeters: 0.15,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(driveRequests.length, 2);
+  assert.deepEqual(
+    driveRequests.map((request) => [
+      request.targetPosition.xMeters,
+      request.targetPosition.yMeters,
+    ]),
+    [[1, 0.1], [1.4, 0.1]],
+  );
 });
 
 test("continuous follower refuses recovery motion from materially outside the route", async () => {
@@ -186,6 +282,41 @@ test("continuous follower does not abort for one route-deviation sample just ove
 
   assert.equal(result.completed, true);
   assert.equal(driveCalls, 0);
+});
+
+test("continuous follower allows a correcting turn to settle after more than 0.2 seconds", async () => {
+  let pose = createPose(0, 0.27, createInternalHeading(0), "gnss");
+  let commandCount = 0;
+  const follower = new ContinuousPathFollower({
+    poseFusion: { getCurrentPose: () => pose },
+    driveController: { executeDrive: async () => ({ status: "success" }) },
+    turnController: { executeTurn: async () => ({ status: "success" }) },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async () => {
+        commandCount += 1;
+        if (commandCount === 15) {
+          pose = createPose(1, 0, createInternalHeading(0), "gnss");
+        }
+      },
+      requestNeutralMotorOutputs: async () => {},
+    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 1, yMeters: 0, capturedAt: 2 },
+  ], {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(commandCount, 15);
 });
 
 test("continuous follower completes a perimeter near its final target without entering final recovery", async () => {

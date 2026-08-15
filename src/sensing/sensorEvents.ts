@@ -76,6 +76,12 @@ export interface ObstructionDetectedEvent {
   readonly rightMotorCurrentAmps: number;
   readonly leftEncoderDelta: number;
   readonly rightEncoderDelta: number;
+  /** Motion mode whose independent progress reference raised the event. */
+  readonly motionKind: "translation" | "pivot" | null;
+  /** True only when sustained current caused or reinforced the stall. */
+  readonly currentHigh: boolean;
+  /** Raw motor-controller fault flags captured with the triggering sample. */
+  readonly faultFlags: number;
 }
 
 /**

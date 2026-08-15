@@ -67,8 +67,7 @@ import {
   DRIVE_SHORT_TARGET_X_ERROR_METERS,
   DRIVE_SHORT_TARGET_Y_ERROR_METERS,
   DRIVE_ARRIVAL_TOLERANCE_METERS,
-  DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG,
-  DRIVE_STEERING_PIVOT_OUTPUT_PERCENT,
+  DRIVE_STEERING_MAX_HEADING_ERROR_DEG,
   DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS,
   DRIVE_STEERING_MAX_TRIM_PERCENT,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
@@ -82,7 +81,6 @@ import type { LearningPolicy } from "../config/learningPolicyConfig.js";
 export interface DriveLineRequest extends DriveRequest {
   readonly driveDirectionSign?: 1 | -1;
   readonly maxCrossTrackErrorMeters?: number;
-  readonly allowRotateToHeading?: boolean;
 }
 
 export interface DriveLineControllerOptions {
@@ -158,7 +156,6 @@ export class DriveLineController {
   private driveResolve: ((result: DriveResult) => void) | null = null;
   private cteSamples: Meters[] = [];
   private driveDirectionSign: 1 | -1 = 1;
-  private allowRotateToHeading = true;
 
   // Phase-1 instrumentation: per-run state populated when a drive starts
   // and consumed when the drive completes/aborts.  Null between drives.
@@ -544,7 +541,6 @@ export class DriveLineController {
       systemStop.clearStop("drive-line-execute");
       this.currentDrive = request;
       this.driveDirectionSign = request.driveDirectionSign ?? 1;
-      this.allowRotateToHeading = request.allowRotateToHeading ?? true;
       this.driveStartTime = this.nowMillis();
       this.cteSamples = [];
       this.brakeDecisionPoseQuality = "unknown";
@@ -600,6 +596,9 @@ export class DriveLineController {
       const initialRemainingAlongTrackDistance = unwrapMeters(
         distanceBetween(this.driveLineStart, this.driveLineEnd),
       );
+      if (this.isGrosslyMisaligned(startPose, initialRemainingAlongTrackDistance)) {
+        throw new Error("Line-drive heading error exceeded limit before translation");
+      }
       this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
     } catch (error) {
       if (subscribed) {
@@ -1197,6 +1196,12 @@ export class DriveLineController {
     const projectedAlongTrackDistance = this.projectAlongTrackDistance(currentPosition);
     const remainingAlongTrackDistance = Math.max(0, targetDistance - projectedAlongTrackDistance);
 
+    if (this.isGrosslyMisaligned(pose, remainingAlongTrackDistance)) {
+      this.poseFusion.off("poseUpdate", this.onPoseUpdate);
+      await this.finishStoppedDrive("Line-drive heading error exceeded limit");
+      return;
+    }
+
     if (remainingAlongTrackDistance <= DRIVE_ARRIVAL_TOLERANCE_METERS) {
       this.brakeDecisionPoseQuality = pose.quality;
       this.captureBrakeTriggerSnapshot(pose, remainingAlongTrackDistance, "arrival_tolerance");
@@ -1319,26 +1324,18 @@ export class DriveLineController {
       ? pose.heading
       : createInternalHeading(unwrapInternalHeading(pose.heading) + 180);
     const headingDiff = unwrapRelativeAngle(headingDifference(controlHeading, lineHeading));
-    const headingErrorDeg = Math.abs(headingDiff);
-
-    if (
-      this.allowRotateToHeading &&
-      headingErrorDeg >= DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG &&
-      remainingAlongTrackDistance > DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS
-    ) {
-      const turnSign = headingDiff >= 0 ? 1 : -1;
-      const { leftCommand, rightCommand } = this.calculatePivotCommands(turnSign, false);
-      void this.sensorController.setMotorWheelOutputs(leftCommand, rightCommand);
-      return;
-    }
 
     const cte = unwrapMeters(crossTrackError(pose.position, this.driveLineStart, this.driveLineEnd));
     const cteGain = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
     const cteTrim = cte * cteGain;
+    const headingGain = this.learningModel.getLongHeadingGainForDirection(this.driveDirectionSign);
     const headingTrim = totalDistance > DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS
       ? this.learningModel.getLongHeadingBiasForDirection(this.driveDirectionSign)
-        + (headingDiff * this.learningModel.getLongHeadingGainForDirection(this.driveDirectionSign))
-      : 0;
+        + (headingDiff * headingGain)
+      : (headingDiff * headingGain * Math.min(
+        1,
+        remainingAlongTrackDistance / DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS,
+      ));
     const trim = this.clamp(
       cteTrim + headingTrim,
       -DRIVE_STEERING_MAX_TRIM_PERCENT,
@@ -1348,10 +1345,9 @@ export class DriveLineController {
     const baseCommand = this.driveDirectionSign * this.activeFullSpeedCommand();
     const leftCommand = this.clampNormalizedSpeed(baseCommand - trim);
     const rightCommand = this.clampNormalizedSpeed(baseCommand + trim);
-    const normalizedCommands = this.enforceMinimumActiveArcCommands(
+    const normalizedCommands = this.enforceTranslationOnlyCommands(
       leftCommand,
       rightCommand,
-      trim,
     );
 
     void this.sensorController.setMotorWheelOutputs(
@@ -1369,6 +1365,21 @@ export class DriveLineController {
     const dy = unwrapMeters(this.driveLineEnd.yMeters) - unwrapMeters(this.driveLineStart.yMeters);
 
     return createInternalHeading((Math.atan2(dy, dx) * 180) / Math.PI);
+  }
+
+  private isGrosslyMisaligned(pose: Pose, remainingAlongTrackDistance: number): boolean {
+    if (remainingAlongTrackDistance <= DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS) {
+      return false;
+    }
+
+    const lineHeading = this.getDriveLineHeading();
+    const controlHeading = this.driveDirectionSign > 0
+      ? pose.heading
+      : createInternalHeading(unwrapInternalHeading(pose.heading) + 180);
+    const headingErrorDeg = Math.abs(
+      unwrapRelativeAngle(headingDifference(controlHeading, lineHeading)),
+    );
+    return headingErrorDeg >= DRIVE_STEERING_MAX_HEADING_ERROR_DEG;
   }
 
   private projectAlongTrackDistance(position: Position): number {
@@ -1401,56 +1412,27 @@ export class DriveLineController {
   }
 
   /**
-   * Wheel-command sanity pass. If the trim has flipped one wheel's sign or
-   * zeroed it (which would otherwise issue a one-wheel scrub) the controller
-   * pivots in place toward the requested rotation direction instead. Otherwise
-   * each command is floored at the minimum active output so the motors do not
-   * stall on grass.
+   * Preserve the line-drive invariant after the initial settled turn: both
+   * wheels continue in the requested travel direction. A saturated steering
+   * trim may slow an inner wheel to the minimum useful output, but can never
+   * turn a translation into a one-wheel scrub or an in-place pivot.
    */
-  private enforceMinimumActiveArcCommands(
+  private enforceTranslationOnlyCommands(
     leftCommand: number,
     rightCommand: number,
-    trim: number,
   ): { leftCommand: number; rightCommand: number } {
-    if (leftCommand === 0 && rightCommand === 0) {
-      return { leftCommand: 0, rightCommand: 0 };
-    }
-
-    const leftSign = Math.sign(leftCommand);
-    const rightSign = Math.sign(rightCommand);
-    if (leftSign === 0 || rightSign === 0 || leftSign !== rightSign) {
-      const turnSign = trim >= 0 ? 1 : -1;
-      return this.calculatePivotCommands(turnSign, true);
-    }
-
     return {
-      leftCommand: this.applyMinimumActiveCommand(leftCommand),
-      rightCommand: this.applyMinimumActiveCommand(rightCommand),
+      leftCommand: this.applyTranslationDirection(leftCommand),
+      rightCommand: this.applyTranslationDirection(rightCommand),
     };
   }
 
-  private calculatePivotCommands(
-    turnSign: 1 | -1,
-    followTravelDirection: boolean,
-  ): { leftCommand: number; rightCommand: number } {
-    const pivotSpeed = Math.max(
-      MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
-      DRIVE_STEERING_PIVOT_OUTPUT_PERCENT,
-    );
-    const directionSign = followTravelDirection ? this.driveDirectionSign : 1;
-
-    return {
-      leftCommand: this.clampNormalizedSpeed(-turnSign * pivotSpeed * directionSign),
-      rightCommand: this.clampNormalizedSpeed(turnSign * pivotSpeed * directionSign),
-    };
-  }
-
-  private applyMinimumActiveCommand(command: number): number {
-    if (command === 0 || Math.abs(command) >= MOTOR_MIN_ACTIVE_OUTPUT_PERCENT) {
-      return command;
-    }
-
-    return Math.sign(command) * MOTOR_MIN_ACTIVE_OUTPUT_PERCENT;
+  private applyTranslationDirection(command: number): number {
+    const maximum = this.activeFullSpeedCommand();
+    const minimum = Math.min(maximum, MOTOR_MIN_ACTIVE_OUTPUT_PERCENT);
+    const requestedMagnitude = command * this.driveDirectionSign;
+    const boundedMagnitude = this.clamp(requestedMagnitude, minimum, maximum);
+    return boundedMagnitude * this.driveDirectionSign;
   }
 
   private clamp(value: number, min: number, max: number): number {

@@ -12,8 +12,8 @@ A `Pose` consisting of:
 
 | Field | Source of truth | Notes |
 |---|---|---|
-| `position` (X, Y meters, ENU plane) | GNSS when validator says **TRUSTED**, otherwise integrated by encoders | X = East, Y = North |
-| `heading` (`InternalHeading`, 0° = +X, CCW positive) | IMU yaw, integrated continuously; rebased from GNSS only when validator says heading is TRUSTED | The IMU is always the live heading reference |
+| `position` (X, Y meters, ENU plane) | GNSS when validator says **TRUSTED** and the current epoch passes, otherwise integrated by encoders | X = East, Y = North |
+| `heading` (`InternalHeading`, 0° = +X, CCW positive) | IMU yaw, integrated continuously; rebased only from a currently valid GNSS heading while stationary | The IMU is always the live heading reference |
 | `quality` | `"gnss"` \| `"dead-reckoning"` \| `"unknown"` | Demoted to dead-reckoning if no TRUSTED GNSS in `GNSS_STALE_TIMEOUT_MS` (2 s) |
 
 A `poseUpdate` event fires on every contributing sensor input (encoder, IMU, GNSS), so subscribers always see the freshest fused state.
@@ -67,14 +67,14 @@ flowchart TD
     Which -->|GNSS sample| Validate[GnssValidator.validate]
     Validate --> ValidatorState{position state?}
 
-    ValidatorState -->|TRUSTED| SnapPos[Snap fused position to GNSS<br/>currentQuality = gnss<br/>lastGnssSyncTimeMs = now<br/>Re-anchor encoder-only X/Y<br/>to fused position]
+    ValidatorState -->|TRUSTED + current epoch passes| SnapPos[Snap fused position to GNSS<br/>currentQuality = gnss<br/>lastGnssSyncTimeMs = now<br/>Re-anchor encoder-only X/Y<br/>to fused position]
     ValidatorState -->|DEGRADED / REJECTED| RecRej[Record rejection reason<br/>Pose continues from<br/>IMU + encoder integration]
 
     SnapPos --> HeadCheck{Heading<br/>conditions?}
     RecRej --> HeadCheck
 
-    HeadCheck -->|First TRUSTED epoch<br/>+ GNSS heading present| Bootstrap[Bootstrap rebase:<br/>seed IMU = GNSS heading]
-    HeadCheck -->|heading state = TRUSTED| RebaseTrusted[Rebase IMU = GNSS heading<br/>guarded by validator's<br/>≤5° IMU agreement check]
+    HeadCheck -->|First intrinsically good heading<br/>+ safe stationary state| Bootstrap[Bootstrap rebase:<br/>seed IMU = GNSS heading]
+    HeadCheck -->|heading state = TRUSTED<br/>+ current epoch passes<br/>+ safe stationary state| RebaseTrusted[Rebase IMU = GNSS heading<br/>guarded by validator's<br/>≤5° IMU agreement check]
     HeadCheck -->|Stationary override<br/>position TRUSTED, safe to rebase,<br/>5 intrinsically good headings<br/>regardless of disagreement| RebaseStat[Rebase IMU = GNSS heading<br/>recovers from drift while<br/>parked]
     HeadCheck -->|None| NoRebase[isUsingGnssHeading = false]
 
@@ -142,8 +142,8 @@ These thresholds are configurable but the values above are the runtime defaults.
 
 The IMU is the live heading source. GNSS only writes into the IMU on a rebase. There are three rebase paths, in priority order:
 
-1. **Bootstrap**: first time we ever see a TRUSTED position with a heading present, seed the IMU from GNSS so subsequent IMU-agreement checks aren't deadlocked by an unknown initial offset.
-2. **Trusted-state rebase**: the heading state machine reports TRUSTED — the validator already verified the disagreement is ≤ 5°, so this is a small correction.
+1. **Bootstrap**: first time we see a TRUSTED, currently valid position with an intrinsically good heading while stationary, seed the IMU from GNSS so subsequent IMU-agreement checks aren't deadlocked by an unknown initial offset.
+2. **Trusted-state rebase**: the heading state machine reports TRUSTED, the current epoch itself passes every heading check, and the mower is stationary and safe to rebase. The validator has verified disagreement is ≤ 5°, so this is a small correction. A TRUSTED latch that is waiting for its demotion dwell never makes a rejected current sample eligible for fusion.
 3. **Stationary override**: position is TRUSTED, the sensor controller reports the rebase is safe, and five consecutive samples pass every GNSS heading check except IMU agreement. The IMU is then rebased regardless of disagreement angle. Fix quality, position accuracy, heading validity, heading accuracy, antenna baseline, and sample-to-sample heading stability must remain good throughout the dwell; any failure or unsafe/moving state resets it. This lets a parked mower recover from arbitrarily large IMU drift without allowing one questionable GNSS sample to overwrite the IMU.
 
 Every rebase also re-anchors the encoder-only diagnostic track and bumps DR confidence by 0.5.
@@ -173,7 +173,7 @@ encoderOnlyX += avgDist · cos(encoderOnlyHeading)
 encoderOnlyY += avgDist · sin(encoderOnlyHeading)
 ```
 
-This is why the wheelbase (`WHEEL_BASE_METERS_DEFAULT = 0.55 m` until calibrated) is load-bearing for the encoder-only track — and consequently for any switchover from GNSS to dead-reckoning. Wheelbase is also used by slip detection to compare encoder-implied turn against IMU turn.
+The wheelbase (`WHEEL_BASE_METERS_DEFAULT = 0.55 m` until calibrated) affects only this encoder-only diagnostic heading and the diagnostic slip comparison. It does not affect fused heading, turn control, line steering, path following, or any other navigation decision. Active turns use IMU yaw exclusively; GNSS heading is neither consumed nor written into the IMU baseline until motor output is zero and yaw has settled.
 
 ### Encoder re-anchor on TRUSTED GNSS
 
@@ -188,6 +188,8 @@ Each motor-feedback sample with at least 1 mm of movement compares:
 - `imuTurnDeg = signed change in IMU heading since the last sample`
 
 If `|encoderImpliedTurn − imuTurn| > 10°`, slip is suspected:
+
+This comparison is diagnostic only. It changes the displayed encoder-track confidence and is captured in run records, but it never corrects the fused heading, steers or stops the mower, validates an IMU turn, or otherwise participates in navigation.
 
 - `wheelSlipSuspected = true`
 - `drConfidence -= 0.05`
@@ -221,8 +223,8 @@ A normal mowing session looks like this:
 
 1. **Boot.** No GNSS yet → `quality = "unknown"`, position = (0, 0), IMU integrating from its own bias-calibrated baseline.
 2. **First few GNSS epochs.** Validator runs through its 3-epoch window. Position promotes to TRUSTED. Fused position snaps to GNSS, `quality = "gnss"`, encoder-only track is seeded from the same anchor.
-3. **First valid heading.** Bootstrap rebase fires once GNSS heading is present. IMU is seeded from GNSS — the only time GNSS heading writes the IMU without going through the 5° agreement gate.
-4. **Steady mowing under open sky.** Each TRUSTED GNSS sample snaps fused position to GNSS. Between samples (and on every encoder tick or IMU tick), the fused pose advances using IMU heading and encoder distance. Heading state machine remains TRUSTED, so each sample also pulls IMU back toward GNSS by the small validator-permitted step. `quality = "gnss"` throughout.
+3. **First valid heading.** Bootstrap rebase fires once an intrinsically good GNSS heading is present and the mower is safe to rebase. IMU is seeded from GNSS — the only path that does not require prior 5° agreement.
+4. **Steady mowing under open sky.** Each TRUSTED GNSS position epoch that also passes its current checks snaps fused position to GNSS. Between samples (and on every encoder tick or IMU tick), the fused pose advances using IMU heading and encoder distance. Heading remains owned by IMU throughout motion; GNSS heading rebasing waits for a safe stationary interval. `quality = "gnss"` throughout while position epochs remain good.
 5. **Stop and settle.** Once the sensor controller reports that heading rebasing is safe, five consecutive intrinsically good GNSS headings trigger the **stationary override** even if IMU drift is very large. This is the path that prevents the agreement gate from permanently blocking recovery.
 
 ---

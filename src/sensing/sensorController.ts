@@ -1389,6 +1389,9 @@ export class SensorController extends EventEmitter {
       rightMotorCurrentAmps: rightMotorCurrentAmps ?? 0,
       leftEncoderDelta: current.leftEncoderDelta ?? 0,
       rightEncoderDelta: current.rightEncoderDelta ?? 0,
+      motionKind: this.stallCommandMotionKind,
+      currentHigh,
+      faultFlags,
     });
     systemStop.requestStop("sensors", "motor_stall_detected");
   }

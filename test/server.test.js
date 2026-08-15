@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { PrimitivesStore, resolveServerPort, routeServerRequest } from '../dist/index.js';
+import { PrimitivesStore, resolveServerPort, routeServerRequest, shouldStartRechargeDiversion } from '../dist/index.js';
 import { getManualDrivePageCss, getManualDrivePageHtml, getManualDrivePageJs } from '../dist/server/manualDrivePage.js';
 import { getTurnTuningPageHtml } from '../dist/server/turnTuningPage.js';
 import { getDriveTuningPageHtml } from '../dist/server/driveTuningPage.js';
 import { getSegmentTestingPageHtml } from '../dist/server/segmentTestingPage.js';
 import { getDeadReckoningPageHtml } from '../dist/server/deadReckoningPage.js';
+import { getBatteryManagementPageHtml } from '../dist/server/batteryManagementPage.js';
 import { renderPathTracingPage } from '../dist/server/pathTracingPage.js';
 
 test('resolveServerPort returns fallback for invalid values', () => {
@@ -15,6 +16,30 @@ test('resolveServerPort returns fallback for invalid values', () => {
   assert.equal(resolveServerPort('0', 8090), 8090);
   assert.equal(resolveServerPort('abc', 8090), 8090);
   assert.equal(resolveServerPort('8090', 8090), 8090);
+});
+
+test('recharge diversion uses monitored battery reserve rather than wheel distance', () => {
+  assert.equal(shouldStartRechargeDiversion({
+    enabled: true,
+    pointsConfigured: true,
+    explicitlyRequested: false,
+    automaticRechargeSuppressed: false,
+    batteryReturnDue: false,
+  }), false);
+  assert.equal(shouldStartRechargeDiversion({
+    enabled: true,
+    pointsConfigured: true,
+    explicitlyRequested: false,
+    automaticRechargeSuppressed: false,
+    batteryReturnDue: true,
+  }), true);
+  assert.equal(shouldStartRechargeDiversion({
+    enabled: true,
+    pointsConfigured: true,
+    explicitlyRequested: true,
+    automaticRechargeSuppressed: true,
+    batteryReturnDue: false,
+  }), true);
 });
 
 test('routeServerRequest serves health and primitives payloads', () => {
@@ -74,6 +99,10 @@ test('routeServerRequest serves Drive & Paths as home, dashboard expansion, and 
   assert.equal(recordsRoute.body.includes('data-definition-id='), true);
   assert.equal(recordsRoute.body.includes("selectDefinition(row.dataset.definitionId)"), true);
   assert.equal(recordsRoute.body.includes("e.key==='Enter'||e.key===' '"), true);
+  assert.equal(recordsRoute.body.includes('id="cancelMaintenance"'), true);
+  assert.equal(recordsRoute.body.includes('id="cancelDefinition"'), true);
+  assert.equal(recordsRoute.body.includes('if(!maintenanceEditing)'), true);
+  assert.equal(recordsRoute.body.includes('if(!definitionEditing)'), true);
 
   const manualRoute = routeServerRequest('GET', '/manual-drive', 'running', 'mower-core-test', primitives.snapshot(), null, null, null, null, null, null, null, null);
   assert.equal(manualRoute.statusCode, 200);
@@ -214,11 +243,21 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('Mow From Perimeter'), true);
   assert.equal(manualPage.includes('id="resumeMowingBtn"'), true);
   assert.equal(manualPage.includes('Carry On Mowing'), true);
+  assert.equal(manualPage.includes('id="cancelMowingPlanEditBtn"'), true);
+  assert.equal(manualPage.includes('if (mowingPlanEditing)'), true);
+  assert.equal(manualPage.includes('async function cancelMowingPlanEdit()'), true);
   assert.equal(manualPage.includes("const STRIP_SPACING_STORAGE_KEY = 'manualDrivePage.stripSpacingCm';"), true);
   assert.equal(manualPage.includes("const MOWING_PRESET_STORAGE_KEY = 'manualDrivePage.mowingPresetId';"), true);
   assert.equal(manualPage.includes('storeMowingPresetId(preset?.id || \'\');'), true);
   assert.equal(manualPage.includes('restoreStoredMowingPreset();'), true);
   assert.equal(manualPage.includes("const MOWING_PROGRESS_STORAGE_KEY = 'manualDrivePage.mowingProgress';"), true);
+  assert.equal(manualPage.includes("const MOWING_PLAN_PREVIEW_STORAGE_KEY = 'manualDrivePage.mowingPlanPreview.v1';"), true);
+  assert.equal(manualPage.includes('storeMowingPlanPreview(result);'), true);
+  assert.equal(manualPage.includes("fetchJson('/api/mowing/plan')"), true);
+  assert.equal(manualPage.includes('loadFrozenMowingPlanPreview(),'), true);
+  assert.equal(manualPage.includes('if (!restoreStoredMowingPlanPreview())'), true);
+  assert.equal(manualPage.includes('if (mowingPlanPreview?.areaName === selectedMowingPlanArea)'), true);
+  assert.equal(manualPage.includes("it has not been recalculated from the mower's current position"), true);
   assert.equal(manualPage.includes("fetchJson('/api/mowing/progress')"), true);
   assert.equal(manualPage.includes('loadMowerMowingProgress(),'), true);
   assert.equal(manualPage.includes('clearMowingProgress();'), true);
@@ -240,6 +279,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('/api/area-perimeter/verify'), true);
   assert.equal(manualPage.includes('/api/area-perimeter/drive'), true);
   assert.equal(manualPage.includes('id="perimeterEditorCanvas"'), true);
+  assert.equal(manualPage.includes('id="resetPerimeterEdit" class="button button-secondary" type="button">Cancel changes'), true);
   assert.equal(manualPage.includes('onclick="editAreaPerimeter('), true);
   assert.equal(manualPage.includes("postJson('/api/area-perimeter/update'"), true);
   assert.equal(manualPage.includes('function replaceShorterPerimeterSection('), true);
@@ -271,6 +311,14 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes('Skipping ${warningLabel} with invalid points:'), true);
   assert.equal(manualPage.includes("result.failedSegment?.errorMessage"), true);
   assert.equal(manualPage.includes('confirm('), false);
+  assert.equal(manualPage.includes('Combined wheel budget'), false);
+  assert.equal(manualPage.includes('/api/recharge/reset-distance'), false);
+  assert.equal(manualPage.includes('Automatic recharge uses monitored motor power only.'), true);
+
+  const batteryPage = getBatteryManagementPageHtml();
+  assert.equal(batteryPage.includes('id="cancelSettings"'), true);
+  assert.equal(batteryPage.includes('if(!settingsEditing||restoreSettings)'), true);
+  assert.equal(batteryPage.includes("$('settings').addEventListener('input',()=>setSettingsEditing(true))"), true);
 
   const deadReckoningPage = getDeadReckoningPageHtml();
   assert.equal(deadReckoningPage.includes('id="lineDistanceMeters"'), true);

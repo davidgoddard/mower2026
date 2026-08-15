@@ -65,7 +65,7 @@ This document maps problem domains to candidate files removing the need for Code
   - each stored mowing area exposes an editor that overlays the original and proposed boundaries, supports two-anchor straightening and two-anchor/one-control-point corner reshaping, undo/reset, and explicit save
   - the homepage header includes navigation to all operator pages, and its mowing controls can apply reusable presets while still allowing per-run angle and width edits
   - the selected reusable mowing preset is retained in browser storage across page refreshes; manual area, angle, or width changes return the selector to custom settings
-- `src/server/mowingRecordsPage.ts`: left-aligned mowing history, reusable definition, and distance-based blade-sharpening maintenance page served at `/mowing-records`; definition inputs call the production mowing-plan preview API and render the selected area with its generated strips for fine tuning before save, with visible mutation feedback plus picklist, pointer, and keyboard selection for loading and previewing saved definitions.
+- `src/server/mowingRecordsPage.ts`: left-aligned mowing history, reusable definition, and distance-based blade-sharpening maintenance page served at `/mowing-records`; definition inputs call the production mowing-plan preview API and render the selected area with its generated strips for fine tuning before save, with visible mutation feedback plus picklist, pointer, and keyboard selection for loading and previewing saved definitions. Maintenance and definition forms preserve unsaved fields across data reloads and expose adjacent Cancel buttons that restore server values before refreshes resume.
 - `src/server/appServer.ts`: mowing-definition saves validate area display names through `PathStore.pathExists()` so names containing spaces resolve to the same sanitized file used by preview and loading.
 - `src/server/turnTuningPage.ts`: turn tuning UI uses the shared popup overlay for alerts and confirm prompts.
 - `src/server/driveTuningPage.ts`: drive tuning UI uses the shared popup overlay for alerts.
@@ -92,15 +92,19 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
   - Carry On first recovers a GNSS pose up to 75cm outside the area to a validated 25cm-inset target through the ordinary pivot-then-straight drive controller; farther, blocked, or unsuccessful recovery fails closed
+  - after outside recovery, a saved point-to-point operation is never driven blindly from the new pose: an area- or obstacle-crossing direct segment is replaced by a validated and persisted transit route to the unchanged target
   - continuous operations persist their exact ordered route with progress and validate connector samples against the area and obstacles before initial or resumed execution
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
   - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
   - all mowing segment requests use the 15 cm post-pivot minimum translation; routed connectors and perimeter traces use the conservative continuous follower
+  - an unsafe frozen inter-strip connector receives one local repair attempt from the current fused pose to its unchanged destination; the replacement must pass executor safety validation and is persisted for resume without replanning the remaining strips
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
   - after the final strip, follows the shorter direction around the recorded area perimeter and then returns to the session's original GNSS start position; the return path and start point are persisted for stop/resume recovery
-- `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, assigns stable sweep-topology regions, builds both sweep orientations for every region, optimises a closed regional cycle, and rotates that cycle to the nearest preferred entry without changing its transitions. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
+- `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, removes sub-30cm boundary slivers that the mandatory perimeter trace covers, assigns stable sweep-topology regions only to executable passes, builds both sweep orientations for every region, and optimises the actual open route from the preferred entry using a fast distance-plus-routing-penalty estimate before fully constructing and validating only the selected safe connectors. Free-space transit routing uses the inward-offset area loop, never raw physical-boundary vertices, when a concavity prevents a direct line. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
 - `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control that performs one TurnController-owned entry alignment before starting, then runs 50Hz forward-only differential steering with elapsed-time wheel-command slew limiting, learned forward CTE/heading gains, ordered local-path projection, and a stable route-wide moving lookahead. The single execution-level genuine-corner test delegates outgoing-edge capture through `DriveController`/`TurnController`, and sustained route-deviation confirmation owns abort decisions.
+  - route projection interprets the current index as the next target vertex and always retains its incoming segment; consuming a start point therefore cannot make a recharge/return transit falsely appear distant from the mower
 - `src/pathfollowing/conservativeLookahead.ts`: samples the complete stored boundary at 5cm spacing before motion, independently of the mower's arrival section, and selects the longest stable 25cm-to-1m lookahead whose chords remain within the configured path-deviation budget everywhere; reports when genuine corners require the pivot/capture fallback rather than relaxing safety, and normalises floating-point residue on collinear paths to zero.
+- `src/maintenance/motorBatteryUsageTracker.ts`, `src/config/rechargeConfigStore.ts`, `src/server/batteryManagementPage.ts`, and recharge wiring in `src/server/appServer.ts`: integrate drive-motor current into the battery-use estimate and trigger automatic recharge only at the configured remaining-Ah reserve. Combined wheel travel remains a displayed diagnostic and never enters recharge eligibility; explicit operator recharge remains available. Recharge and return routes are geometry-validated before motion, identify whether the trigger was explicit or battery-driven in one start log, and use the routed-connector corner pivot/capture behaviour. Battery polling continues updating read-only metrics while an edited settings form is protected from replacement; Save or Cancel releases that edit lock, with Cancel reloading stored settings.
 
 ## Pose Fusion
 - `docs/pose-fusion.md`: detailed pose-fusion design, end-to-end flow diagram, GNSS validator state machine, and degraded-input behaviour notes.
@@ -108,7 +112,9 @@ This document maps problem domains to candidate files removing the need for Code
   - maintains the latest IMU/GNSS/encoder-derived pose estimate
   - throttles downstream `poseUpdate` emissions so control consumers do not rerun on every upstream IMU/GNSS/encoder event burst
   - GNSS heading accuracy and fix quality drive IMU heading priming/rebasing; GNSS position accuracy is used separately for trusting x/y pose updates
-  - the first good GNSS heading primes the IMU immediately, then IMU remains the live heading reference; normal GNSS nudges require close agreement, while five consecutive intrinsically good GNSS heading samples may rebase by any angle when the mower is stationary and safe to rebase
+  - the first intrinsically good GNSS heading primes the IMU while stationary, then IMU remains the live heading reference; normal GNSS nudges require close agreement and a safe stationary rebase state, while five consecutive intrinsically good GNSS heading samples may rebase by any angle when the mower is stationary and safe to rebase
+  - consumes only GNSS position and heading values that pass the checks for their current epoch; validator promotion/demotion hysteresis never permits an individually rejected sample to snap position or rebase heading
+  - encoder-implied turn, wheelbase-derived heading, slip comparison and DR confidence are diagnostics only; no turn controller, line controller, path follower or other navigation decision consumes them
   - GNSS pose is only trusted when fix quality, position accuracy, heading accuracy, heading stability, and the current IMU/GNSS heading alignment gate all pass for the part of pose being updated
   - `getCurrentPose()` returns the latest fused pose without settling
 - `src/sensing/gnssValidator.ts`: GNSS sample acceptance / trust state machine
@@ -195,9 +201,10 @@ This document maps problem domains to candidate files removing the need for Code
   - `POST /api/turn/reset-learning` - reset parameters to defaults
 
 ## Drive Controller
-- `src/control/driveController.ts`: segment drive controller that turns to face the target and then delegates straight-line travel
+- `src/control/driveController.ts`: segment drive controller that turns to face the target, recomputes bearing from the settled post-turn pose, performs a bounded corrective IMU turn only when the projected residual would exceed the requested CTE envelope, and then delegates straight-line travel
   - segment orchestration only; no straight-line CTE, brake, or arrival learning logic
   - automatic turn-to-face-target before driving
+  - requires every initial or corrective `TurnController` result to be successful; an errored or stopped turn cannot fall through into translation
   - short and long point-to-point segments use the same turn-then-straight rule; only an explicit caller request may skip the initial pivot
   - callers may supply a minimum useful translation; mowing uses 15 cm and rechecks after the alignment pivot, while training leaves the option unset
   - delegates to line controller immediately after the turn, then records successful segment history
@@ -208,7 +215,7 @@ This document maps problem domains to candidate files removing the need for Code
   - integrates with retry system for obstruction recovery
 - `src/control/driveLineController.ts`: straight-line drive controller with proportional cross-track trim and brake distance learning
   - executes straight-line drives from current position to target position
-  - holds full forward (or full reverse) wheel power and applies a proportional left/right wheel trim from the cross-track error to keep the mower on the line; the only deviations from full power are this trim and an in-place pivot when heading error exceeds the rotate-to-heading threshold and the mower is not yet inside the final approach window
+  - holds full forward (or full reverse) wheel power and applies a proportional left/right wheel trim from cross-track and heading error; both wheels remain in the selected travel direction for the whole translation, and a gross heading loss stops the line rather than escalating into an in-place pivot
   - reverse travel uses the same geometric controller with the correct body-heading reference
   - hard arrival stop plus separate forward/reverse full-speed brake distance learning for longer sample drives
   - per-run RunRecord instrumentation: anchor / brake-trigger / settled pose snapshots, 2 Hz heartbeat, peak encoder tick-rate, obstruction/slip/GNSS-demoted events surfaced to the learner; emits `drive.line.run_record` and writes `<MOWER_LOG_DIR>/run-records/<date>.jsonl`
@@ -229,7 +236,7 @@ This document maps problem domains to candidate files removing the need for Code
   - short-drive brake distances bucketed at the exact short distances from 10cm through 100cm; all longer plateau drives use the long forward/reverse brake distances
   - direction-specific CTE gain adaptation from peak CTE and average CTE remains persisted for compatibility with the tuning UI and historical learning data
   - JSON persistence at `config/drive-learning-params.json`
-- Drive sequence: settle → get pose → turn to target → settle → delegate line drive with CTE correction and arrival braking → measure errors → update learning
+- Drive sequence: settle → get pose → turn to target → turn-owned settle → recompute distance/bearing from the settled pose → optionally realign when the residual cannot fit the requested CTE envelope → delegate line drive with tapered short-drive heading/CTE correction and arrival braking → measure errors → update learning
 - API: `driveToTarget(target)`, `reverseForDuration(ms)` for retry recovery
   - `POST /api/drive/train-short` - short-drive forward/reverse training sequence
   - `POST /api/drive/train-segment` - segment-drive forward/reverse training sequence
@@ -237,7 +244,8 @@ This document maps problem domains to candidate files removing the need for Code
 ## Retry System (Obstruction Recovery)
 - `src/retry/retryManager.ts`: **EVENT-DRIVEN RECOVERY SYSTEM** - handles obstruction detection and context-aware recovery
   - subscribes to `obstructionDetected` events from sensor controller via the appServer wiring
-  - retry fires only for `high_current` events; `stall` and `wheel_slip` stop and abort the active session
+  - generic recovery fires for `high_current`; `stall` and `wheel_slip` otherwise stop and abort the active session
+  - before generic dispatch, an active `MowingExecutor` may claim one low-current, fault-free translation non-progress stall while actually driving a mowing strip; after the drive settles it requires fresh GNSS, revalidates the live-pose-to-frozen-target line, clears only the matching sensor stall, and reissues the ordinary strip drive once
   - session tracking: max 3 recoverable-obstruction retry attempts per session before abort
   - implements `RecentTargetSink` so the segmented executor can record completed targets while a path follow runs; the path-context recovery walks that trail backward
   - context-aware recovery strategies:
@@ -255,9 +263,9 @@ This document maps problem domains to candidate files removing the need for Code
   - `Checkpoint`: recovery point with pose and context metadata
 - `src/retry/operationContextTracker.ts`: in-process holder for the active `OperationContext`. Perimeter routes and the mowing run set "path" while running; the obstruction-event handler reads this to decide whether to dispatch to recovery and which flow to use. Returns `null` when nothing is active so unrelated obstruction events are ignored.
 - Obstruction detection conditions (sensorController):
-  - Motor current > 2A threshold (configurable) — triggers retry (high_current detection not yet implemented in firmware/sensor pipeline)
+  - sustained motor current at or above 10A is independent stall evidence pending validation of the installed sensors
   - Wheel slip: encoder movement but position stationary — stops and aborts the active operation
-  - Stall: no physical position progress while a motion command remains active; encoder-stationary evidence is used as a fallback when trusted position is unavailable — stops and aborts the active operation
+  - Stall: no physical position progress while a motion command remains active; encoder-stationary evidence is used as a fallback when trusted position is unavailable. The narrowly bounded active-strip retry described above is the only low-current stall exception.
 - `src/server/appServer.ts` wiring:
   - constructs `OperationContextTracker`, `CheckpointStore`, and `RetryManager` after the drive/turn controllers
   - injects a `turn(angleDeg)` adapter that calls `turnController.executeTurn({ targetAngle, direction })`
@@ -307,6 +315,8 @@ This document maps problem domains to candidate files removing the need for Code
   - aligns once to the initial moving-lookahead direction through the standard `TurnController` before any forward output, covering connector, resume, return-to-start, recharge, and manual continuous-route entry without adding mid-route branching
   - confirms an ordinary route-corridor breach for ten consecutive 50Hz samples before aborting, while retaining an immediate abort at twice the corridor; it never converts route deviation into recovery motion and clears the stateful wheel command on every exit path
   - obstacle encounters and displaced obstacle-boundary resumes up to 1.5m away use a safety-checked ordinary segment drive to a tangent-approach point, then the ordinary turn controller, before continuous following begins on genuine perimeter points; the live off-route pose is never inserted into the closed loop as a synthetic chord/corner
+  - displaced inter-strip connector resumes retain the saved pending target and untouched connector remainder, locally route from the current fused pose to that target, validate and persist the replacement route, then continue without regenerating or reordering the mowing plan
+  - a connector corridor-deviation abort gets one equivalent live local replan to its unchanged destination; repeated deviation or unavailable/unsafe routing still fails closed
   - the execution-level local waypoint test is the sole owner of genuine 20° corner stops; it delegates the outgoing-edge target (up to 40cm) to `DriveController`, and therefore to the standard `TurnController`, before ordinary projection resumes
   - perimeter traces and routed perimeter connectors keep the faster wheel at their requested speed while allowing the inner wheel to slow to zero; execution settings persist across mowing resume
   - applies a per-control-cycle wheel-command slew limit so curvature, heading, and CTE corrections change motor demand progressively instead of jumping between fast and slow outputs
@@ -330,6 +340,8 @@ This document maps problem domains to candidate files removing the need for Code
   - obstacle shaping remains separate from mowing-area cleanup so the obstacle-safe outward offset logic does not leak into area-perimeter handling
   - shaping behaviour is defined by clearly named local constants, including the obstacle outward offset, per-step outside nudge, and Chaikin pass count
 - `src/pathfollowing/pathVerification.ts`: rotates a stored path so verification/drive starts at the nearest recorded point and (for closed perimeters) loops back to the join point
+  - pose-joined closed perimeter routes use the live pose only for the initial approach leg; vertices skipped by the ahead join are rotated to the end of the route so every recorded perimeter edge is retained before closing at the first joined perimeter point
+- `src/pathfollowing/mowingExecutor.ts`: projects a strip-derived preferred area-trace anchor onto the authoritative cleaned perimeter before inserting it, preventing small clipping/intersection residue from creating an exterior perimeter vertex
   - chooses forward or reverse traversal by tangent alignment at the nearest point
   - verification approach stages 10cm short of the join point so the mower has body clearance to pivot before joining the perimeter
   - obstacle verify now reuses the chosen direction but recomputes the nearest perimeter join from the post-turn pose before starting the follow loop
@@ -412,6 +424,7 @@ This document maps problem domains to candidate files removing the need for Code
   - path recording controls for named obstacle paths
   - mowing area perimeter recording controls and stored perimeter management
   - mowing strip preview controls for selecting an area, setting strip width, and setting the strip angle with either a slider or a canvas drag gesture
+  - the first mowing-plan field edit protects those controls from recurring area-list refreshes; a successful Preview/Mow commits the values, while the adjacent Cancel changes button restores the prior plan controls and resumes refreshes
   - persists the operator's strip-width selection in browser storage so refreshes do not reset it to 30 cm or overwrite it with an older area-capture default
   - drive and verify actions for stored paths (single segmented drive mode — no per-path algorithm choice)
   - canvas map auto-scales across live position history, obstacle paths, and mowing area perimeters, with a minimum view range and stationary jitter coalescing so centimetre-scale GNSS drift does not dominate the display
@@ -510,7 +523,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU
   - `GnssPositionUpdateEvent`: position, heading, fix quality from GNSS
   - `MotorFeedbackUpdateEvent`: wheel speeds, encoder deltas, PWM, current, watchdog/fault state
-  - `ObstructionDetectedEvent`: obstruction type, motor currents, wheel speeds
+  - `ObstructionDetectedEvent`: obstruction type, motor currents, wheel speeds, active motion kind, sustained-current evidence and raw controller fault flags
 - `src/sensing/sensorHardwareGateway.ts`: hardware adapter boundary between application sensor controller and physical sensor drivers, including the optional low-satellite GNSS debug-line fetch used for Pi-side raw-text logging.
 - `src/i2c/types.ts`: I2C transport and queued request types.
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
@@ -533,7 +546,8 @@ This document maps problem domains to candidate files removing the need for Code
   - maintains current position (X, Y meters) and heading (InternalHeading)
   - quality tracking: "gnss" (RTK fixed/float), "dead-reckoning", or "unknown"
   - GNSS position updates: accepts high-quality GNSS fixes (RTK fixed/float with <0.1m accuracy)
-  - GNSS heading fusion: updates from stable GNSS dual-antenna heading when available and already close to the current IMU heading; while stationary and safe to rebase, five consecutive samples that pass all GNSS heading checks except IMU agreement rebase the IMU regardless of disagreement angle; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw.
+  - GNSS heading fusion: updates from a currently valid stable GNSS dual-antenna heading when available, already close to the current IMU heading, and safe to rebase; while stationary and safe to rebase, five consecutive samples that pass all GNSS heading checks except IMU agreement rebase the IMU regardless of disagreement angle; GNSS heading write-back is deferred while the sensor controller reports active motor motion or active yaw, and latched trust never admits a rejected current epoch.
+  - turn-heading ownership: active turns use IMU yaw exclusively; GNSS rebasing waits until after motor and yaw settling, while encoder-implied turn and IMU/encoder disagreement remain dashboard/log diagnostics with no navigation authority
   - exposes a primitive snapshot flag indicating whether GNSS heading is currently being used to rebase the IMU so the web UI can tint the widgets without re-deriving that state
   - turn diagnostics: logs the motor-stop IMU summary when GNSS heading rebases after a stop or consistent offset, so turn evidence can be reviewed without 200Hz disk writes
   - IMU heading integration: continuously integrates IMU yaw for heading during GNSS gaps

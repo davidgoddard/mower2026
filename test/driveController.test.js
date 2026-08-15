@@ -14,7 +14,7 @@ import {
   DRIVE_SEGMENT_STEP_METERS,
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
 } from "../dist/constants.js";
-import { createInternalHeading } from "../dist/geometry/headingTypes.js";
+import { addRelativeAngle, createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPosition, createMeters, unwrapMeters } from "../dist/geometry/positionTypes.js";
 
 const STRAIGHT_LINE_TRAINING_DISTANCES_METERS = [
@@ -106,9 +106,16 @@ describe("DriveController", () => {
     return fusion;
   }
 
-  function createMockTurnController() {
+  function createMockTurnController(poseFusion) {
     return {
       executeTurn: mock.fn(async (request) => {
+        if (poseFusion?._testSetPose) {
+          const pose = poseFusion.getCurrentPose();
+          poseFusion._testSetPose({
+            ...pose,
+            heading: addRelativeAngle(pose.heading, request.targetAngle),
+          });
+        }
         return {
           requestedAngle: request.targetAngle,
           achievedAngle: request.targetAngle,
@@ -211,7 +218,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -268,7 +275,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -322,11 +329,75 @@ describe("DriveController", () => {
     assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
   });
 
+  it("realigns from the settled post-turn pose when the new short line would exceed its CTE limit", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+    const target = createPosition(17.197830716027152, 10.685652022663241);
+    mockPose._testSetPose({
+      position: createPosition(17.522686582711543, 10.931763279958375),
+      heading: createInternalHeading(-62.061946012506155),
+      quality: "gnss",
+    });
+
+    let turnCount = 0;
+    const mockTurn = createMockTurnController(mockPose);
+    mockTurn.executeTurn = mock.fn(async (request) => {
+      turnCount += 1;
+      if (turnCount === 1) {
+        mockPose._testSetPose({
+          position: createPosition(17.488116538934687, 10.973127908030342),
+          heading: createInternalHeading(-142.72850880126327),
+          quality: "gnss",
+        });
+      } else {
+        const pose = mockPose.getCurrentPose();
+        mockPose._testSetPose({
+          ...pose,
+          heading: addRelativeAngle(pose.heading, request.targetAngle),
+        });
+      }
+      return {
+        requestedAngle: request.targetAngle,
+        achievedAngle: request.targetAngle,
+        errorAngle: createInternalHeading(0),
+        durationMs: 1000,
+        motorEngaged: true,
+        status: "success",
+        timestamp: new Date().toISOString(),
+      };
+    });
+
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    const result = await controller.executeDrive({
+      targetPosition: target,
+      learningEnabled: false,
+      alwaysTurnToFaceTarget: true,
+      maxCrossTrackErrorMeters: 0.05,
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 2);
+    assert.ok(Math.abs(Number(mockTurn.executeTurn.mock.calls[1].arguments[0].targetAngle) - 7.449853621994748) < 1e-6);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
+  });
+
   it("pivots before a short hop when heading error is large", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -356,13 +427,57 @@ describe("DriveController", () => {
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 
+  it("does not translate when the initial alignment turn fails", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockTurn = createMockTurnController(mockPose);
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+    mockTurn.executeTurn = mock.fn(async (request) => ({
+      requestedAngle: request.targetAngle,
+      achievedAngle: createInternalHeading(0),
+      errorAngle: request.targetAngle,
+      durationMs: 100,
+      brakeDistanceUsed: createInternalHeading(0),
+      motorEngaged: false,
+      status: "error",
+      errorMessage: "imu_turn_failed",
+      timestamp: new Date().toISOString(),
+    }));
+
+    mockPose._testSetPose({
+      position: createPosition(0, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    const result = await controller.executeDrive({
+      targetPosition: createPosition(0, 1),
+      learningEnabled: false,
+    });
+
+    assert.equal(result.status, "error");
+    assert.equal(result.errorMessage, "drive_initial_turn_failed:error:imu_turn_failed");
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 0);
+  });
+
   it("skips a mowing translation when the alignment pivot leaves less than 10cm", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     mockTurn.executeTurn = mock.fn(async (request) => {
       mockPose._testSetPose({
         position: createPosition(0, 0.06),
@@ -407,7 +522,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -432,14 +547,13 @@ describe("DriveController", () => {
     assert.equal(mockTurn.executeTurn.mock.calls.length, 0);
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
     assert.equal(mockLineDrive.executeLineDrive.mock.calls[0].arguments[0].driveDirectionSign, -1);
-    assert.equal(mockLineDrive.executeLineDrive.mock.calls[0].arguments[0].allowRotateToHeading, false);
   });
 
   it("forwards stopCurrentDrive() to the line drive controller", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -475,7 +589,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -518,7 +632,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -557,7 +671,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -588,7 +702,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
     const mockLineDrive = createMockLineDriveController();
 
@@ -661,7 +775,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
 
     const progressMessages = [];
@@ -764,7 +878,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
 
     const controller = new DriveController({
@@ -821,7 +935,7 @@ describe("DriveController", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createMockPoseFusion();
-    const mockTurn = createMockTurnController();
+    const mockTurn = createMockTurnController(mockPose);
     const mockLearning = createMockLearningModel();
 
     mockPose._testSetPose({
@@ -1221,6 +1335,45 @@ describe("DriveLineController", () => {
     assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
   });
 
+  it("uses a tapered heading correction arc on a short line drive", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
+    mockPose.setPose({
+      position: createPosition(0, 0),
+      heading: createInternalHeading(8),
+      quality: "gnss",
+    });
+    const mockLearning = createMockLearningModel();
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const drivePromise = controller.executeLineDrive({
+      targetPosition: createPosition(0.4, 0),
+      learningEnabled: false,
+      maxCrossTrackErrorMeters: 0.075,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const firstCommand = mockSensor.setMotorWheelOutputs.mock.calls[0]?.arguments;
+    assert.ok(firstCommand);
+    assert.notEqual(firstCommand[0], firstCommand[1]);
+
+    mockPose.setPose({
+      position: createPosition(0.4, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    const result = await drivePromise;
+    assert.equal(result.status, "success");
+  });
+
   it("samples the short-training anchor after the pre-drive pause", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
@@ -1428,7 +1581,7 @@ describe("DriveLineController", () => {
     await drivePromise;
   });
 
-  it("pivots in the correct world direction when reverse travel heading is badly misaligned", async () => {
+  it("stops rather than pivoting when a reverse line loses its heading", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
@@ -1448,6 +1601,11 @@ describe("DriveLineController", () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
+    const initialCommand = mockSensor.setMotorWheelOutputs.mock.calls.at(-1)?.arguments ?? [];
+    assert.ok(initialCommand.length >= 2);
+    assert.equal(Number(initialCommand[0]) < 0, true);
+    assert.equal(Number(initialCommand[1]) < 0, true);
+
     mockPose.setPose({
       position: createPosition(0, 0),
       heading: createInternalHeading(90),
@@ -1455,24 +1613,20 @@ describe("DriveLineController", () => {
     });
     mockPose.emit("poseUpdate", mockPose.getCurrentPose());
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const commanded = mockSensor.setMotorWheelOutputs.mock.calls.at(-1)?.arguments ?? [];
-
-    assert.ok(commanded.length >= 2);
-    assert.equal(Number(commanded[0]) > 0, true);
-    assert.equal(Number(commanded[1]) < 0, true);
-
-    await controller.stopCurrentDrive();
-    mockPose.setPose({
-      position: createPosition(0, 0),
-      heading: createInternalHeading(0),
-      quality: "gnss",
-    });
-    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
-    await drivePromise;
+    const result = await drivePromise;
+    assert.equal(result.status, "stopped");
+    assert.equal(result.errorMessage, "Line-drive heading error exceeded limit");
+    assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
+    assert.equal(
+      mockSensor.setMotorWheelOutputs.mock.calls.every((call) => {
+        const [left, right] = call.arguments;
+        return Math.sign(Number(left)) === Math.sign(Number(right));
+      }),
+      true,
+    );
   });
 
-  it("turns on the spot instead of issuing one-wheel line-drive corrections", () => {
+  it("keeps saturated line-drive corrections in the translation direction", () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
@@ -1486,15 +1640,15 @@ describe("DriveLineController", () => {
     });
 
     controller.driveDirectionSign = 1;
-    const forwardCommand = controller.enforceMinimumActiveArcCommands(0.8, 0, 1);
-    assert.equal(forwardCommand.leftCommand < 0, true);
+    const forwardCommand = controller.enforceTranslationOnlyCommands(0.8, 0);
+    assert.equal(forwardCommand.leftCommand > 0, true);
     assert.equal(forwardCommand.rightCommand > 0, true);
     assert.equal(Math.abs(forwardCommand.leftCommand) >= 0.3, true);
     assert.equal(Math.abs(forwardCommand.rightCommand) >= 0.3, true);
 
     controller.driveDirectionSign = -1;
-    const reverseCommand = controller.enforceMinimumActiveArcCommands(-0.8, 0, 1);
-    assert.equal(reverseCommand.leftCommand > 0, true);
+    const reverseCommand = controller.enforceTranslationOnlyCommands(-0.8, 0);
+    assert.equal(reverseCommand.leftCommand < 0, true);
     assert.equal(reverseCommand.rightCommand < 0, true);
     assert.equal(Math.abs(reverseCommand.leftCommand) >= 0.3, true);
     assert.equal(Math.abs(reverseCommand.rightCommand) >= 0.3, true);
@@ -1731,7 +1885,7 @@ describe("DriveLineController", () => {
     await drivePromise;
   });
 
-  it("keeps the existing cte-only steering on 1m runs", async () => {
+  it("applies tapered heading correction on 1m runs", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
@@ -1761,7 +1915,7 @@ describe("DriveLineController", () => {
     const commanded = mockSensor.setMotorWheelOutputs.mock.calls.at(-1)?.arguments ?? [];
 
     assert.ok(commanded.length >= 2);
-    assert.equal(Math.abs(Number(commanded[0]) - Number(commanded[1])) < 1e-9, true);
+    assert.equal(Math.abs(Number(commanded[0]) - Number(commanded[1])) > 1e-9, true);
 
     await controller.stopCurrentDrive();
     mockPose.setPose({

@@ -264,6 +264,44 @@ test("buildPerimeterPathPointsFromPose injects the live pose and skips tiny star
   );
 });
 
+test("buildPerimeterPathPointsFromPose closes a perimeter at the boundary join rather than the live approach pose", () => {
+  const points = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 0.1, yMeters: 0, capturedAt: 2 },
+    { xMeters: 0.2, yMeters: 0, capturedAt: 3 },
+    { xMeters: 1, yMeters: 0, capturedAt: 4 },
+    { xMeters: 1, yMeters: 1, capturedAt: 5 },
+    { xMeters: 0, yMeters: 1, capturedAt: 6 },
+    { xMeters: 0, yMeters: 0, capturedAt: 7 },
+  ];
+  const pose = createPose(0.1, 0.1, createInternalHeading(0), "gnss");
+
+  const perimeterPoints = buildPerimeterPathPointsFromPose(
+    points,
+    pose,
+    "forward",
+    TEST_PARAMETERS,
+    0.5,
+  );
+
+  assert.deepEqual(
+    [perimeterPoints[0].xMeters, perimeterPoints[0].yMeters],
+    [0.1, 0.1],
+  );
+  assert.deepEqual(
+    [perimeterPoints.at(-1).xMeters, perimeterPoints.at(-1).yMeters],
+    [perimeterPoints[1].xMeters, perimeterPoints[1].yMeters],
+  );
+  assert.notDeepEqual(
+    [perimeterPoints.at(-1).xMeters, perimeterPoints.at(-1).yMeters],
+    [perimeterPoints[0].xMeters, perimeterPoints[0].yMeters],
+  );
+  assert.deepEqual(
+    perimeterPoints.slice(-3, -1).map((point) => [point.xMeters, point.yMeters]),
+    [[0.1, 0], [0.2, 0]],
+  );
+});
+
 test("buildVerificationApproachTarget stops 10cm short of the perimeter point", () => {
   const pose = createPose(0, 0, createInternalHeading(0), "gnss");
 

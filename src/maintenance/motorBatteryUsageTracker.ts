@@ -78,12 +78,6 @@ export class MotorBatteryUsageTracker {
     return this.snapshot();
   }
 
-  async resetDistance(): Promise<void> {
-    this.state = { ...this.state, combinedWheelMetersSinceCharge: 0, updatedAt: new Date().toISOString() };
-    this.dirty = true;
-    await this.flush();
-  }
-
   async close(): Promise<void> {
     this.sensorController.off(SENSOR_EVENTS.MOTOR_FEEDBACK_UPDATE, this.onFeedback);
     await this.flush();

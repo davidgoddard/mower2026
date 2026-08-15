@@ -66,6 +66,9 @@ __APP_DIALOG_STYLE_TAG__
         <button id="previewMowingPlanBtn" class="button button-primary" type="button">
           <span>▦</span> Preview
         </button>
+        <button id="cancelMowingPlanEditBtn" class="button button-secondary" type="button" hidden>
+          <span>↶</span> Cancel changes
+        </button>
           <div style="display:flex;flex-direction:column;gap:0.5rem;align-items:stretch">
             <button id="startMowingBtn" class="button button-success" type="button">
               <span>🌿</span> Mow Area
@@ -94,10 +97,7 @@ __APP_DIALOG_STYLE_TAG__
           <span id="rechargeDriveToText">Not set</span>
           <button id="captureRechargeChargingBtn" class="button button-primary" type="button">Capture charging point</button>
           <span id="rechargeChargingText">Not set</span>
-          <div class="input-group"><label for="rechargeBudgetMeters">Combined wheel budget (m)</label><input id="rechargeBudgetMeters" type="number" min="10" step="10" value="1500"></div>
-          <button id="saveRechargeBtn" class="button button-primary" type="button">Save</button>
           <button id="rechargeNowBtn" class="button button-primary" type="button">Recharge after this strip</button>
-          <button id="resetRechargeDistanceBtn" class="button" type="button">Reset distance</button>
         </div>
         <div class="section-description" id="rechargeStatusText">Loading recharge configuration…</div>
       </div>
@@ -254,14 +254,16 @@ __APP_DIALOG_STYLE_TAG__
         <button id="straightenPerimeterSection" class="button button-primary" type="button">Straighten section</button>
         <button id="reshapePerimeterSection" class="button button-secondary" type="button">Reshape corner</button>
         <button id="undoPerimeterEdit" class="button button-secondary" type="button" disabled>Undo</button>
-        <button id="resetPerimeterEdit" class="button button-secondary" type="button">Reset</button>
       </div>
       <p id="perimeterEditorHelp" class="perimeter-editor-help"></p>
       <canvas id="perimeterEditorCanvas" width="1100" height="700"></canvas>
       <div class="perimeter-editor-legend"><span class="legend-original">Original</span><span class="legend-edited">Edited</span><span class="legend-anchor">Fixed anchor</span><span class="legend-control">Movable point</span></div>
       <div class="perimeter-editor-footer">
         <div id="perimeterEditorStatus" role="status" aria-live="polite"></div>
-        <button id="savePerimeterEdit" class="button button-success" type="button" disabled>Save corrected perimeter</button>
+        <div class="perimeter-editor-toolbar">
+          <button id="resetPerimeterEdit" class="button button-secondary" type="button">Cancel changes</button>
+          <button id="savePerimeterEdit" class="button button-success" type="button" disabled>Save corrected perimeter</button>
+        </div>
       </div>
     </section>
   </div>

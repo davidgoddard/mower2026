@@ -1,6 +1,6 @@
 import { PathPoint } from "./pathFollowerApi.js";
 import { ContinuousPathFollower } from "./continuousPathFollower.js";
-import { buildMowingPlan, effectiveMowingStripStandoffMeters, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
+import { buildMowingPlan, buildMowingTransitPath, effectiveMowingStripStandoffMeters, type MowingBoundaryReference, type MowingInitialEntryPlan, type MowingPlan } from "./mowingPlanner.js";
 import type { MowingResumeContinuation, MowingResumeOperation, MowingResumeState, MowingResumeStage } from "./mowingResumeStore.js";
 import { buildPerimeterJoinPlan, buildPerimeterPathPointsFromPlan, buildPerimeterPathPointsFromPlanAndPose, buildPerimeterPathPointsFromPose, buildPerimeterFollowPlan, buildVerificationApproachPlan } from "./pathVerification.js";
 import { RecentTargetSink } from "./segmentedBoundaryExecutor.js";
@@ -65,6 +65,8 @@ export interface MowingExecutorOptions {
   readonly resumeState?: MowingResumeState | null;
   /** Test override; production allows brief validator state transitions. */
   readonly gnssLossGraceMs?: number;
+  /** Test override for the pause before the single automatic strip retry. */
+  readonly transientStallRetryDelayMs?: number;
   readonly returnToStartAfterMowing?: boolean;
   readonly mowingStartPoint?: { readonly xMeters: number; readonly yMeters: number };
   readonly rechargeDue?: () => boolean;
@@ -89,6 +91,7 @@ const RESUME_BOUNDARY_REJOIN_MAX_DISTANCE_METERS = 1.5;
 const AREA_ESCAPE_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_CHECK_INTERVAL_MS = 100;
 const MOWING_GNSS_LOSS_GRACE_MS = 2_000;
+const MOWING_TRANSIENT_STALL_RETRY_DELAY_MS = 500;
 const MOWING_TARGET_REACHED_TOLERANCE_METERS = 0.1;
 const MOWING_MINIMUM_TRANSLATION_METERS = 0.15;
 const SHORT_DIRECT_CONNECTOR_MAX_DISTANCE_METERS = 1.0;
@@ -119,12 +122,14 @@ export class MowingExecutor {
   private readonly updateResumeState: ((state: MowingResumeState | null) => void) | undefined;
   private readonly resumeState: MowingResumeState | null;
   private readonly gnssLossGraceMs: number;
+  private readonly transientStallRetryDelayMs: number;
   private readonly returnToStartAfterMowing: boolean;
   private readonly mowingStartPoint: { readonly xMeters: number; readonly yMeters: number } | null;
   private readonly rechargeDue: (() => boolean) | undefined;
   private readonly performRechargeDiversion: MowingExecutorOptions["performRechargeDiversion"];
 
   private phase: MowingPhase = "idle";
+  private executionError: string | null = null;
   private currentStripIndex: number = 0;
   private tracedBoundaries: Set<string> = new Set();
   private stopRequested: boolean = false;
@@ -132,6 +137,9 @@ export class MowingExecutor {
   private gnssSafetyMonitor: NodeJS.Timeout | null = null;
   private outsideAreaViolationMessage: string | null = null;
   private poorGnssViolation = false;
+  private stripDriveActive = false;
+  private stripStallRetryPending = false;
+  private stripStallRetryUsed = false;
   private selectedAreaStartAnchor: AreaStartAnchorPlan | null = null;
 
   constructor(options: MowingExecutorOptions) {
@@ -153,6 +161,10 @@ export class MowingExecutor {
     this.updateResumeState = options.updateResumeState;
     this.resumeState = options.resumeState ?? null;
     this.gnssLossGraceMs = Math.max(0, options.gnssLossGraceMs ?? MOWING_GNSS_LOSS_GRACE_MS);
+    this.transientStallRetryDelayMs = Math.max(
+      0,
+      options.transientStallRetryDelayMs ?? MOWING_TRANSIENT_STALL_RETRY_DELAY_MS,
+    );
     this.returnToStartAfterMowing = options.returnToStartAfterMowing ?? false;
     this.mowingStartPoint = options.resumeState?.mowingStartPoint
       ?? options.mowingStartPoint
@@ -162,17 +174,55 @@ export class MowingExecutor {
   }
 
   getStatus(): MowingStatus {
+    const error = this.poorGnssViolation
+      ? "poor_gnss"
+      : this.executionError ?? undefined;
     return {
       phase: this.phase,
       currentStripIndex: this.currentStripIndex,
       totalStrips: this.plan.strips.length,
       tracedBoundaryCount: this.tracedBoundaries.size,
-      ...(this.poorGnssViolation ? { error: "poor_gnss" } : {}),
+      ...(error ? { error } : {}),
     };
   }
 
   stop(): void {
     this.stopRequested = true;
+  }
+
+  /**
+   * Claim a low-current, fault-free translation stall for the active mowing
+   * strip. The sensor listener calls this before the global stop is raised.
+   * Returning true prevents the generic path retry from aborting the session;
+   * the blocked strip drive will settle, validate its fresh GNSS-to-target
+   * line, clear only that sensor stop, and retry once.
+   */
+  acceptTransientTranslationStallRetry(evidence: {
+    readonly motionKind: "translation" | "pivot" | null;
+    readonly currentHigh: boolean;
+    readonly faultFlags: number;
+    readonly leftMotorCurrentAmps: number;
+    readonly rightMotorCurrentAmps: number;
+  }): boolean {
+    if (
+      this.phase !== "mowing_strip"
+      || !this.stripDriveActive
+      || this.stripStallRetryPending
+      || this.stripStallRetryUsed
+      || evidence.motionKind !== "translation"
+      || evidence.currentHigh
+      || evidence.faultFlags !== 0
+    ) {
+      return false;
+    }
+
+    this.stripStallRetryPending = true;
+    this.logger.warn("mowing.strip.transient_stall_retry_armed", {
+      stripIndex: this.currentStripIndex,
+      leftMotorCurrentAmps: evidence.leftMotorCurrentAmps,
+      rightMotorCurrentAmps: evidence.rightMotorCurrentAmps,
+    });
+    return true;
   }
 
   async execute(): Promise<MowingStatus> {
@@ -182,6 +232,7 @@ export class MowingExecutor {
       : new Set();
     this.outsideAreaViolationMessage = null;
     this.poorGnssViolation = false;
+    this.executionError = null;
     this.selectedAreaStartAnchor = null;
     this.stopAreaEscapeMonitor();
     this.stopGnssSafetyMonitor();
@@ -329,6 +380,11 @@ export class MowingExecutor {
     }
 
     if (!this.skipInitialBoundaryTrace) {
+      // The approach may legitimately begin outside the polygon, so the area
+      // watchdog starts only after it has completed. Keep it active while the
+      // perimeter itself is traced; route tracking tolerance must not be the
+      // only protection against leaving the garden.
+      this.startAreaEscapeMonitor();
       const traceResult = await this.traceBoundary("area", entryPlan.entryPoint, {
         stripIndex: 0,
         continuation: { stage: "strip_approach", stripIndex: 0 },
@@ -360,6 +416,10 @@ export class MowingExecutor {
     }
 
     this.currentStripIndex = resumeState.currentStripIndex;
+    // recoverResumePoseInsideArea has already established a valid starting
+    // pose. Resume operations, including an interrupted perimeter trace, must
+    // therefore run with the real area-escape watchdog active.
+    this.startAreaEscapeMonitor();
     let continuation = await this.executeResumeOperation(resumeState.activeOperation);
     if (!continuation) {
       return this.getStatus();
@@ -585,7 +645,14 @@ export class MowingExecutor {
           targetHeadingDeg: stripHeading,
           continuation: { stage: "strip_drive", stripIndex: index },
         });
-        await this.turnToHeading(stripHeading);
+        const turnStatus = await this.turnToHeading(stripHeading);
+        if (turnStatus !== "success") {
+          this.phase = turnStatus === "stopped" ? "stopped" : "error";
+          return {
+            ...this.getStatus(),
+            ...(turnStatus === "error" ? { error: "strip_turn_failed:error" } : {}),
+          };
+        }
         stage = "strip_drive";
       }
 
@@ -611,11 +678,7 @@ export class MowingExecutor {
           },
         });
         if (!this.isNearCurrentPose(exitStandoff.x, exitStandoff.y)) {
-          const stripResult = await this.driveController.executeDrive({
-            targetPosition: createPosition(exitStandoff.x, exitStandoff.y),
-            learningEnabled: true,
-            minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
-          });
+          const stripResult = await this.executeMowingStripDrive(exitStandoff.x, exitStandoff.y);
           if (stripResult.status !== "success") {
             if (stripResult.status === "stopped") {
               this.phase = "stopped";
@@ -623,6 +686,14 @@ export class MowingExecutor {
             }
             this.phase = "error";
             return { ...this.getStatus(), error: `strip_drive_failed:${stripResult.status}` };
+          }
+          if (stripResult.learnSkipReason === "below_minimum_drive_distance") {
+            this.phase = "error";
+            this.logger.warn("mowing.strip.translation_not_executable", {
+              stripIndex: index,
+              reason: stripResult.learnSkipReason,
+            });
+            return { ...this.getStatus(), error: "strip_drive_not_executable" };
           }
         }
         stage = !this.tracedBoundaries.has(endBoundaryKey)
@@ -688,7 +759,10 @@ export class MowingExecutor {
               return this.getStatus();
             }
             this.phase = "error";
-            return { ...this.getStatus(), error: `connector_failed:${transitionResult.reason}` };
+            return {
+              ...this.getStatus(),
+              error: transitionResult.error ?? `connector_failed:${transitionResult.reason}`,
+            };
           }
         }
       }
@@ -765,17 +839,188 @@ export class MowingExecutor {
     return this.completeMowing();
   }
 
+  private async executeMowingStripDrive(targetX: number, targetY: number) {
+    this.stripDriveActive = true;
+    this.stripStallRetryPending = false;
+    this.stripStallRetryUsed = false;
+
+    try {
+      while (true) {
+        const result = await this.driveController.executeDrive({
+          targetPosition: createPosition(targetX, targetY),
+          learningEnabled: true,
+          minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
+        });
+        if (result.status !== "stopped" || !this.stripStallRetryPending) {
+          return result;
+        }
+
+        const stopState = systemStop.snapshot();
+        if (
+          stopState.source !== "sensors"
+          || stopState.reason !== "motor_stall_detected"
+          || this.stopRequested
+          || this.outsideAreaViolationMessage !== null
+          || this.poorGnssViolation
+        ) {
+          this.stripStallRetryPending = false;
+          return result;
+        }
+
+        this.stripStallRetryPending = false;
+        this.stripStallRetryUsed = true;
+        if (this.transientStallRetryDelayMs > 0) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, this.transientStallRetryDelayMs);
+          });
+        }
+
+        const settledStopState = systemStop.snapshot();
+        const retryPose = this.poseFusion.getCurrentPose();
+        const retryPath: PathPoint[] = [
+          {
+            xMeters: unwrapMeters(retryPose.position.xMeters),
+            yMeters: unwrapMeters(retryPose.position.yMeters),
+            capturedAt: Date.now(),
+          },
+          {
+            xMeters: targetX,
+            yMeters: targetY,
+            capturedAt: Date.now(),
+          },
+        ];
+        const routeSafe = isMowingExecutionPathSafe(
+          retryPath,
+          this.areaPoints,
+          this.obstaclePointsArray,
+        );
+        if (
+          settledStopState.source !== "sensors"
+          || settledStopState.reason !== "motor_stall_detected"
+          || this.stopRequested
+          || this.outsideAreaViolationMessage !== null
+          || this.poorGnssViolation
+          || retryPose.quality !== "gnss"
+          || !routeSafe
+        ) {
+          this.logger.warn("mowing.strip.transient_stall_retry_rejected", {
+            stripIndex: this.currentStripIndex,
+            stopSource: settledStopState.source,
+            stopReason: settledStopState.reason,
+            poseQuality: retryPose.quality,
+            routeSafe,
+          });
+          return result;
+        }
+
+        this.logger.warn("mowing.strip.transient_stall_retrying", {
+          stripIndex: this.currentStripIndex,
+          targetX,
+          targetY,
+          currentX: retryPose.position.xMeters,
+          currentY: retryPose.position.yMeters,
+          attemptNumber: 1,
+        });
+        systemStop.clearStop("mowing-strip-transient-stall-retry");
+      }
+    } finally {
+      this.stripDriveActive = false;
+      this.stripStallRetryPending = false;
+    }
+  }
+
   private async executeResumeOperation(operation: MowingResumeOperation): Promise<MowingResumeContinuation | null> {
     this.currentStripIndex = operation.stripIndex;
 
     if (operation.kind === "drive") {
       this.phase = operation.phase;
       if (!this.isNearCurrentPose(operation.targetX, operation.targetY)) {
-        const result = await this.driveController.executeDrive({
-          targetPosition: createPosition(operation.targetX, operation.targetY),
-          learningEnabled: true,
-          minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
-        });
+        const pose = this.poseFusion.getCurrentPose();
+        const current = {
+          xMeters: unwrapMeters(pose.position.xMeters),
+          yMeters: unwrapMeters(pose.position.yMeters),
+        };
+        const target = {
+          xMeters: operation.targetX,
+          yMeters: operation.targetY,
+          capturedAt: Date.now(),
+        };
+        const directResumePath = [
+          { ...current, capturedAt: target.capturedAt },
+          target,
+        ];
+        if (!isMowingExecutionPathSafe(
+          directResumePath,
+          this.areaPoints,
+          this.obstaclePointsArray,
+        )) {
+          try {
+            const routedResumePath = buildMowingTransitPath(
+              this.areaPoints,
+              this.obstaclePointsArray,
+              current,
+              target,
+              this.standoff,
+            );
+            if (!isMowingExecutionPathSafe(
+              routedResumePath,
+              this.areaPoints,
+              this.obstaclePointsArray,
+            )) {
+              throw new Error("resume_drive_route_unsafe");
+            }
+            const routeLookaheadMeters = planConservativeRouteLookahead(routedResumePath, {
+              minimumLookaheadMeters: this.parameters.continuousPathMinimumLookaheadMeters,
+              maximumLookaheadMeters: this.parameters.continuousPathMaximumLookaheadMeters,
+              maximumPathDeviationMeters: this.parameters.continuousPathMaximumChordDeviationMeters,
+              loopPath: false,
+            }).lookaheadMeters;
+            const routedOperation: Extract<MowingResumeOperation, { kind: "follow_path" }> = {
+              kind: "follow_path",
+              phase: "following_connector",
+              stripIndex: operation.stripIndex,
+              pathPoints: routedResumePath,
+              followOptions: {
+                loopPath: false,
+                preserveFirstTargetAtPose: true,
+                strictOrderedProgress: true,
+                pivotAtWaypointTurnDeg: PERIMETER_CORNER_PIVOT_DEG,
+                pivotAtWaypointDistanceMeters: PERIMETER_CORNER_PIVOT_DISTANCE_METERS,
+                minimumSpeed: PERIMETER_FOLLOW_SPEED,
+                maximumSpeed: PERIMETER_FOLLOW_SPEED,
+                routeLookaheadMeters,
+                initialTargetIndex: 1,
+              },
+              errorCode: "resume_drive_route_failed",
+              continuation: operation.continuation,
+            };
+            this.logger.info("mowing.resume.drive_route_ready", {
+              originalPhase: operation.phase,
+              stripIndex: operation.stripIndex,
+              routePointCount: routedResumePath.length,
+              targetX: operation.targetX,
+              targetY: operation.targetY,
+            });
+            this.persistResumeOperation(routedOperation);
+            return this.executeResumeOperation(routedOperation);
+          } catch (error) {
+            this.executionError = "resume_drive_route_unavailable";
+            this.logger.warn("mowing.resume.drive_route_unavailable", {
+              originalPhase: operation.phase,
+              stripIndex: operation.stripIndex,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            this.phase = "error";
+            return null;
+          }
+        }
+        const result = operation.phase === "mowing_strip"
+          ? await this.executeMowingStripDrive(operation.targetX, operation.targetY)
+          : await this.driveController.executeDrive({
+            targetPosition: createPosition(operation.targetX, operation.targetY),
+            learningEnabled: true,
+            minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
+          });
         if (result.status !== "success") {
           if (result.status === "stopped") {
             this.phase = "stopped";
@@ -784,13 +1029,32 @@ export class MowingExecutor {
           this.phase = "error";
           return null;
         }
+        if (
+          operation.phase === "mowing_strip"
+          && result.learnSkipReason === "below_minimum_drive_distance"
+        ) {
+          this.phase = "error";
+          this.logger.warn("mowing.strip.translation_not_executable", {
+            stripIndex: operation.stripIndex,
+            reason: result.learnSkipReason,
+            resumed: true,
+          });
+          return null;
+        }
       }
       return operation.continuation;
     }
 
     if (operation.kind === "turn") {
       this.phase = operation.phase;
-      await this.turnToHeading(operation.targetHeadingDeg);
+      const turnStatus = await this.turnToHeading(operation.targetHeadingDeg);
+      if (turnStatus !== "success") {
+        this.phase = turnStatus === "stopped" ? "stopped" : "error";
+        if (turnStatus === "error") {
+          this.executionError = "strip_turn_failed:error";
+        }
+        return null;
+      }
       if (this.isStopped()) {
         this.phase = "stopped";
         return null;
@@ -805,11 +1069,12 @@ export class MowingExecutor {
     ) {
       const target = operation.pathPoints[1];
       if (!this.canUseDirectConnector(target, Number.POSITIVE_INFINITY)) {
-        this.logger.warn("mowing.resume.direct_connector_unsafe", {
-          stripIndex: operation.stripIndex,
-          targetX: target.xMeters,
-          targetY: target.yMeters,
-        });
+        const replannedOperation = this.buildConnectorResumeRejoinOperation(operation);
+        if (replannedOperation) {
+          this.persistResumeOperation(replannedOperation);
+          return this.executeResumeOperation(replannedOperation);
+        }
+        this.executionError = "resume_connector_rejoin_unavailable";
         this.phase = "error";
         return null;
       }
@@ -831,6 +1096,9 @@ export class MowingExecutor {
         return operation.continuation;
       }
       this.phase = driveResult.status === "stopped" ? "stopped" : "error";
+      if (driveResult.status !== "stopped") {
+        this.executionError = driveResult.errorMessage ?? operation.errorCode;
+      }
       return null;
     }
     const livePose = this.poseFusion.getCurrentPose();
@@ -866,12 +1134,34 @@ export class MowingExecutor {
         );
         return rejoined ? operation.continuation : null;
       }
+      if (operation.phase === "following_connector") {
+        const replannedOperation = this.buildConnectorResumeRejoinOperation(operation);
+        if (replannedOperation) {
+          this.logger.info("mowing.resume.connector_rejoin_ready", {
+            stripIndex: operation.stripIndex,
+            livePathDistanceMeters,
+            previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
+            rejoinPointCount: replannedOperation.pathPoints.length,
+          });
+          this.persistResumeOperation(replannedOperation);
+          return this.executeResumeOperation(replannedOperation);
+        }
+        this.executionError = "resume_connector_rejoin_unavailable";
+        this.logger.warn("mowing.resume.connector_rejoin_unavailable", {
+          stripIndex: operation.stripIndex,
+          livePathDistanceMeters,
+          previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
+        });
+        this.phase = "error";
+        return null;
+      }
       this.logger.warn("mowing.resume.follow_pose_too_far_from_route", {
         phase: operation.phase,
         stripIndex: operation.stripIndex,
         livePathDistanceMeters,
         maximumRejoinDistanceMeters: RESUME_BOUNDARY_REJOIN_MAX_DISTANCE_METERS,
       });
+      this.executionError = "resume_follow_pose_too_far_from_route";
       this.phase = "error";
       return null;
     }
@@ -898,6 +1188,7 @@ export class MowingExecutor {
         phase: operation.phase,
         stripIndex: operation.stripIndex,
       });
+      this.executionError = "resume_path_geometry_unsafe";
       this.phase = "error";
       return null;
     }
@@ -914,6 +1205,7 @@ export class MowingExecutor {
         this.phase = "stopped";
         return null;
       }
+      this.executionError = result.error ?? operation.errorCode;
       this.phase = "error";
       return null;
     }
@@ -946,6 +1238,80 @@ export class MowingExecutor {
       }
     }
     return operation.continuation;
+  }
+
+  private buildConnectorResumeRejoinOperation(
+    operation: Extract<MowingResumeOperation, { kind: "follow_path" }>,
+  ): Extract<MowingResumeOperation, { kind: "follow_path" }> | null {
+    if (operation.phase !== "following_connector" || operation.pathPoints.length < 2) {
+      return null;
+    }
+
+    const lastTargetIndex = operation.pathPoints.length - 1;
+    const requestedTargetIndex = operation.followOptions.initialTargetIndex ?? 1;
+    const pendingTargetIndex = Math.max(
+      1,
+      Math.min(lastTargetIndex, Math.trunc(requestedTargetIndex)),
+    );
+    const pendingTarget = operation.pathPoints[pendingTargetIndex];
+    const pose = this.poseFusion.getCurrentPose();
+    const current = {
+      xMeters: unwrapMeters(pose.position.xMeters),
+      yMeters: unwrapMeters(pose.position.yMeters),
+    };
+
+    try {
+      const rejoinPath = buildMowingTransitPath(
+        this.areaPoints,
+        this.obstaclePointsArray,
+        current,
+        pendingTarget,
+        this.standoff,
+      );
+      const executionPath = [...rejoinPath];
+      for (const point of operation.pathPoints.slice(pendingTargetIndex + 1)) {
+        const previous = executionPath[executionPath.length - 1];
+        if (Math.hypot(
+          point.xMeters - previous.xMeters,
+          point.yMeters - previous.yMeters,
+        ) > 0.01) {
+          executionPath.push(point);
+        }
+      }
+      if (!isMowingExecutionPathSafe(
+        executionPath,
+        this.areaPoints,
+        this.obstaclePointsArray,
+      )) {
+        return null;
+      }
+
+      const routeLookaheadMeters = planConservativeRouteLookahead(executionPath, {
+        minimumLookaheadMeters: this.parameters.continuousPathMinimumLookaheadMeters,
+        maximumLookaheadMeters: this.parameters.continuousPathMaximumLookaheadMeters,
+        maximumPathDeviationMeters: this.parameters.continuousPathMaximumChordDeviationMeters,
+        loopPath: false,
+      }).lookaheadMeters;
+      return {
+        ...operation,
+        pathPoints: executionPath,
+        followOptions: {
+          ...operation.followOptions,
+          loopPath: false,
+          preserveFirstTargetAtPose: true,
+          strictOrderedProgress: true,
+          initialTargetIndex: 1,
+          routeLookaheadMeters,
+        },
+      };
+    } catch (error) {
+      this.logger.warn("mowing.resume.connector_rejoin_plan_failed", {
+        stripIndex: operation.stripIndex,
+        pendingTargetIndex,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   private async approachStripEntryAfterBoundaryTrace(
@@ -1318,6 +1684,7 @@ export class MowingExecutor {
     connector: ReadonlyArray<PathPoint>,
     stripIndex: number,
     continuation: MowingResumeContinuation,
+    allowLocalReplan: boolean = true,
   ): Promise<{
     readonly completed: boolean;
     readonly reason: "reached_end" | "user_stopped" | "error";
@@ -1376,6 +1743,47 @@ export class MowingExecutor {
         inputPointCount: connector.length,
         executionPointCount: executionConnector.length,
       });
+      if (allowLocalReplan) {
+        const pose = this.poseFusion.getCurrentPose();
+        const current = {
+          xMeters: unwrapMeters(pose.position.xMeters),
+          yMeters: unwrapMeters(pose.position.yMeters),
+        };
+        try {
+          const replannedConnector = buildMowingTransitPath(
+            this.areaPoints,
+            this.obstaclePointsArray,
+            current,
+            target,
+            this.standoff,
+          );
+          if (isMowingExecutionPathSafe(
+            replannedConnector,
+            this.areaPoints,
+            this.obstaclePointsArray,
+          )) {
+            this.logger.info("mowing.connector.local_replan_ready", {
+              stripIndex,
+              originalPointCount: connector.length,
+              replannedPointCount: replannedConnector.length,
+              currentX: current.xMeters,
+              currentY: current.yMeters,
+              targetX: target.xMeters,
+              targetY: target.yMeters,
+            });
+            return this.followConnector(replannedConnector, stripIndex, continuation, false);
+          }
+          this.logger.warn("mowing.connector.local_replan_unsafe", {
+            stripIndex,
+            replannedPointCount: replannedConnector.length,
+          });
+        } catch (error) {
+          this.logger.warn("mowing.connector.local_replan_unavailable", {
+            stripIndex,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       return { completed: false, reason: "error", error: "connector_geometry_outside_safe_area" };
     }
     this.logger.info("mowing.connector.path_ready", {
@@ -1416,6 +1824,50 @@ export class MowingExecutor {
       return { completed: true, reason: "reached_end" };
     }
     this.persistInterruptedFollowProgress(followOperation, followResult.completedWaypoints);
+    if (
+      allowLocalReplan
+      && followResult.reason !== "user_stopped"
+      && followResult.error === "continuous_path_pose_too_far_from_route"
+    ) {
+      const pose = this.poseFusion.getCurrentPose();
+      const current = {
+        xMeters: unwrapMeters(pose.position.xMeters),
+        yMeters: unwrapMeters(pose.position.yMeters),
+      };
+      try {
+        const replannedConnector = buildMowingTransitPath(
+          this.areaPoints,
+          this.obstaclePointsArray,
+          current,
+          target,
+          this.standoff,
+        );
+        if (isMowingExecutionPathSafe(
+          replannedConnector,
+          this.areaPoints,
+          this.obstaclePointsArray,
+        )) {
+          this.logger.info("mowing.connector.route_deviation_rejoin_ready", {
+            stripIndex,
+            replannedPointCount: replannedConnector.length,
+            currentX: current.xMeters,
+            currentY: current.yMeters,
+            targetX: target.xMeters,
+            targetY: target.yMeters,
+          });
+          return this.followConnector(replannedConnector, stripIndex, continuation, false);
+        }
+        this.logger.warn("mowing.connector.route_deviation_rejoin_unsafe", {
+          stripIndex,
+          replannedPointCount: replannedConnector.length,
+        });
+      } catch (error) {
+        this.logger.warn("mowing.connector.route_deviation_rejoin_unavailable", {
+          stripIndex,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     return {
       completed: false,
       reason: followResult.reason === "user_stopped" ? "user_stopped" : "error",
@@ -1458,18 +1910,19 @@ export class MowingExecutor {
     ));
   }
 
-  private async turnToHeading(targetHeadingDeg: number): Promise<void> {
+  private async turnToHeading(targetHeadingDeg: number): Promise<"success" | "error" | "stopped"> {
     const currentPose = this.poseFusion.getCurrentPose();
     const targetHeading = createInternalHeading(targetHeadingDeg);
     const turnAngle = headingDifference(currentPose.heading, targetHeading);
     if (Math.abs(unwrapRelativeAngle(turnAngle)) <= this.parameters.turnAlignmentThresholdDeg) {
-      return;
+      return "success";
     }
-    await this.turnController.executeTurn({
+    const result = await this.turnController.executeTurn({
       targetAngle: turnAngle,
       direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
       learningEnabled: true,
     });
+    return result.status;
   }
 
   private boundaryKeyFromReference(boundary: MowingBoundaryReference): string {
@@ -1966,33 +2419,36 @@ function insertPreferredBoundaryPoint(boundaryPoints: ReadonlyArray<PathPoint>, 
 
   let nearestSegmentIndex = 0;
   let nearestDistance = Infinity;
+  let projectedPreferredPoint: PathPoint | null = null;
   const segmentCount = wasClosed ? points.length : points.length - 1;
   for (let index = 0; index < segmentCount; index += 1) {
     const current = points[index];
     const next = points[(index + 1) % points.length];
-    const distance = pointToSegmentDistance(preferredPoint, current, next);
+    const projection = nearestPointOnSegment(
+      { x: preferredPoint.xMeters, y: preferredPoint.yMeters },
+      { x: current.xMeters, y: current.yMeters },
+      { x: next.xMeters, y: next.yMeters },
+    );
+    const distance = Math.hypot(
+      preferredPoint.xMeters - projection.x,
+      preferredPoint.yMeters - projection.y,
+    );
     if (distance < nearestDistance) {
       nearestDistance = distance;
       nearestSegmentIndex = index;
+      projectedPreferredPoint = {
+        ...preferredPoint,
+        xMeters: projection.x,
+        yMeters: projection.y,
+      };
     }
   }
 
-  points.splice(nearestSegmentIndex + 1, 0, preferredPoint);
-  return wasClosed ? points.concat([points[0]]) : points;
-}
-
-function pointToSegmentDistance(point: PathPoint, start: PathPoint, end: PathPoint): number {
-  const segmentX = end.xMeters - start.xMeters;
-  const segmentY = end.yMeters - start.yMeters;
-  const lengthSquared = (segmentX * segmentX) + (segmentY * segmentY);
-  if (lengthSquared <= 1e-9) {
-    return Math.hypot(point.xMeters - start.xMeters, point.yMeters - start.yMeters);
+  if (!projectedPreferredPoint) {
+    return boundaryPoints.slice();
   }
-
-  const t = Math.max(0, Math.min(1, (((point.xMeters - start.xMeters) * segmentX) + ((point.yMeters - start.yMeters) * segmentY)) / lengthSquared));
-  const projectedX = start.xMeters + (segmentX * t);
-  const projectedY = start.yMeters + (segmentY * t);
-  return Math.hypot(point.xMeters - projectedX, point.yMeters - projectedY);
+  points.splice(nearestSegmentIndex + 1, 0, projectedPreferredPoint);
+  return wasClosed ? points.concat([points[0]]) : points;
 }
 
 function normalizeSignedDegrees(angleDeg: number): number {

@@ -188,9 +188,12 @@ test("PoseFusion accepts trusted GNSS position even when heading does not valida
     timestampMillis: 1000,
   });
 
-  assert.equal(sensorController.setHeading.mock.calls.length, 1);
-  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 90);
-  assert.equal(fusion.getCurrentPose().quality, "gnss");
+  const pose = fusion.getCurrentPose();
+  assert.equal(sensorController.setHeading.mock.calls.length, 0);
+  assert.equal(unwrapInternalHeading(pose.heading), 0);
+  assert.equal(unwrapMeters(pose.position.xMeters), 1);
+  assert.equal(unwrapMeters(pose.position.yMeters), 2);
+  assert.equal(pose.quality, "gnss");
 
   await fusion.stop();
 });
@@ -496,6 +499,99 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   assert.equal(sensorController.setHeading.mock.calls.length, 2);
   assert.equal(unwrapInternalHeading(sensorController.setHeading.mock.calls[1].arguments[0]), 11);
 
+  rebaseReadiness = {
+    safe: false,
+    motorCommandActive: true,
+    leftEncoderDelta: 20,
+    rightEncoderDelta: 20,
+    wheelsStationary: false,
+    maxStationaryTickDelta: 1,
+  };
+  emitImuHeading(sensorController, 12, 2400);
+  emitGnssPosition(sensorController, {
+    xMeters: 1,
+    yMeters: 2,
+    headingDeg: 12,
+    positionAccuracyMeters: 0.03,
+    headingAccuracyDeg: 0.4,
+    fixType: "fixed",
+    satellitesInUse: 20,
+    timestampMillis: 2400,
+  });
+  assert.equal(sensorController.setHeading.mock.calls.length, 2);
+  assert.equal(fusion.getPrimitiveState().usingGnssHeading, false);
+
+  await fusion.stop();
+});
+
+test("PoseFusion never consumes a rejected heading sample while trust demotion is pending", async () => {
+  const sensorController = new EventEmitter();
+  let rebaseReadiness = {
+    safe: true,
+    motorCommandActive: false,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
+    wheelsStationary: true,
+    maxStationaryTickDelta: 1,
+  };
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => rebaseReadiness;
+  sensorController.getCurrentTimeMillis = () => 1000;
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+
+  await fusion.start();
+  emitImuHeading(sensorController, 10, 1000);
+  emitRepeatedGnssPositions(sensorController, 5, {
+    headingDeg: 10,
+    timestampMillis: 1100,
+  });
+  const trustedRebaseCount = sensorController.setHeading.mock.calls.length;
+  assert.ok(trustedRebaseCount > 0);
+
+  rebaseReadiness = {
+    safe: true,
+    motorCommandActive: false,
+    leftEncoderDelta: 0,
+    rightEncoderDelta: 0,
+    wheelsStationary: true,
+    maxStationaryTickDelta: 1,
+  };
+  emitGnssPosition(sensorController, {
+    headingDeg: 90,
+    timestampMillis: 1700,
+  });
+
+  assert.equal(sensorController.setHeading.mock.calls.length, trustedRebaseCount);
+  assert.equal(unwrapInternalHeading(fusion.getCurrentPose().heading), 10);
+  await fusion.stop();
+});
+
+test("PoseFusion does not snap to a rejected position epoch while trust demotion is pending", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  sensorController.getCurrentTimeMillis = () => 1000;
+  const fusion = new PoseFusion({ sensorController, logger: createMockLogger() });
+
+  await fusion.start();
+  emitRepeatedGnssPositions(sensorController, 3, {
+    xMeters: 1,
+    yMeters: 2,
+    headingDeg: null,
+    timestampMillis: 1100,
+  });
+  emitGnssPosition(sensorController, {
+    xMeters: 50,
+    yMeters: 60,
+    headingDeg: null,
+    positionAccuracyMeters: 5,
+    fixType: "single",
+    timestampMillis: 1500,
+  });
+
+  const pose = fusion.getCurrentPose();
+  assert.equal(unwrapMeters(pose.position.xMeters), 1);
+  assert.equal(unwrapMeters(pose.position.yMeters), 2);
   await fusion.stop();
 });
 

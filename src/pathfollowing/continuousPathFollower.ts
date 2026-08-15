@@ -25,8 +25,14 @@ const CONTINUOUS_CTE_GAIN = 1.8;
 const CONTINUOUS_HEADING_GAIN = 0.02;
 const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND = 0.8;
 const CONTINUOUS_CORNER_CAPTURE_DISTANCE_METERS = 0.4;
+const CONTINUOUS_CORNER_CAPTURE_CTE_RELAXATION = 1.5;
 const CONTINUOUS_ORDERED_PROJECTION_FORWARD_WINDOW_METERS = 0.5;
-const CONTINUOUS_ROUTE_DEVIATION_CONFIRMATION_SAMPLES = 10;
+// A route deviation is not itself an emergency: the controller may already be
+// applying the correct differential output to bring the mower back onto the
+// segment.  Ten 20 ms samples gave that correction only 0.2 seconds, which
+// made normal corner settling look like a failed path.  The separate mowing
+// area watchdog remains responsible for stopping an actual garden escape.
+const CONTINUOUS_ROUTE_DEVIATION_CONFIRMATION_SAMPLES = 25;
 const CONTINUOUS_ROUTE_DEVIATION_IMMEDIATE_ABORT_MULTIPLIER = 2;
 
 export interface ContinuousPathFollowerOptions {
@@ -218,7 +224,8 @@ export class ContinuousPathFollower {
           });
           break;
         }
-        currentIndex = advancePassedTargets(
+        const indexBeforePassedTargetAdvance = currentIndex;
+        const advancedIndex = advancePassedTargets(
           pathPoints,
           pose,
           currentIndex,
@@ -226,6 +233,19 @@ export class ContinuousPathFollower {
           preserveCurrentTargetAtPose,
           options.loopPath ?? true,
         );
+        // Do not consume a sharp corner merely because the mower has reached
+        // its pass margin. This matters particularly for two nearby corners:
+        // the first corner capture can put the pose at the second corner, and
+        // advancing first used to skip the second turn completely.
+        const pendingCornerIndex = findPendingCornerCaptureIndex(
+          pathPoints,
+          pose,
+          indexBeforePassedTargetAdvance,
+          advancedIndex,
+          options.pivotAtWaypointTurnDeg,
+          options.pivotAtWaypointDistanceMeters,
+        );
+        currentIndex = pendingCornerIndex ?? advancedIndex;
         preserveCurrentTargetAtPose = false;
         if (currentIndex >= pathPoints.length) {
           break;
@@ -284,7 +304,12 @@ export class ContinuousPathFollower {
           };
         }
         currentIndex = Math.max(currentIndex, projection.segmentStartIndex + 1);
-        const cornerVertexIndex = projection.segmentStartIndex + 1;
+        // Projection may select the outgoing side of a corner after only a few
+        // centimetres of braking overshoot. The ordered-progress check above
+        // has already identified any sharp corner that is still owed, so that
+        // corner owns the manoeuvre even when the adjacent segment is now
+        // geometrically closer to the live pose.
+        const cornerVertexIndex = pendingCornerIndex ?? (projection.segmentStartIndex + 1);
         if (
           Number.isFinite(options.pivotAtWaypointTurnDeg)
           && Number.isFinite(options.pivotAtWaypointDistanceMeters)
@@ -301,6 +326,13 @@ export class ContinuousPathFollower {
             pathPoints[cornerVertexIndex],
             pathPoints[cornerVertexIndex + 1],
           );
+          const cornerCaptureMaxCteMeters = Math.max(
+            parameters.segmentedDriveMaxCteMeters,
+            Math.min(
+              parameters.mowingStandoffMeters,
+              parameters.segmentedDriveMaxCteMeters * CONTINUOUS_CORNER_CAPTURE_CTE_RELAXATION,
+            ),
+          );
           this.logger.info("continuous_path.corner_align_started", {
             vertexIndex: cornerVertexIndex,
             cornerX: pathPoints[cornerVertexIndex].xMeters,
@@ -311,7 +343,7 @@ export class ContinuousPathFollower {
           const cornerResult = await this.driveController.executeDrive({
             targetPosition: createPosition(cornerCaptureTarget.xMeters, cornerCaptureTarget.yMeters),
             learningEnabled: false,
-            maxCrossTrackErrorMeters: parameters.segmentedDriveMaxCteMeters,
+            maxCrossTrackErrorMeters: cornerCaptureMaxCteMeters,
             alwaysTurnToFaceTarget: true,
             minimumDriveDistanceMeters: Math.max(
               parameters.mowingStandoffMeters,
@@ -602,9 +634,12 @@ export function projectPoseOntoPath(
 ): ContinuousPathProjection {
   const cumulativeDistances = buildCumulativeDistances(points);
   const clampedStartIndex = Math.max(0, Math.min(startIndex, points.length - 2));
-  const minSegmentStartIndex = strictOrderedProgress
-    ? Math.max(0, clampedStartIndex - 1)
-    : clampedStartIndex;
+  // startIndex names the next target vertex, so the segment currently being
+  // traversed ends at that vertex and starts one index earlier. Always retain
+  // that incoming segment in the projection search. Omitting it makes a route
+  // beginning at the live pose appear to be metres away immediately after
+  // waypoint zero is consumed.
+  const minSegmentStartIndex = Math.max(0, clampedStartIndex - 1);
   let maxSegmentStartIndex = points.length - 2;
   if (strictOrderedProgress) {
     maxSegmentStartIndex = Math.min(points.length - 2, clampedStartIndex + 1);
@@ -720,6 +755,30 @@ function isCornerAtLeast(points: PathPoint[], vertexIndex: number, thresholdDeg:
     pointToPosition(points[vertexIndex + 1]),
   );
   return Math.abs(unwrapRelativeAngle(headingDifference(incomingHeading, outgoingHeading))) >= thresholdDeg;
+}
+
+function findPendingCornerCaptureIndex(
+  points: PathPoint[],
+  pose: Pose,
+  startIndex: number,
+  advancedIndex: number,
+  pivotAtWaypointTurnDeg: number | undefined,
+  pivotAtWaypointDistanceMeters: number | undefined,
+): number | null {
+  if (!Number.isFinite(pivotAtWaypointTurnDeg) || !Number.isFinite(pivotAtWaypointDistanceMeters)) {
+    return null;
+  }
+  const finalCornerIndex = Math.min(advancedIndex, points.length - 2);
+  for (let index = Math.max(1, startIndex); index <= finalCornerIndex; index += 1) {
+    if (
+      isCornerAtLeast(points, index, Math.abs(pivotAtWaypointTurnDeg ?? 0))
+      && distanceFromPoseToPoint(pose, points[index])
+        <= Math.max(0, pivotAtWaypointDistanceMeters ?? 0)
+    ) {
+      return index;
+    }
+  }
+  return null;
 }
 
 export function buildCommittedCornerCaptureTarget(

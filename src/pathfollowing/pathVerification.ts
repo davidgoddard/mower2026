@@ -295,6 +295,7 @@ export function buildPerimeterPathPointsFromPose(
         livePosePoint,
         [injectedPoint, ...perimeterPoints.slice(index)],
         normalizedPath.isClosedLoop,
+        perimeterPoints.slice(1, index),
       );
     }
     accumulatedMeters += segmentLengthMeters;
@@ -357,6 +358,7 @@ export function buildPerimeterPathPointsFromPlanAndPose(
         livePosePoint,
         [injectedPoint, ...perimeterPoints.slice(index)],
         normalizedPath.isClosedLoop,
+        perimeterPoints.slice(1, index),
       );
     }
     accumulatedMeters += segmentLengthMeters;
@@ -373,9 +375,24 @@ function finalizePoseJoinedPerimeterPath(
   livePosePoint: PathPoint,
   remainder: PathPoint[],
   isClosedLoop: boolean,
+  skippedPerimeterPrefix: PathPoint[] = [],
 ): PathPoint[] {
   const path = [livePosePoint, ...remainder];
-  return isClosedLoop ? path.concat([livePosePoint]) : path;
+  if (!isClosedLoop || remainder.length === 0) {
+    return path;
+  }
+
+  // The live pose is an approach point, not part of the perimeter. Once the
+  // mower has joined ahead of the anchor, rotate the skipped perimeter prefix
+  // to the end instead of deleting it. The route then completes every
+  // authoritative perimeter edge before returning to the boundary join.
+  const completedPerimeter = path.concat(skippedPerimeterPrefix);
+  const boundaryJoin = remainder[0];
+  const last = completedPerimeter[completedPerimeter.length - 1];
+  if (pointDistance(last, boundaryJoin) <= 1e-9) {
+    return completedPerimeter;
+  }
+  return completedPerimeter.concat([boundaryJoin]);
 }
 
 /**

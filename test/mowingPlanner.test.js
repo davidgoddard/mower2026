@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMowingInitialEntryPlan, buildMowingPlan, effectiveMowingStripStandoffMeters, normalizeAxisHeading } from "../dist/pathfollowing/mowingPlanner.js";
+import { buildMowingInitialEntryPlan, buildMowingPlan, buildMowingTransitPath, effectiveMowingStripStandoffMeters, normalizeAxisHeading } from "../dist/pathfollowing/mowingPlanner.js";
 
 const square = [
   { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -144,7 +144,35 @@ test("buildMowingPlan plans obstacle-relative regions as one persisted route", (
   assert.ok(plan.routeCost.estimatedCombinedWheelTravelMeters > plan.routeCost.mowingDistanceMeters);
 });
 
-test("buildMowingPlan rotates one closed regional cycle to the nearest requested region entry", () => {
+test("buildMowingPlan bounds sequencing time for a many-region lawn", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0 }, { xMeters: 20, yMeters: 0 },
+    { xMeters: 20, yMeters: 12 }, { xMeters: 0, yMeters: 12 },
+    { xMeters: 0, yMeters: 0 },
+  ];
+  const obstacles = Array.from({ length: 5 }, (_, index) => {
+    const minX = 2 + (index * 3.5);
+    const minY = 0.8 + (index * 2);
+    return [
+      { xMeters: minX, yMeters: minY }, { xMeters: minX + 1.2, yMeters: minY },
+      { xMeters: minX + 1.2, yMeters: minY + 1.2 }, { xMeters: minX, yMeters: minY + 1.2 },
+      { xMeters: minX, yMeters: minY },
+    ];
+  });
+
+  const plan = buildMowingPlan(area, {
+    headingDeg: 0,
+    stripSpacingMeters: 0.38,
+    preferredStartPoint: { xMeters: 0, yMeters: 0 },
+    obstacles,
+  });
+
+  assert.ok(plan.regions.length > 8, `expected more than 8 regions, got ${plan.regions.length}`);
+  assert.ok(plan.performance.sequenceMs < 5_000, `sequencing took ${plan.performance.sequenceMs}ms`);
+  assert.equal(plan.connectors.length, plan.strips.length - 1);
+});
+
+test("buildMowingPlan optimises an open regional route from the requested entry", () => {
   const area = [
     { xMeters: 0, yMeters: 0 }, { xMeters: 4, yMeters: 0 },
     { xMeters: 4, yMeters: 4 }, { xMeters: 0, yMeters: 4 },
@@ -173,12 +201,6 @@ test("buildMowingPlan rotates one closed regional cycle to the nearest requested
   });
 
   assert.equal(rotated.regionOrder[0], requestedRegion.id);
-  const doubledBaseOrder = [...base.regionOrder, ...base.regionOrder].join(",");
-  assert.equal(
-    doubledBaseOrder.includes(rotated.regionOrder.join(",")),
-    true,
-    "anchoring should rotate rather than recalculate the regional cycle",
-  );
   assert.deepEqual(
     [...rotated.regionOrder].sort(),
     [...base.regionOrder].sort(),
@@ -366,7 +388,7 @@ test("buildMowingPlan removes strip sections inside obstacle perimeters", () => 
   }
 });
 
-test("buildMowingPlan discards obstacle-clipped drives shorter than 15 cm", () => {
+test("buildMowingPlan discards obstacle-clipped drives shorter than 30 cm", () => {
   const area = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 2, yMeters: 0, capturedAt: 2 },
@@ -391,13 +413,13 @@ test("buildMowingPlan discards obstacle-clipped drives shorter than 15 cm", () =
   assert.equal(plan.strips.some((strip) => Math.hypot(
     strip.end.xMeters - strip.start.xMeters,
     strip.end.yMeters - strip.start.yMeters,
-  ) < 0.15 - 1e-9), false);
+  ) < 0.3 - 1e-9), false);
 });
 
-test("effectiveMowingStripStandoffMeters preserves a 15 cm short-strip drive", () => {
-  assert.equal(effectiveMowingStripStandoffMeters(0.5, 0.15), 0.15);
-  assert.ok(Math.abs(effectiveMowingStripStandoffMeters(0.2, 0.15) - 0.025) < 1e-9);
-  assert.equal(effectiveMowingStripStandoffMeters(0.15, 0.15), 0);
+test("effectiveMowingStripStandoffMeters preserves a 30 cm executable short-strip drive", () => {
+  assert.equal(effectiveMowingStripStandoffMeters(0.5, 0.15), 0.1);
+  assert.ok(Math.abs(effectiveMowingStripStandoffMeters(0.4, 0.15) - 0.05) < 1e-9);
+  assert.equal(effectiveMowingStripStandoffMeters(0.3, 0.15), 0);
 });
 
 test("buildMowingPlan ignores obstacles that do not overlap the active strip offsets", () => {
@@ -537,6 +559,41 @@ test("buildMowingPlan uses configured mowing standoff for same-boundary connecto
       [0.5, 0.25],
     ],
   );
+});
+
+test("buildMowingTransitPath routes around a concavity on the inward standoff rather than the raw wall", () => {
+  const area = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 6, yMeters: 0, capturedAt: 2 },
+    { xMeters: 6, yMeters: 6, capturedAt: 3 },
+    { xMeters: 4, yMeters: 6, capturedAt: 4 },
+    { xMeters: 4, yMeters: 2, capturedAt: 5 },
+    { xMeters: 2, yMeters: 2, capturedAt: 6 },
+    { xMeters: 2, yMeters: 6, capturedAt: 7 },
+    { xMeters: 0, yMeters: 6, capturedAt: 8 },
+    { xMeters: 0, yMeters: 0, capturedAt: 9 },
+  ];
+
+  const route = buildMowingTransitPath(
+    area,
+    [],
+    { xMeters: 1, yMeters: 5 },
+    { xMeters: 5, yMeters: 5 },
+    0.4,
+  );
+
+  assert.equal(route.length >= 4, true);
+  samplePathStaysInsidePolygon(route, area);
+  for (const point of route) {
+    const distanceFromBoundary = Math.min(...area.slice(0, -1).map((start, index) => (
+      pointToSegmentDistance(
+        { x: point.xMeters, y: point.yMeters },
+        start,
+        area[index + 1],
+      )
+    )));
+    assert.equal(distanceFromBoundary >= 0.39, true);
+  }
 });
 
 test("buildMowingPlan keeps each obstacle-relative region contiguous", () => {

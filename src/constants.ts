@@ -326,8 +326,8 @@ export const MOTOR_STALL_CONSECUTIVE_SAMPLES = 12;
  * Motor current thresholds used as independent obstruction evidence.
  * The lower clear threshold provides hysteresis around the trip point.
  */
-export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 2.8;
-export const MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS = 2.6;
+export const MOTOR_STALL_CURRENT_THRESHOLD_AMPS = 10;
+export const MOTOR_STALL_CURRENT_CLEAR_THRESHOLD_AMPS = 9.5;
 
 /**
  * Number of consecutive 50ms motor samples required at high current.
@@ -574,30 +574,25 @@ export const WHEEL_BASE_METERS_MIN_PLAUSIBLE = 0.20;
 export const WHEEL_BASE_METERS_MAX_PLAUSIBLE = 1.50;
 
 /**
- * Heading-error angle at which the straight-line driver gives up trying to
- * steer through the misalignment under power and pivots in place to
- * re-acquire the line first.
+ * Maximum body-heading error permitted once straight-line translation has
+ * started.  Segment alignment belongs to DriveController/TurnController;
+ * exceeding this limit during translation is a failed line drive, never a
+ * request to pivot in place.
  */
-export const DRIVE_STEERING_ROTATE_TO_HEADING_MIN_ANGLE_DEG = 45;
+export const DRIVE_STEERING_MAX_HEADING_ERROR_DEG = 45;
 
 /**
- * Wheel output magnitude used for the in-place pivot recovery.  Kept above
- * the motor minimum-active output so it never deadbands out.
- */
-export const DRIVE_STEERING_PIVOT_OUTPUT_PERCENT = 0.35;
-
-/**
- * Within this remaining-along-track distance from the target the driver no
- * longer reaches for an in-place pivot.  The brake trigger is imminent and
- * pivoting next to the target would just waste arrival accuracy.
+ * Within this remaining-along-track distance from the target, short-drive
+ * heading trim tapers toward zero and the gross-heading guard yields to the
+ * imminent arrival/brake decision.
  */
 export const DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS = 0.5;
 
 /**
  * Maximum left/right wheel-trim magnitude applied by the proportional CTE
- * correction.  Trims above this would make one wheel reverse while the other
- * is still forward, which the minimum-active-arc handler turns into an
- * in-place pivot — capping here keeps that pivot escalation deliberate.
+ * correction. The translation-only command guard prevents either wheel from
+ * reversing even if a low per-manoeuvre output ceiling makes this trim larger
+ * than the base command.
  */
 export const DRIVE_STEERING_MAX_TRIM_PERCENT = 0.35;
 

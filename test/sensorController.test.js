@@ -230,7 +230,7 @@ test('SensorController rejects implausible encoder jumps and requires three cohe
   });
 });
 
-test('SensorController ignores normal 2.3A mowing load but stops sustained 2.8A current', async () => {
+test('SensorController ignores measured mowing load up to 6A but stops sustained 10A current', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
       app: 'core-app',
@@ -262,13 +262,13 @@ test('SensorController ignores normal 2.3A mowing load but stops sustained 2.8A 
     now = 1_000;
     for (let sample = 1; sample <= 100; sample += 1) {
       controller.latestGnssPosition = { x: sample * 0.11, y: 0 };
-      controller.evaluateStallDetection(40, 40, 2.3, 0, 0);
+      controller.evaluateStallDetection(40, 40, 6, 0, 0);
     }
     assert.equal(systemStop.isStopped(), false);
 
     for (let sample = 101; sample <= 152; sample += 1) {
       controller.latestGnssPosition = { x: sample * 0.11, y: 0 };
-      controller.evaluateStallDetection(40, 40, 2.8, 0, 0);
+      controller.evaluateStallDetection(40, 40, 10, 0, 0);
     }
     assert.equal(systemStop.snapshot().reason, 'motor_stall_detected');
     systemStop.clearStop('high-current-stall-test-cleanup');
@@ -1772,6 +1772,9 @@ test('SensorController obstruction event reports the latest wheel speeds, not li
       assert.notEqual(stallEvent.leftEncoderDelta, 0,
         'left encoder delta in obstruction event should not be zero when encoder ticks are non-zero');
       assert.equal(typeof stallEvent.rightEncoderDelta, 'number');
+      assert.equal(stallEvent.motionKind, 'translation');
+      assert.equal(stallEvent.currentHigh, false);
+      assert.equal(stallEvent.faultFlags, 0);
 
       await controller.stop();
     } finally {

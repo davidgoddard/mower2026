@@ -550,6 +550,8 @@ export class PoseFusion extends EventEmitter {
     this.encoderOnlyY = (this.encoderOnlyY ?? 0) + avgDist * Math.sin(encHeadingRad);
 
     // --- Slip detection and confidence ---
+    // Diagnostic only: encoder-implied turn and this confidence flag have no
+    // authority over fused heading, turn control, or any navigation command.
     if (Math.abs(avgDist) >= SLIP_CHECK_MIN_DISTANCE_METERS && this.wheelbaseMeters > 0) {
       if (this.lastImuHeadingForSlip !== null) {
         // Use the signed IMU delta so opposite-direction disagreements (encoder
@@ -611,7 +613,8 @@ export class PoseFusion extends EventEmitter {
     const validation = this.gnssValidator.validate(event, this.currentHeading);
     const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
 
-    if (validation.position === "TRUSTED") {
+    const currentPositionSamplePassed = validation.positionRejections.length === 0;
+    if (validation.position === "TRUSTED" && currentPositionSamplePassed) {
       // Position is trusted — snap fused pose to GNSS.  No blending against
       // DR, no agreement gate.  GNSS is the truth.
       const preSnapX = unwrapMeters(this.currentPosition.xMeters);
@@ -655,11 +658,6 @@ export class PoseFusion extends EventEmitter {
       }
     }
 
-    const canBootstrapHeadingFromGnss =
-      !this.hasGnssHeadingBaseline &&
-      validation.position === "TRUSTED" &&
-      event.heading !== null;
-
     const headingDisagreementDeg = event.heading === null
       ? null
       : Math.abs(unwrapRelativeAngle(headingDifference(this.currentHeading, event.heading)));
@@ -667,7 +665,16 @@ export class PoseFusion extends EventEmitter {
     const headingQualityPassedIgnoringImuAgreement =
       event.heading !== null &&
       validation.position === "TRUSTED" &&
+      currentPositionSamplePassed &&
       validation.headingRejections.every((reason) => reason === "heading_disagrees_with_imu");
+    const currentHeadingSamplePassed =
+      event.heading !== null &&
+      currentPositionSamplePassed &&
+      validation.headingRejections.length === 0;
+    const canBootstrapHeadingFromGnss =
+      !this.hasGnssHeadingBaseline &&
+      rebaseReadiness.safe &&
+      headingQualityPassedIgnoringImuAgreement;
     if (rebaseReadiness.safe && headingQualityPassedIgnoringImuAgreement) {
       this.stationaryHeadingOverrideGoodEpochs += 1;
     } else {
@@ -682,12 +689,19 @@ export class PoseFusion extends EventEmitter {
     if (canBootstrapHeadingFromGnss) {
       // Bootstrap: on first trusted GNSS epoch, seed IMU heading from GNSS so
       // later IMU-agreement checks don't deadlock due to initial offset.
-      this.applyGnssHeadingRebase(event.heading, event.timestampMillis);
+      this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
       this.isUsingGnssHeading = true;
-    } else if (validation.heading === "TRUSTED" && event.heading !== null) {
-      // Heading is trusted — rebase the IMU.  The validator already verified
-      // |GNSS - IMU| ≤ disagreement threshold so this is a small step.
-      this.applyGnssHeadingRebase(event.heading, event.timestampMillis);
+    } else if (
+      validation.heading === "TRUSTED" &&
+      currentHeadingSamplePassed &&
+      rebaseReadiness.safe
+    ) {
+      // A latched TRUSTED state survives isolated bad epochs by design, but
+      // those rejected epochs must never be consumed. Rebase only from a
+      // currently valid sample while the mower is stationary; applying a
+      // delayed or jumping GNSS heading during a pivot corrupts the IMU
+      // integration baseline and creates a false line-drive heading error.
+      this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
       this.isUsingGnssHeading = true;
     } else if (canStationaryOverrideRebase) {
       // Throttle to one log per second; this branch fires per GNSS sample
