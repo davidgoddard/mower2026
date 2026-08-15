@@ -5,6 +5,7 @@ data/logs/
 data/mowing-resume-state.json
 data/mowing-records.json
 data/mowing-progress.jsonl
+data/motor-battery-usage.json
 .DS_Store
 **/.DS_Store
 ._.DS_Store
