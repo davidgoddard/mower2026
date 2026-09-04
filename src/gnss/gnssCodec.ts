@@ -1,4 +1,4 @@
-import type { GnssFixType, GnssSample } from "./gnssProtocol.js";
+import type { GnssFixType, GnssOriginSource, GnssSample } from "./gnssProtocol.js";
 
 /**
  * Optional decode-time context.  When provided, `nowMillis` is used to stamp
@@ -15,7 +15,7 @@ export interface GnssDecodeContext {
   readonly nowMillis: number;
 }
 
-// Single payload layout — see gnss-node-v2.ino buildGnssPayload for the
+// Single payload layout — see gnss-mower.ino buildGnssPayload for the
 // authoritative definition.  Total length 40 bytes:
 //
 //   off 0 .. 7 : gpsTimeMillis  uint64 LE (Unix epoch ms; 0 when UTC invalid)
@@ -32,7 +32,9 @@ export interface GnssDecodeContext {
 //   off 33     : satellites in use uint8
 //   off 34     : flags
 //   off 35     : log config mask
-//   off 36..39 : reserved
+//   off 36..37 : GNSS ESP boot id uint16 LE
+//   off 38     : esp_reset_reason_t code
+//   off 39     : origin source (0 none, 1 RTCM1006, 2 dynamic)
 const GNSS_PAYLOAD_LENGTH = 40;
 
 const POSITION_SCALE_MM_TO_M = 1000;
@@ -54,6 +56,12 @@ const codeToFixType: Record<number, GnssFixType> = {
   1: "single",
   2: "float",
   3: "fixed",
+};
+
+const codeToOriginSource: Record<number, GnssOriginSource> = {
+  0: "none",
+  1: "rtcm1006",
+  2: "dynamic",
 };
 
 export function gnssPayloadLength(): number {
@@ -121,6 +129,10 @@ export function decodeGnssSample(payload: Uint8Array, context?: GnssDecodeContex
   const satellitesInUse = view.getUint8(33);
   const flags = view.getUint8(34);
   const logConfigMask = view.getUint8(35);
+  const bootId = view.getUint16(36, true);
+  const resetReasonCode = view.getUint8(38);
+  const originSourceCode = view.getUint8(39);
+  const originSource = codeToOriginSource[originSourceCode] ?? "unknown";
 
   const utcValid = (flags & FLAG_UTC_VALID) !== 0;
   const headingValid = (flags & FLAG_HEADING_VALID) !== 0;
@@ -141,6 +153,7 @@ export function decodeGnssSample(payload: Uint8Array, context?: GnssDecodeContex
   // supply a context, then to 0 — callers should always supply nowMillis in
   // production.
   const piTimestampMillis = context?.nowMillis ?? gpsTimeMillis ?? 0;
+  const hasNodeDiagnostics = bootId !== 0 || resetReasonCode !== 0 || originSourceCode !== 0;
 
   return {
     timestampMillis: piTimestampMillis,
@@ -157,6 +170,14 @@ export function decodeGnssSample(payload: Uint8Array, context?: GnssDecodeContex
     ...(headingBaselineMeters === undefined || !baselineFlag ? {} : { headingBaselineMeters }),
     ...(gpsTimeMillis === undefined ? {} : { gpsTimeMillis }),
     headingValid,
-    ...(logConfigMask === 0 ? {} : { debug: { logConfigMask } }),
+    ...(logConfigMask === 0 && !hasNodeDiagnostics
+      ? {}
+      : {
+          debug: {
+            ...(logConfigMask === 0 ? {} : { logConfigMask }),
+            ...(bootId === 0 ? {} : { bootId }),
+            ...(hasNodeDiagnostics ? { resetReasonCode, originSource } : {}),
+          },
+        }),
   };
 }

@@ -1,7 +1,14 @@
 export type GnssFixType = "none" | "single" | "float" | "fixed";
+export type GnssOriginSource = "none" | "rtcm1006" | "dynamic" | "unknown";
 
 export interface GnssDebugAges {
   readonly logConfigMask?: number;
+  /** Random non-zero identifier generated whenever the GNSS ESP boots. */
+  readonly bootId?: number;
+  /** Raw esp_reset_reason_t value reported by the GNSS ESP. */
+  readonly resetReasonCode?: number;
+  /** Coordinate-frame origin used to convert latitude/longitude to lawn X/Y. */
+  readonly originSource?: GnssOriginSource;
 }
 
 export interface GnssSample {

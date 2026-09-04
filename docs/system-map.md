@@ -133,6 +133,7 @@ This document maps problem domains to candidate files removing the need for Code
   - before the first non-zero command, sends a dedicated current-zero calibration request and waits for the ESP32 sampling window; this shared path covers mowing, web manual drive, and game-controller drive
 - `src/sensing/sensorController.ts`: converts raw motor encoder deltas into wheel-speed estimates using persisted calibration.
   - runs the top-level sensor loop, with IMU on every loop tick while GNSS and motor polling run at their own lower cadences to reduce CPU and I2C load
+  - exponentially backs off only failed GNSS polls to at most one per second, rate-limits repeated identical errors, restores 20 Hz immediately on recovery, and logs GNSS ESP boot-ID changes
   - rejects impossible encoder jumps, requires three coherent frames after a motor-feedback outage, rate-limits repeated poll errors, and safety-stops motion after ten consecutive failed feedback polls
   - exposes motion-start motor-feedback health: three coherent frames, a frame age no greater than 250 ms, healthy watchdog state and zero motor fault flags
 - `src/sensing/sensorHardwareGateway.ts`: clamps normalized wheel outputs (`-1..1`) and applies direction mapping before sending to the motor client.
@@ -144,10 +145,10 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorMapping.ts`: motor sign mapping and normalized wheel-output clamp helpers.
 
 ## GNSS ESP32 Firmware
-- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover-side GNSS ESP32 firmware; receives RTCM over ESP-NOW, relays corrections to the UM982, parses receiver logs, and serves compact GNSS frames to the Pi over I2C.
-- `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`: base-side GNSS ESP32 firmware; reads RTCM from the UM980 base receiver and forwards it to rover peers over the current fragmented ESP-NOW RTCM transport.
-- `external-hardware/esp32/gnss-relay-v1/gnss-relay-v1.ino`: optional ESP-NOW range relay; filters packets by the configured base MAC, forwards each packet unchanged so the rover can deduplicate direct and relayed copies, and pulses the onboard GPIO2 blue LED after each successful forward.
-- `external-hardware/esp32/gnss-base-station-v1/README.md`: base-station wiring and peer-configuration notes.
+- `external-hardware/esp32/gnss-mower/gnss-mower.ino`: rover-side GNSS ESP32 firmware; receives RTCM over ESP-NOW, relays corrections to the UM982, parses receiver logs, and serves compact GNSS frames to the Pi over I2C. ESP-NOW callbacks enqueue bounded packet copies for main-loop processing, and I2C callbacks serve atomically swapped immutable payload/frame snapshots.
+- `external-hardware/esp32/gnss-base-station/gnss-base-station.ino`: base-side GNSS ESP32 firmware; reads RTCM from the UM980 base receiver and forwards it to rover peers over the current fragmented ESP-NOW RTCM transport.
+- `external-hardware/esp32/gnss-relay/gnss-relay.ino`: optional ESP-NOW range relay; filters packets by the configured base MAC, forwards each packet unchanged so the rover can deduplicate direct and relayed copies, and pulses the onboard GPIO2 blue LED after each successful forward.
+- `external-hardware/esp32/gnss-base-station/README.md`: base-station wiring and peer-configuration notes.
 
 ## Turn Controller
 - `src/control/turnController.ts`: turn execution controller with self-learning brake points
@@ -519,7 +520,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/gnss/gnssCodec.ts`: GNSS sample payload decoding for the compact 40-byte GNSS frame.
 - `src/gnss/gnssDebugCodec.ts`: low-satellite raw-text debug payload decoding for the diagnostic I2C frame.
 - `src/gnss/gnssNodeClient.ts`: GNSS request/response polling client over I2C framed protocol, plus low-satellite raw-text debug fetches.
-- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`: rover GNSS firmware; relays verified RTCM to the UM982, decodes RTCM 1006 base-position messages for the local origin when no fixed base is configured, converts rover lat/lon to local X/Y, serves framed GNSS samples over I2C, and retains the latest low-satellite raw `PVTSLNA` payload for Pi-side logging.
+- `external-hardware/esp32/gnss-mower/gnss-mower.ino`: rover GNSS firmware; relays verified RTCM to the UM982, uses decoded RTCM 1006 base-position messages as the stable local origin, reports no usable position until that origin is available, converts rover lat/lon to local X/Y, serves immutable framed snapshots over I2C, exposes boot/reset/origin diagnostics, and retains the latest low-satellite raw `PVTSLNA` payload for Pi-side logging.
 - `src/motors/motorProtocol.ts`: motor command/feedback contracts.
 - `src/motors/motorCodec.ts`: wheel-speed command encoding and motor-feedback payload decoding.
 - `src/motors/motorMapping.ts`: app-facing forward-positive wheel convention mapping to/from raw motor node direction signs.
@@ -546,6 +547,7 @@ This document maps problem domains to candidate files removing the need for Code
   - buffered IMU diagnostics: retains a short in-memory window of recent gyro integrations, snapshots that window when motor motion stops, and can expose a compact summary for turn debugging without per-sample file writes.
   - heading rebase readiness: exposes whether GNSS heading may safely rebase the IMU; rebasing is blocked while a motor command is active or the latest tilt-compensated yaw rate exceeds 1 deg/s.
   - GNSS geometry correction: buffers recent IMU headings and applies the configured body-frame offset to raw GNSS reference coordinates using a wrap-safe interpolation at the fix's effective timestamp (arrival minus receiver sample age), avoiding arrival-time heading artefacts during pivots; diagnostic events retain both raw and corrected inputs.
+  - GNSS fault isolation: backs repeated transport/decode failures off exponentially to a one-second maximum interval, logs the first/reason-changed failure and recovery, and identifies GNSS-node restarts from the firmware boot ID without slowing motor or IMU polling.
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
@@ -562,13 +564,13 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/i2c/priorities.ts`: queue priorities for stop/motor/GNSS/IMU operations.
 - `src/i2c/i2cBusController.ts`: single-bus queued priority controller with key-based request replacement.
 - `src/i2c/liveI2cTransport.ts`: live Raspberry Pi I2C transport (`i2c-bus` module wrapper).
-  - reopens the bus handle and retries once after recoverable Linux/I2C failures such as `EIO`, `EREMOTEIO`, `ENXIO`, `EBUSY`, timeout-style errors, or short read/write counts
+  - retries address-level failures (`EIO`, `EREMOTEIO`, `ENXIO`, or short transfers) once on the same handle so one restarting client does not disrupt the other nodes; only controller-wide `EBUSY`/timeout faults reopen the shared bus before retry
 - `external-hardware/manual-tests/*.js`: Pi-side hardware utilities use the built defaults from `dist/constants.js` and retain the same `MOWER_I2C_BUS_NUMBER`, `MOWER_GNSS_I2C_ADDRESS`, and `MOWER_MOTOR_I2C_ADDRESS` overrides as production where applicable.
 - `external-hardware/manual-tests/imu_manual_test.js`: manual BMI160 bring-up poller script; uses built runtime modules from `dist/i2c/*` and `dist/imu/*` after `npm run build`.
 - `external-hardware/manual-tests/imu_gnss_turn_calibration.js`: interactive IMU/GNSS heading capture utility; press `S` to start a run and locally align the IMU to the current GNSS heading, then press `E` to save paired start/end headings, a suggested yaw-scale correction to JSONL, and the averaged export to `config/imu-yaw-calibration.json`.
 - `external-hardware/manual-tests/rotation_center_calibration.js`: manual GNSS geometry calibration utility that spins the mower through at least one full rotation and writes `config/geometry-calibration.json`.
 - `test/i2cBusController.test.js`: queue priority and replacement behavior tests.
-- `test/liveI2cTransport.test.js`: transport reopen/retry behavior for recoverable bus faults.
+- `test/liveI2cTransport.test.js`: verifies same-handle retry for client faults and reopen/retry for controller-wide faults.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
 - `test/motorNodeClient.test.js`: motor command priority, duplicate suppression, active/neutral/disabled latest-command heartbeat, queued motion-to-neutral replacement, shutdown cancellation, and feedback-frame decode tests.

@@ -31,7 +31,7 @@ Default behavior is broadcast fallback only. Broadcast is convenient for bench p
 
 This sketch is paired with:
 
-- `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`
+- `external-hardware/esp32/gnss-mower/gnss-mower.ino`
 
 The rover sketch accepts this fragmented transport and uses its message identity
 to suppress duplicate direct and relayed packets.

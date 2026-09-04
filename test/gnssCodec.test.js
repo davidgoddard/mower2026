@@ -71,6 +71,9 @@ test('decodeGnssSample maps a fully populated RTK fixed sample', () => {
   view.setUint8(33, 14);
   view.setUint8(34, 0x07);                    // utc + heading + baseline valid
   view.setUint8(35, 0x07);                    // log config: pvt + rectime + uniheading active
+  view.setUint16(36, 0x5a3c, true);           // GNSS ESP boot id
+  view.setUint8(38, 12);                      // software CPU reset
+  view.setUint8(39, 1);                       // stable RTCM1006 origin
 
   const sample = decodeGnssSample(payload, { nowMillis: 1_700_000_001_234 });
 
@@ -88,6 +91,29 @@ test('decodeGnssSample maps a fully populated RTK fixed sample', () => {
   assert.equal(sample.headingBaselineMeters, 0.3);
   assert.equal(sample.gpsTimeMillis, 1_700_000_000_000);
   assert.equal(sample.headingValid, true);
+  assert.deepEqual(sample.debug, {
+    logConfigMask: 0x07,
+    bootId: 0x5a3c,
+    resetReasonCode: 12,
+    originSource: 'rtcm1006',
+  });
+});
+
+test('decodeGnssSample exposes unknown lifecycle values without rejecting the sample', () => {
+  const { payload, view } = makePayload();
+  view.setUint16(24, 65_000, true);
+  view.setUint8(32, 0);
+  view.setUint16(36, 7, true);
+  view.setUint8(38, 99);
+  view.setUint8(39, 99);
+
+  const sample = decodeGnssSample(payload, { nowMillis: 100 });
+
+  assert.deepEqual(sample.debug, {
+    bootId: 7,
+    resetReasonCode: 99,
+    originSource: 'unknown',
+  });
 });
 
 test('decodeGnssSample omits sentinel-valued optional fields', () => {

@@ -76,6 +76,8 @@ const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
 const IMU_BIAS_RECALIBRATION_MAX_STEP_DEG_PER_SEC = 1;
 const IMU_BIAS_AUTO_RECALIBRATION_SETTLE_MS = 2_000;
 const IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS = 30 * 60 * 1000;
+const GNSS_FAILURE_BACKOFF_MAX_MS = 1_000;
+const GNSS_FAILURE_ERROR_LOG_INTERVAL_MS = 60_000;
 
 interface SensorControllerOptions {
   logger: SessionLogger;
@@ -206,6 +208,11 @@ export class SensorController extends EventEmitter {
   private motionSessionDepth = 0;
   private motionSessionIdleSinceMillis: number | null = null;
   private lastGnssPollStartedMillis: number | null = null;
+  private gnssFailureCount = 0;
+  private gnssFailureStartedMillis: number | null = null;
+  private gnssLastFailureMessage: string | null = null;
+  private gnssLastErrorLogMillis: number | null = null;
+  private lastGnssBootId: number | null = null;
   private lastMotorPollStartedMillis: number | null = null;
   private latestGnssPosition: Position | null = null;
   private latestGnssAccuracyMeters: number | null = null;
@@ -292,6 +299,11 @@ export class SensorController extends EventEmitter {
     this.motionSessionDepth = 0;
     this.motionSessionIdleSinceMillis = this.nowMillis();
     this.lastGnssPollStartedMillis = null;
+    this.gnssFailureCount = 0;
+    this.gnssFailureStartedMillis = null;
+    this.gnssLastFailureMessage = null;
+    this.gnssLastErrorLogMillis = null;
+    this.lastGnssBootId = null;
     this.lastMotorPollStartedMillis = null;
     this.latestGnssPosition = null;
     this.latestGnssAccuracyMeters = null;
@@ -952,7 +964,7 @@ export class SensorController extends EventEmitter {
       await this.sendDisableMotorsCommand();
     }
     await this.pollImu();
-    if (this.shouldPoll(loopStartedMillis, this.lastGnssPollStartedMillis, this.gnssPollIntervalMs)) {
+    if (this.shouldPoll(loopStartedMillis, this.lastGnssPollStartedMillis, this.currentGnssPollIntervalMs())) {
       this.lastGnssPollStartedMillis = loopStartedMillis;
       await this.pollGnss();
     }
@@ -968,6 +980,15 @@ export class SensorController extends EventEmitter {
     intervalMs: number,
   ): boolean {
     return lastPollStartedMillis === null || nowMillis - lastPollStartedMillis >= intervalMs;
+  }
+
+  private currentGnssPollIntervalMs(): number {
+    if (this.gnssFailureCount === 0) {
+      return this.gnssPollIntervalMs;
+    }
+
+    const multiplier = 2 ** Math.min(this.gnssFailureCount, 5);
+    return Math.min(GNSS_FAILURE_BACKOFF_MAX_MS, this.gnssPollIntervalMs * multiplier);
   }
 
   private async pollImu(): Promise<void> {
@@ -1070,6 +1091,41 @@ export class SensorController extends EventEmitter {
   private async pollGnss(): Promise<void> {
     try {
       const sample = await this.gateway.readGnss();
+      const nowMillis = this.nowMillis();
+
+      if (this.gnssFailureCount > 0) {
+        this.logger.info("sensor.gnss.poll_recovered", {
+          consecutiveFailures: this.gnssFailureCount,
+          failureDurationMs: this.gnssFailureStartedMillis === null
+            ? null
+            : Math.max(0, nowMillis - this.gnssFailureStartedMillis),
+          bootId: sample.debug?.bootId ?? null,
+          originSource: sample.debug?.originSource ?? null,
+        });
+      }
+      this.gnssFailureCount = 0;
+      this.gnssFailureStartedMillis = null;
+      this.gnssLastFailureMessage = null;
+      this.gnssLastErrorLogMillis = null;
+
+      const bootId = sample.debug?.bootId;
+      if (bootId !== undefined && bootId !== this.lastGnssBootId) {
+        if (this.lastGnssBootId === null) {
+          this.logger.info("sensor.gnss.node_boot_observed", {
+            bootId,
+            resetReasonCode: sample.debug?.resetReasonCode ?? null,
+            originSource: sample.debug?.originSource ?? null,
+          });
+        } else {
+          this.logger.warn("sensor.gnss.node_restarted", {
+            previousBootId: this.lastGnssBootId,
+            bootId,
+            resetReasonCode: sample.debug?.resetReasonCode ?? null,
+            originSource: sample.debug?.originSource ?? null,
+          });
+        }
+        this.lastGnssBootId = bootId;
+      }
 
       let internalHeadingDeg: number | null = null;
       let internalHeading: InternalHeading | null = null;
@@ -1145,6 +1201,10 @@ export class SensorController extends EventEmitter {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const nowMillis = this.nowMillis();
+      const failureMessageChanged = message !== this.gnssLastFailureMessage;
+      this.gnssFailureCount += 1;
+      this.gnssFailureStartedMillis ??= nowMillis;
       const current = this.primitivesStore.snapshot().gnss;
       this.primitivesStore.update({
         gnss: {
@@ -1153,7 +1213,20 @@ export class SensorController extends EventEmitter {
           error: message,
         },
       });
-      this.logger.error("sensor.gnss.poll_failed", { error: message });
+      if (
+        this.gnssFailureCount === 1
+        || failureMessageChanged
+        || this.gnssLastErrorLogMillis === null
+        || nowMillis - this.gnssLastErrorLogMillis >= GNSS_FAILURE_ERROR_LOG_INTERVAL_MS
+      ) {
+        this.logger.error("sensor.gnss.poll_failed", {
+          error: message,
+          consecutiveFailures: this.gnssFailureCount,
+          retryAfterMs: this.currentGnssPollIntervalMs(),
+        });
+        this.gnssLastErrorLogMillis = nowMillis;
+      }
+      this.gnssLastFailureMessage = message;
     }
   }
 

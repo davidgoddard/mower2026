@@ -83,7 +83,14 @@ export class LiveI2cTransport implements I2cTransport {
         if (attempt >= this.maxRetries || !isRecoverableI2cError(error)) {
           throw error;
         }
-        await this.reopenBus();
+        // EIO/EREMOTEIO/ENXIO and short transfers normally identify one
+        // missing or restarting client. Retrying those on the same file
+        // descriptor avoids disrupting healthy motor and IMU clients which
+        // share this controller. Reopen only when the controller itself is
+        // busy or timed out.
+        if (shouldReopenI2cBus(error)) {
+          await this.reopenBus();
+        }
         attempt += 1;
       }
     }
@@ -136,4 +143,9 @@ function isRecoverableI2cError(error: unknown): boolean {
   return /\b(EIO|EREMOTEIO|ENXIO|EBUSY|ETIMEDOUT)\b/i.test(message)
     || /short i2c (read|write)/i.test(message)
     || /i\/o error/i.test(message);
+}
+
+function shouldReopenI2cBus(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(EBUSY|ETIMEDOUT)\b/i.test(message);
 }

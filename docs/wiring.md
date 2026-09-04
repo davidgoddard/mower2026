@@ -10,8 +10,8 @@ This document collects the current practical wiring for:
 
 It is based on the current software and hardware notes in:
 
-- `external-hardware/esp32/gnss-node-v2/`
-- `external-hardware/esp32/motor-controller-v2/`
+- `external-hardware/esp32/gnss-mower/`
+- `external-hardware/esp32/motor-controller/`
 
 ## GNSS ESP Wiring
 

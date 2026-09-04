@@ -183,6 +183,8 @@ If a message of one of the priorities has already been queued, then replace the 
 
 The controller should send all messages in the queue in the priority order as soon as possible and clear the queue as quickly as possible.
 
+A recoverable failure from one I2C address (`EIO`, `EREMOTEIO`, `ENXIO`, or a short transfer) shall be retried on the existing bus handle and shall not close or reopen the controller shared by the other nodes. A controller-wide busy or timeout failure may close and reopen the bus before retry. This distinction prevents a rebooting GNSS client from repeatedly disrupting motor commands and IMU samples.
+
 
 
 ### Web server
@@ -255,7 +257,7 @@ The sensor interface shall be implemented as one Sensor Controller boundary in t
 - application-facing sensor state and polling orchestration
 - hardware-facing adapters/drivers for each device.
 
-The Sensor Controller will be responsible for polling each configured sensor device on its own cadence and storing only the latest successful state (plus last error state where relevant). A single scheduler loop wakes every ~8 ms and dispatches reads only to the sensors whose individual deadline has elapsed: IMU at ~125 Hz, motor feedback at 50 Hz, and GNSS at 20 Hz. Polling is asynchronous to the main control code.
+The Sensor Controller will be responsible for polling each configured sensor device on its own cadence and storing only the latest successful state (plus last error state where relevant). A single scheduler loop wakes every ~8 ms and dispatches reads only to the sensors whose individual deadline has elapsed: IMU at ~125 Hz, motor feedback at 50 Hz, and GNSS at 20 Hz. Polling is asynchronous to the main control code. Consecutive GNSS transport/decode failures shall exponentially reduce only the GNSS polling rate, capped at a one-second retry interval; the normal 20 Hz cadence resumes immediately after a valid sample, without reducing motor or IMU polling.
 
 The Sensor Controller is the single owner of sensor polling cadence.  Device-specific polling loops are not to be run independently outside this controller in production runtime.
 
@@ -370,11 +372,13 @@ The GNSS response payload should provide planar position and heading primitives,
 - optional ground speed
 - sample age and related health/debug ages where available.
 
-The application should support the currently observed GNSS payload variants (`36` and `38` bytes) while decoding them into one consistent runtime sample model.
+The application and current GNSS firmware shall use one 40-byte GNSS payload layout. Bytes 36–39 report the GNSS ESP boot identifier, reset-reason code, and coordinate-origin source so the Pi can distinguish a radio/receiver-quality outage from an ESP restart and origin reacquisition.
 
 The application should validate that GNSS responses are of the expected node/message type before accepting the sample.
 
-The I2C GNSS request path should be resilient to transient bus errors using short retry attempts before surfacing a read failure.
+The I2C GNSS request path should be resilient to transient client errors using short retries on the existing shared bus handle before surfacing a read failure. Sustained failures shall be rate-limited as specified for the Sensor Controller, with one recovery event when valid frames resume.
+
+The GNSS ESP shall derive the production local coordinate frame only from verified RTCM 1006 base-station data. After startup or reset it shall publish `fixType=none`, zero local coordinates, and unusable position accuracy until that stable origin is available; it shall not silently redefine the lawn origin from the first rover fix.
 
 #### Planar coordinate and heading conventions
 

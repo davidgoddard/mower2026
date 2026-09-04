@@ -12,7 +12,7 @@ copies and deliver each RTCM message only once.
 3. Flash the relay and read its own station MAC from the serial line beginning
    `[RTCM-RELAY] station MAC=`.
 4. Put the base and relay station MAC addresses into the corresponding values
-   in `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino` before flashing
+   in `external-hardware/esp32/gnss-mower/gnss-mower.ino` before flashing
    the mower GNSS ESP32.
 
 The relay deliberately remains disabled while `BASE_STATION_MAC` is all zero.

@@ -1,4 +1,4 @@
-# GNSS Node V2
+# Mower GNSS Node
 
 ## Purpose
 
@@ -6,7 +6,7 @@ This folder contains a practical replacement ESP32 rover GNSS sketch for the sec
 
 File:
 
-- `gnss-node-v2.ino`
+- `gnss-mower.ino`
 - `UM982-module-pinout.md`
 
 ## What it does
@@ -23,25 +23,19 @@ File:
 
 ## Important behavior
 
-- absence of a base station does not block operation
-- if RTCM is missing, the node still serves GNSS data using whatever fix quality is available
-- this supports manual driving and controller-based use even when autonomous accuracy is not available
+- the node answers I2C throughout startup, initially with an explicit unusable sample
+- until a verified RTCM 1006 base origin is available, the node reports `fixType=none`, zero local coordinates, and unusable position accuracy
+- the production firmware never derives a replacement lawn origin from the first rover fix after a reset
+- manual motor control remains independent of GNSS quality, while autonomous consumers fail closed
 
 ## Before flashing
 
-Check the development configuration section at the top of the sketch:
-
-- `BASE_LATITUDE_DEGREES`
-- `BASE_LONGITUDE_DEGREES`
-- `ALLOW_DYNAMIC_ORIGIN_IF_BASE_IS_ZERO`
-- `ANTENNA_BASELINE_METERS`
-- `ANTENNA_BASELINE_TOLERANCE_METERS`
+Check the development configuration section at the top of the sketch, including `ANTENNA_BASELINE_METERS`, `ANTENNA_BASELINE_TOLERANCE_METERS`, `BASE_STATION_MAC`, and `GNSS_RELAY_MAC`.
 
 Recommended usage:
 
-- for a surveyed fixed base, set the fixed base latitude/longitude in the sketch
-- for a base that emits RTCM 1006, leave the fixed base values at zero; the rover will decode verified RTCM 1006 messages and use that base position as the local origin
-- for quick bring-up without RTCM 1006, leave base at zero and allow dynamic origin
+- configure the base to emit RTCM 1006; the rover decodes a verified message and uses that base position as its stable local origin
+- do not enable a dynamic first-fix origin on the mower, because an ESP reset would move the coordinate frame relative to every saved perimeter and obstacle
 
 Also confirm the current wiring assumptions in the sketch:
 
@@ -56,7 +50,7 @@ Also confirm the current wiring assumptions in the sketch:
 - RTCM activity LED: `GPIO19`
 - RTCM route indicator LED: `GPIO23`
 
-The specific UM982 breakout module pin/header mapping used on this mower is documented in [UM982-module-pinout.md](/Volumes/mower/mower/external-hardware/esp32/gnss-node-v2/UM982-module-pinout.md).
+The specific UM982 breakout module pin/header mapping used on this mower is documented in [`UM982-module-pinout.md`](UM982-module-pinout.md).
 
 Key point:
 
@@ -156,7 +150,11 @@ Interpretation:
 - `rtcm1006AgeMs`
   - milliseconds since the last verified RTCM 1006 message was decoded
 - `origin`
-  - local coordinate origin source and current latitude/longitude/height; expected values are `config`, `rtcm1006`, `dynamic`, or `none`
+  - local coordinate origin source and current latitude/longitude/height; production values are `rtcm1006` or `none`
+- `rtcmQueueDrops`
+  - ESP-NOW packets dropped because the bounded handoff queue was full
+- `bootId` / `resetReason`
+  - lifecycle identifiers also sent to the Pi in payload bytes 36–39 so unexpected ESP resets are visible in the session log
 - `uniloglistAgeMs`
   - milliseconds since the last parsed `UNILOGLIST` response
 
@@ -174,8 +172,8 @@ Useful failure patterns:
   output via SSH
 - `rtcmAgeMs=none`
   - rover has not recently received verified RTCM correction messages
-- `rtcmAgeMs` fresh but `origin=dynamic`
-  - RTCM is arriving, but no RTCM 1006 base-position message has been decoded yet; the rover is still using the first usable rover fix as its local origin
+- `rtcmAgeMs` fresh but `origin=none`
+  - corrections are arriving, but no verified RTCM 1006 base-position message has been decoded yet; local position remains deliberately unusable
 
 Startup diagnostics were also extended:
 

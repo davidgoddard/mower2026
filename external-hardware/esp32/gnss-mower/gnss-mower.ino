@@ -28,6 +28,7 @@
 
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_system.h>
 #include <esp_wifi.h>
 #include <HardwareSerial.h>
 #include <Wire.h>
@@ -73,7 +74,9 @@ static const size_t GNSS_DEBUG_PAYLOAD_SIZE = 116;
 //                  bit1 = heading valid (UNIHEADINGA solution status usable)
 //                  bit2 = baseline valid (UNIHEADINGA length present)
 //   off 35     : log config mask (PVTSLNA/RECTIMEA/UNIHEADINGA active bits)
-//   off 36..39 : reserved (zero-filled)
+//   off 36..37 : GNSS ESP boot id uint16 LE (changes on every boot)
+//   off 38     : esp_reset_reason_t code
+//   off 39     : origin source (0 none, 1 RTCM1006, 2 dynamic)
 static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + GNSS_DEBUG_PAYLOAD_SIZE + FRAME_CRC_SIZE;
 
 // ===== ESP32 pins =====
@@ -96,12 +99,10 @@ static const uint32_t UM982_UART_BAUD = 460800;
 HardwareSerial UM982(2);
 
 // ===== Origin configuration =====
-// The local X/Y origin is always taken from the RTCM1006 base station message when
-// available, giving a stable coordinate frame that is consistent across power cycles
-// as long as the base station hasn't moved. If RTCM1006 has not yet arrived the origin
-// falls back to the mower's own first fix so that coordinates are at least valid; it
-// will be corrected to the true base-station origin as soon as the first RTCM1006 is
-// received (typically within a few seconds of boot).
+// The production local X/Y origin is taken from the RTCM1006 base-station
+// message, giving a stable coordinate frame across node resets. Until that
+// origin has arrived the payload advertises FIX_NONE rather than inventing a
+// new lawn coordinate frame from the first rover fix.
 
 // If you know the antenna baseline more precisely, update the command below too.
 static const float ANTENNA_BASELINE_METERS = 0.30f;
@@ -139,6 +140,13 @@ static const uint8_t RTCM_COMPLETED_CACHE_SIZE = 128;
 static const uint32_t RTCM_FRAGMENT_TIMEOUT_MILLIS = 500;
 static const uint32_t RTCM_COMPLETED_RETENTION_MILLIS = 10000;
 static const uint32_t RTCM_ROUTE_FRESH_MILLIS = 3000;
+static const uint8_t ESP_NOW_PACKET_QUEUE_CAPACITY = 16;
+static const uint16_t ESP_NOW_PACKET_MAX_LENGTH = 250;
+
+// A dynamic first-fix origin is useful on a bench but is unsafe for the mower:
+// after an ESP reset it silently creates a different coordinate frame. Keep
+// autonomous position unavailable until a verified RTCM1006 origin returns.
+static const bool ALLOW_DYNAMIC_ORIGIN_FALLBACK = false;
 
 // TODO: Fill both station-mode MAC addresses before flashing this mower node.
 // Incoming ESP-NOW corrections are deliberately rejected while both are zero.
@@ -149,6 +157,12 @@ enum RtcmPacketSource : uint8_t {
   RTCM_SOURCE_NONE = 0,
   RTCM_SOURCE_DIRECT = 1,
   RTCM_SOURCE_RELAY = 2,
+};
+
+struct PendingEspNowPacket {
+  RtcmPacketSource source;
+  uint16_t length;
+  uint8_t data[ESP_NOW_PACKET_MAX_LENGTH];
 };
 
 struct RtcmAssembly {
@@ -187,6 +201,7 @@ static uint32_t g_totalRtcmFragmentsRejected = 0;
 static uint32_t g_totalRtcmFragmentsDuplicated = 0;
 static uint32_t g_totalRtcmAssemblyTimeouts = 0;
 static uint32_t g_totalRtcmUnknownSenders = 0;
+static uint32_t g_totalRtcmQueueDrops = 0;
 static uint32_t g_totalRtcm1006Messages = 0;
 static uint32_t g_lastRtcm1006Millis = 0;
 static RtcmAssembly g_rtcmAssemblies[RTCM_ASSEMBLY_SLOT_COUNT] = {};
@@ -194,6 +209,11 @@ static CompletedRtcmMessage g_completedRtcmMessages[RTCM_COMPLETED_CACHE_SIZE] =
 static uint8_t g_nextCompletedRtcmSlot = 0;
 static uint8_t g_lastRtcmRouteSourceMask = RTCM_SOURCE_NONE;
 static uint32_t g_lastRtcmRouteMillis = 0;
+static PendingEspNowPacket g_espNowPacketQueue[ESP_NOW_PACKET_QUEUE_CAPACITY] = {};
+static volatile uint8_t g_espNowPacketQueueHead = 0;
+static volatile uint8_t g_espNowPacketQueueTail = 0;
+static volatile uint8_t g_espNowPacketQueueCount = 0;
+static portMUX_TYPE g_espNowPacketQueueMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ===== LED status =====
 enum LedQualityState : uint8_t {
@@ -326,10 +346,14 @@ double g_originLatitudeDegrees = 0.0;
 double g_originLongitudeDegrees = 0.0;
 double g_originHeightMeters = 0.0;
 
-uint16_t g_lastRequestSequence = 0;
-uint8_t g_lastRequestMessageType = MESSAGE_TYPE_GNSS_SAMPLE;
-uint8_t g_txFrame[MAX_FRAME_SIZE];
-size_t g_txFrameLength = 0;
+uint8_t g_samplePayloadSnapshot[GNSS_SAMPLE_PAYLOAD_SIZE] = {};
+uint8_t g_debugPayloadSnapshot[GNSS_DEBUG_PAYLOAD_SIZE] = {};
+uint8_t g_txFrames[2][MAX_FRAME_SIZE] = {};
+size_t g_txFrameLengths[2] = { 0, 0 };
+volatile uint8_t g_activeTxFrameIndex = 0;
+portMUX_TYPE g_i2cSnapshotMux = portMUX_INITIALIZER_UNLOCKED;
+uint16_t g_bootId = 0;
+uint8_t g_resetReasonCode = 0;
 
 void readUm982Lines();
 
@@ -693,6 +717,8 @@ void printDebugStatus() {
   Serial.print(g_totalRtcmAssemblyTimeouts);
   Serial.print(" unknownRtcmSenders=");
   Serial.print(g_totalRtcmUnknownSenders);
+  Serial.print(" rtcmQueueDrops=");
+  Serial.print(g_totalRtcmQueueDrops);
   Serial.print(" rtcmRoute=");
   if (g_lastRtcmRouteSourceMask == (RTCM_SOURCE_DIRECT | RTCM_SOURCE_RELAY)) {
     Serial.print("mixed");
@@ -732,6 +758,10 @@ void printDebugStatus() {
   } else {
     Serial.print(deviceReadyAgeMillis);
   }
+  Serial.print(" bootId=");
+  Serial.print(g_bootId);
+  Serial.print(" resetReason=");
+  Serial.print(g_resetReasonCode);
   Serial.println();
 }
 
@@ -960,6 +990,9 @@ void updateIndicatorLeds() {
 }
 
 void ensureOriginFromCurrentFix() {
+  if (!ALLOW_DYNAMIC_ORIGIN_FALLBACK) {
+    return;
+  }
   // Only use the dynamic fallback if RTCM1006 has never arrived. Once a real
   // base-station origin is established it is never replaced by a dynamic one.
   if (g_originSource == ORIGIN_RTCM1006 || g_originSource == ORIGIN_DYNAMIC) {
@@ -973,13 +1006,13 @@ void ensureOriginFromCurrentFix() {
   }
 }
 
-void localXYFromLatLon(double latitudeDegrees, double longitudeDegrees, int32_t &xMillimeters, int32_t &yMillimeters) {
+bool localXYFromLatLon(double latitudeDegrees, double longitudeDegrees, int32_t &xMillimeters, int32_t &yMillimeters) {
   ensureOriginFromCurrentFix();
 
   if (g_originSource == ORIGIN_NONE) {
     xMillimeters = 0;
     yMillimeters = 0;
-    return;
+    return false;
   }
 
   const double earthRadiusMeters = 6378137.0;
@@ -1001,13 +1034,18 @@ void localXYFromLatLon(double latitudeDegrees, double longitudeDegrees, int32_t 
     northMillimeters < static_cast<double>(INT32_MIN) ||
     northMillimeters >= static_cast<double>(INT32_MAX)
   ) {
-    xMillimeters = INT32_MAX;
-    yMillimeters = INT32_MAX;
-    return;
+    // Never leak the saturation sentinel into the Pi-facing coordinates. It
+    // looks like a real position (2147483.647 m) and was observed during the
+    // failure that motivated this hardening. The false return also forces
+    // FIX_NONE and unusable accuracy in buildGnssPayload().
+    xMillimeters = 0;
+    yMillimeters = 0;
+    return false;
   }
 
   xMillimeters = static_cast<int32_t>(eastMillimeters);
   yMillimeters = static_cast<int32_t>(northMillimeters);
+  return true;
 }
 
 uint64_t readRtcmBits(const uint8_t *payload, size_t bitOffset, size_t bitCount) {
@@ -1456,7 +1494,8 @@ void appendFragmentedRtcmPacket(const uint8_t *incomingData, int len, RtcmPacket
 
 // ===== RTCM relay =====
 void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
-  if (info == nullptr) {
+  if (info == nullptr || incomingData == nullptr || len <= 0 || len > ESP_NOW_PACKET_MAX_LENGTH) {
+    g_totalRtcmFragmentsRejected += 1;
     return;
   }
   const RtcmPacketSource source = classifyRtcmSender(info->src_addr);
@@ -1464,14 +1503,59 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
     g_totalRtcmUnknownSenders += 1;
     return;
   }
-  if (isNewRtcmTransportPacket(incomingData, len)) {
-    appendFragmentedRtcmPacket(incomingData, len, source);
+
+  // ESP-NOW invokes this callback from its Wi-Fi task. Do not parse RTCM,
+  // update the coordinate origin, write the UM982 UART, or touch the I2C
+  // snapshot from that context. Queue a bounded copy for the main loop.
+  portENTER_CRITICAL(&g_espNowPacketQueueMux);
+  if (g_espNowPacketQueueCount >= ESP_NOW_PACKET_QUEUE_CAPACITY) {
+    g_totalRtcmQueueDrops += 1;
+    portEXIT_CRITICAL(&g_espNowPacketQueueMux);
     return;
   }
+  PendingEspNowPacket &queued = g_espNowPacketQueue[g_espNowPacketQueueTail];
+  queued.source = source;
+  queued.length = static_cast<uint16_t>(len);
+  memcpy(queued.data, incomingData, static_cast<size_t>(len));
+  g_espNowPacketQueueTail = static_cast<uint8_t>(
+    (g_espNowPacketQueueTail + 1) % ESP_NOW_PACKET_QUEUE_CAPACITY
+  );
+  g_espNowPacketQueueCount += 1;
+  portEXIT_CRITICAL(&g_espNowPacketQueueMux);
+}
 
-  // The legacy transport has no stable message identity and cannot safely be
-  // deduplicated across direct and relayed paths.
-  g_totalRtcmFragmentsRejected += 1;
+bool dequeueEspNowPacket(PendingEspNowPacket &packetOut) {
+  bool available = false;
+  portENTER_CRITICAL(&g_espNowPacketQueueMux);
+  if (g_espNowPacketQueueCount > 0) {
+    const PendingEspNowPacket &queued = g_espNowPacketQueue[g_espNowPacketQueueHead];
+    packetOut.source = queued.source;
+    packetOut.length = queued.length;
+    memcpy(packetOut.data, queued.data, queued.length);
+    g_espNowPacketQueueHead = static_cast<uint8_t>(
+      (g_espNowPacketQueueHead + 1) % ESP_NOW_PACKET_QUEUE_CAPACITY
+    );
+    g_espNowPacketQueueCount -= 1;
+    available = true;
+  }
+  portEXIT_CRITICAL(&g_espNowPacketQueueMux);
+  return available;
+}
+
+void processPendingEspNowPackets() {
+  PendingEspNowPacket packet;
+  uint8_t processed = 0;
+  while (processed < ESP_NOW_PACKET_QUEUE_CAPACITY && dequeueEspNowPacket(packet)) {
+    processed += 1;
+    if (isNewRtcmTransportPacket(packet.data, packet.length)) {
+      appendFragmentedRtcmPacket(packet.data, packet.length, packet.source);
+      continue;
+    }
+
+    // The legacy transport has no stable message identity and cannot safely
+    // be deduplicated across direct and relayed paths.
+    g_totalRtcmFragmentsRejected += 1;
+  }
 }
 
 // ===== UM982 configuration =====
@@ -1819,9 +1903,14 @@ void buildGnssPayload(uint8_t *payloadOut) {
 
   int32_t xMillimeters = 0;
   int32_t yMillimeters = 0;
-  if (g_latestPvtsln.valid) {
-    localXYFromLatLon(g_latestPvtsln.latitudeDegrees, g_latestPvtsln.longitudeDegrees, xMillimeters, yMillimeters);
-  }
+  const bool positionReady = g_latestPvtsln.valid
+    && g_latestPvtsln.fixType != FIX_NONE
+    && localXYFromLatLon(
+      g_latestPvtsln.latitudeDegrees,
+      g_latestPvtsln.longitudeDegrees,
+      xMillimeters,
+      yMillimeters
+    );
 
   // off 0..7: UTC fix time in Unix epoch ms.  When UTC is not yet valid the
   // field is zero and the Pi will use its own decode-time wallclock.
@@ -1859,8 +1948,15 @@ void buildGnssPayload(uint8_t *payloadOut) {
     writeU16LE(&payloadOut[22], 0xFFFF);
   }
 
-  // off 24..25: position accuracy mm
-  writeU16LE(&payloadOut[24], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.positionAccuracyMeters) * 1000.0f));
+  // off 24..25: position accuracy mm. Without the stable lawn origin, expose
+  // an unusable accuracy rather than apparently precise coordinates at zero.
+  const float positionAccuracyMeters = positionReady
+    ? g_latestPvtsln.positionAccuracyMeters
+    : 65.0f;
+  writeU16LE(
+    &payloadOut[24],
+    static_cast<uint16_t>(min(65.535f, max(0.0f, positionAccuracyMeters)) * 1000.0f)
+  );
 
   // off 26..27: heading accuracy centideg
   if (g_latestPvtsln.headingAccuracyValid) {
@@ -1880,7 +1976,9 @@ void buildGnssPayload(uint8_t *payloadOut) {
   writeU16LE(&payloadOut[30], sampleAgeMillis);
 
   // off 32: fix type
-  payloadOut[32] = static_cast<uint8_t>(g_latestPvtsln.fixType);
+  payloadOut[32] = positionReady
+    ? static_cast<uint8_t>(g_latestPvtsln.fixType)
+    : static_cast<uint8_t>(FIX_NONE);
 
   // off 33: satellites in use
   payloadOut[33] = g_latestPvtsln.satellitesInUse;
@@ -1898,7 +1996,10 @@ void buildGnssPayload(uint8_t *payloadOut) {
     (g_unilogRectimeaActive ? 0x02 : 0x00) |
     (g_unilogUniheadingaActive ? 0x04 : 0x00);
 
-  // off 36..39: reserved (zero-filled by memset)
+  // off 36..39: node lifecycle and coordinate-frame diagnostics
+  writeU16LE(&payloadOut[36], g_bootId);
+  payloadOut[38] = g_resetReasonCode;
+  payloadOut[39] = static_cast<uint8_t>(g_originSource);
 }
 
 void buildGnssDebugPayload(uint8_t *payloadOut) {
@@ -1923,25 +2024,60 @@ void buildGnssDebugPayload(uint8_t *payloadOut) {
   memcpy(&payloadOut[4], g_lastLowSatelliteRawText, copyLength);
 }
 
-void refreshTxFrame() {
+void refreshPayloadSnapshots() {
+  uint8_t samplePayload[GNSS_SAMPLE_PAYLOAD_SIZE];
+  uint8_t debugPayload[GNSS_DEBUG_PAYLOAD_SIZE];
+  buildGnssPayload(samplePayload);
+  buildGnssDebugPayload(debugPayload);
+
+  // Only the main loop builds payloads from parser/RTCM state. I2C callbacks
+  // copy these immutable snapshots and therefore never observe a half-written
+  // double, parser struct, origin, or debug string.
+  portENTER_CRITICAL(&g_i2cSnapshotMux);
+  memcpy(g_samplePayloadSnapshot, samplePayload, GNSS_SAMPLE_PAYLOAD_SIZE);
+  memcpy(g_debugPayloadSnapshot, debugPayload, GNSS_DEBUG_PAYLOAD_SIZE);
+  portEXIT_CRITICAL(&g_i2cSnapshotMux);
+}
+
+void prepareTxFrame(uint8_t messageType, uint16_t sequence) {
+  uint8_t payload[GNSS_DEBUG_PAYLOAD_SIZE];
+  uint16_t payloadLength = GNSS_SAMPLE_PAYLOAD_SIZE;
+
+  portENTER_CRITICAL(&g_i2cSnapshotMux);
+  if (messageType == MESSAGE_TYPE_GNSS_DEBUG_LINE) {
+    payloadLength = GNSS_DEBUG_PAYLOAD_SIZE;
+    memcpy(payload, g_debugPayloadSnapshot, payloadLength);
+  } else {
+    memcpy(payload, g_samplePayloadSnapshot, payloadLength);
+  }
+  portEXIT_CRITICAL(&g_i2cSnapshotMux);
+
   uint8_t flags = 0;
-  if (g_lastRequestMessageType == MESSAGE_TYPE_GNSS_DEBUG_LINE) {
-    uint8_t payload[GNSS_DEBUG_PAYLOAD_SIZE];
-    buildGnssDebugPayload(payload);
-    g_txFrameLength = encodeFrame(MESSAGE_TYPE_GNSS_DEBUG_LINE, flags, g_lastRequestSequence, payload, GNSS_DEBUG_PAYLOAD_SIZE, g_txFrame);
-    return;
+  if (messageType == MESSAGE_TYPE_GNSS_SAMPLE) {
+    if (payload[32] == static_cast<uint8_t>(FIX_NONE)) {
+      flags |= 0x01;
+    }
+    if ((payload[34] & 0x02) == 0) {
+      flags |= 0x02;
+    }
   }
 
-  uint8_t payload[GNSS_SAMPLE_PAYLOAD_SIZE];
-  buildGnssPayload(payload);
+  uint8_t frame[MAX_FRAME_SIZE];
+  const size_t frameLength = encodeFrame(
+    messageType,
+    flags,
+    sequence,
+    payload,
+    payloadLength,
+    frame
+  );
 
-  if (!g_latestPvtsln.valid || g_latestPvtsln.fixType == FIX_NONE) {
-    flags |= 0x01;
-  }
-  if (!g_latestPvtsln.headingValid) {
-    flags |= 0x02;
-  }
-  g_txFrameLength = encodeFrame(MESSAGE_TYPE_GNSS_SAMPLE, flags, g_lastRequestSequence, payload, GNSS_SAMPLE_PAYLOAD_SIZE, g_txFrame);
+  portENTER_CRITICAL(&g_i2cSnapshotMux);
+  const uint8_t inactiveIndex = static_cast<uint8_t>(1u - g_activeTxFrameIndex);
+  memcpy(g_txFrames[inactiveIndex], frame, frameLength);
+  g_txFrameLengths[inactiveIndex] = frameLength;
+  g_activeTxFrameIndex = inactiveIndex;
+  portEXIT_CRITICAL(&g_i2cSnapshotMux);
 }
 
 // ===== I2C =====
@@ -1968,15 +2104,22 @@ void onReceive(int numBytes) {
   }
 
   if (messageType == MESSAGE_TYPE_GNSS_SAMPLE || messageType == MESSAGE_TYPE_GNSS_DEBUG_LINE) {
-    g_lastRequestMessageType = messageType;
-    g_lastRequestSequence = sequence;
-    refreshTxFrame();
+    prepareTxFrame(messageType, sequence);
   }
 }
 
 void onRequest() {
-  refreshTxFrame();
-  Wire.write(g_txFrame, g_txFrameLength);
+  uint8_t frame[MAX_FRAME_SIZE];
+  size_t frameLength = 0;
+  portENTER_CRITICAL(&g_i2cSnapshotMux);
+  const uint8_t activeIndex = g_activeTxFrameIndex;
+  frameLength = g_txFrameLengths[activeIndex];
+  memcpy(frame, g_txFrames[activeIndex], frameLength);
+  portEXIT_CRITICAL(&g_i2cSnapshotMux);
+
+  if (frameLength > 0) {
+    Wire.write(frame, frameLength);
+  }
 }
 
 // ===== Setup / loop =====
@@ -1994,6 +2137,11 @@ void setupEspNow() {
 void setup() {
   Serial.begin(115200);
   UM982.begin(UM982_UART_BAUD, SERIAL_8N1, UM982_RX_PIN, UM982_TX_PIN);
+  g_bootId = static_cast<uint16_t>(esp_random() & 0xFFFFu);
+  if (g_bootId == 0) {
+    g_bootId = 1;
+  }
+  g_resetReasonCode = static_cast<uint8_t>(esp_reset_reason());
 
   pinMode(LED_HEADING_PIN, OUTPUT);
   pinMode(LED_POSITION_PIN, OUTPUT);
@@ -2003,21 +2151,27 @@ void setup() {
   digitalWrite(LED_POSITION_PIN, LOW);
   digitalWrite(LED_RTCM_PIN, LOW);
   digitalWrite(LED_RTCM_ROUTE_PIN, LOW);
-  flashStartupLeds();
 
+  // Bring the I2C node up before the visible startup sequence and receiver
+  // checks. The Pi can then distinguish an initializing node (FIX_NONE) from
+  // an absent device throughout the several-second startup path.
+  refreshPayloadSnapshots();
+  prepareTxFrame(MESSAGE_TYPE_GNSS_SAMPLE, 0);
   Wire.begin(I2C_SLAVE_ADDRESS, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
   Wire.onReceive(onReceive);
   Wire.onRequest(onRequest);
 
+  flashStartupLeds();
   setupEspNow();
   delay(200);
   sendReceiverConfiguration();
-  refreshTxFrame();
+  refreshPayloadSnapshots();
 }
 
 void loop() {
+  processPendingEspNowPackets();
   readUm982Lines();
-  refreshTxFrame();
+  refreshPayloadSnapshots();
   updateIndicatorLeds();
   printDebugStatus();
   delay(5);

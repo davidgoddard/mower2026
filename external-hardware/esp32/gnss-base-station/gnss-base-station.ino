@@ -12,7 +12,7 @@
 // - fragments each RTCM frame into ESP-NOW packets with message metadata
 // - sends fragments on a fixed Wi-Fi channel with power save disabled
 // - prefers configured unicast rover peers; falls back to broadcast when enabled
-// - pairs with `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino`
+// - pairs with `external-hardware/esp32/gnss-mower/gnss-mower.ino`
 //
 // Notes:
 // - set `ROVER_PEERS` and `ROVER_PEER_COUNT` for best field reliability

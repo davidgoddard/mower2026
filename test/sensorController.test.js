@@ -370,6 +370,76 @@ test('SensorController polls IMU and stores latest integrated heading state', as
   });
 });
 
+test('SensorController backs off repeated GNSS I2C failures and reports recovery and reboot once', async () => {
+  const infoCalls = [];
+  const warnCalls = [];
+  const errorCalls = [];
+  const logger = {
+    child: () => logger,
+    transition: () => {},
+    info: (...args) => infoCalls.push(args),
+    warn: (...args) => warnCalls.push(args),
+    error: (...args) => errorCalls.push(args),
+  };
+  let now = 1_000;
+  let failuresRemaining = 3;
+  let bootId = 41;
+  const controller = new SensorController({
+    logger,
+    primitivesStore: new PrimitivesStore(),
+    gateway: {
+      async initialise() {},
+      async readImu() { return null; },
+      async readGnss() {
+        if (failuresRemaining > 0) {
+          failuresRemaining -= 1;
+          throw new Error('EIO: GNSS address did not acknowledge');
+        }
+        return {
+          timestampMillis: now,
+          xMeters: 1,
+          yMeters: 2,
+          positionAccuracyMeters: 0.02,
+          fixType: 'fixed',
+          satellitesInUse: 20,
+          sampleAgeMillis: 10,
+          debug: { bootId, resetReasonCode: 12, originSource: 'rtcm1006' },
+        };
+      },
+      async readMotorFeedback() { return null; },
+      async setMotorWheelOutputs() {},
+      async stopMotors() {},
+      async close() {},
+    },
+    pollIntervalMs: 10,
+    nowMillis: () => now,
+  });
+
+  const normalInterval = controller.currentGnssPollIntervalMs();
+  await controller.pollGnss();
+  const firstFailureInterval = controller.currentGnssPollIntervalMs();
+  now += firstFailureInterval;
+  await controller.pollGnss();
+  const secondFailureInterval = controller.currentGnssPollIntervalMs();
+  now += secondFailureInterval;
+  await controller.pollGnss();
+
+  assert.ok(firstFailureInterval > normalInterval);
+  assert.ok(secondFailureInterval > firstFailureInterval);
+  assert.ok(controller.currentGnssPollIntervalMs() <= 1_000);
+  assert.equal(errorCalls.filter((call) => call[0] === 'sensor.gnss.poll_failed').length, 1);
+
+  now += controller.currentGnssPollIntervalMs();
+  await controller.pollGnss();
+  assert.equal(controller.currentGnssPollIntervalMs(), normalInterval);
+  assert.equal(infoCalls.filter((call) => call[0] === 'sensor.gnss.poll_recovered').length, 1);
+  assert.equal(infoCalls.filter((call) => call[0] === 'sensor.gnss.node_boot_observed').length, 1);
+
+  bootId = 42;
+  await controller.pollGnss();
+  assert.equal(warnCalls.filter((call) => call[0] === 'sensor.gnss.node_restarted').length, 1);
+});
+
 test('SensorController only auto-recalibrates IMU bias after a long idle period', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({

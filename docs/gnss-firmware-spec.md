@@ -171,7 +171,7 @@ why persistent UM982 configuration is the normal operating model.
 
 ## Current sketch startup policy
 
-The current ESP32 GNSS sketch in `external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino` now defaults to a passive startup model over `Serial2` at `460800` baud (see `UM982_UART_BAUD`). The UM982 must be persistently configured to match.
+The current ESP32 GNSS sketch in `external-hardware/esp32/gnss-mower/gnss-mower.ino` defaults to a passive startup model over `Serial2` at `460800` baud (see `UM982_UART_BAUD`). The UM982 must be persistently configured to match.
 
 Default startup sequence:
 
@@ -316,7 +316,7 @@ The mower's current UM982 breakout module wiring uses the lower header row label
 EN  GND  TXD  RXD  VCC  PPS
 ```
 
-That header is the receiver `COM2` UART for this project wiring. See [UM982-module-pinout.md](/Volumes/mower/mower/external-hardware/esp32/gnss-node-v2/UM982-module-pinout.md).
+That header is the receiver `COM2` UART for this project wiring. See [`UM982-module-pinout.md`](../external-hardware/esp32/gnss-mower/UM982-module-pinout.md).
 
 Reference base-station config captured from the user's working base on `2026-03-11`:
 
@@ -369,14 +369,14 @@ The heading-length command currently encodes an antenna baseline assumption of a
 
 ## GNSS ESP processing pipeline
 
-1. Receive RTCM fragments over ESP-NOW from the base node.
-2. Reassemble full RTCM messages.
+1. Receive RTCM fragments over ESP-NOW from the base node and copy them into a bounded queue; the Wi-Fi callback must not parse RTCM, write UART, or mutate origin/I2C state.
+2. Drain a bounded number of queued packets in the main loop and reassemble full RTCM messages.
 3. Forward RTCM messages to the UM982 serial port.
 4. Read `PVTSLNB` continuously.
 5. Read `RECTIMEB` at low rate for time validity.
 6. Optionally read `UNIHEADINGB` for heading-quality enrichment.
 7. Convert receiver fields into one compact navigation sample.
-8. Expose that compact sample to the Pi over I2C.
+8. Build the compact payload in the main loop and atomically publish an immutable snapshot. I2C request/receive callbacks may only copy/encode that snapshot, never read live parser or origin fields. Register the I2C node before startup LED/configuration delays so it remains discoverable while initializing.
 
 ## Indoor comms test guidance
 
@@ -433,7 +433,7 @@ Chosen decision:
 
 - use the fixed base-station position as the local origin
 - when the sketch constants leave the fixed base at zero, decode verified RTCM 1006 messages from the base and use that transmitted base position as the local origin
-- if no configured base and no RTCM 1006 base position is available yet, a dynamic first-fix origin may be used only as a bring-up fallback
+- until a verified RTCM 1006 base position is available, expose `fixType=none`, zero local coordinates, and unusable position accuracy; production firmware must not create a dynamic first-fix origin because doing so moves every saved lawn boundary after an ESP reset
 
 Operational rule:
 
@@ -523,7 +523,9 @@ The GNSS ESP emits one fixed payload layout — there is no version negotiation 
 | 33 | 1 | `satellitesInUse` | uint8 — `bestpos_solnsvs` from `PVTSLNA` |
 | 34 | 1 | flags | bit0 utc-valid, bit1 heading-valid, bit2 baseline-valid |
 | 35 | 1 | log config mask | bit0 PVTSLNA active, bit1 RECTIMEA active, bit2 UNIHEADINGA active |
-| 36 | 4 | reserved | zero-filled |
+| 36 | 2 | `bootId` | uint16 LE — random non-zero identifier generated on each GNSS ESP boot |
+| 38 | 1 | `resetReasonCode` | raw `esp_reset_reason_t` value |
+| 39 | 1 | `originSource` | `0=none, 1=RTCM1006, 2=dynamic` (dynamic retained as a diagnostic code, not a production fallback) |
 
 ### Why these fields and no others
 
@@ -545,7 +547,7 @@ The Pi-side codec stamps `timestampMillis` from `Date.now()` at decode time so G
 
 ### Receiver fields actually consumed
 
-Per [`buildGnssPayload`](../external-hardware/esp32/gnss-node-v2/gnss-node-v2.ino) the GNSS ESP reads these fields from the receiver logs:
+Per [`buildGnssPayload`](../external-hardware/esp32/gnss-mower/gnss-mower.ino) the GNSS ESP reads these fields from the receiver logs:
 
 - `PVTSLNA`: `bestpos_type`, `bestpos_lat`, `bestpos_lon`, `bestpos_latstd`, `bestpos_lonstd`, `bestpos_solnsvs`, `psrvel_ground`, `heading_type`, `heading`, `pitch`
 - `RECTIMEA`: `clock status`, `utc year/month/day/hour/min/ms`, `utc status`
