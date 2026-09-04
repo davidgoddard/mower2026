@@ -11,6 +11,10 @@ import { I2cBusController } from "../../dist/i2c/i2cBusController.js";
 import { Bmi160ImuSensor } from "../../dist/imu/bmi160ImuSensor.js";
 import { GnssNodeClient } from "../../dist/gnss/gnssNodeClient.js";
 import {
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+} from "../../dist/constants.js";
+import {
   buildTurnCalibrationSummary,
   fieldHeadingToInternalDegrees,
   headingDeltaDegrees,
@@ -24,8 +28,8 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "../..");
 const DEFAULT_OUTPUT_PATH = resolve(REPO_ROOT, "logs", `imu-gnss-turn-calibration-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
 const DEFAULT_EXPORT_PATH = resolve(REPO_ROOT, "config", "imu-yaw-calibration.json");
 
-const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? 1);
-const GNSS_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? 0x52);
+const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
+const GNSS_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? I2C_ADDRESS_GNSS_DEFAULT);
 const IMU_POLL_INTERVAL_MS = Number(process.env.MOWER_IMU_POLL_INTERVAL_MS ?? 33);
 const GNSS_POLL_INTERVAL_MS = Number(process.env.MOWER_GNSS_POLL_INTERVAL_MS ?? 250);
 const GNSS_MAX_HEADING_ACCURACY_DEGREES = Number(process.env.MOWER_GNSS_MAX_HEADING_ACCURACY_DEGREES ?? 1);

@@ -20,6 +20,8 @@ File:
 - preserves stop-before-reverse behavior
 - counts FG/tach pulses
 - returns a direct-read, fixed 32-byte feedback snapshot at 20 Hz
+- calibrates both current-sensor zero points on demand immediately before the
+  first non-zero drive request from the Pi, while both PWM outputs are forced off
 - builds feedback in an inactive buffer and atomically swaps buffers, leaving
   the I2C request callback with only a fixed-size `Wire.write()`
 
@@ -135,6 +137,26 @@ Expected result for a healthy idle run:
 - zero encoder deltas for the full run
 - `watchdogHealthy: true` while the Pi command heartbeat is current, including
   a current zero-output or disabled command
+
+The production Pi client establishes a disabled command during sensor-hardware
+initialization and refreshes the latest active, zero-output, or disabled command
+until the hardware gateway closes. This keeps idle health checks meaningful
+without enabling the H-bridges; loss of the Pi still expires the lease.
+
+Current sensing is deliberately not calibrated during ESP32 startup because the
+ESP32 and Pi can be powered before the motor battery and current sensors are in
+their operating state. The first non-zero command from mowing, web manual drive,
+or game-controller drive sends a dedicated calibration request. The ESP32
+invalidates any prior drive command, forces both PWM outputs off, averages 128
+samples from both sensors, and only then can the Pi send the requested motion.
+Until this happens, reported motor current is zero rather than an invalid value.
+For direct maintenance clients that do not send the dedicated request, the ESP32
+also recognizes the first non-zero wheel command, retains it with drive gated
+off, performs the same calibration, and applies the command on the next control
+step.
+An explicit disabled motor command marks the calibration stale, since the motor
+battery may subsequently be disconnected without rebooting the Pi or ESP32. The
+next drive interaction therefore performs a fresh calibration.
 
 ## Before flashing
 

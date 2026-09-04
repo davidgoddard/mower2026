@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MowingExecutor, buildMowingReturnPath, isMowingExecutionPathSafe } from "../dist/pathfollowing/mowingExecutor.js";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
-import { createPose } from "../dist/geometry/positionTypes.js";
+import { createPose, createPosition } from "../dist/geometry/positionTypes.js";
 import { systemStop } from "../dist/control/systemStop.js";
 
 function createLogger() {
@@ -67,6 +67,317 @@ test("MowingExecutor exposes a failed IMU alignment turn to strip execution", as
 
   const status = await executor["turnToHeading"](90);
   assert.equal(status, "error");
+});
+
+test("MowingExecutor accepts a wheelbase-contained post-turn boundary offset for the next inward recovery", async () => {
+  let pose = createPose(0.05, 5, createInternalHeading(0), "gnss");
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: { async executeDrive() { throw new Error("translation is not part of this test"); } },
+    turnController: {
+      async executeTurn() {
+        pose = createPose(-0.1, 5, createInternalHeading(90), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["turnToHeading"](90), "success");
+  assert.equal(executor.getStatus().error, undefined);
+});
+
+test("MowingExecutor reapproaches and realigns once after an excessive strip-entry pivot displacement", async () => {
+  let pose = createPose(1, 1, createInternalHeading(90), "gnss");
+  let turnCalls = 0;
+  let driveCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive(request) {
+        driveCalls += 1;
+        assert.equal(request.minimumDriveDistanceMeters, 0);
+        assert.equal(request.validateTranslationPath(pose.position, request.targetPosition), null);
+        pose = createPose(1, 1, createInternalHeading(90), "gnss");
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: {
+      async executeTurn() {
+        turnCalls += 1;
+        pose = turnCalls === 1
+          ? createPose(1, 1.17, createInternalHeading(0), "gnss")
+          : createPose(1.01, 1, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  const status = await executor["alignMowingStripEntry"](
+    4,
+    0,
+    { x: 1, y: 1 },
+    { x: 9, y: 1 },
+  );
+
+  assert.equal(status, "success");
+  assert.equal(turnCalls, 2);
+  assert.equal(driveCalls, 1);
+  assert.equal(executor.getStatus().error, undefined);
+});
+
+test("MowingExecutor hands repeated strip-entry instability to the geometry-checked line drive without requiring resume", async () => {
+  let pose = createPose(1, 1, createInternalHeading(90), "gnss");
+  let turnCalls = 0;
+  let driveCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive() {
+        driveCalls += 1;
+        pose = createPose(1, 1, createInternalHeading(90), "gnss");
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: {
+      async executeTurn() {
+        turnCalls += 1;
+        pose = createPose(1, 1.17, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  const status = await executor["alignMowingStripEntry"](
+    4,
+    0,
+    { x: 1, y: 1 },
+    { x: 9, y: 1 },
+  );
+
+  assert.equal(status, "success");
+  assert.equal(turnCalls, 2);
+  assert.equal(driveCalls, 1);
+  assert.equal(executor.getStatus().error, undefined);
+});
+
+test("MowingExecutor leaves a normal small strip-entry offset for baseline convergence", async () => {
+  let pose = createPose(1, 1, createInternalHeading(90), "gnss");
+  let driveCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: { async executeDrive() { driveCalls += 1; return { status: "success", maxCteMeters: 0 }; } },
+    turnController: {
+      async executeTurn() {
+        pose = createPose(1, 1.03, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["alignMowingStripEntry"](
+    4,
+    0,
+    { x: 1, y: 1 },
+    { x: 9, y: 1 },
+  ), "success");
+  assert.equal(driveCalls, 0);
+});
+
+test("MowingExecutor leaves a sub-five-degree strip-entry residual for forward convergence", async () => {
+  let pose = createPose(1, 1, createInternalHeading(90), "gnss");
+  let turnCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: { async executeDrive() { throw new Error("reapproach must not start"); } },
+    turnController: {
+      async executeTurn() {
+        turnCalls += 1;
+        pose = createPose(1, 1, createInternalHeading(3), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["alignMowingStripEntry"](
+    4,
+    0,
+    { x: 1, y: 1 },
+    { x: 9, y: 1 },
+  ), "success");
+  assert.equal(turnCalls, 1);
+});
+
+test("MowingExecutor permits only a shallow monotonic exit after a pivot moves the control point inside an obstacle", () => {
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [[
+      { xMeters: 4, yMeters: 4, capturedAt: 6 },
+      { xMeters: 6, yMeters: 4, capturedAt: 7 },
+      { xMeters: 6, yMeters: 6, capturedAt: 8 },
+      { xMeters: 4, yMeters: 6, capturedAt: 9 },
+      { xMeters: 4, yMeters: 4, capturedAt: 10 },
+    ]],
+    driveController: { async executeDrive() { return { status: "success", maxCteMeters: 0 }; } },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    poseFusion: { getCurrentPose() { return createPose(4.1, 5, createInternalHeading(0), "gnss"); } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(
+    executor["mowingTranslationPathRejection"](createPosition(4.1, 5), createPosition(3, 5)),
+    null,
+  );
+  assert.equal(
+    executor["mowingTranslationPathRejection"](createPosition(4.1, 5), createPosition(6.5, 5)),
+    "start_inside_obstacle:0",
+  );
+  assert.equal(
+    executor["mowingTranslationPathRejection"](createPosition(5, 5), createPosition(3, 5)),
+    "start_inside_obstacle:0",
+  );
+});
+
+test("MowingExecutor proceeds when a strip-entry turn settles facing safely out of an obstacle", async () => {
+  let pose = createPose(4.1, 5, createInternalHeading(90), "gnss");
+  let driveCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 180, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [[
+      { xMeters: 4, yMeters: 4, capturedAt: 6 },
+      { xMeters: 6, yMeters: 4, capturedAt: 7 },
+      { xMeters: 6, yMeters: 6, capturedAt: 8 },
+      { xMeters: 4, yMeters: 6, capturedAt: 9 },
+      { xMeters: 4, yMeters: 4, capturedAt: 10 },
+    ]],
+    driveController: { async executeDrive() { driveCalls += 1; return { status: "success", maxCteMeters: 0 }; } },
+    turnController: {
+      async executeTurn() {
+        pose = createPose(4.1, 5, createInternalHeading(180), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["alignMowingStripEntry"](
+    4,
+    180,
+    { x: 4.1, y: 5 },
+    { x: 3, y: 5 },
+  ), "success");
+  assert.equal(driveCalls, 0);
+  assert.equal(executor.getStatus().error, undefined);
+});
+
+test("MowingExecutor rejects an outward strip line when the settled heading still faces into the obstacle", async () => {
+  let pose = createPose(4.1, 5, createInternalHeading(90), "gnss");
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 180, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [[
+      { xMeters: 4, yMeters: 4, capturedAt: 6 },
+      { xMeters: 6, yMeters: 4, capturedAt: 7 },
+      { xMeters: 6, yMeters: 6, capturedAt: 8 },
+      { xMeters: 4, yMeters: 6, capturedAt: 9 },
+      { xMeters: 4, yMeters: 4, capturedAt: 10 },
+    ]],
+    driveController: { async executeDrive() { throw new Error("translation must not start"); } },
+    turnController: {
+      async executeTurn() {
+        pose = createPose(4.1, 5, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["alignMowingStripEntry"](
+    4,
+    180,
+    { x: 4.1, y: 5 },
+    { x: 3, y: 5 },
+  ), "error");
+  assert.equal(executor.getStatus().error, "turn_pose_rejected:start_inside_obstacle:0");
 });
 
 test("MowingExecutor retries one low-current translation stall on the same mowing-strip target", async () => {
@@ -891,6 +1202,69 @@ test("MowingExecutor retains a routed short connector when the direct segment cr
   assert.deepEqual(followCalls[0].pathPoints, connector);
 });
 
+test("MowingExecutor retains a routed short connector when its direct shortcut leaves a concave area", async () => {
+  const followCalls = [];
+  const areaPoints = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 2, yMeters: 0, capturedAt: 2 },
+    { xMeters: 2, yMeters: 2, capturedAt: 3 },
+    { xMeters: 1.2, yMeters: 2, capturedAt: 4 },
+    { xMeters: 1.2, yMeters: 1.5, capturedAt: 5 },
+    { xMeters: 0.8, yMeters: 1.5, capturedAt: 6 },
+    { xMeters: 0.8, yMeters: 2, capturedAt: 7 },
+    { xMeters: 0, yMeters: 2, capturedAt: 8 },
+    { xMeters: 0, yMeters: 0, capturedAt: 9 },
+  ];
+  const connector = [
+    { xMeters: 0.7, yMeters: 1.8, capturedAt: 10 },
+    { xMeters: 0.7, yMeters: 1.4, capturedAt: 11 },
+    { xMeters: 1.3, yMeters: 1.4, capturedAt: 12 },
+    { xMeters: 1.3, yMeters: 1.8, capturedAt: 13 },
+  ];
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 0,
+      stripSpacingMeters: 0.3,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints,
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive() {
+        assert.fail("an area-crossing direct shortcut must not use segment drive");
+      },
+    },
+    turnController: {
+      async executeTurn() { return { status: "success" }; },
+    },
+    poseFusion: {
+      getCurrentPose() { return createPose(0.7, 1.8, createInternalHeading(0), "gnss"); },
+    },
+    continuousPathFollower: {
+      async executePath(pathPoints, options) {
+        followCalls.push({ pathPoints, options });
+        return { completed: true, reason: "reached_end" };
+      },
+    },
+    logger: createLogger(),
+  });
+
+  assert.equal(isMowingExecutionPathSafe(connector, areaPoints, []), true);
+  assert.equal(isMowingExecutionPathSafe([connector[0], connector.at(-1)], areaPoints, []), false);
+
+  const result = await executor["followConnector"](connector, 2, {
+    stage: "strip_approach",
+    stripIndex: 3,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(followCalls.length, 1);
+  assert.deepEqual(followCalls[0].pathPoints, connector);
+});
+
 test("MowingExecutor locally replans an unsafe connector from the live pose", async () => {
   const areaPoints = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
@@ -1086,9 +1460,10 @@ test("MowingExecutor publishes resume snapshots for the active step and clears t
   assert.equal(savedStates.at(-1), null);
 });
 
-test("MowingExecutor resumes a saved strip-drive operation directly when its segment is safe", async () => {
+test("MowingExecutor resumes an interrupted strip from its planned start standoff", async () => {
   const driveTargets = [];
   let skipTranslation = false;
+  let poseY = 0.3;
   const driveController = {
     async executeDrive(options) {
       driveTargets.push([
@@ -1109,7 +1484,7 @@ test("MowingExecutor resumes a saved strip-drive operation directly when its seg
   };
   const poseFusion = {
     getCurrentPose() {
-      return createPose(0, 0.3, createInternalHeading(90), "gnss");
+      return createPose(0, poseY, createInternalHeading(90), "gnss");
     },
   };
   const continuousPathFollower = {
@@ -1185,11 +1560,18 @@ test("MowingExecutor resumes a saved strip-drive operation directly when its seg
   const status = await executor.execute();
 
   assert.equal(status.phase, "complete");
-  assert.deepEqual(driveTargets, [[0, 0.85]]);
+  assert.deepEqual(driveTargets, [[0, 0.15], [0, 0.85]]);
 
   skipTranslation = true;
   const skippedStatus = await new MowingExecutor(executorOptions).execute();
   assert.equal(skippedStatus.phase, "error");
+
+  skipTranslation = false;
+  poseY = 0.85;
+  driveTargets.length = 0;
+  const completedStripStatus = await new MowingExecutor(executorOptions).execute();
+  assert.equal(completedStripStatus.phase, "complete");
+  assert.deepEqual(driveTargets, []);
 });
 
 test("MowingExecutor routes a displaced strip-drive resume instead of driving straight outside the area", async () => {
@@ -1943,6 +2325,149 @@ test("MowingExecutor resumes a saved two-point connector through DriveController
   assert.equal(driveRequests.length, 1);
   assert.equal(driveRequests[0].targetPosition.xMeters, 12.48110393941283);
   assert.equal(driveRequests[0].targetPosition.yMeters, 14.966004617521396);
+  assert.equal(typeof driveRequests[0].validateTranslationPath, "function");
+  assert.equal(
+    driveRequests[0].validateTranslationPath(
+      createPosition(21, 17.2),
+      driveRequests[0].targetPosition,
+    ),
+    "start_outside_mowing_area",
+  );
+  assert.equal(
+    driveRequests[0].validateTranslationPath(
+      createPosition(-0.1, 10),
+      driveRequests[0].targetPosition,
+    ),
+    null,
+  );
+  assert.equal(
+    driveRequests[0].validateTranslationPath(
+      createPosition(-0.1, 10),
+      createPosition(-0.05, 10),
+    ),
+    "outside_recovery_target_not_inside",
+  );
+});
+
+test("MowingExecutor resumes a saved outward connector after a pivot-contained obstacle offset", async () => {
+  let driveCalls = 0;
+  const operation = {
+    kind: "drive",
+    phase: "following_connector",
+    stripIndex: 47,
+    targetX: 3,
+    targetY: 5,
+    errorCode: "connector_failed",
+    continuation: { stage: "complete", stripIndex: 47 },
+  };
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 0,
+      stripSpacingMeters: 0.38,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [[
+      { xMeters: 4, yMeters: 4, capturedAt: 6 },
+      { xMeters: 6, yMeters: 4, capturedAt: 7 },
+      { xMeters: 6, yMeters: 6, capturedAt: 8 },
+      { xMeters: 4, yMeters: 6, capturedAt: 9 },
+      { xMeters: 4, yMeters: 4, capturedAt: 10 },
+    ]],
+    driveController: {
+      async executeDrive(request) {
+        driveCalls += 1;
+        assert.equal(
+          request.validateTranslationPath(createPosition(4.1, 5), request.targetPosition),
+          null,
+        );
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    poseFusion: {
+      getCurrentPose() { return createPose(4.1, 5, createInternalHeading(180), "gnss"); },
+    },
+    continuousPathFollower: {
+      async executePath() { assert.fail("the safe direct outward recovery must not route"); },
+    },
+    logger: createLogger(),
+  });
+
+  const continuation = await executor["executeResumeOperation"](operation);
+
+  assert.deepEqual(continuation, operation.continuation);
+  assert.equal(driveCalls, 1);
+  assert.equal(executor.getStatus().error, undefined);
+});
+
+test("MowingExecutor reports a carried resume pose that remains inside an obstacle", async () => {
+  let driveCalls = 0;
+  const areaPoints = [
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 10, yMeters: 0, capturedAt: 2 },
+    { xMeters: 10, yMeters: 10, capturedAt: 3 },
+    { xMeters: 0, yMeters: 10, capturedAt: 4 },
+    { xMeters: 0, yMeters: 0, capturedAt: 5 },
+  ];
+  const obstacle = [
+    { xMeters: 4, yMeters: 4, capturedAt: 6 },
+    { xMeters: 6, yMeters: 4, capturedAt: 7 },
+    { xMeters: 6, yMeters: 6, capturedAt: 8 },
+    { xMeters: 4, yMeters: 6, capturedAt: 9 },
+    { xMeters: 4, yMeters: 4, capturedAt: 10 },
+  ];
+  const operation = {
+    kind: "drive",
+    phase: "following_connector",
+    stripIndex: 47,
+    targetX: 3,
+    targetY: 3,
+    errorCode: "connector_failed",
+    continuation: { stage: "complete", stripIndex: 47 },
+  };
+  const executor = new MowingExecutor({
+    plan: {
+      headingDeg: 0,
+      stripSpacingMeters: 0.38,
+      bladeWidthMeters: 0.4,
+      stripCount: 0,
+      strips: [],
+      connectors: [],
+    },
+    areaPoints,
+    obstaclePointsArray: [obstacle],
+    driveController: {
+      async executeDrive() {
+        driveCalls += 1;
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    poseFusion: {
+      getCurrentPose() { return createPose(5, 5, createInternalHeading(0), "gnss"); },
+    },
+    continuousPathFollower: {
+      async executePath() { assert.fail("an obstacle-interior resume must not move"); },
+    },
+    logger: createLogger(),
+  });
+
+  const continuation = await executor["executeResumeOperation"](operation);
+
+  assert.equal(continuation, null);
+  assert.equal(driveCalls, 0);
+  assert.equal(executor.getStatus().phase, "error");
+  assert.equal(executor.getStatus().error, "resume_pose_rejected:start_inside_obstacle:0");
 });
 
 test("MowingExecutor stages a displaced obstacle-boundary resume before following only perimeter points", async () => {

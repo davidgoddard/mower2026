@@ -67,13 +67,15 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   await client.sendWheelSpeedCommand(0.5, -0.5);
   await client.stop();
 
-  assert.equal(writes.length, 2);
-  assert.equal(writes[0].key, 'motor.speed');
-  assert.equal(writes[0].priority, I2C_PRIORITY.motorSpeed);
-  assert.equal(writes[1].key, 'motor.stop');
-  assert.equal(writes[1].priority, I2C_PRIORITY.stop);
+  assert.equal(writes.length, 3);
+  assert.equal(writes[0].key, 'motor.current-calibration');
+  assert.equal(writes[0].priority, I2C_PRIORITY.stop);
+  assert.equal(writes[1].key, 'motor.speed');
+  assert.equal(writes[1].priority, I2C_PRIORITY.motorSpeed);
+  assert.equal(writes[2].key, 'motor.stop');
+  assert.equal(writes[2].priority, I2C_PRIORITY.stop);
 
-  const commandView = new DataView(writes[0].payload.buffer, writes[0].payload.byteOffset, writes[0].payload.byteLength);
+  const commandView = new DataView(writes[1].payload.buffer, writes[1].payload.byteOffset, writes[1].payload.byteLength);
   assert.equal(commandView.getInt16(13, true), 500);
   assert.equal(commandView.getInt16(15, true), -500);
   // Acceleration / deceleration rates are derived from the %/s defaults:
@@ -83,8 +85,9 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   assert.equal(commandView.getUint16(22, true), 1500);
 
   // Motor wheel-speed command frame type.
-  assert.equal(writes[0].payload[3], 0x21);
+  assert.equal(writes[0].payload[3], 0x23);
   assert.equal(writes[1].payload[3], 0x21);
+  assert.equal(writes[2].payload[3], 0x21);
 });
 
 test('MotorNodeClient suppresses duplicate unchanged commands', async () => {
@@ -108,12 +111,13 @@ test('MotorNodeClient suppresses duplicate unchanged commands', async () => {
   await client.stop();
   await client.stop();
 
-  assert.equal(writes.length, 2);
-  assert.equal(writes[0].key, 'motor.speed');
-  assert.equal(writes[1].key, 'motor.stop');
+  assert.equal(writes.length, 3);
+  assert.equal(writes[0].key, 'motor.current-calibration');
+  assert.equal(writes[1].key, 'motor.speed');
+  assert.equal(writes[2].key, 'motor.stop');
 });
 
-test('MotorNodeClient refreshes only the latest active command from one resettable timer', async () => {
+test('MotorNodeClient refreshes only the latest command from one resettable timer', async () => {
   const writes = [];
   let now = 100;
   const timers = [];
@@ -135,36 +139,36 @@ test('MotorNodeClient refreshes only the latest active command from one resettab
   await client.sendWheelSpeedCommand(0.5, -0.5);
   now = 500;
   await client.sendWheelSpeedCommand(0.5, -0.5);
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, 2);
   assert.equal(timers.length, 1);
 
   now = 600;
   await client.sendWheelSpeedCommand(-0.5, 0.5);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 3);
   assert.equal(timers[0].cancelled, true);
   assert.equal(timers.length, 2);
 
   // Even if a cancelled callback is delivered, it cannot resend stale state.
   timers[0].callback();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 3);
 
   now = 1600;
   timers[1].callback();
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(writes.length, 3);
+  assert.equal(writes.length, 4);
   const refreshed = new DataView(
-    writes[2].payload.buffer,
-    writes[2].payload.byteOffset,
-    writes[2].payload.byteLength,
+    writes[3].payload.buffer,
+    writes[3].payload.byteOffset,
+    writes[3].payload.byteLength,
   );
   assert.equal(refreshed.getInt16(13, true), -500);
   assert.equal(refreshed.getInt16(15, true), 500);
   assert.equal(timers.length, 3);
 });
 
-test('MotorNodeClient cancels command refresh when zero or disabled is requested', async () => {
+test('MotorNodeClient keeps a heartbeat for zero and disabled commands until closed', async () => {
   const writes = [];
   const timers = [];
   const fakeController = {
@@ -186,16 +190,26 @@ test('MotorNodeClient cancels command refresh when zero or disabled is requested
   assert.equal(timers.length, 1);
   await client.sendWheelSpeedCommand(0, 0);
   assert.equal(timers[0].cancelled, true);
-  assert.equal(timers.length, 1);
+  assert.equal(timers.length, 2);
 
   await client.sendWheelSpeedCommand(0.5, -0.5);
-  assert.equal(timers.length, 2);
-  await client.stop();
   assert.equal(timers[1].cancelled, true);
-  assert.equal(timers.length, 2);
+  assert.equal(timers.length, 3);
+  await client.stop();
+  assert.equal(timers[2].cancelled, true);
+  assert.equal(timers.length, 4);
   assert.deepEqual(writes.map((write) => write.key), [
-    'motor.speed', 'motor.speed', 'motor.speed', 'motor.stop',
+    'motor.current-calibration', 'motor.speed', 'motor.speed', 'motor.speed', 'motor.stop',
   ]);
+
+  timers[3].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writes.at(-1).key, 'motor.speed');
+  assert.equal(writes.at(-1).payload[17], 0);
+  assert.equal(timers.length, 5);
+
+  client.close();
+  assert.equal(timers[4].cancelled, true);
 });
 
 test('MotorNodeClient encodes per-command ramp overrides', async () => {
@@ -219,8 +233,8 @@ test('MotorNodeClient encodes per-command ramp overrides', async () => {
     rampDownTimeMs: 120,
   });
 
-  assert.equal(writes.length, 1);
-  const commandView = new DataView(writes[0].payload.buffer, writes[0].payload.byteOffset, writes[0].payload.byteLength);
+  assert.equal(writes.length, 2);
+  const commandView = new DataView(writes[1].payload.buffer, writes[1].payload.byteOffset, writes[1].payload.byteLength);
   assert.equal(commandView.getUint16(20, true), 8333);
   assert.equal(commandView.getUint16(22, true), 8333);
 });
@@ -263,7 +277,7 @@ test('MotorNodeClient treats same-key motor write replacement as benign coalesci
   const fakeController = {
     async queueWrite(request) {
       writes.push(request);
-      if (firstCall) {
+      if (firstCall && request.key === 'motor.speed') {
         firstCall = false;
         throw new I2cTaskReplacedError(request.key);
       }
@@ -281,7 +295,38 @@ test('MotorNodeClient treats same-key motor write replacement as benign coalesci
   await client.sendWheelSpeedCommand(0.5, 0.5);
   await client.stop();
 
-  assert.equal(writes.length, 2);
-  assert.equal(writes[0].key, 'motor.speed');
-  assert.equal(writes[1].key, 'motor.stop');
+  assert.equal(writes.length, 3);
+  assert.equal(writes[0].key, 'motor.current-calibration');
+  assert.equal(writes[1].key, 'motor.speed');
+  assert.equal(writes[2].key, 'motor.stop');
+});
+
+test('MotorNodeClient does not send a pending first drive command after a stop during calibration', async () => {
+  const writes = [];
+  let finishCalibration;
+  const calibrationWait = new Promise((resolve) => { finishCalibration = resolve; });
+  const fakeController = {
+    async queueWrite(request) { writes.push(request); },
+    async queueRead() { throw new Error('not used in this test'); },
+  };
+  const client = new MotorNodeClient(fakeController, {
+    address: 0x66,
+    sleep: () => calibrationWait,
+  });
+
+  const drivePromise = client.sendWheelSpeedCommand(0.5, 0.5);
+  await new Promise((resolve) => setImmediate(resolve));
+  await client.stop();
+  finishCalibration();
+  await drivePromise;
+
+  assert.deepEqual(writes.map((write) => write.key), [
+    'motor.current-calibration', 'motor.stop',
+  ]);
+
+  await client.sendWheelSpeedCommand(0.4, 0.4);
+  assert.deepEqual(writes.map((write) => write.key), [
+    'motor.current-calibration', 'motor.stop',
+    'motor.current-calibration', 'motor.speed',
+  ]);
 });

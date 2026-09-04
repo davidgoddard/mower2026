@@ -13,9 +13,13 @@
 // - FAIL: repeated invalid feedback reads that prevent a trustworthy sample set
 
 import i2c from "i2c-bus";
+import {
+  I2C_ADDRESS_MOTOR_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+} from "../../dist/constants.js";
 
-const I2C_ADDRESS = 0x66;
-const BUS_NUMBER = 1;
+const I2C_ADDRESS = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? I2C_ADDRESS_MOTOR_DEFAULT);
+const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
 
 const PROTOCOL_START_OF_FRAME = 0x4d;
 const PROTOCOL_VERSION = 0x01;

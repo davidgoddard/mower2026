@@ -32,6 +32,13 @@ export interface GnssPositionUpdateEvent {
   readonly timestampMillis: number;
   /** Receiver-claimed sample age (ms). */
   readonly sampleAgeMillis: number | null;
+  /** Raw antenna position before the calibrated body-frame offset is applied. */
+  readonly rawXMeters?: number;
+  readonly rawYMeters?: number;
+  /** Effective receiver sample time used to align the position offset heading. */
+  readonly positionCorrectionTimestampMillis?: number;
+  /** IMU heading, interpolated to the effective receiver sample time. */
+  readonly positionCorrectionHeadingDeg?: number;
   /** UTC fix time (ms since Unix epoch) from RECTIMEA when valid. */
   readonly gpsTimeMillis?: number;
   /** Measured antenna baseline length (m) from UNIHEADINGA. */

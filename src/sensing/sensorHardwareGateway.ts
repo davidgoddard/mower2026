@@ -8,6 +8,10 @@ import { MotorFeedbackSample } from "../motors/motorProtocol.js";
 import { Bmi160ImuSensor } from "../imu/bmi160ImuSensor.js";
 import { ImuSample } from "../imu/types.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
+import {
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_ADDRESS_MOTOR_DEFAULT,
+} from "../constants.js";
 
 export interface MotorCommandOptions {
   rampUpTimeMs?: number;
@@ -66,6 +70,10 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
       motorCalibration: this.motorCalibration,
     });
 
+    // Establish a safe disabled command immediately and keep its ESP command
+    // lease current. This lets motor-feedback health become trustworthy before
+    // a start/resume request without ever enabling the H-bridges.
+    await this.motorClient.stop();
     await this.imuSensor.initialise();
     await this.imuSensor.calibrateGyro();
   }
@@ -127,6 +135,7 @@ class PiSensorHardwareGateway implements SensorHardwareGateway {
     } catch {
       // Best-effort stop on shutdown; continue closing transport even if node is offline.
     }
+    this.motorClient?.close();
     this.motorClient = null;
     await this.imuSensor?.close();
     this.imuSensor = null;
@@ -149,8 +158,8 @@ export async function createPiSensorHardwareGateway(
 ): Promise<SensorHardwareGateway> {
   const gateway = new PiSensorHardwareGateway({
     busNumber,
-    gnssAddress: options.gnssAddress ?? 0x52,
-    motorAddress: options.motorAddress ?? 0x66,
+    gnssAddress: options.gnssAddress ?? I2C_ADDRESS_GNSS_DEFAULT,
+    motorAddress: options.motorAddress ?? I2C_ADDRESS_MOTOR_DEFAULT,
     leftMotorForwardSign: options.leftMotorForwardSign ?? -1,
     rightMotorForwardSign: options.rightMotorForwardSign ?? -1,
     motorCalibration: options.motorCalibration,

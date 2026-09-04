@@ -32,6 +32,7 @@ static const uint8_t PROTOCOL_VERSION = 0x01;
 static const uint8_t NODE_ID_MOTOR = 0x20;
 static const uint8_t MESSAGE_TYPE_WHEEL_SPEED_COMMAND = 0x21;
 static const uint8_t MESSAGE_TYPE_MOTOR_FEEDBACK = 0x22;
+static const uint8_t MESSAGE_TYPE_CURRENT_CALIBRATION_COMMAND = 0x23;
 
 static const size_t FRAME_HEADER_SIZE = 9;
 static const size_t FRAME_CRC_SIZE = 2;
@@ -159,6 +160,8 @@ uint16_t g_feedbackSequence = 0;
 uint32_t g_lastValidCommandMillis = 0;
 bool g_haveValidCommand = false;
 bool g_commandLeaseHealthy = false;
+volatile bool g_currentCalibrationRequested = false;
+bool g_currentSensorsCalibrated = false;
 
 uint32_t g_lastControlMillis = 0;
 uint32_t g_lastFeedbackMillis = 0;
@@ -444,18 +447,26 @@ float adcCountToVolts(int rawCount) {
   return (static_cast<float>(rawCount) / static_cast<float>(ADC_MAX_COUNT)) * CURRENT_SENSOR_SUPPLY_VOLTS;
 }
 
-void calibrateCurrentSensor(CurrentSensorState &sensor) {
-  uint32_t accumulator = 0;
+void calibrateCurrentSensors() {
+  uint32_t leftAccumulator = 0;
+  uint32_t rightAccumulator = 0;
   for (uint16_t index = 0; index < CURRENT_SENSOR_CALIBRATION_SAMPLES; index += 1) {
-    accumulator += static_cast<uint32_t>(analogRead(sensor.pin));
+    leftAccumulator += static_cast<uint32_t>(analogRead(g_leftCurrentSensor.pin));
+    rightAccumulator += static_cast<uint32_t>(analogRead(g_rightCurrentSensor.pin));
     delay(2);
   }
 
-  sensor.zeroVoltageVolts = adcCountToVolts(static_cast<int>(accumulator / CURRENT_SENSOR_CALIBRATION_SAMPLES));
-  sensor.filteredCurrentAmps = 0.0f;
+  g_leftCurrentSensor.zeroVoltageVolts = adcCountToVolts(static_cast<int>(leftAccumulator / CURRENT_SENSOR_CALIBRATION_SAMPLES));
+  g_rightCurrentSensor.zeroVoltageVolts = adcCountToVolts(static_cast<int>(rightAccumulator / CURRENT_SENSOR_CALIBRATION_SAMPLES));
+  g_leftCurrentSensor.filteredCurrentAmps = 0.0f;
+  g_rightCurrentSensor.filteredCurrentAmps = 0.0f;
+  g_currentSensorsCalibrated = true;
 }
 
 float readCurrentSensor(CurrentSensorState &sensor) {
+  if (!g_currentSensorsCalibrated) {
+    return 0.0f;
+  }
   const int rawCount = analogRead(sensor.pin);
   const float measuredVolts = adcCountToVolts(rawCount);
   const float signedCurrentAmps = (measuredVolts - sensor.zeroVoltageVolts) / CURRENT_SENSOR_VOLTS_PER_AMP;
@@ -526,7 +537,13 @@ void runControlStep(uint32_t nowMillis) {
     && commandSnapshot.commandTimeoutMillis > 0
     && nowMillis - lastValidCommandMillis <= commandSnapshot.commandTimeoutMillis;
   g_commandLeaseHealthy = commandLeaseHealthy;
-  bool allowDrive = commandSnapshot.enableDrive && commandLeaseHealthy;
+  const bool requestsMotion = commandSnapshot.enableDrive
+    && (fabs(commandSnapshot.leftWheelTargetPercent) >= DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT
+      || fabs(commandSnapshot.rightWheelTargetPercent) >= DEFAULT_MIN_EFFECTIVE_WHEEL_OUTPUT_PERCENT);
+  if (requestsMotion && !g_currentSensorsCalibrated) {
+    g_currentCalibrationRequested = true;
+  }
+  bool allowDrive = commandSnapshot.enableDrive && commandLeaseHealthy && g_currentSensorsCalibrated;
 
   float leftTarget = allowDrive ? commandSnapshot.leftWheelTargetPercent : 0.0f;
   float rightTarget = allowDrive ? commandSnapshot.rightWheelTargetPercent : 0.0f;
@@ -536,6 +553,10 @@ void runControlStep(uint32_t nowMillis) {
   if (!allowDrive) {
     forceMotorStop(g_leftMotor);
     forceMotorStop(g_rightMotor);
+    if (g_currentCalibrationRequested) {
+      g_currentCalibrationRequested = false;
+      calibrateCurrentSensors();
+    }
     lastStepMillis = nowMillis;
     return;
   }
@@ -588,8 +609,24 @@ void onReceive(int numBytes) {
       g_latestCommand = decoded;
       g_lastValidCommandMillis = millis();
       g_haveValidCommand = true;
+      if (!decoded.enableDrive) {
+        // A hard disable marks the end of an operating session. The motor
+        // supply may be disconnected while the Pi and ESP remain powered,
+        // so the next motion request must establish a fresh zero point.
+        g_currentSensorsCalibrated = false;
+      }
       portEXIT_CRITICAL(&g_protocolStateMux);
     }
+  } else if (messageType == MESSAGE_TYPE_CURRENT_CALIBRATION_COMMAND && payloadLength == 0) {
+    // Calibration is serviced by the control loop only after both outputs
+    // have been forced off. Invalidate any earlier drive command immediately
+    // so a calibration request can never sample motor load current as zero.
+    portENTER_CRITICAL(&g_protocolStateMux);
+    g_latestCommand.enableDrive = false;
+    g_latestCommand.leftWheelTargetPercent = 0.0f;
+    g_latestCommand.rightWheelTargetPercent = 0.0f;
+    g_currentCalibrationRequested = true;
+    portEXIT_CRITICAL(&g_protocolStateMux);
   }
 }
 
@@ -656,9 +693,6 @@ void setup() {
   configurePwm();
   applyMotorHardware(g_leftMotor);
   applyMotorHardware(g_rightMotor);
-  calibrateCurrentSensor(g_leftCurrentSensor);
-  calibrateCurrentSensor(g_rightCurrentSensor);
-
   attachInterrupt(digitalPinToInterrupt(LEFT_TACH_PIN), onLeftPulse, FALLING);
   attachInterrupt(digitalPinToInterrupt(RIGHT_TACH_PIN), onRightPulse, FALLING);
 

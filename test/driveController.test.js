@@ -1,7 +1,7 @@
-import { describe, it, mock } from "node:test";
+import { beforeEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DriveController } from "../dist/control/driveController.js";
@@ -14,8 +14,9 @@ import {
   DRIVE_SEGMENT_STEP_METERS,
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
 } from "../dist/constants.js";
-import { addRelativeAngle, createInternalHeading } from "../dist/geometry/headingTypes.js";
+import { addRelativeAngle, createInternalHeading, unwrapRelativeAngle } from "../dist/geometry/headingTypes.js";
 import { createPosition, createMeters, unwrapMeters } from "../dist/geometry/positionTypes.js";
+import { systemStop } from "../dist/control/systemStop.js";
 
 const STRAIGHT_LINE_TRAINING_DISTANCES_METERS = [
   ...DRIVE_SHORT_BUCKET_DISTANCES_METERS,
@@ -27,6 +28,7 @@ const SEGMENT_TRAINING_DISTANCE_COUNT =
 const SEGMENT_TRAINING_DRIVE_COUNT = SEGMENT_TRAINING_DISTANCE_COUNT * 2;
 
 describe("DriveController", () => {
+  beforeEach(() => systemStop.clearStop("drive-controller-test"));
   function createMockLogger() {
     return {
       child: () => createMockLogger(),
@@ -186,6 +188,7 @@ describe("DriveController", () => {
     return {
       getBrakeDistanceForDrive: mock.fn(() => createMeters(2.0)),
       getCteGainForDirection: () => 0.3,
+      getCteDampingGainForDirection: () => 0.1,
       getLongHeadingBiasForDirection: () => 0,
       getLongHeadingGainForDirection: () => 0.01,
       getMotorRampDownTime: () => 700,
@@ -393,6 +396,103 @@ describe("DriveController", () => {
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 1);
   });
 
+  it("rejects an unsafe settled pose before a corrective turn or translation", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+    const mockTurn = createMockTurnController(mockPose);
+
+    mockPose._testSetPose({
+      position: createPosition(0, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    mockTurn.executeTurn = mock.fn(async (request) => {
+      mockPose._testSetPose({
+        position: createPosition(0.6, 0.6),
+        heading: addRelativeAngle(createInternalHeading(0), request.targetAngle),
+        quality: "gnss",
+      });
+      return {
+        requestedAngle: request.targetAngle,
+        achievedAngle: request.targetAngle,
+        errorAngle: createInternalHeading(0),
+        durationMs: 1000,
+        motorEngaged: true,
+        status: "success",
+        timestamp: new Date().toISOString(),
+      };
+    });
+
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    const result = await controller.executeDrive({
+      targetPosition: createPosition(0, 1),
+      learningEnabled: false,
+      validateTranslationPath(startPosition) {
+        return Number(startPosition.xMeters) > 0.5 ? "start_inside_obstacle:1" : null;
+      },
+    });
+
+    assert.equal(result.status, "error");
+    assert.equal(result.errorMessage, "drive_translation_path_rejected:start_inside_obstacle:1");
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 0);
+  });
+
+  it("aims from the settled pose while preserving the planned strip as the CTE reference", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+    const mockTurn = createMockTurnController(mockPose);
+    mockPose._testSetPose({
+      position: createPosition(0.2, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+    const cteReferenceStartPosition = createPosition(0, 0);
+
+    const result = await controller.executeDrive({
+      cteReferenceStartPosition,
+      targetPosition: createPosition(0, 10),
+      learningEnabled: false,
+    });
+
+    assert.equal(result.status, "success");
+    const livePoseBearingDeg = Math.atan2(10, -0.2) * 180 / Math.PI;
+    assert.ok(
+      Math.abs(
+        unwrapRelativeAngle(mockTurn.executeTurn.mock.calls[0].arguments[0].targetAngle)
+          - livePoseBearingDeg,
+      ) < 1e-9,
+    );
+    assert.equal(
+      mockLineDrive.executeLineDrive.mock.calls[0].arguments[0].cteReferenceStartPosition,
+      cteReferenceStartPosition,
+    );
+  });
+
   it("pivots before a short hop when heading error is large", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
@@ -515,6 +615,41 @@ describe("DriveController", () => {
     assert.equal(result.status, "success");
     assert.equal(result.learnSkipReason, "below_minimum_drive_distance");
     assert.equal(mockTurn.executeTurn.mock.calls.length, 1);
+    assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 0);
+  });
+
+  it("skips a sub-minimum translation before wasting power on an initial turn", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createMockPoseFusion();
+    const mockLearning = createMockLearningModel();
+    const mockLineDrive = createMockLineDriveController();
+    const mockTurn = createMockTurnController(mockPose);
+    mockPose._testSetPose({
+      position: createPosition(0, 0),
+      heading: createInternalHeading(90),
+      quality: "gnss",
+    });
+
+    const controller = new DriveController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      turnController: mockTurn,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      lineDriveController: mockLineDrive,
+      sleep: async () => {},
+    });
+
+    const result = await controller.executeDrive({
+      targetPosition: createPosition(0.1, 0),
+      learningEnabled: true,
+      minimumDriveDistanceMeters: 0.15,
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(result.learnSkipReason, "below_minimum_drive_distance");
+    assert.equal(mockTurn.executeTurn.mock.calls.length, 0);
     assert.equal(mockLineDrive.executeLineDrive.mock.calls.length, 0);
   });
 
@@ -1007,6 +1142,7 @@ describe("DriveController", () => {
 });
 
 describe("DriveLineController", () => {
+  beforeEach(() => systemStop.clearStop("drive-line-controller-test"));
   function createMockLogger() {
     return {
       child: () => createMockLogger(),
@@ -1102,6 +1238,7 @@ describe("DriveLineController", () => {
     return {
       getBrakeDistanceForDrive: mock.fn(() => createMeters(0.15)),
       getCteGainForDirection: () => 0.3,
+      getCteDampingGainForDirection: () => 0.1,
       getLongHeadingBiasForDirection: () => 0,
       getLongHeadingGainForDirection: () => 0.01,
       getParameters: mock.fn(() => ({
@@ -1489,6 +1626,81 @@ describe("DriveLineController", () => {
     assert.ok(Math.abs(calls[1].x - 0) < 1e-9);
     assert.equal(calls[1].y, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
     assert.equal(calls[1].driveDirectionSign, -1);
+  });
+
+  it("corrects toward the planned CTE baseline from a displaced live start", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0.2));
+    const mockLearning = createMockLearningModel();
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const drivePromise = controller.executeLineDrive({
+      cteReferenceStartPosition: createPosition(0, 0),
+      targetPosition: createPosition(5, 0),
+      learningEnabled: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const initialCommand = mockSensor.setMotorWheelOutputs.mock.calls.at(-1)?.arguments ?? [];
+    assert.ok(initialCommand.length >= 2);
+    assert.equal(Number(initialCommand[0]) > Number(initialCommand[1]), true);
+
+    await controller.stopCurrentDrive();
+    mockPose.setPose({
+      position: createPosition(0, 0.2),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    await drivePromise;
+  });
+
+  it("feeds qualified mowing strips to steering-only learning", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
+    const mockLearning = createMockLearningModel();
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      learningPolicy: { allows: (source) => source === "mowing_strip" },
+      sleep: async () => {},
+    });
+
+    const drivePromise = controller.executeLineDrive({
+      cteReferenceStartPosition: createPosition(0, 0),
+      targetPosition: createPosition(4, 0),
+      learningEnabled: true,
+      learningSource: "mowing_strip",
+    });
+
+    for (const [x, y] of [[1, 0.08], [2, -0.07], [3, 0.06], [3.9, 0.04]]) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      mockPose.setPose({
+        position: createPosition(x, y),
+        heading: createInternalHeading(0),
+        quality: "gnss",
+      });
+      mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    }
+
+    const result = await drivePromise;
+    assert.equal(result.status, "success");
+    assert.equal(result.learnApplied, true);
+    assert.equal(mockLearning.updateFromDrive.mock.calls.length, 1);
+    const learningInput = mockLearning.updateFromDrive.mock.calls[0].arguments[0];
+    assert.equal(learningInput.learningScope, "steering_only");
+    assert.equal(learningInput.steeringMetrics.sampledAlongTrackMeters >= 3, true);
+    assert.equal(learningInput.steeringMetrics.baselineCrossings >= 2, true);
   });
 
   it("applies cross-track correction in the same world direction when driving in reverse", async () => {
@@ -2141,12 +2353,47 @@ describe("DriveLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 6);
+    assert.equal(params.version, 7);
     assert.equal(params.longDriveBrakeDistanceForwardMeters, 0.2);
     assert.equal(params.longDriveBrakeDistanceReverseMeters, 0.2);
     assert.equal(params.forwardCteGain, 0.3);
     assert.equal(params.reverseCteGain, 0.3);
+    assert.equal(params.forwardCteDampingGain, 0.1);
+    assert.equal(params.reverseCteDampingGain, 0.1);
     assert.equal(params.shortDriveBuckets?.length, DRIVE_SHORT_BUCKET_DISTANCES_METERS.length);
+  });
+
+  it("migrates existing parameters without losing learned steering or braking", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-v6-"));
+    const parametersPath = join(dir, "drive-learning.json");
+    try {
+      const defaults = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await defaults.loadParameters();
+      const legacy = defaults.getParameters();
+      await writeFile(parametersPath, JSON.stringify({
+        ...legacy,
+        version: 6,
+        forwardCteGain: 1.5,
+        longDriveBrakeDistanceForwardMeters: 0.18,
+        forwardCteDampingGain: undefined,
+        reverseCteDampingGain: undefined,
+        operationalSteeringSamplesForward: undefined,
+        operationalSteeringSamplesReverse: undefined,
+        shortDriveBuckets: undefined,
+      }));
+
+      const migrated = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await migrated.loadParameters();
+      const parameters = migrated.getParameters();
+      assert.equal(parameters.version, 7);
+      assert.equal(parameters.forwardCteGain, 1.5);
+      assert.equal(parameters.longDriveBrakeDistanceForwardMeters, 0.18);
+      assert.equal(parameters.forwardCteDampingGain, 0.1);
+      assert.equal(parameters.operationalSteeringSamplesForward, 0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("updates brake distance from error", async () => {
@@ -2236,6 +2483,57 @@ describe("DriveLearningModel", () => {
     }
   });
 
+  it("learns convergence damping from repeated crossings without changing braking", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-damping-"));
+    const parametersPath = join(dir, "drive-learning.json");
+
+    try {
+      const model = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await model.loadParameters();
+      const before = model.getParameters();
+
+      await model.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(10, 0),
+        finalPosition: createPosition(10.5, 0.08),
+        driveDirectionSign: 1,
+        learningScope: "steering_only",
+        errorX: createMeters(0.5),
+        errorY: createMeters(0.08),
+        maxCte: createMeters(0.12),
+        avgCte: createMeters(0.06),
+        brakeDistanceUsed: createMeters(0.2),
+        steeringMetrics: {
+          sampleCount: 8,
+          sampledAlongTrackMeters: 10,
+          initialAbsCteMeters: 0.12,
+          finalAbsCteMeters: 0.08,
+          meanAbsCteMeters: 0.06,
+          maxAbsCteMeters: 0.12,
+          cteIntegralMetersSquared: 0.6,
+          baselineCrossings: 3,
+          nonDecayingCrossings: 1,
+          distanceToTargetBandMeters: null,
+        },
+      });
+
+      const after = model.getParameters();
+      assert.equal(after.forwardCteDampingGain > before.forwardCteDampingGain, true);
+      assert.equal(after.operationalSteeringSamplesForward, 1);
+      assert.equal(
+        after.longDriveBrakeDistanceForwardMeters,
+        before.longDriveBrakeDistanceForwardMeters,
+      );
+      assert.deepEqual(
+        after.shortDriveBrakeDistancesPositive,
+        before.shortDriveBrakeDistancesPositive,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("allows CTE gain to rise materially when drift remains high without exploding", async () => {
     const mockLogger = createMockLogger();
     const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-cte-strong-"));
@@ -2265,7 +2563,88 @@ describe("DriveLearningModel", () => {
 
       const after = model.getParameters();
       assert.equal(after.forwardCteGain > 0.7, true);
-      assert.equal(after.forwardCteGain <= 1.5, true);
+      assert.equal(after.forwardCteGain <= 3.0, true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues operational steering learning beyond the former saturated limits", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-unsaturated-"));
+    const parametersPath = join(dir, "drive-learning.json");
+
+    try {
+      const defaults = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await defaults.loadParameters();
+      await writeFile(parametersPath, JSON.stringify({
+        ...defaults.getParameters(),
+        forwardCteGain: 1.5,
+        forwardCteDampingGain: 0.6,
+        shortDriveBuckets: undefined,
+      }));
+
+      const driftModel = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await driftModel.loadParameters();
+      await driftModel.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(10, 0),
+        finalPosition: createPosition(10, 0.08),
+        driveDirectionSign: 1,
+        learningScope: "steering_only",
+        errorX: createMeters(0),
+        errorY: createMeters(0.08),
+        maxCte: createMeters(0.08),
+        avgCte: createMeters(0.04),
+        brakeDistanceUsed: createMeters(0.2),
+        steeringMetrics: {
+          sampleCount: 20,
+          sampledAlongTrackMeters: 10,
+          initialAbsCteMeters: 0.02,
+          finalAbsCteMeters: 0.08,
+          meanAbsCteMeters: 0.04,
+          maxAbsCteMeters: 0.08,
+          cteIntegralMetersSquared: 0.4,
+          baselineCrossings: 0,
+          nonDecayingCrossings: 0,
+          distanceToTargetBandMeters: 10,
+        },
+      });
+      assert.equal(driftModel.getParameters().forwardCteGain > 1.5, true);
+
+      await writeFile(parametersPath, JSON.stringify({
+        ...defaults.getParameters(),
+        forwardCteGain: 1.5,
+        forwardCteDampingGain: 0.6,
+        shortDriveBuckets: undefined,
+      }));
+      const oscillationModel = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await oscillationModel.loadParameters();
+      await oscillationModel.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(10, 0),
+        finalPosition: createPosition(10, 0.04),
+        driveDirectionSign: 1,
+        learningScope: "steering_only",
+        errorX: createMeters(0),
+        errorY: createMeters(0.04),
+        maxCte: createMeters(0.08),
+        avgCte: createMeters(0.03),
+        brakeDistanceUsed: createMeters(0.2),
+        steeringMetrics: {
+          sampleCount: 20,
+          sampledAlongTrackMeters: 10,
+          initialAbsCteMeters: 0.05,
+          finalAbsCteMeters: 0.04,
+          meanAbsCteMeters: 0.03,
+          maxAbsCteMeters: 0.08,
+          cteIntegralMetersSquared: 0.3,
+          baselineCrossings: 3,
+          nonDecayingCrossings: 2,
+          distanceToTargetBandMeters: null,
+        },
+      });
+      assert.equal(oscillationModel.getParameters().forwardCteDampingGain > 0.6, true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -16,6 +16,12 @@ import { LoggerScope } from "../logging/types.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { DriveLearningModel } from "./driveLearningModel.js";
+import { AdaptiveTerrainSteering } from "./adaptiveTerrainSteering.js";
+import {
+  calculateDriveSteeringMetrics,
+  type DriveSteeringMetrics,
+  type DriveSteeringSample,
+} from "./driveSteeringMetrics.js";
 import { MotorCalibration } from "../config/motorCalibration.js";
 import {
   RunRecord,
@@ -71,6 +77,11 @@ import {
   DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS,
   DRIVE_STEERING_MAX_TRIM_PERCENT,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
+  DRIVE_CTE_CROSSING_HYSTERESIS_METERS,
+  DRIVE_CTE_SLOPE_FILTER_FACTOR,
+  DRIVE_CTE_SLOPE_MAX_ABS,
+  DRIVE_OPERATIONAL_STEERING_MIN_DISTANCE_METERS,
+  DRIVE_TARGET_CTE_METERS,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
 } from "../constants.js";
 
@@ -116,7 +127,20 @@ interface RunInstrumentation {
   gnssDemotedDuringRun: boolean;
   lastHeartbeatTickMs: number;
   heartbeat: RunRecordHeartbeatSample[];
-  paramsSnapshot: { coastDistanceUsedMeters: number; cteGainUsed: number; shortBucketUsed: boolean };
+  paramsSnapshot: {
+    coastDistanceUsedMeters: number;
+    cteGainUsed: number;
+    cteDampingGainUsed: number;
+    shortBucketUsed: boolean;
+  };
+}
+
+interface SteeringDiagnostics {
+  readonly headingErrorDeg: number;
+  readonly proportionalTrimPercent: number;
+  readonly headingTrimPercent: number;
+  readonly dampingTrimPercent: number;
+  readonly terrainTrimPercent: number;
 }
 
 const RUN_RECORD_HEARTBEAT_INTERVAL_MS = 500; // 2 Hz
@@ -155,6 +179,12 @@ export class DriveLineController {
   private driveStartTime = 0;
   private driveResolve: ((result: DriveResult) => void) | null = null;
   private cteSamples: Meters[] = [];
+  private steeringSamples: DriveSteeringSample[] = [];
+  private previousSlopeSample: DriveSteeringSample | null = null;
+  private filteredCteSlope = 0;
+  private readonly terrainSteering = new AdaptiveTerrainSteering();
+  private latestMotorFeedback: MotorFeedbackUpdateEvent | null = null;
+  private latestSteeringDiagnostics: SteeringDiagnostics | null = null;
   private driveDirectionSign: 1 | -1 = 1;
 
   // Phase-1 instrumentation: per-run state populated when a drive starts
@@ -221,6 +251,7 @@ export class DriveLineController {
   private beginRunInstrumentation(): void {
     const params = this.learningModel.getParameters();
     const cteGainUsed = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
+    const cteDampingGainUsed = this.learningModel.getCteDampingGainForDirection(this.driveDirectionSign);
     const brakeDistanceMeters = unwrapMeters(this.getBrakeDistanceForCurrentDrive());
     const isShort =
       this.driveStartPosition !== null &&
@@ -244,12 +275,22 @@ export class DriveLineController {
       paramsSnapshot: {
         coastDistanceUsedMeters: brakeDistanceMeters,
         cteGainUsed,
+        cteDampingGainUsed,
         shortBucketUsed: isShort,
       },
     };
 
     this.boundOnMotorFeedback = (event: MotorFeedbackUpdateEvent) => {
       if (this.runInstrumentation === null) return;
+      this.latestMotorFeedback = event;
+      const primitive = this.safeGetPrimitiveState();
+      this.terrainSteering.observe(
+        event,
+        this.status === "driving"
+          && !primitive.wheelSlipSuspected
+          && !this.runInstrumentation.obstructionSeen,
+        this.nowMillis(),
+      );
       const tickRate = Math.abs(event.leftEncoderDelta) + Math.abs(event.rightEncoderDelta);
       if (tickRate > this.runInstrumentation.peakTickRate) {
         this.runInstrumentation.peakTickRate = tickRate;
@@ -356,6 +397,9 @@ export class DriveLineController {
       rightEncoderDelta: null,
       remainingAlongTrackMeters,
       cteMeters,
+      ...(this.latestSteeringDiagnostics ?? {}),
+      leftMotorCurrentAmps: this.latestMotorFeedback?.leftMotorCurrentAmps ?? null,
+      rightMotorCurrentAmps: this.latestMotorFeedback?.rightMotorCurrentAmps ?? null,
     });
   }
 
@@ -459,6 +503,7 @@ export class DriveLineController {
         gnssDemoted: inst.gnssDemotedDuringRun,
       },
       heartbeat: inst.heartbeat,
+      steeringMetrics: this.calculateSteeringMetrics(),
       learning: {
         applied: args.learnApplied,
         skipReason: args.learnSkipReason ?? null,
@@ -538,11 +583,19 @@ export class DriveLineController {
     let subscribed = false;
     try {
       this.stopRequested = false;
-      systemStop.clearStop("drive-line-execute");
+      if (systemStop.isStopped()) {
+        throw new Error("drive_line_start_blocked_by_system_stop");
+      }
       this.currentDrive = request;
       this.driveDirectionSign = request.driveDirectionSign ?? 1;
       this.driveStartTime = this.nowMillis();
       this.cteSamples = [];
+      this.steeringSamples = [];
+      this.previousSlopeSample = null;
+      this.filteredCteSlope = 0;
+      this.terrainSteering.reset();
+      this.latestMotorFeedback = null;
+      this.latestSteeringDiagnostics = null;
       this.brakeDecisionPoseQuality = "unknown";
 
       const startPose = this.poseFusion.getCurrentPose();
@@ -582,8 +635,10 @@ export class DriveLineController {
         driveDirectionSign: this.driveDirectionSign,
       });
 
-      this.driveLineStart = this.driveStartPosition;
+      this.driveLineStart = request.cteReferenceStartPosition ?? this.driveStartPosition;
       this.driveLineEnd = request.targetPosition;
+      request.translationPoseSink?.(startPose.position);
+      this.recordSteeringSample(startPose.position);
 
       // Set status before subscribing so a pose event that arrives during the
       // synchronous subscription path doesn't get rejected by the status guard.
@@ -1172,15 +1227,9 @@ export class DriveLineController {
     }
 
     const currentPosition = pose.position;
+    this.currentDrive?.translationPoseSink?.(currentPosition);
     const cte = crossTrackError(currentPosition, this.driveLineStart, this.driveLineEnd);
     this.cteSamples.push(cte);
-
-    {
-      const targetDistanceForHb = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
-      const projectedAlongTrackForHb = this.projectAlongTrackDistance(currentPosition);
-      const remainingForHb = Math.max(0, targetDistanceForHb - projectedAlongTrackForHb);
-      this.recordRunHeartbeatIfDue(pose, unwrapMeters(cte), remainingForHb);
-    }
 
     const maxCrossTrackErrorMeters = this.currentDrive?.maxCrossTrackErrorMeters;
     if (
@@ -1195,6 +1244,8 @@ export class DriveLineController {
     const targetDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
     const projectedAlongTrackDistance = this.projectAlongTrackDistance(currentPosition);
     const remainingAlongTrackDistance = Math.max(0, targetDistance - projectedAlongTrackDistance);
+    this.recordSteeringSample(currentPosition);
+    this.recordRunHeartbeatIfDue(pose, unwrapMeters(cte), remainingAlongTrackDistance);
 
     if (this.isGrosslyMisaligned(pose, remainingAlongTrackDistance)) {
       this.poseFusion.off("poseUpdate", this.onPoseUpdate);
@@ -1328,6 +1379,8 @@ export class DriveLineController {
     const cte = unwrapMeters(crossTrackError(pose.position, this.driveLineStart, this.driveLineEnd));
     const cteGain = this.learningModel.getCteGainForDirection(this.driveDirectionSign);
     const cteTrim = cte * cteGain;
+    const dampingGain = this.learningModel.getCteDampingGainForDirection(this.driveDirectionSign);
+    const dampingTrim = this.filteredCteSlope * dampingGain;
     const headingGain = this.learningModel.getLongHeadingGainForDirection(this.driveDirectionSign);
     const headingTrim = totalDistance > DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS
       ? this.learningModel.getLongHeadingBiasForDirection(this.driveDirectionSign)
@@ -1336,8 +1389,13 @@ export class DriveLineController {
         1,
         remainingAlongTrackDistance / DRIVE_STEERING_TARGET_INFLUENCE_DISTANCE_METERS,
       ));
+    // AdaptiveTerrainSteering reports a forward-command trim. Reverse wheel
+    // velocities invert the differential response, so invert this one term
+    // while leaving world-frame CTE and heading corrections unchanged.
+    const terrainTrim = this.terrainSteering.getSnapshot(this.nowMillis()).trimPercent
+      * this.driveDirectionSign;
     const trim = this.clamp(
-      cteTrim + headingTrim,
+      cteTrim + headingTrim + dampingTrim + terrainTrim,
       -DRIVE_STEERING_MAX_TRIM_PERCENT,
       DRIVE_STEERING_MAX_TRIM_PERCENT,
     );
@@ -1349,6 +1407,14 @@ export class DriveLineController {
       leftCommand,
       rightCommand,
     );
+
+    this.latestSteeringDiagnostics = {
+      headingErrorDeg: headingDiff,
+      proportionalTrimPercent: cteTrim,
+      headingTrimPercent: headingTrim,
+      dampingTrimPercent: dampingTrim,
+      terrainTrimPercent: terrainTrim,
+    };
 
     void this.sensorController.setMotorWheelOutputs(
       normalizedCommands.leftCommand,
@@ -1480,6 +1546,7 @@ export class DriveLineController {
       const maxCte = this.calculateMaxCte();
       const avgCte = this.calculateAvgCte();
       const brakeDistance = this.getBrakeDistanceForCurrentDrive();
+      const steeringMetrics = this.calculateSteeringMetrics();
 
       this.logger.info("drive.line.completed", {
         startPosition: {
@@ -1525,7 +1592,7 @@ export class DriveLineController {
       if (this.currentDrive?.learningEnabled === false) {
         learnSkipReason = "learning_disabled";
       } else if (!(this.learningPolicy?.allows(this.currentDrive?.learningSource) ?? true)) {
-        learnSkipReason = "learning_policy_training_only";
+        learnSkipReason = "learning_policy_rejected";
       } else {
         // Pose-quality gate covers anchor / brake-decision / settled.  All
         // three must be GNSS-quality, otherwise the brake timing taught to
@@ -1535,7 +1602,15 @@ export class DriveLineController {
           this.driveStartPoseQuality === "gnss" &&
           this.brakeDecisionPoseQuality === "gnss" &&
           finalPose.quality === "gnss";
-        if (learningPoseQualityOk) {
+        const operationalSteeringSample = this.currentDrive?.learningSource === "mowing_strip";
+        const operationalSteeringEligible = !operationalSteeringSample || (
+          steeringMetrics.sampledAlongTrackMeters >= DRIVE_OPERATIONAL_STEERING_MIN_DISTANCE_METERS
+          && steeringMetrics.sampleCount >= 3
+          && !inst?.obstructionSeen
+          && !inst?.wheelSlipSeen
+          && !inst?.gnssDemotedDuringRun
+        );
+        if (learningPoseQualityOk && operationalSteeringEligible) {
           this.status = "learning";
           await this.learningModel.updateFromDrive({
             startPosition: this.driveStartPosition,
@@ -1549,8 +1624,19 @@ export class DriveLineController {
             maxCte,
             avgCte,
             brakeDistanceUsed: brakeDistance,
+            learningScope: operationalSteeringSample ? "steering_only" : "all",
+            steeringMetrics,
           });
           learnApplied = true;
+        } else if (!operationalSteeringEligible) {
+          learnSkipReason = "operational_steering_sample_rejected";
+          this.logger.info("drive.line.learning_skipped", {
+            reason: learnSkipReason,
+            steeringMetrics,
+            obstructionSeen: inst?.obstructionSeen ?? false,
+            wheelSlipSeen: inst?.wheelSlipSeen ?? false,
+            gnssDemotedDuringRun: inst?.gnssDemotedDuringRun ?? false,
+          });
         } else {
           learnSkipReason = "non_gnss_pose_sample";
           this.logger.warn("drive.line.learning_skipped", {
@@ -1740,6 +1826,41 @@ export class DriveLineController {
     }
     const sum = this.cteSamples.reduce((sum, cte) => sum + Math.abs(unwrapMeters(cte)), 0);
     return createMeters(sum / this.cteSamples.length);
+  }
+
+  private recordSteeringSample(position: Position): void {
+    if (this.driveLineStart === null || this.driveLineEnd === null) return;
+    const sample: DriveSteeringSample = {
+      alongTrackMeters: this.projectAlongTrackDistance(position),
+      cteMeters: unwrapMeters(crossTrackError(position, this.driveLineStart, this.driveLineEnd)),
+    };
+    const previous = this.previousSlopeSample;
+    if (previous) {
+      const deltaAlong = sample.alongTrackMeters - previous.alongTrackMeters;
+      if (deltaAlong >= 0.01) {
+        const rawSlope = this.clamp(
+          (sample.cteMeters - previous.cteMeters) / deltaAlong,
+          -DRIVE_CTE_SLOPE_MAX_ABS,
+          DRIVE_CTE_SLOPE_MAX_ABS,
+        );
+        this.filteredCteSlope += DRIVE_CTE_SLOPE_FILTER_FACTOR * (rawSlope - this.filteredCteSlope);
+        this.previousSlopeSample = sample;
+      }
+    } else {
+      this.previousSlopeSample = sample;
+    }
+    const last = this.steeringSamples.at(-1);
+    if (!last || sample.alongTrackMeters - last.alongTrackMeters >= 0.01) {
+      this.steeringSamples.push(sample);
+    }
+  }
+
+  private calculateSteeringMetrics(): DriveSteeringMetrics {
+    return calculateDriveSteeringMetrics(
+      this.steeringSamples,
+      DRIVE_TARGET_CTE_METERS,
+      DRIVE_CTE_CROSSING_HYSTERESIS_METERS,
+    );
   }
 
   private addToHistory(result: DriveResult): void {

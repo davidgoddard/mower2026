@@ -348,6 +348,9 @@ export const MOTOR_FEEDBACK_FAILURE_STOP_COUNT = 10;
 /** Valid frames required after an outage before feedback is trusted again. */
 export const MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT = 3;
 
+/** Maximum age of the last coherent motor frame when starting/resuming motion. */
+export const MOTOR_FEEDBACK_MOTION_START_MAX_AGE_MS = 250;
+
 /** Minimum interval between repeated motor-feedback error log entries. */
 export const MOTOR_FEEDBACK_ERROR_LOG_INTERVAL_MS = 5_000;
 
@@ -555,6 +558,40 @@ export const DRIVE_BRAKE_DISTANCE_DEFAULT_METERS = 0.2;
  * Higher = more aggressive correction
  */
 export const DRIVE_CTE_GAIN_DEFAULT = 0.3;
+
+/**
+ * Default damping applied to the change in CTE per metre travelled. Unlike
+ * proportional CTE gain, this term resists a growing lateral trend and hence
+ * suppresses repeated crossings of the reference line.
+ */
+export const DRIVE_CTE_DAMPING_GAIN_DEFAULT = 0.1;
+
+/** Ignore sign changes inside this band when counting baseline crossings. */
+export const DRIVE_CTE_CROSSING_HYSTERESIS_METERS = 0.015;
+
+/** Minimum straight distance that can update persisted operational steering parameters. */
+export const DRIVE_OPERATIONAL_STEERING_MIN_DISTANCE_METERS = 3.0;
+
+/** Low-pass factor for CTE change per metre used by the damping term. */
+export const DRIVE_CTE_SLOPE_FILTER_FACTOR = 0.25;
+
+/** Plausibility bound for a single CTE change-per-metre observation. */
+export const DRIVE_CTE_SLOPE_MAX_ABS = 1.0;
+
+/** Maximum temporary steering trim attributable to asymmetric terrain load. */
+export const DRIVE_TERRAIN_MAX_TRIM_PERCENT = 0.08;
+
+/** Applied PWM below this fraction is not stable terrain evidence. */
+export const DRIVE_TERRAIN_MIN_APPLIED_PWM_FRACTION = 0.5;
+
+/** Maximum change in temporary terrain trim per coherent feedback frame. */
+export const DRIVE_TERRAIN_TRIM_SLEW_PER_SAMPLE = 0.008;
+
+/** Fraction retained when terrain evidence is unavailable or contradictory. */
+export const DRIVE_TERRAIN_TRIM_DECAY = 0.85;
+
+/** Converts normalized corroborated left/right load asymmetry into wheel trim. */
+export const DRIVE_TERRAIN_EVIDENCE_GAIN = 0.16;
 
 /**
  * Default wheel track / wheelbase for dead-reckoning differential odometry (meters).

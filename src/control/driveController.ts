@@ -138,7 +138,9 @@ export class DriveController {
       const preserveLearningState = this.status === "learning";
       try {
         this.stopRequested = false;
-        systemStop.clearStop("drive-execute");
+        if (systemStop.isStopped()) {
+          throw new Error("drive_start_blocked_by_system_stop");
+        }
         if (!preserveLearningState) {
           this.shortTrainingProgress = null;
           this.segmentTrainingProgress = null;
@@ -174,6 +176,48 @@ export class DriveController {
           this.driveStartPosition,
           request.targetPosition,
         ));
+        const minimumDriveDistanceMeters = Math.max(0, request.minimumDriveDistanceMeters ?? 0);
+        const finishBelowMinimumDrive = (
+          finalPosition: Position,
+          remainingDistanceMeters: number,
+        ): DriveResult => {
+          const skippedResult: DriveResult = {
+            driveDirectionSign,
+            startPosition: this.driveStartPosition ?? finalPosition,
+            targetPosition: request.targetPosition,
+            finalPosition,
+            errorX: createMeters(remainingDistanceMeters),
+            errorY: createMeters(0),
+            maxCteMeters: createMeters(0),
+            avgCteMeters: createMeters(0),
+            durationMs: this.nowMillis() - this.driveStartTime,
+            brakeDistanceUsed: createMeters(0),
+            status: "success",
+            timestamp: new Date().toISOString(),
+            learnApplied: false,
+            learnSkipReason: "below_minimum_drive_distance",
+          };
+          this.addToHistory(skippedResult);
+          this.stopRequested = false;
+          this.status = preserveLearningState ? "learning" : "idle";
+          this.currentDrive = null;
+          return skippedResult;
+        };
+
+        // A target already inside the caller's useful-distance deadband needs
+        // neither a pivot nor a translation. Check this before calculating or
+        // executing an alignment turn; the post-turn check below remains
+        // necessary because a real pivot can move the fused control point.
+        if (minimumDriveDistanceMeters > 0 && targetDistanceMeters < minimumDriveDistanceMeters) {
+          this.assertTranslationPathSafe(request, startPose, "before_translation");
+          this.logger.info("drive.translation_skipped_near_target", {
+            postTurnDistanceMeters: targetDistanceMeters,
+            minimumDriveDistanceMeters,
+            phase: "before_initial_turn",
+          });
+          resolve(finishBelowMinimumDrive(startPose.position, targetDistanceMeters));
+          return;
+        }
         const angleToTarget = angleTo(this.driveStartPosition, request.targetPosition);
         const desiredHeading: InternalHeading = driveDirectionSign === 1
           ? angleToTarget
@@ -210,7 +254,7 @@ export class DriveController {
             targetAngle: headingError,
             direction: unwrapRelativeAngle(headingError) > 0 ? "ccw" : "cw",
             learningEnabled: true,
-            learningSource: request.learningSource,
+            learningSource: request.learningSource === "mowing_strip" ? "operation" : request.learningSource,
           });
           if (turnResult.status !== "success") {
             throw new Error(`drive_initial_turn_failed:${turnResult.status}${
@@ -221,11 +265,15 @@ export class DriveController {
         }
 
         let postTurnPose = this.poseFusion.getCurrentPose();
+        this.assertTranslationPathSafe(
+          request,
+          postTurnPose,
+          performedInitialTurn ? "after_initial_turn" : "before_translation",
+        );
         let postTurnDistanceMeters = unwrapMeters(distanceBetween(
           postTurnPose.position,
           request.targetPosition,
         ));
-        const minimumDriveDistanceMeters = Math.max(0, request.minimumDriveDistanceMeters ?? 0);
 
         // A pivot can move the fused control point by several centimetres even
         // after TurnController has ramped down and settled. On a short hop that
@@ -268,7 +316,7 @@ export class DriveController {
             targetAngle: settledHeadingError,
             direction: unwrapRelativeAngle(settledHeadingError) > 0 ? "ccw" : "cw",
             learningEnabled: true,
-            learningSource: request.learningSource,
+            learningSource: request.learningSource === "mowing_strip" ? "operation" : request.learningSource,
           });
           if (turnResult.status !== "success") {
             throw new Error(`drive_realignment_turn_failed:${turnResult.status}${
@@ -276,6 +324,7 @@ export class DriveController {
             }`);
           }
           postTurnPose = this.poseFusion.getCurrentPose();
+          this.assertTranslationPathSafe(request, postTurnPose, "after_realignment_turn");
           postTurnDistanceMeters = unwrapMeters(distanceBetween(
             postTurnPose.position,
             request.targetPosition,
@@ -286,35 +335,23 @@ export class DriveController {
           this.logger.info("drive.translation_skipped_near_target", {
             postTurnDistanceMeters,
             minimumDriveDistanceMeters,
+            phase: "after_initial_turn",
           });
-          const skippedResult: DriveResult = {
-            driveDirectionSign,
-            startPosition: this.driveStartPosition ?? postTurnPose.position,
-            targetPosition: request.targetPosition,
-            finalPosition: postTurnPose.position,
-            errorX: createMeters(postTurnDistanceMeters),
-            errorY: createMeters(0),
-            maxCteMeters: createMeters(0),
-            avgCteMeters: createMeters(0),
-            durationMs: this.nowMillis() - this.driveStartTime,
-            brakeDistanceUsed: createMeters(0),
-            status: "success",
-            timestamp: new Date().toISOString(),
-            learnApplied: false,
-            learnSkipReason: "below_minimum_drive_distance",
-          };
-          this.addToHistory(skippedResult);
-          this.stopRequested = false;
-          this.status = preserveLearningState ? "learning" : "idle";
-          this.currentDrive = null;
-          resolve(skippedResult);
+          resolve(finishBelowMinimumDrive(postTurnPose.position, postTurnDistanceMeters));
           return;
         }
 
-        // 4. Delegate straight-line driving immediately after the turn.
+        // 4. Recheck at the actual translation handoff. The pose may have
+        // changed between the last settled-turn sample and this point.
+        postTurnPose = this.poseFusion.getCurrentPose();
+        this.assertTranslationPathSafe(request, postTurnPose, "before_translation");
+
+        // Delegate straight-line driving immediately after the turn.
         this.status = "driving";
         const lineResult = await this.lineDriveController.executeLineDrive({
           targetPosition: request.targetPosition,
+          cteReferenceStartPosition: request.cteReferenceStartPosition,
+          translationPoseSink: request.translationPoseSink,
           learningEnabled: request.learningEnabled,
           learningSource: request.learningSource,
           driveDirectionSign,
@@ -361,6 +398,26 @@ export class DriveController {
         this.sensorController.endMotionSession();
       }
     });
+  }
+
+  private assertTranslationPathSafe(
+    request: DriveRequest,
+    pose: Pose,
+    stage: "after_initial_turn" | "after_realignment_turn" | "before_translation",
+  ): void {
+    const rejection = request.validateTranslationPath?.(pose.position, request.targetPosition) ?? null;
+    if (!rejection) {
+      return;
+    }
+    this.logger.warn("drive.translation_path_rejected", {
+      stage,
+      reason: rejection,
+      startX: unwrapMeters(pose.position.xMeters),
+      startY: unwrapMeters(pose.position.yMeters),
+      targetX: unwrapMeters(request.targetPosition.xMeters),
+      targetY: unwrapMeters(request.targetPosition.yMeters),
+    });
+    throw new Error(`drive_translation_path_rejected:${rejection}`);
   }
 
   /**

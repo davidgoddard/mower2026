@@ -222,10 +222,15 @@ test('SensorController rejects implausible encoder jumps and requires three cohe
     const accepted = [];
     controller.on('motorFeedbackUpdate', (sample) => accepted.push(sample));
 
+    assert.equal(controller.getMotorFeedbackHealth().reason, 'no_valid_feedback');
+
     for (let poll = 0; poll < 4; poll += 1) await controller.pollMotors();
     assert.equal(accepted.length, 1);
     assert.equal(accepted[0].leftEncoderDelta, 54);
     assert.equal(accepted[0].rightEncoderDelta, 55);
+    assert.equal(controller.getMotorFeedbackHealth().healthy, true);
+    now += 251;
+    assert.equal(controller.getMotorFeedbackHealth().reason, 'stale');
     await logger.close();
   });
 });
@@ -1066,6 +1071,89 @@ test('SensorController adjusts GNSS position to the calibrated vehicle reference
     // right axis is (0, -1) at heading 0 → -0.5 in world Y
     assert.equal(snapshot.gnss.xMeters, 13.34);
     assert.equal(snapshot.gnss.yMeters, 56.28);
+
+    await controller.stop();
+    await logger.close();
+  });
+});
+
+test('SensorController applies the vehicle offset using the IMU heading at the delayed GNSS sample time', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+
+    let now = 0;
+    const primitivesStore = new PrimitivesStore();
+    const geometryCalibration = new GeometryCalibration({ logger });
+    geometryCalibration.setPositionOffset(1, 0);
+    const emittedPositions = [];
+    const gateway = {
+      async initialise() {},
+      async readImu() {
+        now += 1000;
+        return {
+          timestampMillis: now,
+          angularVelocity: { zDegreesPerSecond: 90 },
+        };
+      },
+      async readGnss() {
+        return {
+          timestampMillis: now,
+          xMeters: 0,
+          yMeters: 0,
+          headingDegrees: 0,
+          positionAccuracyMeters: 0.02,
+          headingAccuracyDegrees: 0.5,
+          fixType: 'fixed',
+          satellitesInUse: 18,
+          sampleAgeMillis: 1000,
+        };
+      },
+      async readMotorFeedback() {
+        return {
+          timestampMillis: now,
+          leftEncoderDelta: 0,
+          rightEncoderDelta: 0,
+          leftPwmAppliedPercent: 0,
+          rightPwmAppliedPercent: 0,
+          watchdogHealthy: true,
+          faultFlags: 0,
+        };
+      },
+      async setMotorWheelOutputs() {},
+      async stopMotors() {},
+      async close() {},
+    };
+
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway,
+      geometryCalibration,
+      pollIntervalMs: 0,
+      sleep: async () => {},
+      nowMillis: () => now,
+      maxLoopCount: 2,
+    });
+    controller.on('gnssPositionUpdate', (event) => emittedPositions.push(event));
+
+    await controller.start();
+    await delay(0);
+
+    const snapshot = primitivesStore.snapshot();
+    // At arrival the integrated heading is 90 degrees, but this fix is one
+    // second old and belongs to the earlier 0-degree heading.
+    assert.ok(Math.abs((snapshot.gnss.xMeters ?? 0) - 1) < 1e-9);
+    assert.ok(Math.abs(snapshot.gnss.yMeters ?? 0) < 1e-9);
+    assert.equal(emittedPositions.at(-1).positionCorrectionTimestampMillis, 1000);
+    assert.equal(emittedPositions.at(-1).positionCorrectionHeadingDeg, 0);
+    assert.equal(emittedPositions.at(-1).rawXMeters, 0);
+    assert.equal(emittedPositions.at(-1).rawYMeters, 0);
 
     await controller.stop();
     await logger.close();

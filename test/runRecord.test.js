@@ -30,7 +30,12 @@ function makeRecord(overrides = {}) {
     plannedDistanceMeters: 1.0,
     fullPowerCommand: 1.0,
     calibrationFingerprintAtRun: null,
-    params: { coastDistanceUsedMeters: 0.7, cteGainUsed: 0.3, shortBucketUsed: false },
+    params: {
+      coastDistanceUsedMeters: 0.7,
+      cteGainUsed: 0.3,
+      cteDampingGainUsed: 0.1,
+      shortBucketUsed: false,
+    },
     anchor: {
       xMeters: 0,
       yMeters: 0,
@@ -96,6 +101,7 @@ test("RunRecordWriter writes a JSONL row to <logDir>/run-records/<date>.jsonl", 
     assert.equal(parsed.brakeTrigger.reason, "brake_distance");
     assert.equal(parsed.coastDistanceMeasuredMeters, 0.6);
     assert.equal(parsed.peakTickRate, 42);
+    assert.equal(parsed.params.cteDampingGainUsed, 0.1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

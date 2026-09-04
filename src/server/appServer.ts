@@ -43,6 +43,9 @@ import { PrimitiveSnapshot, PrimitivesStore } from "./primitivesStore.js";
 import { createRelativeAngle, headingDifference, unwrapInternalHeading, unwrapRelativeAngle } from "../geometry/headingTypes.js";
 import { angleTo, createPosition, unwrapMeters } from "../geometry/positionTypes.js";
 import {
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_ADDRESS_MOTOR_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
   MAX_PORT_NUMBER,
   MAX_WHEEL_OUTPUT_PERCENT_DEFAULT,
   SENSOR_CONTROLLER_POLL_INTERVAL_MS,
@@ -268,6 +271,7 @@ const STOP_ACTION_PATHS = new Set([
 
 export function shouldClearSystemStopForPost(pathname: string): boolean {
   return !STOP_ACTION_PATHS.has(pathname)
+    && pathname !== "/api/mowing/resume"
     && !pathname.startsWith("/api/mowing-records/")
     && !pathname.startsWith("/api/battery-management/")
     && pathname !== "/api/mowing-plan/preview";
@@ -1957,10 +1961,18 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             return;
           }
           const mowingStartPose = poseFusion.getCurrentPose();
-          if (mowingStartPose.quality !== "gnss") {
-            systemStop.requestStop("mowing", "poor_gnss");
+          const mowingStartHeadingSynchronized = poseFusion.isHeadingSynchronized();
+          if (mowingStartPose.quality !== "gnss" || !mowingStartHeadingSynchronized) {
+            const error = mowingStartPose.quality !== "gnss"
+              ? "poor_gnss"
+              : "gnss_heading_not_synchronized";
+            systemStop.requestStop("mowing", error);
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
-            response.end(encodeJson({ error: "poor_gnss", poseQuality: mowingStartPose.quality }));
+            response.end(encodeJson({
+              error,
+              poseQuality: mowingStartPose.quality,
+              headingSynchronized: mowingStartHeadingSynchronized,
+            }));
             return;
           }
 
@@ -2105,7 +2117,7 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
           return;
         }
 
-        if (requestUrl.pathname === "/api/mowing/resume" && driveController && turnController && poseFusion) {
+        if (requestUrl.pathname === "/api/mowing/resume" && sensorController && driveController && turnController && poseFusion) {
           if (rechargeWaiting && releaseRechargeWait) {
             const chargingPosition = rechargeConfiguration.chargingPosition;
             const driveToPosition = rechargeConfiguration.driveToPosition;
@@ -2153,10 +2165,28 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
             return;
           }
           const mowingResumePose = poseFusion.getCurrentPose();
-          if (mowingResumePose.quality !== "gnss") {
-            systemStop.requestStop("mowing", "poor_gnss");
+          const mowingResumeHeadingSynchronized = poseFusion.isHeadingSynchronized();
+          if (mowingResumePose.quality !== "gnss" || !mowingResumeHeadingSynchronized) {
+            const error = mowingResumePose.quality !== "gnss"
+              ? "poor_gnss"
+              : "gnss_heading_not_synchronized";
+            systemStop.requestStop("mowing", error);
             response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
-            response.end(encodeJson({ error: "poor_gnss", poseQuality: mowingResumePose.quality }));
+            response.end(encodeJson({
+              error,
+              poseQuality: mowingResumePose.quality,
+              headingSynchronized: mowingResumeHeadingSynchronized,
+            }));
+            return;
+          }
+          const motorFeedbackHealth = sensorController.getMotorFeedbackHealth();
+          if (!motorFeedbackHealth.healthy) {
+            systemStop.requestStop("mowing", "motor_feedback_unavailable");
+            response.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            response.end(encodeJson({
+              error: "motor_feedback_unhealthy",
+              motorFeedback: motorFeedbackHealth,
+            }));
             return;
           }
 
@@ -2684,10 +2714,10 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     await pathFollowingConfig.loadParameters();
 
     sensorGateway = await createPiSensorHardwareGateway(
-      options.i2cBusNumber ?? 1,
+      options.i2cBusNumber ?? I2C_BUS_NUMBER_DEFAULT,
       {
-        gnssAddress: options.gnssI2cAddress ?? 0x52,
-        motorAddress: options.motorI2cAddress ?? 0x66,
+        gnssAddress: options.gnssI2cAddress ?? I2C_ADDRESS_GNSS_DEFAULT,
+        motorAddress: options.motorI2cAddress ?? I2C_ADDRESS_MOTOR_DEFAULT,
         leftMotorForwardSign: options.leftMotorForwardSign ?? -1,
         rightMotorForwardSign: options.rightMotorForwardSign ?? -1,
         motorCalibration: motorCalibration!,

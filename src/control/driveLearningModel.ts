@@ -7,6 +7,7 @@ import { LoggerScope } from "../logging/types.js";
 import { Position, Meters, createMeters, unwrapMeters, distanceBetween } from "../geometry/positionTypes.js";
 import {
   DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
+  DRIVE_CTE_DAMPING_GAIN_DEFAULT,
   DRIVE_CTE_GAIN_DEFAULT,
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_LONG_STEERING_HEADING_GAIN_PER_DEG,
@@ -15,6 +16,7 @@ import {
   DRIVE_LEARNING_PARAMETERS_PATH,
 } from "../constants.js";
 import { readJsonFile, writeJsonFile } from "../config/jsonFileStore.js";
+import type { DriveSteeringMetrics } from "./driveSteeringMetrics.js";
 
 const DRIVE_LEARNING_RATE = 0.7;
 
@@ -38,6 +40,10 @@ export interface DriveParameters {
   longHeadingGainReversePerDeg: number;
   forwardCteGain: number;
   reverseCteGain: number;
+  forwardCteDampingGain: number;
+  reverseCteDampingGain: number;
+  operationalSteeringSamplesForward: number;
+  operationalSteeringSamplesReverse: number;
   longDriveMinDistanceMeters: number;
   shortDriveBrakeDistancesPositive: number[];
   shortDriveBrakeDistancesNegative: number[];
@@ -61,6 +67,8 @@ export interface DriveUpdateData {
   avgCte: Meters;
   brakeDistanceUsed: Meters;
   longHeadingLearningMode?: "standard" | "bias-only" | "gain-only";
+  learningScope?: "all" | "steering_only";
+  steeringMetrics?: DriveSteeringMetrics;
 }
 
 export interface DriveLearningModelOptions {
@@ -69,7 +77,14 @@ export interface DriveLearningModelOptions {
 }
 
 export class DriveLearningModel {
-  private static readonly MAX_CTE_GAIN = 1.5;
+  /**
+   * The output trim remains hard-limited by DriveLineController. These wider
+   * learning bounds let persistent, evidence-backed mowing drift use more of
+   * that already-safe authority instead of becoming stuck at the historical
+   * limits while CTE is still outside the target band.
+   */
+  private static readonly MAX_CTE_GAIN = 3.0;
+  private static readonly MAX_CTE_DAMPING_GAIN = 1.2;
   private static readonly DEFAULT_LONG_HEADING_GAIN_PER_DEG = DRIVE_LONG_STEERING_HEADING_GAIN_PER_DEG;
   private static readonly MAX_LONG_HEADING_GAIN_PER_DEG = 0.03;
   private static readonly MAX_LONG_HEADING_BIAS_PERCENT = 0.2;
@@ -141,6 +156,12 @@ export class DriveLearningModel {
     return directionSign > 0 ? this.parameters.forwardCteGain : this.parameters.reverseCteGain;
   }
 
+  getCteDampingGainForDirection(directionSign: 1 | -1): number {
+    return directionSign > 0
+      ? this.parameters.forwardCteDampingGain
+      : this.parameters.reverseCteDampingGain;
+  }
+
   getLongHeadingBiasForDirection(directionSign: 1 | -1): number {
     return directionSign > 0
       ? this.parameters.longHeadingBiasForwardPercent
@@ -175,6 +196,27 @@ export class DriveLearningModel {
     const driveDistance = unwrapMeters(distanceBetween(data.startPosition, data.targetPosition));
     const distanceClass = data.learningDistanceClass ?? this.classifyDistance(driveDistance);
 
+    if (data.learningScope === "steering_only") {
+      const before = {
+        proportional: this.getCteGainForDirection(direction),
+        damping: this.getCteDampingGainForDirection(direction),
+      };
+      this.updateSteeringParameters(direction, maxCteValue, avgCteValue, data.steeringMetrics);
+      if (direction > 0) {
+        this.parameters.operationalSteeringSamplesForward += 1;
+      } else {
+        this.parameters.operationalSteeringSamplesReverse += 1;
+      }
+      this.logger.info("drive.learning.updated_operational_steering", {
+        direction,
+        metrics: data.steeringMetrics ?? null,
+        proportionalGain: { before: before.proportional, after: this.getCteGainForDirection(direction) },
+        dampingGain: { before: before.damping, after: this.getCteDampingGainForDirection(direction) },
+      });
+      await this.saveParameters();
+      return;
+    }
+
     if (distanceClass === "short") {
       const bucketIndex = this.getBucketIndex(driveDistance);
       const currentBrake = direction > 0
@@ -187,7 +229,7 @@ export class DriveLearningModel {
       const newBrake = this.clamp(currentBrake + adjustment, 0, driveDistance);
 
       const cteGainBefore = this.getCteGainForDirection(direction);
-      this.updateCteGain(direction, maxCteValue, avgCteValue);
+      this.updateSteeringParameters(direction, maxCteValue, avgCteValue, data.steeringMetrics);
       const cteGainAfter = this.getCteGainForDirection(direction);
 
       if (direction > 0) {
@@ -283,7 +325,7 @@ export class DriveLearningModel {
     }
 
     const cteGainBefore = this.getCteGainForDirection(direction);
-    this.updateCteGain(direction, maxCteValue, avgCteValue);
+    this.updateSteeringParameters(direction, maxCteValue, avgCteValue, data.steeringMetrics);
     const cteGainAfter = this.getCteGainForDirection(direction);
 
     this.logger.info("drive.learning.updated", {
@@ -297,12 +339,39 @@ export class DriveLearningModel {
     await this.saveParameters();
   }
 
-  private updateCteGain(directionSign: 1 | -1, maxCteValue: number, avgCteValue: number): void {
+  private updateSteeringParameters(
+    directionSign: 1 | -1,
+    maxCteValue: number,
+    avgCteValue: number,
+    metrics?: DriveSteeringMetrics,
+  ): void {
     const targetCte = DRIVE_TARGET_CTE_METERS;
     let gain = directionSign > 0 ? this.parameters.forwardCteGain : this.parameters.reverseCteGain;
+    let damping = this.getCteDampingGainForDirection(directionSign);
     const lateralSeverity = Math.max(maxCteValue, avgCteValue);
 
-    if (lateralSeverity > targetCte * 1.2) {
+    if (metrics && metrics.sampleCount >= 3) {
+      const repeatedCrossing = metrics.baselineCrossings >= 2;
+      // One crossing is the permitted initial convergence arc. Only teach
+      // additional damping after the mower has crossed the baseline again.
+      const nonDecayingOscillation = metrics.baselineCrossings >= 2
+        && metrics.nonDecayingCrossings >= 1;
+      if (repeatedCrossing || nonDecayingOscillation) {
+        damping += nonDecayingOscillation ? 0.025 : 0.012;
+        // Once damping is already substantial, repeated crossings indicate
+        // that proportional authority is itself too aggressive.
+        if (metrics.baselineCrossings >= 4 && damping >= 0.25) gain *= 0.985;
+      } else if (lateralSeverity > targetCte * 1.2) {
+        gain *= 1.05;
+      } else if (lateralSeverity > targetCte * 0.7) {
+        gain *= 1.015;
+      } else if (metrics.meanAbsCteMeters <= targetCte) {
+        // A clean strip with no repeat crossing is evidence that the current
+        // terrain needs less damping. This lets dry/short grass unwind a gain
+        // learned on heavier ground without reacting to a single sample.
+        damping *= 0.995;
+      }
+    } else if (lateralSeverity > targetCte * 1.2) {
       gain *= 1.08;
     } else if (lateralSeverity > targetCte * 0.7) {
       gain *= 1.03;
@@ -311,10 +380,13 @@ export class DriveLearningModel {
     }
 
     const clampedGain = this.clamp(gain, 0.1, DriveLearningModel.MAX_CTE_GAIN);
+    const clampedDamping = this.clamp(damping, 0, DriveLearningModel.MAX_CTE_DAMPING_GAIN);
     if (directionSign > 0) {
       this.parameters.forwardCteGain = clampedGain;
+      this.parameters.forwardCteDampingGain = clampedDamping;
     } else {
       this.parameters.reverseCteGain = clampedGain;
+      this.parameters.reverseCteDampingGain = clampedDamping;
     }
   }
 
@@ -370,7 +442,7 @@ export class DriveLearningModel {
     const distances = [...DRIVE_SHORT_BUCKET_DISTANCES_METERS];
     const count = distances.length;
     return {
-      version: 6,
+      version: 7,
       longDriveBrakeDistanceForwardMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
       longDriveBrakeDistanceReverseMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
       longHeadingBiasForwardPercent: 0,
@@ -379,6 +451,10 @@ export class DriveLearningModel {
       longHeadingGainReversePerDeg: DriveLearningModel.DEFAULT_LONG_HEADING_GAIN_PER_DEG,
       forwardCteGain: DRIVE_CTE_GAIN_DEFAULT,
       reverseCteGain: DRIVE_CTE_GAIN_DEFAULT,
+      forwardCteDampingGain: DRIVE_CTE_DAMPING_GAIN_DEFAULT,
+      reverseCteDampingGain: DRIVE_CTE_DAMPING_GAIN_DEFAULT,
+      operationalSteeringSamplesForward: 0,
+      operationalSteeringSamplesReverse: 0,
       longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBrakeDistancesPositive: distances.map((d) => this.defaultBrakeDistance(d)),
       shortDriveBrakeDistancesNegative: distances.map((d) => this.defaultBrakeDistance(d)),
@@ -410,7 +486,7 @@ export class DriveLearningModel {
     );
 
     return {
-      version: 6,
+      version: 7,
       longDriveBrakeDistanceForwardMeters: this.readNumber(
         (raw as Record<string, unknown>).longDriveBrakeDistanceForwardMeters,
         this.readNumber(
@@ -460,6 +536,24 @@ export class DriveLearningModel {
         this.readNumber((raw as Record<string, unknown>).reverseCteGain, DRIVE_CTE_GAIN_DEFAULT),
         0.1,
         DriveLearningModel.MAX_CTE_GAIN,
+      ),
+      forwardCteDampingGain: this.clamp(
+        this.readNumber((raw as Record<string, unknown>).forwardCteDampingGain, DRIVE_CTE_DAMPING_GAIN_DEFAULT),
+        0,
+        DriveLearningModel.MAX_CTE_DAMPING_GAIN,
+      ),
+      reverseCteDampingGain: this.clamp(
+        this.readNumber((raw as Record<string, unknown>).reverseCteDampingGain, DRIVE_CTE_DAMPING_GAIN_DEFAULT),
+        0,
+        DriveLearningModel.MAX_CTE_DAMPING_GAIN,
+      ),
+      operationalSteeringSamplesForward: Math.max(
+        0,
+        Math.trunc(this.readNumber((raw as Record<string, unknown>).operationalSteeringSamplesForward, 0)),
+      ),
+      operationalSteeringSamplesReverse: Math.max(
+        0,
+        Math.trunc(this.readNumber((raw as Record<string, unknown>).operationalSteeringSamplesReverse, 0)),
       ),
       longDriveMinDistanceMeters: DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
       shortDriveBrakeDistancesPositive: shortPos,

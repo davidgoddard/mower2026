@@ -11,6 +11,7 @@
     "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
     "test": "node --test test/*.test.js",
     "verify:mowing-angles": "node scripts/verify-mowing-plan-angles.mjs",
+    "measure:peg-layout": "node scripts/run-peg-layout.mjs",
     "start": "./scripts/mower-launch.sh",
     "test:controller": "node ./external-hardware/manual-tests/controller_inspector.js",
     "lint": "npm run typecheck",

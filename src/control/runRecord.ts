@@ -24,6 +24,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { SessionLogger } from "../logging/index.js";
 import { LoggerScope } from "../logging/types.js";
+import type { DriveSteeringMetrics } from "./driveSteeringMetrics.js";
 
 export type RunRecordDirection = "forward" | "reverse";
 export type RunRecordPoseQuality = "gnss" | "dead-reckoning" | "unknown";
@@ -50,6 +51,13 @@ export interface RunRecordHeartbeatSample {
   readonly rightEncoderDelta: number | null;
   readonly remainingAlongTrackMeters: number;
   readonly cteMeters: number;
+  readonly headingErrorDeg?: number;
+  readonly proportionalTrimPercent?: number;
+  readonly headingTrimPercent?: number;
+  readonly dampingTrimPercent?: number;
+  readonly terrainTrimPercent?: number;
+  readonly leftMotorCurrentAmps?: number | null;
+  readonly rightMotorCurrentAmps?: number | null;
 }
 
 export interface RunRecordEvents {
@@ -64,6 +72,7 @@ export interface RunRecordEvents {
 export interface RunRecordParams {
   readonly coastDistanceUsedMeters: number;
   readonly cteGainUsed: number;
+  readonly cteDampingGainUsed: number;
   readonly shortBucketUsed: boolean;
 }
 
@@ -110,6 +119,9 @@ export interface RunRecord {
 
   /** Bounded sample of pose-vs-encoder evidence during the run. */
   readonly heartbeat: readonly RunRecordHeartbeatSample[];
+
+  /** Distance-domain evidence used by convergence-aware steering learning. */
+  readonly steeringMetrics?: DriveSteeringMetrics;
 
   readonly learning: {
     readonly applied: boolean;

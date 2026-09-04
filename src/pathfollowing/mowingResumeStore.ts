@@ -14,6 +14,13 @@ export type MowingResumeStage =
   | "strip_drive"
   | "end_boundary_trace"
   | "connector_follow"
+  | "coverage_bisector_approach"
+  | "coverage_bisector_turn"
+  | "coverage_bisector_drive"
+  | "coverage_current_approach"
+  | "coverage_current_turn"
+  | "coverage_current_drive"
+  | "coverage_complete"
   | "complete";
 
 export interface MowingResumeContinuation {
@@ -41,6 +48,10 @@ export type MowingResumeOperation =
     readonly stripIndex: number;
     readonly targetX: number;
     readonly targetY: number;
+    readonly cteReferenceStartX?: number;
+    readonly cteReferenceStartY?: number;
+    readonly restartStage?: MowingResumeStage;
+    readonly coverageTraceRole?: "normal" | "repeat_current";
     readonly errorCode: string;
     readonly continuation: MowingResumeContinuation;
   }
@@ -75,6 +86,11 @@ export interface MowingResumeState {
   readonly initialEntryPlan: MowingInitialEntryPlan | null;
   readonly mowingStartPoint?: { readonly xMeters: number; readonly yMeters: number };
   readonly activeOperation: MowingResumeOperation;
+  readonly coverageTraces?: Array<{
+    readonly stripIndex: number;
+    readonly points: PathPoint[];
+  }>;
+  readonly coverageRepairedPairKeys?: string[];
 }
 
 export interface MowingResumeStoreOptions {

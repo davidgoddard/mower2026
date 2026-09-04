@@ -26,11 +26,17 @@ import { mapPhysicalWheelTargetsToRaw } from "../../dist/src/control/motorMappin
 import { NodeId } from "../../dist/src/protocols/commonProtocol.js";
 import { gnssPayloadLength } from "../../dist/src/protocols/gnssCodec.js";
 import { motorFeedbackSampleLength } from "../../dist/src/protocols/motorCodec.js";
+import {
+  I2C_ADDRESS_BMI160_DEFAULT,
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_ADDRESS_MOTOR_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+} from "../../dist/constants.js";
 
 const PORT = Number(process.env.MOWER_MANUAL_DRIVE_PORT ?? 8093);
-const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? 1);
-const GNSS_I2C_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? 0x52);
-const MOTOR_I2C_ADDRESS = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? 0x66);
+const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
+const GNSS_I2C_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? I2C_ADDRESS_GNSS_DEFAULT);
+const MOTOR_I2C_ADDRESS = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? I2C_ADDRESS_MOTOR_DEFAULT);
 const CONTROL_LOOP_MS = Number(process.env.MOWER_MANUAL_DRIVE_INTERVAL_MS ?? 100);
 const GNSS_REFRESH_INTERVAL_MS = Number(process.env.MOWER_GNSS_REFRESH_INTERVAL_MS ?? 400);
 const TELEMETRY_LOG_INTERVAL_MS = Number(process.env.MOWER_TELEMETRY_LOG_INTERVAL_MS ?? 250);
@@ -483,7 +489,9 @@ async function main() {
     maxWheelDecelerationStepMetersPerSecond: motionLimits.maxWheelDecelerationStepMetersPerSecond,
   });
 
-  console.log("Initialising BMI160 IMU sensor on I2C bus 1 address 0x69...");
+  console.log(
+    `Initialising BMI160 IMU sensor on I2C bus ${BUS_NUMBER} address 0x${I2C_ADDRESS_BMI160_DEFAULT.toString(16)}...`,
+  );
   await sensor.initialise();
   console.log("Calibrating gyro bias. Keep the mower still...");
   await sensor.calibrateGyro();

@@ -90,6 +90,7 @@ const DR_POSITION_SYNC_THRESHOLD_METERS = 0.5;
 // sampleAgeMillis when present).
 const GNSS_STALE_TIMEOUT_MS = 2_000;
 const STATIONARY_HEADING_REBASE_QUALITY_EPOCHS = 5;
+const GNSS_REJECTION_LOG_INTERVAL_MS = 60_000;
 
 const DEG_TO_RAD = Math.PI / 180;
 
@@ -110,6 +111,7 @@ export interface PoseFusionPrimitiveState {
   readonly yMeters: number | null;
   readonly headingDeg: number | null;
   readonly quality: "gnss" | "dead-reckoning" | "unknown";
+  /** True once the IMU heading has been synchronised to an accepted absolute GNSS heading. */
   readonly usingGnssHeading: boolean;
   readonly wheelSlipSuspected: boolean;
   /** Milliseconds since the last accepted good-quality GNSS position fix, or null if never received */
@@ -153,7 +155,6 @@ export class PoseFusion extends EventEmitter {
   private lastGnssSyncTimeMs: number | null = null;
   private gnssQualityLostTimeMs: number | null = null;
   private hasGnssHeadingBaseline = false;
-  private isUsingGnssHeading = false;
 
   // Slip detection
   private wheelSlipSuspected = false;
@@ -171,6 +172,8 @@ export class PoseFusion extends EventEmitter {
   private lastGnssRejectionReason: string | null = null;
   private lastGnssRejectionAtMs: number | null = null;
   private lastGnssRejectionLogAtMs: Map<string, number> = new Map();
+  private suppressedGnssRejectionLogs: Map<string, number> = new Map();
+  private activeGnssRejectionReason: string | null = null;
   // Stationary heading-rebase log throttle. The override path fires on
   // every GNSS sample (~20 Hz) while the mower is parked but the
   // validator hasn't yet promoted the heading to TRUSTED. Logging each
@@ -306,7 +309,7 @@ export class PoseFusion extends EventEmitter {
       yMeters: fusedY,
       headingDeg: fusedHeadingDeg,
       quality: this.currentQuality,
-      usingGnssHeading: this.isUsingGnssHeading,
+      usingGnssHeading: this.hasGnssHeadingBaseline,
       wheelSlipSuspected: this.wheelSlipSuspected,
       gnssPositionAgeMs,
       encoderOnlyXMeters: this.encoderOnlyX,
@@ -315,6 +318,16 @@ export class PoseFusion extends EventEmitter {
       drConfidence: this.drConfidence,
       encoderSynced: headingAgreement && positionAgreement,
     };
+  }
+
+  /**
+   * Autonomous navigation needs an absolute heading reference, not merely a
+   * trusted GNSS position.  Once GNSS has safely seeded the IMU, the IMU owns
+   * heading between stationary GNSS rebases, so isolated rejected epochs do
+   * not make that established reference disappear.
+   */
+  isHeadingSynchronized(): boolean {
+    return this.hasGnssHeadingBaseline;
   }
 
   /**
@@ -337,12 +350,16 @@ export class PoseFusion extends EventEmitter {
       raw: {
         x: number;
         y: number;
+        antennaX: number | null;
+        antennaY: number | null;
         fixType: string;
         positionAccuracyMeters: number | null;
         headingDeg: number | null;
         headingAccuracyDeg: number | null;
         sampleAgeMs: number | null;
         timestampMillis: number;
+        positionCorrectionTimestampMillis: number | null;
+        positionCorrectionHeadingDeg: number | null;
       } | null;
     };
   } {
@@ -368,7 +385,7 @@ export class PoseFusion extends EventEmitter {
         y: fusedY,
         headingDeg: fusedHeadingDeg,
         quality: this.currentQuality,
-        usingGnssHeading: this.isUsingGnssHeading,
+        usingGnssHeading: this.hasGnssHeadingBaseline,
       },
       encoder: {
         onlyX: this.encoderOnlyX,
@@ -397,12 +414,16 @@ export class PoseFusion extends EventEmitter {
         raw: this.lastGnssEvent === null ? null : {
           x: this.lastGnssEvent.xMeters,
           y: this.lastGnssEvent.yMeters,
+          antennaX: this.lastGnssEvent.rawXMeters ?? null,
+          antennaY: this.lastGnssEvent.rawYMeters ?? null,
           fixType: this.lastGnssEvent.fixType,
           positionAccuracyMeters: this.lastGnssEvent.positionAccuracyMeters,
           headingDeg: this.lastGnssEvent.heading === null ? null : unwrapInternalHeading(this.lastGnssEvent.heading),
           headingAccuracyDeg: this.lastGnssEvent.headingAccuracyDeg,
           sampleAgeMs: nowMs - this.lastGnssEvent.timestampMillis,
           timestampMillis: this.lastGnssEvent.timestampMillis,
+          positionCorrectionTimestampMillis: this.lastGnssEvent.positionCorrectionTimestampMillis ?? null,
+          positionCorrectionHeadingDeg: this.lastGnssEvent.positionCorrectionHeadingDeg ?? null,
         },
       },
     };
@@ -633,6 +654,7 @@ export class PoseFusion extends EventEmitter {
       this.lastGnssSyncTimeMs = nowMs;
       this.lastGnssAcceptedAtMs = nowMs;
       this.lastGnssRejectionReason = null;
+      this.activeGnssRejectionReason = null;
       this.gnssQualityLostTimeMs = null;
       // Re-anchor the encoder-only track to the freshly-snapped fused
       // position on every TRUSTED-position update so that, when GNSS later
@@ -656,6 +678,13 @@ export class PoseFusion extends EventEmitter {
       if (this.currentQuality === "gnss" && this.gnssQualityLostTimeMs === null) {
         this.gnssQualityLostTimeMs = nowMs;
       }
+    }
+
+    // Heading validation is independent of position validation.  Previously
+    // these reasons were recorded only when position also failed, leaving a
+    // heading-only demotion unexplained even though position stayed GNSS.
+    if (currentPositionSamplePassed && validation.headingRejections.length > 0) {
+      this.recordValidationRejection(validation, nowMs);
     }
 
     const headingDisagreementDeg = event.heading === null
@@ -690,7 +719,6 @@ export class PoseFusion extends EventEmitter {
       // Bootstrap: on first trusted GNSS epoch, seed IMU heading from GNSS so
       // later IMU-agreement checks don't deadlock due to initial offset.
       this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
-      this.isUsingGnssHeading = true;
     } else if (
       validation.heading === "TRUSTED" &&
       currentHeadingSamplePassed &&
@@ -702,7 +730,6 @@ export class PoseFusion extends EventEmitter {
       // delayed or jumping GNSS heading during a pivot corrupts the IMU
       // integration baseline and creates a false line-drive heading error.
       this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
-      this.isUsingGnssHeading = true;
     } else if (canStationaryOverrideRebase) {
       // Throttle to one log per second; this branch fires per GNSS sample
       // (~20 Hz) while parked.
@@ -716,9 +743,7 @@ export class PoseFusion extends EventEmitter {
         this.lastStationaryOverrideLogAtMs = nowMs;
       }
       this.applyGnssHeadingRebase(event.heading!, event.timestampMillis);
-      this.isUsingGnssHeading = true;
     } else {
-      this.isUsingGnssHeading = false;
       this.lastStationaryOverrideLogAtMs = null;
     }
 
@@ -726,18 +751,23 @@ export class PoseFusion extends EventEmitter {
   }
 
   private recordValidationRejection(validation: GnssValidationResult, nowMs: number): void {
-    const reasons = validation.position === "TRUSTED"
-      ? validation.headingRejections
-      : validation.positionRejections;
+    const reasons = validation.positionRejections.length > 0
+      ? validation.positionRejections
+      : validation.headingRejections;
     if (reasons.length === 0) return;
 
     // Use the first reason as the canonical "why" for the heartbeat snapshot.
     const reason = reasons[0];
+    const reasonChanged = this.activeGnssRejectionReason !== reason;
+    this.activeGnssRejectionReason = reason;
     this.lastGnssRejectionReason = reason;
     this.lastGnssRejectionAtMs = nowMs;
     const lastLogged = this.lastGnssRejectionLogAtMs.get(reason);
-    if (lastLogged === undefined || nowMs - lastLogged >= 1000) {
+    if (reasonChanged || lastLogged === undefined || nowMs - lastLogged >= GNSS_REJECTION_LOG_INTERVAL_MS) {
+      const suppressedSinceLastLog = this.suppressedGnssRejectionLogs.get(reason) ?? 0;
       this.logger.warn(`pose_fusion.gnss_rejected.${reason}`, {
+        suppressedSinceLastLog,
+        summaryIntervalMs: GNSS_REJECTION_LOG_INTERVAL_MS,
         positionState: validation.position,
         headingState: validation.heading,
         positionRejections: validation.positionRejections,
@@ -751,6 +781,8 @@ export class PoseFusion extends EventEmitter {
             satellitesInUse: this.lastGnssEvent.satellitesInUse,
             positionAccuracyMeters: this.lastGnssEvent.positionAccuracyMeters,
             headingAccuracyDeg: this.lastGnssEvent.headingAccuracyDeg,
+            headingBaselineMeters: this.lastGnssEvent.headingBaselineMeters ?? null,
+            headingValid: this.lastGnssEvent.headingValid ?? null,
             headingDeg: this.lastGnssEvent.heading === null ? null : unwrapInternalHeading(this.lastGnssEvent.heading),
             sampleAgeMillis: this.lastGnssEvent.sampleAgeMillis,
             timestampMillis: this.lastGnssEvent.timestampMillis,
@@ -758,6 +790,12 @@ export class PoseFusion extends EventEmitter {
         gnssRawSample: this.lastGnssEvent?.rawSample ?? null,
       });
       this.lastGnssRejectionLogAtMs.set(reason, nowMs);
+      this.suppressedGnssRejectionLogs.set(reason, 0);
+    } else {
+      this.suppressedGnssRejectionLogs.set(
+        reason,
+        (this.suppressedGnssRejectionLogs.get(reason) ?? 0) + 1,
+      );
     }
   }
 

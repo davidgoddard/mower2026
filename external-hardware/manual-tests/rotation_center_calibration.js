@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   MotorCalibration,
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_ADDRESS_MOTOR_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
   PrimitivesStore,
   SessionLogger,
   SensorController,
@@ -22,9 +25,9 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "../..");
 const DEFAULT_CALIBRATION_PATH = resolve(REPO_ROOT, "config/geometry-calibration.json");
 const DEFAULT_LOG_DIR = resolve(REPO_ROOT, "logs");
 
-const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? 1);
-const GNSS_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? 0x52);
-const MOTOR_ADDRESS = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? 0x66);
+const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
+const GNSS_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? I2C_ADDRESS_GNSS_DEFAULT);
+const MOTOR_ADDRESS = Number(process.env.MOWER_MOTOR_I2C_ADDRESS ?? I2C_ADDRESS_MOTOR_DEFAULT);
 const LEFT_FORWARD_SIGN = Number(process.env.MOWER_LEFT_FORWARD_SIGN ?? -1);
 const RIGHT_FORWARD_SIGN = Number(process.env.MOWER_RIGHT_FORWARD_SIGN ?? -1);
 const SPIN_POWER = Number(process.env.MOWER_GEOMETRY_SPIN_POWER ?? 0.5);

@@ -2,10 +2,14 @@
 // Requires the `i2c-bus` package on the Pi.
 
 import i2c from "i2c-bus";
+import {
+  I2C_ADDRESS_GNSS_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+} from "../../dist/constants.js";
 import { decodeGnssSample, gnssPayloadLength } from "../../dist/gnss/gnssCodec.js";
 
-const BUS_NUMBER = 1;
-const I2C_ADDRESS = 0x52;
+const BUS_NUMBER = Number(process.env.MOWER_I2C_BUS_NUMBER ?? I2C_BUS_NUMBER_DEFAULT);
+const I2C_ADDRESS = Number(process.env.MOWER_GNSS_I2C_ADDRESS ?? I2C_ADDRESS_GNSS_DEFAULT);
 
 const PROTOCOL_START_OF_FRAME = 0x4d;
 const PROTOCOL_VERSION = 0x01;

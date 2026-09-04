@@ -18,4 +18,5 @@ export enum MessageType {
   GnssDebugLine = 0x02,
   MotorWheelSpeedCommand = 0x21,
   MotorFeedbackSample = 0x22,
+  MotorCurrentCalibrationCommand = 0x23,
 }

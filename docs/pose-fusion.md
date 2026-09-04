@@ -76,7 +76,7 @@ flowchart TD
     HeadCheck -->|First intrinsically good heading<br/>+ safe stationary state| Bootstrap[Bootstrap rebase:<br/>seed IMU = GNSS heading]
     HeadCheck -->|heading state = TRUSTED<br/>+ current epoch passes<br/>+ safe stationary state| RebaseTrusted[Rebase IMU = GNSS heading<br/>guarded by validator's<br/>≤5° IMU agreement check]
     HeadCheck -->|Stationary override<br/>position TRUSTED, safe to rebase,<br/>5 intrinsically good headings<br/>regardless of disagreement| RebaseStat[Rebase IMU = GNSS heading<br/>recovers from drift while<br/>parked]
-    HeadCheck -->|None| NoRebase[isUsingGnssHeading = false]
+    HeadCheck -->|None| NoRebase[Keep existing heading-synchronised state;<br/>IMU continues from its established baseline]
 
     Bootstrap --> ReanchorEnc
     RebaseTrusted --> ReanchorEnc
@@ -147,6 +147,8 @@ The IMU is the live heading source. GNSS only writes into the IMU on a rebase. T
 3. **Stationary override**: position is TRUSTED, the sensor controller reports the rebase is safe, and five consecutive samples pass every GNSS heading check except IMU agreement. The IMU is then rebased regardless of disagreement angle. Fix quality, position accuracy, heading validity, heading accuracy, antenna baseline, and sample-to-sample heading stability must remain good throughout the dwell; any failure or unsafe/moving state resets it. This lets a parked mower recover from arbitrarily large IMU drift without allowing one questionable GNSS sample to overwrite the IMU.
 
 Every rebase also re-anchors the encoder-only diagnostic track and bumps DR confidence by 0.5.
+
+After the first successful rebase, `isHeadingSynchronized()` and the primitive `usingGnssHeading` flag remain true for the lifetime of that pose-fusion process. This records that the IMU's absolute reference has been established; it does not claim that every subsequent GNSS epoch is being consumed. A process restart resets the invariant and autonomous mowing waits for a fresh accepted stationary rebase.
 
 ---
 
@@ -299,7 +301,7 @@ A normal mowing session looks like this:
 ## Diagnostics
 
 - `getDiagnosticSnapshot()` returns a single bundle (fused state, encoder-only track, calibration, last GNSS event, last rejection reason and age, blend separation) for the per-drive heartbeat. Designed to be sampled at ~5 Hz during a drive.
-- `pose_fusion.gnss_rejected.<reason>` warnings are rate-limited to once per second per reason, so a long degraded run produces tractable log volume.
+- `pose_fusion.gnss_rejected.<reason>` warnings are emitted when the active rejection reason changes and then summarized at most once per minute per reason, including heading-only failures while position remains trusted.
 - `pose_fusion.wheel_slip_suspected` fires once on each transition into the suspected state.
 - `pose_fusion.gnss_heading_rebase_stationary_override` fires whenever the wide-tolerance stationary path is used, with the disagreement and yaw rate at the moment of rebase.
 

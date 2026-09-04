@@ -1,4 +1,4 @@
-import { describe, it, mock } from "node:test";
+import { beforeEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -8,8 +8,10 @@ import { TurnController } from "../dist/control/turnController.js";
 import { TurnLearningModel } from "../dist/control/turnLearningModel.js";
 import { createRelativeAngle, createInternalHeading, unwrapRelativeAngle } from "../dist/geometry/headingTypes.js";
 import { SENSOR_EVENTS } from "../dist/sensing/sensorEvents.js";
+import { systemStop } from "../dist/control/systemStop.js";
 
 describe("TurnController", () => {
+  beforeEach(() => systemStop.clearStop("turn-controller-test"));
   function createMockLogger() {
     return {
       child: () => createMockLogger(),
@@ -283,6 +285,35 @@ describe("TurnController", () => {
     assert.equal(result.status, "stopped");
     assert.equal(result.errorMessage, "Turn stopped by user request");
     assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length > 0, true);
+  });
+
+  it("terminates an active turn when a sensor system stop arrives while IMU updates continue", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockLearning = createMockLearningModel();
+    let elapsed = 0;
+    const controller = new TurnController({
+      sensorController: mockSensor,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      nowMillis: () => elapsed,
+      sleep: async (ms) => { elapsed += ms; },
+    });
+    const turnPromise = controller.executeTurn({
+      targetAngle: createRelativeAngle(180),
+      direction: "ccw",
+      learningEnabled: false,
+    });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    elapsed = 500;
+    systemStop.requestStop("sensors", "motor_feedback_unavailable");
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(2), 500);
+
+    const result = await turnPromise;
+
+    assert.equal(result.status, "stopped");
+    assert.equal(result.errorMessage, "Turn stopped by system stop");
+    assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length, 1);
   });
 
   it("watchdog fires when no IMU heading update arrives during the active turn", async () => {

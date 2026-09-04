@@ -181,7 +181,6 @@ export class TurnController {
     let subscribed = false;
     this.sensorController.beginMotionSession();
     try {
-      systemStop.clearStop("turn-execute");
       this.currentTurn = request;
       this.status = "starting";
       this.turnStartHeading = this.sensorController.getHeading();
@@ -233,6 +232,10 @@ export class TurnController {
       this.armHeadingUpdateWatchdog(request);
       const wheelOutputPercent = scaledMaxWheelOutputPercent * TURN_SMALL_CRAWL_SPEED_FACTOR;
       const initialSpeeds = this.getTurnWheelSpeeds(request.direction, wheelOutputPercent);
+      if (systemStop.isStopped()) {
+        await this.finishStoppedTurn(request, "Turn blocked by system stop before motor start");
+        return;
+      }
       await this.sensorController.setMotorWheelOutputs(initialSpeeds.left, initialSpeeds.right);
     } catch (error) {
       if (subscribed) {
@@ -284,7 +287,24 @@ export class TurnController {
     // is alive. Petting the timer keeps the turn from timing out.
     this.armHeadingUpdateWatchdog(this.currentTurn);
 
-    // Check for emergency stop
+    // A sensor or operator system stop must terminate even while IMU updates
+    // remain healthy. Previously an unavailable motor-feedback stream could
+    // leave a non-moving turn alive indefinitely because every IMU event kept
+    // re-arming the heading watchdog.
+    if (systemStop.isStopped()) {
+      this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
+      this.clearHeadingUpdateWatchdog();
+      try {
+        await this.sensorController.requestNeutralMotorOutputs();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("turn.stop_failed", { error: message });
+      }
+      await this.finishStoppedTurn(this.currentTurn, "Turn stopped by system stop");
+      return;
+    }
+
+    // Check for owner-requested stop
     if (this.stopRequested) {
       this.sensorController.off(SENSOR_EVENTS.IMU_HEADING_UPDATE, this.onHeadingUpdate);
       this.clearHeadingUpdateWatchdog();
@@ -803,7 +823,9 @@ export class TurnController {
       durationMs: this.nowMillis() - this.turnStartTime,
       reason: errorMessage,
     });
-    this.turnResolve?.({
+    const resolve = this.turnResolve;
+    this.turnResolve = null;
+    resolve?.({
       requestedAngle: stoppedTurn.targetAngle,
       achievedAngle: createRelativeAngle(0),
       errorAngle: createRelativeAngle(0),

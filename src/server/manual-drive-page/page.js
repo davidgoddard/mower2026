@@ -1897,6 +1897,7 @@
     });
 
     previewMowingPlanBtn.addEventListener('click', () => {
+      clearMowingProgress();
       requestMowingPlanPreview();
     });
 

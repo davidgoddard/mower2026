@@ -111,7 +111,7 @@ Current sensor-related shape:
 }
 ```
 
-The `poseFusion.usingGnssHeading` flag is the app-level indicator the live widgets use for the green/orange sync background. The browser does not compare headings itself.
+The `poseFusion.usingGnssHeading` flag is the app-level indicator the live widgets use for the green/orange sync background. It becomes true after the current pose-fusion process safely synchronises the IMU to an accepted absolute GNSS heading and remains true while the IMU owns heading between GNSS rebases. The browser does not compare headings itself, and one rejected GNSS epoch does not erase an already established heading baseline.
 
 ### Motor command API
 
@@ -200,6 +200,7 @@ This allows the mower to zero its tilt reference on uneven ground during startup
 
 ### Addressing and transport
 
+- `src/constants.ts` is the sole source of Pi-side default bus and device addresses. Production modules and built manual utilities import those defaults; environment variables remain the supported override boundary.
 - Shared Pi I2C bus: `MOWER_I2C_BUS_NUMBER` (default `1`)
 - GNSS node I2C address: `MOWER_GNSS_I2C_ADDRESS` (default `0x52`)
 
@@ -268,7 +269,9 @@ The runtime treats the GNSS sample position as a fixed receiver reference point 
 - `positionOffsetForwardMeters`: distance from the raw GNSS reference point toward the mower nose
 - `positionOffsetRightMeters`: distance from the raw GNSS reference point toward the mower's right-hand side
 
-That offset is applied before the position is exposed through `SensorController`, `PoseFusion`, and the primitive snapshot. The manual calibration utility `external-hardware/manual-tests/rotation_center_calibration.js` estimates the offset by slowly spinning the mower through at least one full rotation and fitting the observed GNSS trace to a circle.
+That offset is applied before the position is exposed through `SensorController`, `PoseFusion`, and the primitive snapshot. Because the receiver position may arrive late while the mower is pivoting, `SensorController` subtracts the receiver-claimed `sampleAgeMillis` from the Pi arrival timestamp and uses wrap-safe interpolation in its recent IMU-heading history. Applying the arrival-time heading to an older antenna position would rotate the 23 cm geometry offset to the wrong place and can falsely appear as chassis translation. Drive diagnostics retain the raw antenna position, effective correction timestamp, correction heading, and adjusted control point for later comparison.
+
+The manual calibration utility `external-hardware/manual-tests/rotation_center_calibration.js` estimates the offset by slowly spinning the mower through at least one full rotation and fitting the observed GNSS trace to a circle.
 For quick field tuning, `config/geometry-calibration.json` is the live persisted value the runtime loads at startup, so small manual nudges to `positionOffsetForwardMeters` and `positionOffsetRightMeters` will immediately affect the mower reference point on the next restart.
 
 ## Error Handling
@@ -326,6 +329,8 @@ The ESP32 motor node sends raw encoder deltas only. The Pi-side hardware gateway
 For control and stationary-detection purposes the only motor feedback values consumed are the raw encoder deltas per sample (`leftEncoderDelta`, `rightEncoderDelta`).
 
 The sensor controller rejects samples above 1,000 ticks per wheel as physically implausible. After any failed or rejected feedback sample it requires three consecutive coherent frames before publishing motor feedback again. Ten consecutive failed polls latch `systemStop` with reason `motor_feedback_unavailable` and request an H-bridge disable; the disable is retried periodically while feedback remains unavailable. Repeated poll errors are logged at most once every five seconds and a recovery summary records the outage duration and failure count.
+
+The Pi motor client establishes a disabled command during hardware initialization and refreshes the latest active, neutral, or disabled command before the ESP command lease expires. An idle mower therefore continues to report a healthy command watchdog for motion-start validation, while loss of the Pi heartbeat still expires the lease and leaves the H-bridges disabled. Hardware-gateway shutdown cancels the refresh timer after sending the final disabled command.
 
 ### Motor queue priorities
 

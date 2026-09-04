@@ -44,6 +44,7 @@ import {
   MOTOR_FEEDBACK_MAX_ENCODER_DELTA_TICKS,
   MOTOR_FEEDBACK_FAILURE_STOP_COUNT,
   MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT,
+  MOTOR_FEEDBACK_MOTION_START_MAX_AGE_MS,
   MOTOR_FEEDBACK_ERROR_LOG_INTERVAL_MS,
   MOTOR_OUTPUT_DEADBAND_PERCENT,
   MOTOR_MIN_ACTIVE_OUTPUT_PERCENT,
@@ -60,6 +61,8 @@ const DEG_TO_RAD = Math.PI / 180;
 const IMU_DIAGNOSTIC_WINDOW_MS = 5_000;
 const IMU_DIAGNOSTIC_MAX_SAMPLES = 1_000;
 const IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT = 20;
+const IMU_HEADING_HISTORY_WINDOW_MS = 5_000;
+const IMU_HEADING_HISTORY_MAX_SAMPLES = 1_000;
 // Encoder-delta magnitude (ticks per motor poll) at or below which a wheel
 // is considered stationary for heading-rebase / stop-detection purposes.
 // Zero ticks is the most honest signal; a tolerance of one tick absorbs
@@ -133,6 +136,11 @@ interface ImuDiagnosticSample {
   readonly yawDeltaDeg: number;
 }
 
+interface TimestampedImuHeading {
+  readonly timestampMillis: number;
+  readonly heading: InternalHeading;
+}
+
 export interface ImuDiagnosticSummary {
   readonly windowMs: number;
   readonly sampleCount: number;
@@ -160,6 +168,17 @@ export interface HeadingRebaseReadiness {
   readonly rightEncoderDelta: number | null;
   readonly wheelsStationary: boolean;
   readonly maxStationaryTickDelta: number;
+}
+
+export interface MotorFeedbackHealth {
+  readonly healthy: boolean;
+  readonly reason: "healthy" | "no_valid_feedback" | "recovering" | "stale" | "watchdog_unhealthy" | "motor_fault";
+  readonly coherentSamples: number;
+  readonly requiredCoherentSamples: number;
+  readonly lastAcceptedAgeMs: number | null;
+  readonly maximumAcceptedAgeMs: number;
+  readonly watchdogHealthy: boolean | null;
+  readonly faultFlags: number | null;
 }
 
 export class SensorController extends EventEmitter {
@@ -202,6 +221,8 @@ export class SensorController extends EventEmitter {
   private motorFeedbackLastErrorLogMillis: number | null = null;
   private motorFeedbackRecoveryValidSamples = 0;
   private motorFeedbackSafetyStopIssued = false;
+  private motorFeedbackConsecutiveValidSamples = 0;
+  private lastAcceptedMotorFeedbackMillis: number | null = null;
 
   private imuHeading: InternalHeading = createInternalHeading(0);
   /**
@@ -214,6 +235,7 @@ export class SensorController extends EventEmitter {
   private imuDiagnosticNextIndex = 0;
   private imuDiagnosticSampleCount = 0;
   private imuDiagnosticLatestTimestampMillis: number | null = null;
+  private readonly imuHeadingHistory: TimestampedImuHeading[] = [];
   private imuYawRateBiasDegPerSec = 0;
   private lastImuMotionStopSummary: ImuDiagnosticSummary | null = null;
   private imuBiasAutoRecalibratedForCurrentStop = false;
@@ -284,7 +306,10 @@ export class SensorController extends EventEmitter {
     this.motorFeedbackLastErrorLogMillis = null;
     this.motorFeedbackRecoveryValidSamples = 0;
     this.motorFeedbackSafetyStopIssued = false;
+    this.motorFeedbackConsecutiveValidSamples = 0;
+    this.lastAcceptedMotorFeedbackMillis = null;
     this.imuBiasAutoRecalibratedForCurrentStop = false;
+    this.imuHeadingHistory.length = 0;
     this.primitivesStore.update({
       sensorController: {
         status: "starting",
@@ -384,6 +409,11 @@ export class SensorController extends EventEmitter {
     // names the moment the new heading was sampled — the next IMU integration
     // window starts there. Otherwise anchor on the current monotonic clock.
     this.previousImuMonotonicMillis = timestampMillis ?? this.monotonicMillis();
+    // A GNSS rebase changes the absolute reference of all subsequent IMU
+    // headings. Earlier history therefore cannot safely be mixed with the new
+    // reference when correcting delayed GNSS positions.
+    this.imuHeadingHistory.length = 0;
+    this.recordImuHeading(timestampMillis ?? this.nowMillis(), heading);
     const currentImu = this.primitivesStore.snapshot().imu;
     this.primitivesStore.update({
       imu: {
@@ -588,6 +618,39 @@ export class SensorController extends EventEmitter {
 
   getMotorZeroCommandSinceMillis(): number | null {
     return this.motorZeroCommandSinceMillis;
+  }
+
+  getMotorFeedbackHealth(): MotorFeedbackHealth {
+    const nowMillis = this.nowMillis();
+    const lastAcceptedAgeMs = this.lastAcceptedMotorFeedbackMillis === null
+      ? null
+      : Math.max(0, nowMillis - this.lastAcceptedMotorFeedbackMillis);
+    const motors = this.primitivesStore.snapshot().motors;
+    let reason: MotorFeedbackHealth["reason"] = "healthy";
+    if (this.lastAcceptedMotorFeedbackMillis === null) {
+      reason = "no_valid_feedback";
+    } else if (
+      this.motorFeedbackFailureCount > 0
+      || this.motorFeedbackConsecutiveValidSamples < MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT
+    ) {
+      reason = "recovering";
+    } else if (lastAcceptedAgeMs === null || lastAcceptedAgeMs > MOTOR_FEEDBACK_MOTION_START_MAX_AGE_MS) {
+      reason = "stale";
+    } else if (motors.watchdogHealthy !== true) {
+      reason = "watchdog_unhealthy";
+    } else if ((motors.faultFlags ?? 0) !== 0) {
+      reason = "motor_fault";
+    }
+    return {
+      healthy: reason === "healthy",
+      reason,
+      coherentSamples: this.motorFeedbackConsecutiveValidSamples,
+      requiredCoherentSamples: MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT,
+      lastAcceptedAgeMs,
+      maximumAcceptedAgeMs: MOTOR_FEEDBACK_MOTION_START_MAX_AGE_MS,
+      watchdogHealthy: motors.watchdogHealthy,
+      faultFlags: motors.faultFlags,
+    };
   }
 
   getHeadingRebaseReadiness(): HeadingRebaseReadiness {
@@ -962,6 +1025,7 @@ export class SensorController extends EventEmitter {
         this.imuHeading = addRelativeAngle(this.imuHeading, yawDelta);
       }
       const headingAfterDeg = unwrapInternalHeading(this.imuHeading);
+      this.recordImuHeading(sample.timestampMillis, this.imuHeading);
       this.recordImuDiagnosticSample({
         timestampMillis: sample.timestampMillis,
         sampleDeltaMs,
@@ -1027,9 +1091,13 @@ export class SensorController extends EventEmitter {
         this.geometryCalibration?.getPositionOffsetForwardMeters() ?? 0,
         this.geometryCalibration?.getPositionOffsetRightMeters() ?? 0,
       );
+      const positionCorrectionTimestampMillis = sample.timestampMillis
+        - Math.max(0, sample.sampleAgeMillis ?? 0);
+      const positionCorrectionHeading = this.getImuHeadingAt(positionCorrectionTimestampMillis)
+        ?? this.imuHeading;
       const adjustedPosition = translatePositionByHeading(
         createPosition(sample.xMeters, sample.yMeters),
-        this.imuHeading,
+        positionCorrectionHeading,
         geometryOffset,
       );
       const adjustedXMeters = unwrapMeters(adjustedPosition.xMeters);
@@ -1073,6 +1141,10 @@ export class SensorController extends EventEmitter {
         satellitesInUse: sample.satellitesInUse,
         timestampMillis: sample.timestampMillis,
         sampleAgeMillis: sample.sampleAgeMillis,
+        rawXMeters: sample.xMeters,
+        rawYMeters: sample.yMeters,
+        positionCorrectionTimestampMillis,
+        positionCorrectionHeadingDeg: unwrapInternalHeading(positionCorrectionHeading),
         ...(sample.gpsTimeMillis !== undefined ? { gpsTimeMillis: sample.gpsTimeMillis } : {}),
         ...(sample.headingBaselineMeters !== undefined ? { headingBaselineMeters: sample.headingBaselineMeters } : {}),
         ...(sample.headingValid !== undefined ? { headingValid: sample.headingValid } : {}),
@@ -1091,6 +1163,69 @@ export class SensorController extends EventEmitter {
       });
       this.logger.error("sensor.gnss.poll_failed", { error: message });
     }
+  }
+
+  private recordImuHeading(timestampMillis: number, heading: InternalHeading): void {
+    if (!Number.isFinite(timestampMillis)) {
+      return;
+    }
+    const last = this.imuHeadingHistory[this.imuHeadingHistory.length - 1];
+    if (last?.timestampMillis === timestampMillis) {
+      this.imuHeadingHistory[this.imuHeadingHistory.length - 1] = { timestampMillis, heading };
+    } else if (!last || timestampMillis > last.timestampMillis) {
+      this.imuHeadingHistory.push({ timestampMillis, heading });
+    } else {
+      const insertionIndex = this.imuHeadingHistory.findIndex((sample) => sample.timestampMillis > timestampMillis);
+      this.imuHeadingHistory.splice(
+        insertionIndex < 0 ? this.imuHeadingHistory.length : insertionIndex,
+        0,
+        { timestampMillis, heading },
+      );
+    }
+
+    const cutoffTimestampMillis = timestampMillis - IMU_HEADING_HISTORY_WINDOW_MS;
+    while (
+      this.imuHeadingHistory.length > 1
+      && (
+        this.imuHeadingHistory[1].timestampMillis < cutoffTimestampMillis
+        || this.imuHeadingHistory.length > IMU_HEADING_HISTORY_MAX_SAMPLES
+      )
+    ) {
+      this.imuHeadingHistory.shift();
+    }
+  }
+
+  private getImuHeadingAt(timestampMillis: number): InternalHeading | null {
+    if (this.imuHeadingHistory.length === 0) {
+      return null;
+    }
+    const first = this.imuHeadingHistory[0];
+    if (timestampMillis <= first.timestampMillis) {
+      return first.heading;
+    }
+    const last = this.imuHeadingHistory[this.imuHeadingHistory.length - 1];
+    if (timestampMillis >= last.timestampMillis) {
+      return last.heading;
+    }
+
+    for (let index = 1; index < this.imuHeadingHistory.length; index += 1) {
+      const after = this.imuHeadingHistory[index];
+      if (after.timestampMillis < timestampMillis) {
+        continue;
+      }
+      const before = this.imuHeadingHistory[index - 1];
+      const intervalMillis = after.timestampMillis - before.timestampMillis;
+      if (intervalMillis <= 0) {
+        return after.heading;
+      }
+      const fraction = (timestampMillis - before.timestampMillis) / intervalMillis;
+      const delta = headingDifference(before.heading, after.heading);
+      return addRelativeAngle(
+        before.heading,
+        createRelativeAngle(unwrapRelativeAngle(delta) * fraction),
+      );
+    }
+    return last.heading;
   }
 
   private async pollMotors(): Promise<void> {
@@ -1160,11 +1295,17 @@ export class SensorController extends EventEmitter {
 
   private async acceptRecoveredMotorFeedback(): Promise<boolean> {
     if (this.motorFeedbackFailureCount === 0) {
+      this.motorFeedbackConsecutiveValidSamples = Math.min(
+        MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT,
+        this.motorFeedbackConsecutiveValidSamples + 1,
+      );
+      this.lastAcceptedMotorFeedbackMillis = this.nowMillis();
       return true;
     }
 
     this.motorFeedbackRecoveryValidSamples += 1;
     if (this.motorFeedbackRecoveryValidSamples < MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT) {
+      this.motorFeedbackConsecutiveValidSamples = this.motorFeedbackRecoveryValidSamples;
       return false;
     }
 
@@ -1187,6 +1328,8 @@ export class SensorController extends EventEmitter {
     this.motorFeedbackLastErrorLogMillis = null;
     this.motorFeedbackRecoveryValidSamples = 0;
     this.motorFeedbackSafetyStopIssued = false;
+    this.motorFeedbackConsecutiveValidSamples = MOTOR_FEEDBACK_RECOVERY_SAMPLE_COUNT;
+    this.lastAcceptedMotorFeedbackMillis = now;
     return true;
   }
 
@@ -1194,6 +1337,7 @@ export class SensorController extends EventEmitter {
     const now = this.nowMillis();
     this.motorFeedbackFailureCount += 1;
     this.motorFeedbackRecoveryValidSamples = 0;
+    this.motorFeedbackConsecutiveValidSamples = 0;
     if (this.motorFeedbackFailureStartedMillis === null) {
       this.motorFeedbackFailureStartedMillis = now;
     }

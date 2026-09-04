@@ -261,6 +261,7 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(manualPage.includes("fetchJson('/api/mowing/progress')"), true);
   assert.equal(manualPage.includes('loadMowerMowingProgress(),'), true);
   assert.equal(manualPage.includes('clearMowingProgress();'), true);
+  assert.equal(manualPage.includes("previewMowingPlanBtn.addEventListener('click', () => {\n      clearMowingProgress();\n      requestMowingPlanPreview();"), true);
   assert.equal(manualPage.includes('MAX_HISTORY_MS'), false);
   assert.equal(manualPage.includes("ctx.strokeStyle = 'rgba(37, 99, 235, 0.6)';"), true);
   assert.equal(manualPage.includes('id="startRecordingBtn"'), true);

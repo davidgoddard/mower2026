@@ -34,6 +34,8 @@ function emitGnssPosition(sensorController, {
   headingAccuracyDeg = 0.4,
   fixType = "fixed",
   satellitesInUse = 20,
+  headingBaselineMeters,
+  headingValid,
   timestampMillis,
 }) {
   sensorController.emit("gnssPositionUpdate", {
@@ -44,6 +46,8 @@ function emitGnssPosition(sensorController, {
     headingAccuracyDeg,
     fixType,
     satellitesInUse,
+    ...(headingBaselineMeters === undefined ? {} : { headingBaselineMeters }),
+    ...(headingValid === undefined ? {} : { headingValid }),
     timestampMillis,
   });
 }
@@ -121,7 +125,35 @@ test("PoseFusion ignores poor GNSS fixes when deciding whether to reset heading"
   await fusion.stop();
 });
 
-test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", async () => {
+test("PoseFusion summarizes a sustained GNSS rejection no more than once per minute", async () => {
+  const sensorController = new EventEmitter();
+  let nowMillis = 0;
+  sensorController.getCurrentTimeMillis = () => nowMillis;
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  const logger = createMockLogger();
+  const fusion = new PoseFusion({ sensorController, logger });
+  await fusion.start();
+
+  for (let sample = 0; sample < 700; sample += 1) {
+    nowMillis = sample * 100;
+    emitGnssPosition(sensorController, {
+      fixType: "single",
+      positionAccuracyMeters: 2,
+      satellitesInUse: 20,
+      timestampMillis: nowMillis,
+    });
+  }
+
+  const rejectionLogs = logger.warn.mock.calls.filter((call) => (
+    call.arguments[0] === "pose_fusion.gnss_rejected.fix_not_rtk_fixed"
+  ));
+  assert.equal(rejectionLogs.length, 2);
+  assert.ok(rejectionLogs[1].arguments[1].suppressedSinceLastLog > 500);
+  await fusion.stop();
+});
+
+test("PoseFusion retains the established GNSS heading synchronisation while IMU owns heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();
   let rebaseReadiness = { safe: true };
@@ -159,7 +191,8 @@ test("PoseFusion exposes whether GNSS is currently rebasing the IMU heading", as
     timestampMillis: 2100,
   });
 
-  assert.equal(fusion.getPrimitiveState().usingGnssHeading, false);
+  assert.equal(fusion.getPrimitiveState().usingGnssHeading, true);
+  assert.equal(fusion.isHeadingSynchronized(), true);
 
   await fusion.stop();
 });
@@ -473,7 +506,7 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
   });
 
   assert.equal(sensorController.setHeading.mock.calls.length, 1);
-  assert.equal(fusion.getPrimitiveState().usingGnssHeading, false);
+  assert.equal(fusion.getPrimitiveState().usingGnssHeading, true);
 
   rebaseReadiness = {
     safe: true,
@@ -519,8 +552,40 @@ test("PoseFusion defers GNSS heading rebase while controller reports active moti
     timestampMillis: 2400,
   });
   assert.equal(sensorController.setHeading.mock.calls.length, 2);
-  assert.equal(fusion.getPrimitiveState().usingGnssHeading, false);
+  assert.equal(fusion.getPrimitiveState().usingGnssHeading, true);
 
+  await fusion.stop();
+});
+
+test("PoseFusion reports heading-only GNSS rejection reasons while position remains trusted", async () => {
+  const sensorController = new EventEmitter();
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({ safe: true });
+  sensorController.getCurrentTimeMillis = () => 1400;
+  const logger = createMockLogger();
+  const fusion = new PoseFusion({ sensorController, logger });
+
+  await fusion.start();
+  emitRepeatedGnssPositions(sensorController, 3, {
+    headingDeg: 10,
+    headingValid: true,
+    timestampMillis: 1000,
+  });
+  assert.equal(fusion.isHeadingSynchronized(), true);
+
+  emitGnssPosition(sensorController, {
+    headingDeg: 10,
+    headingValid: false,
+    timestampMillis: 1400,
+  });
+
+  const rejection = logger.warn.mock.calls.find((call) => (
+    call.arguments[0] === "pose_fusion.gnss_rejected.heading_invalid_flag"
+  ));
+  assert.ok(rejection);
+  assert.equal(rejection.arguments[1].gnssEvent.headingValid, false);
+  assert.equal(fusion.getCurrentPose().quality, "gnss");
+  assert.equal(fusion.isHeadingSynchronized(), true);
   await fusion.stop();
 });
 

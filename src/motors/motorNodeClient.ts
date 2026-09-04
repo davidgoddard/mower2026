@@ -22,6 +22,7 @@ interface MotorNodeClientOptions {
   sleep?: (delayMs: number) => Promise<void>;
   setCommandRefreshTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearCommandRefreshTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+  currentCalibrationDelayMs?: number;
 }
 
 interface WheelSpeedCommandOptions {
@@ -74,6 +75,11 @@ export class MotorNodeClient {
   private readonly clearCommandRefreshTimer: (timer: ReturnType<typeof setTimeout>) => void;
   private lastSentCommand: WheelSpeedCommand | null = null;
   private commandRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private currentSensorsCalibrated = false;
+  private currentCalibrationPromise: Promise<void> | null = null;
+  private readonly currentCalibrationDelayMs: number;
+  private commandGeneration = 0;
+  private calibrationGeneration = 0;
 
   constructor(controller: I2cBusController, options: MotorNodeClientOptions) {
     this.controller = controller;
@@ -86,6 +92,7 @@ export class MotorNodeClient {
     this.sleep = options.sleep ?? defaultSleep;
     this.setCommandRefreshTimer = options.setCommandRefreshTimer ?? setTimeout;
     this.clearCommandRefreshTimer = options.clearCommandRefreshTimer ?? clearTimeout;
+    this.currentCalibrationDelayMs = options.currentCalibrationDelayMs ?? 400;
   }
 
   async sendWheelSpeedCommand(
@@ -93,6 +100,7 @@ export class MotorNodeClient {
     rightWheelTargetPercent: number,
     options: WheelSpeedCommandOptions = {},
   ): Promise<void> {
+    const commandGeneration = ++this.commandGeneration;
     // The motor drive stays enabled by default. Bringing the mower to rest
     // is the responsibility of {@link SensorController.stopMotors}, which
     // sends a ramped target=0 with the drive still enabled so the ESP32
@@ -100,6 +108,11 @@ export class MotorNodeClient {
     // H-bridges off. The dedicated {@link stop} method (and the systemStop
     // re-assert in the sensor loop) are the only paths that send
     // enableDrive=false.
+
+    if (leftWheelTargetPercent !== 0 || rightWheelTargetPercent !== 0) {
+      await this.ensureCurrentSensorsCalibrated();
+      if (commandGeneration !== this.commandGeneration) return;
+    }
 
     // Resolve deceleration rate: explicit %/s > legacy ms > calibrated > constant default.
     const decelPercentPerSecond = options.decelPercentPerSecond
@@ -136,6 +149,9 @@ export class MotorNodeClient {
   }
 
   async stop(): Promise<void> {
+    this.commandGeneration += 1;
+    this.calibrationGeneration += 1;
+    this.currentSensorsCalibrated = false;
     const command: WheelSpeedCommand = {
       timestampMillis: this.nowMillis(),
       leftWheelTargetPercent: 0,
@@ -151,6 +167,59 @@ export class MotorNodeClient {
     this.cancelCommandRefresh();
     this.lastSentCommand = command;
     await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
+    if (this.lastSentCommand === command) {
+      this.scheduleCommandRefresh();
+    }
+  }
+
+  close(): void {
+    this.commandGeneration += 1;
+    this.calibrationGeneration += 1;
+    this.cancelCommandRefresh();
+    this.lastSentCommand = null;
+    this.currentSensorsCalibrated = false;
+    this.currentCalibrationPromise = null;
+  }
+
+  private async ensureCurrentSensorsCalibrated(): Promise<void> {
+    if (this.currentSensorsCalibrated) return;
+    if (this.currentCalibrationPromise) {
+      await this.currentCalibrationPromise;
+      return;
+    }
+
+    const calibrationGeneration = this.calibrationGeneration;
+    this.currentCalibrationPromise = (async () => {
+      this.cancelCommandRefresh();
+      this.lastSentCommand = null;
+      const frame = encodeFrame(
+        {
+          version: PROTOCOL_VERSION,
+          nodeId: NodeId.Motor,
+          messageType: MessageType.MotorCurrentCalibrationCommand,
+          flags: 0,
+          sequence: this.sequence,
+        },
+        new Uint8Array(0),
+      );
+      this.sequence = (this.sequence + 1) & 0xffff;
+      await this.controller.queueWrite({
+        key: "motor.current-calibration",
+        priority: I2C_PRIORITY.stop,
+        address: this.address,
+        payload: frame,
+      });
+      await this.sleep(this.currentCalibrationDelayMs);
+      if (calibrationGeneration === this.calibrationGeneration) {
+        this.currentSensorsCalibrated = true;
+      }
+    })();
+
+    try {
+      await this.currentCalibrationPromise;
+    } finally {
+      this.currentCalibrationPromise = null;
+    }
   }
 
   async refreshFeedback(): Promise<MotorFeedbackSample> {
@@ -198,7 +267,7 @@ export class MotorNodeClient {
 
   private scheduleCommandRefresh(): void {
     const command = this.lastSentCommand;
-    if (!this.isActiveDriveCommand(command)) {
+    if (!this.isRefreshableCommand(command)) {
       return;
     }
 
@@ -220,7 +289,7 @@ export class MotorNodeClient {
 
   private async refreshLatestCommand(): Promise<void> {
     const current = this.lastSentCommand;
-    if (!this.isActiveDriveCommand(current)) return;
+    if (!this.isRefreshableCommand(current)) return;
 
     const command: WheelSpeedCommand = {
       ...current,
@@ -228,6 +297,9 @@ export class MotorNodeClient {
     };
     this.lastSentCommand = command;
     try {
+      // Heartbeats share the ordinary motor-speed queue key so a newly
+      // requested active command can replace an in-flight neutral/disabled
+      // refresh. Only the initial/final explicit stop uses stop priority.
       await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
     } finally {
       if (this.lastSentCommand === command) {
@@ -236,10 +308,8 @@ export class MotorNodeClient {
     }
   }
 
-  private isActiveDriveCommand(command: WheelSpeedCommand | null): command is WheelSpeedCommand {
-    return command !== null
-      && command.enableDrive
-      && (command.leftWheelTargetPercent !== 0 || command.rightWheelTargetPercent !== 0);
+  private isRefreshableCommand(command: WheelSpeedCommand | null): command is WheelSpeedCommand {
+    return command !== null;
   }
 
   private async writeCommand(command: WheelSpeedCommand, key: string, priority: number): Promise<void> {

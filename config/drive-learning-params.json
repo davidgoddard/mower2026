@@ -1,16 +1,20 @@
 {
-  "version": 6,
+  "version": 7,
   "longDriveBrakeDistanceForwardMeters": 0.1803073675334463,
   "longDriveBrakeDistanceReverseMeters": 0.20725372898751684,
   "longHeadingBiasForwardPercent": 0.015453916385493203,
   "longHeadingBiasReversePercent": -0.005296122879025885,
   "longHeadingGainForwardPerDeg": 0.01,
   "longHeadingGainReversePerDeg": 0.01,
-  "forwardCteGain": 1.5,
-  "reverseCteGain": 0.3016875822298524,
+  "forwardCteGain": 2.919965226526329,
+  "reverseCteGain": 0.2936390831286572,
+  "forwardCteDampingGain": 1.1299473682972507,
+  "reverseCteDampingGain": 0.09558895783575597,
+  "operationalSteeringSamplesForward": 110,
+  "operationalSteeringSamplesReverse": 0,
   "longDriveMinDistanceMeters": 1,
   "shortDriveBrakeDistancesPositive": [
-    0.07281449698581258,
+    0.1000000000000005,
     0.09814983934131878,
     0.1201080416634126,
     0.14232264465824643,
@@ -31,7 +35,7 @@
     0.17222113163527802
   ],
   "shortDriveBrakeDistancesNegative": [
-    0.06818125878606628,
+    0.0999999999999992,
     0.08702532153382941,
     0.12058733086176458,
     0.13063325028289058,
@@ -52,7 +56,7 @@
     0.2129082154491161
   ],
   "shortDriveSampleCountsPositive": [
-    15,
+    36,
     20,
     17,
     33,
@@ -73,7 +77,7 @@
     9
   ],
   "shortDriveSampleCountsNegative": [
-    2,
+    20,
     4,
     6,
     2,
@@ -94,7 +98,7 @@
     4
   ],
   "shortDriveLastErrorPositiveMeters": [
-    0.016800498645902655,
+    0.10600151535670471,
     0.02381604932471241,
     0.01837694028663351,
     -0.021350348788417888,
@@ -115,7 +119,7 @@
     0.022677566909782728
   ],
   "shortDriveLastErrorNegativeMeters": [
-    0.0009578051780316893,
+    0.4711993914066016,
     0.025183371168289847,
     0.021184034586373638,
     -0.006907916896717536,
@@ -135,5 +139,5 @@
     -0.007195479552742365,
     0.01911401872592235
   ],
-  "updatedAt": "2026-08-11T16:34:49.094Z"
+  "updatedAt": "2026-09-04T12:49:02.183Z"
 }

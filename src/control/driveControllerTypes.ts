@@ -7,6 +7,14 @@ import type { LearningSource } from "../config/learningPolicyConfig.js";
 
 export interface DriveRequest {
   readonly targetPosition: Position;
+  /**
+   * Optional immutable start of the desired CTE reference line. Target
+   * bearing still uses the settled live position, allowing the mower to begin
+   * on the slight diagonal from where the transition actually ended. Mowing
+   * supplies the planned strip entry so control then converges onto the
+   * original planned start-to-end baseline.
+   */
+  readonly cteReferenceStartPosition?: Position;
   readonly learningEnabled?: boolean; // Eligible by default; shared policy still decides whether this source may learn.
   readonly learningSource?: LearningSource;
   readonly maxCrossTrackErrorMeters?: number;
@@ -24,6 +32,22 @@ export interface DriveRequest {
    * corrections; calibration and training leave it unset.
    */
   readonly minimumDriveDistanceMeters?: number;
+  /**
+   * Optional operation-owned safety check for the settled start of the
+   * translation. DriveController invokes it after every alignment pivot and
+   * again immediately before handing motion to DriveLineController. Returning
+   * a string rejects the manoeuvre while the wheels are already neutral.
+   *
+   * Mowing supplies its authoritative area/obstacle geometry here so a pivot
+   * that physically displaces the chassis cannot be followed by another
+   * corrective pivot or a newly unsafe straight drive.
+   */
+  readonly validateTranslationPath?: (
+    startPosition: Position,
+    targetPosition: Position,
+  ) => string | null;
+  /** Optional operation-owned trace sink invoked for live translation poses. */
+  readonly translationPoseSink?: (position: Position) => void;
   /**
    * Optional explicit learning-class override. Training flows should set this
    * from the intended bucket/sample type so a nominal 100 cm run never flips
@@ -66,7 +90,8 @@ export interface DriveResult {
   readonly errorMessage?: string;
   readonly timestamp: string;
   /**
-   * Did this drive's measurements feed the brake-distance / CTE-gain learner?
+   * Did this drive's measurements feed an allowed learner? Qualified mowing
+   * strips update steering only; explicit training may also update braking.
    * False for any non-success status, for drives whose `learningEnabled` flag
    * was off, and for drives where any of the three pose-quality samples
    * (start, brake-decision, final) was not GNSS.

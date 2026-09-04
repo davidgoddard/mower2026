@@ -6,6 +6,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Bmi160ImuSensor } from "../../dist/src/hardware/bmi160ImuSensor.js";
+import {
+  I2C_ADDRESS_BMI160_DEFAULT,
+  I2C_BUS_NUMBER_DEFAULT,
+} from "../../dist/constants.js";
 
 const PORT = Number(process.env.IMU_VIEWER_PORT ?? 8091);
 const SAMPLE_INTERVAL_MS = Number(process.env.IMU_SAMPLE_INTERVAL_MS ?? 100);
@@ -160,7 +164,9 @@ async function shutdown(exitCode = 0) {
 }
 
 async function main() {
-  console.log("Initialising BMI160 IMU sensor on I2C bus 1 address 0x69...");
+  console.log(
+    `Initialising BMI160 IMU sensor on I2C bus ${I2C_BUS_NUMBER_DEFAULT} address 0x${I2C_ADDRESS_BMI160_DEFAULT.toString(16)}...`,
+  );
   await sensor.initialise();
   console.log("Calibrating gyro bias. Keep the mower still...");
   await sensor.calibrateGyro();

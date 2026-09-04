@@ -10,6 +10,7 @@ export * from "./segmentedBoundaryExecutor.js";
 export * from "./continuousPathFollower.js";
 export * from "./conservativeLookahead.js";
 export * from "./mowingPlanner.js";
+export * from "./mowingCoverage.js";
 export * from "./mowingExecutor.js";
 export * from "./mowingResumeStore.js";
 export * from "./mowingProgressStore.js";
