@@ -14,6 +14,9 @@ File:
 - accepts explicit left/right wheel output commands (`-1.0..1.0`, where `1.0` is full output)
 - accepts changed commands immediately and a refreshed unchanged command once
   per second as the Pi drive heartbeat
+- rejects an older non-zero sequence that arrives after a newer neutral or
+  disabled command; safety commands are always accepted so a restarted Pi can
+  stop the motors even after its sequence counter resets
 - disables drive if the command heartbeat exceeds its 2.5-second lease
 - uses an independent five-second ESP task watchdog to recover a stalled sketch
 - preserves asymmetric ramp-up / ramp-down behavior

@@ -56,22 +56,22 @@ The system shall:
             - stops the line drive if body-heading error becomes grossly inconsistent with the established line outside the final approach window, leaving any subsequent re-alignment to the segment executor and `TurnController`
             - uses the same geometry for reverse travel with the correct body-heading reference
         - loop reading current pose and measure CTE and remaining distance
-        - when remaining distance to target is less than the learned braking distance request zero motor speed if that braking point is still before the target distance.
+        - when remaining distance to target is less than the learned braking distance request zero motor speed; if a severe short-drive overshoot has learned a braking distance at or beyond the leg length, request zero on the first post-start pose update rather than discarding the correction.
         - always stop when the arrival tolerance is reached, even if braking was not used
         - wait learned brake time
         - settle
         - get current pose
         - compute new control parameters based on the CTE and X/Y errors
-- short drives up to 1 metre shall use positive and negative stop-trigger learning buckets at 5,10,15,20,25,30,35,40,45,50,55,60,70,80,90 and 100cm, and longer plateau drives shall use separate forward and reverse full-speed brake distances while still retrying each training distance as a forward/reverse pair until both legs are below 4cm absolute X error
+- short drives up to 1 metre shall use positive and negative stop-trigger learning buckets at 5,10,15,20,25,30,35,40,45,50,55,60,70,80,90 and 100cm, and longer plateau drives shall use separate forward and reverse full-speed brake distances while still retrying each training distance as a forward/reverse pair until both legs meet the configured endpoint bound on both absolute X and absolute Y error (currently 3cm)
 - short-drive tuning runs shall be able to alternate forward and reverse legs, taking a fresh pose/heading sample for each leg so the mower can train without walking far away from the test area
 - short-drive tuning runs shall clear any stale stop latch at the start of a new user-requested run so a fresh Start action actually starts motion
-- drive learning shall use a larger learning step for larger distance errors so a 10cm miss adapts faster than a 4cm miss
+- drive learning shall use a larger learning step for larger distance errors so a 10cm miss adapts faster than a 4cm miss; short-drive overshoot corrections shall not be clipped to the requested leg length
 - drive learning shall maintain separate CTE gains for forward and reverse motion so reverse steering can learn independently from forward steering
 - qualified completed mowing strips shall update only the direction-specific proportional and CTE-rate damping steering gains; they shall not alter braking or turn parameters. Training runs retain their existing wider learning responsibilities
 - every straight translation shall also apply a bounded, transient terrain trim only when motor-current imbalance and encoder response per applied PWM corroborate the same loaded side. The trim shall slew gradually, decay when evidence disappears, reset between drives, and be disabled by stale/unsafe feedback, watchdog failure, motor faults, obstruction or wheel-slip evidence
 - the drive tuning page shall let the operator choose a starting distance, defaulting to 50cm, so already-learned shorter buckets can be skipped during a session
 - the drive tuning page shall train the fixed short-bucket distances through 100cm and then longer forward/reverse-brake sample distances at 200, 300 and 400cm
-- the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, average CTE, maximum CTE, X error, and Y error
+- the drive tuning page shall present a compact short-distance training view with a single start action, stop action, and a simple results table containing distance, average CTE, maximum CTE, X error, and Y error; its Status column shall report success only when execution completed and the configured X/Y endpoint requirements were both met
 - the Drive & Paths page shall provide a second mowing start action that drives to the selected area perimeter and then begins the first strip nearest that perimeter without tracing the outer perimeter first
 - the Drive & Paths page shall allow an operator to open a stored mowing area perimeter in an on-screen editor, straighten a selected section between two fixed anchors, or replace a selected section with a movable corner between two fixed anchors; the original and edited outlines shall remain visible until the operator explicitly saves the corrected perimeter, and saving shall retain the editor with the saved outline until the operator explicitly closes it
 - the Drive & Paths homepage shall retain a header navigation strip linking to the other operator pages
@@ -269,14 +269,14 @@ The sensor controller shall expose motor command methods for:
 - setting left and right wheel target percentages, where 1.0 is full output and 0.0 is stop
 - issuing a stop command
 
-Motor speed commands shall be latest-wins: if the application enqueues several speed commands before the bus drains, only the most recent target reaches the ESP32. Every motor speed command is merged with the global system-stop flag so that once stop is latched, any pending or subsequent speed command is rewritten as a disable until the global flag is cleared.
+Motor wheel commands shall be latest-wins across active, neutral and disabled states: all three use one logical I2C queue key, so if the application enqueues several commands before the bus drains only the newest state reaches the ESP32. An in-flight command may finish, but the newest command must be the next motor command written. While the global system-stop flag is latched, ordinary wheel-output requests shall be suppressed and the sensor loop shall continue reasserting the disabled state until the flag is explicitly cleared.
 
-The motor I2C client shall own one resettable refresh timer for the latest active motor command. A changed command replaces the latest value immediately, cancels the prior timer, is queued to I2C as soon as possible, and starts a new one-second refresh interval. The timer callback shall read the current latest command rather than retain an older command snapshot. Zero-output and disabled commands shall cancel the timer because command-lease expiry is already a safe stopped state. Command producers are not responsible for heartbeat traffic.
+The motor I2C client shall own one resettable refresh timer for the latest active, neutral or disabled motor command. A changed command replaces the latest value immediately, cancels the prior timer, is queued to I2C as soon as possible, and starts a new one-second refresh interval. The timer callback shall read the current latest command rather than retain an older command snapshot. Command producers are not responsible for heartbeat traffic.
 
 The Pi-to-motor-node command protocol shall use normalized percentages rather than metres-per-second targets.
 The ESP32 motor controller shall treat the requested target percentage as the top-of-ramp destination and apply ramp-up/ramp-down over the configured duration.
 
-Motor stop commands must use the highest bus priority (`1`) and motor speed commands use priority (`2`).
+Neutral and disabled motor commands must use the highest bus priority (`1`); commands requesting motion use priority (`2`).
 
 Application-level motor command convention shall be:
 - positive wheel speed means forward
@@ -447,7 +447,7 @@ The input is a single target position
 
 The segment drive goal is to turn to face the target and then drive as straight a line as possible arriving as close to the target as possible.
 
-The straight-line portion is a self-contained line-drive component that assumes the mower is already aligned with the line of travel.  It is responsible for minimising cross-track error (CTE), along-track X error, and arrival Y error, while learning brake distance and CTE gain for both short and long drives.  Forward and reverse motion use separate line-control branches so the reverse case can treat the target as behind the mower while still using the same straight-line learning model.  The target arrival is mandatory; braking is an aid used only when there is still room before the target.  A heading preview term may assist steering while there is still comfortable distance to run, but it should taper off close to the target so that it does not create a sharp turn-in at arrival.  The live CTE correction should become progressively stronger as lateral drift grows so the mower fights a bowing path early rather than waiting for the next run to learn from it.
+The straight-line portion is a self-contained line-drive component that assumes the mower is already aligned with the line of travel.  It is responsible for minimising cross-track error (CTE), along-track X error, and arrival Y error, while learning brake distance and CTE gain for both short and long drives.  Forward and reverse motion use separate line-control branches so the reverse case can treat the target as behind the mower while still using the same straight-line learning model.  The target arrival is mandatory. For an extremely short drive whose learned braking distance is at least the whole leg, the braking request is issued on the first post-start pose update; the learned evidence is not ignored merely because the physical ramp-down distance exceeds the requested travel. A heading preview term may assist steering while there is still comfortable distance to run, but it should taper off close to the target so that it does not create a sharp turn-in at arrival.  The live CTE correction should become progressively stronger as lateral drift grows so the mower fights a bowing path early rather than waiting for the next run to learn from it.
 
 To control this the drive component will learn how to keep CTE small or zero and keep X/Y arrival errors small or zero.  In priority terms, X is more important than Y but Y should naturally be small if CTE is tuned well.
 
@@ -458,7 +458,7 @@ The logical sequence of steps is:
 - call the turn component with that angle
 - get current pose 
 - calculate line to target
-- apply power to motors
+- apply power to motors and wait for the initial command/current-calibration handshake to drain through I2C before accepting pose updates as drive progress or braking evidence
 - monitor and correct CTE and monitor remaining distance.
 - when at or beyond the braking distance stop the motors.
 - wait for twice the configured motor ramp down time for things to settle

@@ -205,6 +205,8 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(drivePage.includes('Max CTE</th>'), true);
   assert.equal(drivePage.includes('X Error</th>'), true);
   assert.equal(drivePage.includes('Y Error</th>'), true);
+  assert.equal(drivePage.includes('function describeResultStatus(item)'), true);
+  assert.equal(drivePage.includes('text: "requirements missed"'), true);
 
   const segmentPage = getSegmentTestingPageHtml();
   assert.equal(segmentPage.includes('class="page-layout"'), true);

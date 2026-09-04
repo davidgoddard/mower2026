@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MotorNodeClient, I2C_PRIORITY, I2cTaskReplacedError } from '../dist/index.js';
+import { I2cBusController, MotorNodeClient, I2C_PRIORITY, I2cTaskReplacedError } from '../dist/index.js';
 import { systemStop } from '../dist/control/systemStop.js';
 
 test.beforeEach(() => {
@@ -70,9 +70,9 @@ test('MotorNodeClient sends speed and stop with expected i2c priorities', async 
   assert.equal(writes.length, 3);
   assert.equal(writes[0].key, 'motor.current-calibration');
   assert.equal(writes[0].priority, I2C_PRIORITY.stop);
-  assert.equal(writes[1].key, 'motor.speed');
+  assert.equal(writes[1].key, 'motor.command');
   assert.equal(writes[1].priority, I2C_PRIORITY.motorSpeed);
-  assert.equal(writes[2].key, 'motor.stop');
+  assert.equal(writes[2].key, 'motor.command');
   assert.equal(writes[2].priority, I2C_PRIORITY.stop);
 
   const commandView = new DataView(writes[1].payload.buffer, writes[1].payload.byteOffset, writes[1].payload.byteLength);
@@ -113,8 +113,8 @@ test('MotorNodeClient suppresses duplicate unchanged commands', async () => {
 
   assert.equal(writes.length, 3);
   assert.equal(writes[0].key, 'motor.current-calibration');
-  assert.equal(writes[1].key, 'motor.speed');
-  assert.equal(writes[2].key, 'motor.stop');
+  assert.equal(writes[1].key, 'motor.command');
+  assert.equal(writes[2].key, 'motor.command');
 });
 
 test('MotorNodeClient refreshes only the latest command from one resettable timer', async () => {
@@ -199,12 +199,13 @@ test('MotorNodeClient keeps a heartbeat for zero and disabled commands until clo
   assert.equal(timers[2].cancelled, true);
   assert.equal(timers.length, 4);
   assert.deepEqual(writes.map((write) => write.key), [
-    'motor.current-calibration', 'motor.speed', 'motor.speed', 'motor.speed', 'motor.stop',
+    'motor.current-calibration', 'motor.command', 'motor.command', 'motor.command', 'motor.command',
   ]);
 
   timers[3].callback();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(writes.at(-1).key, 'motor.speed');
+  assert.equal(writes.at(-1).key, 'motor.command');
+  assert.equal(writes.at(-1).priority, I2C_PRIORITY.stop);
   assert.equal(writes.at(-1).payload[17], 0);
   assert.equal(timers.length, 5);
 
@@ -277,7 +278,7 @@ test('MotorNodeClient treats same-key motor write replacement as benign coalesci
   const fakeController = {
     async queueWrite(request) {
       writes.push(request);
-      if (firstCall && request.key === 'motor.speed') {
+      if (firstCall && request.key === 'motor.command') {
         firstCall = false;
         throw new I2cTaskReplacedError(request.key);
       }
@@ -297,8 +298,8 @@ test('MotorNodeClient treats same-key motor write replacement as benign coalesci
 
   assert.equal(writes.length, 3);
   assert.equal(writes[0].key, 'motor.current-calibration');
-  assert.equal(writes[1].key, 'motor.speed');
-  assert.equal(writes[2].key, 'motor.stop');
+  assert.equal(writes[1].key, 'motor.command');
+  assert.equal(writes[2].key, 'motor.command');
 });
 
 test('MotorNodeClient does not send a pending first drive command after a stop during calibration', async () => {
@@ -321,12 +322,62 @@ test('MotorNodeClient does not send a pending first drive command after a stop d
   await drivePromise;
 
   assert.deepEqual(writes.map((write) => write.key), [
-    'motor.current-calibration', 'motor.stop',
+    'motor.current-calibration', 'motor.command',
   ]);
 
   await client.sendWheelSpeedCommand(0.4, 0.4);
   assert.deepEqual(writes.map((write) => write.key), [
-    'motor.current-calibration', 'motor.stop',
-    'motor.current-calibration', 'motor.speed',
+    'motor.current-calibration', 'motor.command',
+    'motor.current-calibration', 'motor.command',
   ]);
+});
+
+test('MotorNodeClient replaces a queued motion command with a newer neutral command', async () => {
+  const physicalWrites = [];
+  let releaseBlock;
+  const block = new Promise((resolve) => { releaseBlock = resolve; });
+  const transport = {
+    async write(_address, payload) {
+      physicalWrites.push(payload);
+      if (payload[0] === 0x7f) await block;
+    },
+    async read() { return new Uint8Array(0); },
+    async writeRead() { return new Uint8Array(0); },
+    async close() {},
+  };
+  const controller = new I2cBusController(transport);
+  const client = new MotorNodeClient(controller, {
+    address: 0x66,
+    currentCalibrationDelayMs: 0,
+    sleep: async () => {},
+  });
+
+  await client.sendWheelSpeedCommand(0.2, 0.2);
+  const blockingWrite = controller.queueWrite({
+    key: 'blocking',
+    priority: I2C_PRIORITY.stop,
+    address: 0x66,
+    payload: new Uint8Array([0x7f]),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const staleMotion = client.sendWheelSpeedCommand(0.8, 0.8);
+  await new Promise((resolve) => setImmediate(resolve));
+  const neutral = client.sendWheelSpeedCommand(0, 0);
+  releaseBlock();
+  await Promise.all([blockingWrite, staleMotion, neutral]);
+
+  const wheelFrames = physicalWrites.filter((payload) => payload[3] === 0x21);
+  assert.equal(wheelFrames.length, 2);
+  const finalCommand = new DataView(
+    wheelFrames.at(-1).buffer,
+    wheelFrames.at(-1).byteOffset,
+    wheelFrames.at(-1).byteLength,
+  );
+  assert.equal(finalCommand.getInt16(13, true), 0);
+  assert.equal(finalCommand.getInt16(15, true), 0);
+  assert.equal(finalCommand.getUint8(17), 1);
+
+  client.close();
+  await controller.close();
 });

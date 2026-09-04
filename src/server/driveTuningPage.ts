@@ -637,6 +637,26 @@ ${getAppDialogScript()}
         return { className: "warn", text: "—" };
       }
 
+      function describeResultStatus(item) {
+        if (item.status !== "success") {
+          return {
+            className: "bad",
+            text: item.status === "error" && item.errorMessage
+              ? item.status + ": " + item.errorMessage
+              : (item.status ?? "-"),
+          };
+        }
+
+        const targetX = Number.isFinite(item.targetXErrorMeters) ? item.targetXErrorMeters : 0.03;
+        const targetY = Number.isFinite(item.targetYErrorMeters) ? item.targetYErrorMeters : 0.03;
+        const requirementsMet = typeof item.requirementsMet === "boolean"
+          ? item.requirementsMet
+          : Math.abs(item.errorX ?? 0) <= targetX && Math.abs(item.errorY ?? 0) <= targetY;
+        return requirementsMet
+          ? { className: "good", text: "success" }
+          : { className: "bad", text: "requirements missed" };
+      }
+
       function appendDriveRows(rows) {
         for (const item of rows) {
           const key = driveResultKey(item);
@@ -731,9 +751,7 @@ ${getAppDialogScript()}
             const xErrorMeters = item.errorX ?? 0;
             const yErrorMeters = item.errorY ?? 0;
             const learnedCell = describeLearnedCell(item);
-            const statusText = item.status === "error" && item.errorMessage
-              ? item.status + ": " + item.errorMessage
-              : (item.status ?? "-");
+            const resultStatus = describeResultStatus(item);
             return \`
               <tr>
                 <td>\${formatCm(distanceMeters)}</td>
@@ -741,7 +759,7 @@ ${getAppDialogScript()}
                 <td class="\${statusClass(maxCteMeters)}">\${formatCm(maxCteMeters)}</td>
                 <td class="\${statusClass(xErrorMeters)}">\${formatCm(xErrorMeters)}</td>
                 <td class="\${statusClass(yErrorMeters)}">\${formatCm(yErrorMeters)}</td>
-                <td>\${statusText}</td>
+                <td class="\${resultStatus.className}">\${resultStatus.text}</td>
                 <td class="\${learnedCell.className}">\${learnedCell.text}</td>
               </tr>
             \`;

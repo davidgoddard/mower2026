@@ -160,6 +160,8 @@ uint16_t g_feedbackSequence = 0;
 uint32_t g_lastValidCommandMillis = 0;
 bool g_haveValidCommand = false;
 bool g_commandLeaseHealthy = false;
+bool g_haveAcceptedWheelCommandSequence = false;
+uint16_t g_lastAcceptedWheelCommandSequence = 0;
 volatile bool g_currentCalibrationRequested = false;
 bool g_currentSensorsCalibrated = false;
 
@@ -199,6 +201,10 @@ int16_t readI16LE(const uint8_t *bytes) {
 
 int32_t readI32LE(const uint8_t *bytes) {
   return static_cast<int32_t>(readU32LE(bytes));
+}
+
+bool isNewerSequence(uint16_t candidate, uint16_t previous) {
+  return static_cast<int16_t>(candidate - previous) > 0;
 }
 
 void writeU16LE(uint8_t *bytes, uint16_t value) {
@@ -606,14 +612,27 @@ void onReceive(int numBytes) {
     WheelSpeedCommand decoded;
     if (decodeWheelSpeedCommandPayload(payload, payloadLength, decoded)) {
       portENTER_CRITICAL(&g_protocolStateMux);
-      g_latestCommand = decoded;
-      g_lastValidCommandMillis = millis();
-      g_haveValidCommand = true;
-      if (!decoded.enableDrive) {
-        // A hard disable marks the end of an operating session. The motor
-        // supply may be disconnected while the Pi and ESP remain powered,
-        // so the next motion request must establish a fresh zero point.
-        g_currentSensorsCalibrated = false;
+      const bool requestsMotion = decoded.enableDrive
+        && (fabs(decoded.leftWheelTargetPercent) > 0.0f || fabs(decoded.rightWheelTargetPercent) > 0.0f);
+      // Neutral and disabled commands are always accepted: safety commands
+      // must still work after a Pi restart resets its sequence counter. A
+      // motion command, however, may not revive an older target that arrived
+      // after a newer stop because of upstream queueing or async completion.
+      const bool acceptCommand = !requestsMotion
+        || !g_haveAcceptedWheelCommandSequence
+        || isNewerSequence(sequence, g_lastAcceptedWheelCommandSequence);
+      if (acceptCommand) {
+        g_latestCommand = decoded;
+        g_lastValidCommandMillis = millis();
+        g_haveValidCommand = true;
+        g_lastAcceptedWheelCommandSequence = sequence;
+        g_haveAcceptedWheelCommandSequence = true;
+        if (!decoded.enableDrive) {
+          // A hard disable marks the end of an operating session. The motor
+          // supply may be disconnected while the Pi and ESP remain powered,
+          // so the next motion request must establish a fresh zero point.
+          g_currentSensorsCalibrated = false;
+        }
       }
       portEXIT_CRITICAL(&g_protocolStateMux);
     }
@@ -625,6 +644,7 @@ void onReceive(int numBytes) {
     g_latestCommand.enableDrive = false;
     g_latestCommand.leftWheelTargetPercent = 0.0f;
     g_latestCommand.rightWheelTargetPercent = 0.0f;
+    g_haveAcceptedWheelCommandSequence = false;
     g_currentCalibrationRequested = true;
     portEXIT_CRITICAL(&g_protocolStateMux);
   }

@@ -90,6 +90,14 @@ export interface DriveResult {
   readonly errorMessage?: string;
   readonly timestamp: string;
   /**
+   * For a training run, whether the completed drive met the configured X/Y
+   * endpoint requirements. `status` reports whether the manoeuvre executed;
+   * this field reports whether that execution was accurate enough to pass.
+   */
+  readonly requirementsMet?: boolean;
+  readonly targetXErrorMeters?: number;
+  readonly targetYErrorMeters?: number;
+  /**
    * Did this drive's measurements feed an allowed learner? Qualified mowing
    * strips update steering only; explicit training may also update braking.
    * False for any non-success status, for drives whose `learningEnabled` flag

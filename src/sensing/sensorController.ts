@@ -437,6 +437,11 @@ export class SensorController extends EventEmitter {
       deadbandedLeftWheelOutputPercent,
       deadbandedRightWheelOutputPercent,
     );
+    // A latched system stop owns the motor state. Do not let a concurrent
+    // controller request overwrite the stop state or queue an enable command.
+    if (systemStop.isStopped()) {
+      return;
+    }
     const isActiveCommand =
       Math.max(
         Math.abs(normalizedLeftWheelOutputPercent),
@@ -513,27 +518,6 @@ export class SensorController extends EventEmitter {
       this.motorZeroCommandSinceMillis = null;
       this.lastImuMotionStopSummary = null;
     }
-    // While systemStop is latched, swallow the speed command rather than
-    // sending an enableDrive=false equivalent. The sensor loop is
-    // simultaneously re-asserting the dedicated disable command on every
-    // tick, so the H-bridges stay off and any in-flight wheel-target value
-    // reaching the ESP32 here would just race that disable.
-    if (systemStop.isStopped()) {
-      const current = this.primitivesStore.snapshot().motors;
-      this.primitivesStore.update({
-        motors: {
-          ...current,
-          commandedLeftWheelOutputPercent: normalizedLeftWheelOutputPercent,
-          commandedRightWheelOutputPercent: normalizedRightWheelOutputPercent,
-        },
-      });
-      return;
-    }
-    await this.gateway.setMotorWheelOutputs(
-      normalizedLeftWheelOutputPercent,
-      normalizedRightWheelOutputPercent,
-      options,
-    );
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
@@ -542,6 +526,14 @@ export class SensorController extends EventEmitter {
         commandedRightWheelOutputPercent: normalizedRightWheelOutputPercent,
       },
     });
+    // Publish the requested state before awaiting I2C. A newer zero/disable
+    // request can then update the state immediately and an older async send
+    // cannot resume later and restore stale non-zero commanded values.
+    await this.gateway.setMotorWheelOutputs(
+      normalizedLeftWheelOutputPercent,
+      normalizedRightWheelOutputPercent,
+      options,
+    );
   }
 
   private applyMinimumActiveMotorOutputs(
@@ -1606,7 +1598,6 @@ export class SensorController extends EventEmitter {
     this.stallHighCurrentSamples = 0;
     this.stallDetectionLatched = false;
 
-    await this.gateway.stopMotors();
     const current = this.primitivesStore.snapshot().motors;
     this.primitivesStore.update({
       motors: {
@@ -1615,6 +1606,7 @@ export class SensorController extends EventEmitter {
         commandedRightWheelOutputPercent: 0,
       },
     });
+    await this.gateway.stopMotors();
   }
 
   private updateMotorStoppedState(

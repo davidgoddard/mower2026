@@ -44,6 +44,8 @@ function clampNormalizedTarget(target: number): number {
   return Math.max(-1, Math.min(1, target));
 }
 
+const MOTOR_COMMAND_QUEUE_KEY = "motor.command";
+
 /**
  * Convert a deceleration/acceleration rate in %/s to the wire field value
  * expected by the ESP32 motor codec.
@@ -142,7 +144,7 @@ export class MotorNodeClient {
 
     this.cancelCommandRefresh();
     this.lastSentCommand = command;
-    await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
+    await this.writeCommand(command);
     if (this.lastSentCommand === command) {
       this.scheduleCommandRefresh();
     }
@@ -166,7 +168,7 @@ export class MotorNodeClient {
 
     this.cancelCommandRefresh();
     this.lastSentCommand = command;
-    await this.writeCommand(command, "motor.stop", I2C_PRIORITY.stop);
+    await this.writeCommand(command);
     if (this.lastSentCommand === command) {
       this.scheduleCommandRefresh();
     }
@@ -297,10 +299,7 @@ export class MotorNodeClient {
     };
     this.lastSentCommand = command;
     try {
-      // Heartbeats share the ordinary motor-speed queue key so a newly
-      // requested active command can replace an in-flight neutral/disabled
-      // refresh. Only the initial/final explicit stop uses stop priority.
-      await this.writeCommand(command, "motor.speed", I2C_PRIORITY.motorSpeed);
+      await this.writeCommand(command);
     } finally {
       if (this.lastSentCommand === command) {
         this.scheduleCommandRefresh();
@@ -312,7 +311,10 @@ export class MotorNodeClient {
     return command !== null;
   }
 
-  private async writeCommand(command: WheelSpeedCommand, key: string, priority: number): Promise<void> {
+  private async writeCommand(command: WheelSpeedCommand): Promise<void> {
+    const requestsMotion = command.enableDrive
+      && (command.leftWheelTargetPercent !== 0 || command.rightWheelTargetPercent !== 0);
+    const priority = requestsMotion ? I2C_PRIORITY.motorSpeed : I2C_PRIORITY.stop;
     const frame = encodeFrame(
       {
         version: PROTOCOL_VERSION,
@@ -327,13 +329,16 @@ export class MotorNodeClient {
 
     try {
       await this.controller.queueWrite({
-        key,
+        // Every wheel command represents the same logical state. A newer
+        // start, neutral, disabled stop, or heartbeat must therefore replace
+        // any older queued wheel command regardless of its command kind.
+        key: MOTOR_COMMAND_QUEUE_KEY,
         priority,
         address: this.address,
         payload: frame,
       });
     } catch (error) {
-      if (error instanceof I2cTaskReplacedError && error.key === key) {
+      if (error instanceof I2cTaskReplacedError && error.key === MOTOR_COMMAND_QUEUE_KEY) {
         return;
       }
       throw error;

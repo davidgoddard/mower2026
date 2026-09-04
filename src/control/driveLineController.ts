@@ -645,16 +645,29 @@ export class DriveLineController {
       this.status = "driving";
       this.beginRunInstrumentation();
 
-      this.poseFusion.on("poseUpdate", this.onPoseUpdate);
-      subscribed = true;
-
       const initialRemainingAlongTrackDistance = unwrapMeters(
         distanceBetween(this.driveLineStart, this.driveLineEnd),
       );
       if (this.isGrosslyMisaligned(startPose, initialRemainingAlongTrackDistance)) {
         throw new Error("Line-drive heading error exceeded limit before translation");
       }
-      this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
+      // The first non-zero command may include the ESP current-sensor
+      // calibration handshake. Do not accept pose/brake events until that
+      // command has actually drained through I2C, otherwise a short leg can
+      // be declared complete before the mower was ever asked to move.
+      await this.applyStraightLineControl(startPose, initialRemainingAlongTrackDistance);
+      if (this.currentDrive === null || this.driveResolve === null) {
+        return;
+      }
+      if (this.stopRequested || systemStop.isStopped()) {
+        await this.finishStoppedDrive(
+          systemStop.isStopped() ? "Drive stopped by system stop during motor start" : "Drive stopped during motor start",
+        );
+        return;
+      }
+
+      this.poseFusion.on("poseUpdate", this.onPoseUpdate);
+      subscribed = true;
     } catch (error) {
       if (subscribed) {
         this.poseFusion.off("poseUpdate", this.onPoseUpdate);
@@ -916,7 +929,7 @@ export class DriveLineController {
             },
           );
 
-          const result = await this.executeLineDrive({
+          const rawResult = await this.executeLineDrive({
             targetPosition,
             learningEnabled: true,
             learningSource: "training",
@@ -927,16 +940,23 @@ export class DriveLineController {
             longHeadingLearningMode,
             maxCrossTrackErrorMeters: distanceMeters,
           });
-          results.push(result);
-          this.shortTrainingResults = [...results];
-
-          const absErrorX = Math.abs(unwrapMeters(result.errorX));
-          const absErrorY = Math.abs(unwrapMeters(result.errorY));
+          const absErrorX = Math.abs(unwrapMeters(rawResult.errorX));
+          const absErrorY = Math.abs(unwrapMeters(rawResult.errorY));
           // Pass criterion: both axes within bound. Acceptance is the same
           // for short and long drives — long drives have more time to
           // correct, so the same bound applies.  See feedback memory
           // [[feedback-drive-acceptance]] / [[feedback-tuner-retry]].
-          const legSucceeded = absErrorX <= targetXErrorMeters && absErrorY <= targetYErrorMeters;
+          const legSucceeded = rawResult.status === "success"
+            && absErrorX <= targetXErrorMeters
+            && absErrorY <= targetYErrorMeters;
+          const result: DriveResult = {
+            ...rawResult,
+            requirementsMet: legSucceeded,
+            targetXErrorMeters,
+            targetYErrorMeters,
+          };
+          results.push(result);
+          this.shortTrainingResults = [...results];
           pairSucceeded = pairSucceeded && legSucceeded;
           this.logger.info("drive.line.short_training.result", {
             distanceMeters,
@@ -954,7 +974,7 @@ export class DriveLineController {
           });
           reportProgress(
             "leg_result",
-            `Distance ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} leg ${result.status}${Number.isFinite(absErrorX) && Number.isFinite(absErrorY) ? `, X ${Math.round(absErrorX * 100)} cm Y ${Math.round(absErrorY * 100)} cm` : ""}.`,
+            `Distance ${Math.round(distanceMeters * 100)} cm, pair ${pairAttempt}, ${directionSign > 0 ? "forward" : "reverse"} leg ${result.status !== "success" ? result.status : (legSucceeded ? "passed" : "missed requirements")}${Number.isFinite(absErrorX) && Number.isFinite(absErrorY) ? `, X ${Math.round(absErrorX * 100)} cm Y ${Math.round(absErrorY * 100)} cm` : ""}.`,
             {
               distanceMeters,
               pairAttempt,
@@ -1275,7 +1295,6 @@ export class DriveLineController {
     if (
       targetDistance > 0 &&
       unwrapMeters(brakeDistance) > 0 &&
-      unwrapMeters(brakeDistance) < targetDistance &&
       remainingAlongTrackDistance <= unwrapMeters(brakeDistance)
     ) {
       this.brakeDecisionPoseQuality = pose.quality;
@@ -1295,7 +1314,7 @@ export class DriveLineController {
       return;
     }
 
-    this.applyStraightLineControl(pose, remainingAlongTrackDistance);
+    await this.applyStraightLineControl(pose, remainingAlongTrackDistance);
   }
 
   private normalizeShortTrainingStartDistanceMeters(startDistanceMeters?: number, maxDistanceMeters = DRIVE_SHORT_BUCKET_MAX_METERS): number {
@@ -1358,16 +1377,14 @@ export class DriveLineController {
   private applyStraightLineControl(
     pose: Pose,
     remainingAlongTrackDistance: number,
-  ): void {
+  ): Promise<void> {
     if (this.driveLineStart === null || this.driveLineEnd === null) {
-      void this.sensorController.setMotorWheelOutputs(0, 0);
-      return;
+      return this.sensorController.setMotorWheelOutputs(0, 0);
     }
 
     const totalDistance = unwrapMeters(distanceBetween(this.driveLineStart, this.driveLineEnd));
     if (totalDistance <= 1e-6) {
-      void this.sensorController.setMotorWheelOutputs(0, 0);
-      return;
+      return this.sensorController.setMotorWheelOutputs(0, 0);
     }
 
     const lineHeading = this.getDriveLineHeading();
@@ -1416,7 +1433,7 @@ export class DriveLineController {
       terrainTrimPercent: terrainTrim,
     };
 
-    void this.sensorController.setMotorWheelOutputs(
+    return this.sensorController.setMotorWheelOutputs(
       normalizedCommands.leftCommand,
       normalizedCommands.rightCommand,
     );

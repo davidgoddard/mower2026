@@ -80,7 +80,7 @@ This document maps problem domains to candidate files removing the need for Code
   - `POST /api/stop` is the unconditional emergency-stop route used by the web UI; it raises `systemStop`, immediately sends a hard motor halt, and then fans out stop requests to active controllers/runners.
   - every other POST action route clears `systemStop` before handling, so any non-stop operator action on the web UI re-enables motion after a prior stop button press
 - `src/sensing/sensorController.ts`: sensor loop stop checks and stop-command keepalive while stopped.
-  - every wheel-output write merges the current global stop latch into the motor payload enable/disable flag, so once stop is raised no later command can re-enable drive until a new user-requested session clears the latch
+  - while the global stop latch is set, ordinary wheel-output writes are suppressed before they can alter commanded state or reach I2C; the sensor loop keeps reasserting disabled frames until a new user-requested session clears the latch
   - neutral stop requests while `systemStop` is latched must resend disabled motor frames rather than zero-speed enabled frames, so the ESP32 keeps seeing a hard stop and never resumes on a stale command
   - stall progress is motion-specific: trusted GNSS displacement for translation and IMU heading change for pivots; encoder rotation alone does not prove chassis progress, while at least 2.8 A sustained for roughly two seconds is independently sufficient to stop, with 2.6 A clear hysteresis
   - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
@@ -244,6 +244,7 @@ This document maps problem domains to candidate files removing the need for Code
   - explicit training requests beyond the canned bucket list are preserved as custom distances instead of silently falling back to the full default training sweep
   - short-drive legs resample the current pose and heading before each forward/reverse leg, so targets are built from the mower's live heading rather than a stale pair anchor
   - short-drive legs pause briefly before motion, clear stale stop latches at the start of a new run, and stop early if cross-track error grows beyond the requested run distance
+  - the initial wheel command is awaited before the pose listener is attached, preventing current-sensor calibration latency from allowing a short leg to brake and complete before its start command reaches the motor ESP
   - self-contained stop handling and learning updates for the line-following phase
 - `src/control/runRecord.ts`: per-line-drive RunRecord schema and JSONL writer (Phase-1 instrumentation)
   - one record per drive: anchor / brake-trigger / settled poses, coast distance measured, peak encoder tick-rate, events seen during run, heartbeat samples
@@ -254,7 +255,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/adaptiveTerrainSteering.ts`: bounded per-drive terrain-load compensator using corroborated motor-current and encoder-response asymmetry; stale or unsafe feedback clears its trim
 - `src/control/driveLearningModel.ts`: drive parameter learning and persistence
   - long-drive brake distance learning from final X error with separate forward/reverse values
-  - short-drive brake distances bucketed at the exact short distances from 10cm through 100cm; all longer plateau drives use the long forward/reverse brake distances
+  - short-drive brake distances bucketed at the exact short distances from 10cm through 100cm; large overshoot corrections may exceed the leg length (bounded by the overall training-distance ceiling) and therefore request braking on the first post-start pose update; all longer plateau drives use the long forward/reverse brake distances
   - direction-specific proportional CTE gain and CTE-rate damping adaptation uses convergence and repeated-crossing metrics; one initial convergence crossing is not treated as oscillation
   - qualified mowing strips use a steering-only learning scope, so terrain-dependent line evidence cannot perturb the already-tuned braking or turning models
   - JSON persistence at `config/drive-learning-params.json`
@@ -525,6 +526,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/motors/motorNodeClient.ts`: motor command send + feedback polling over framed I2C protocol.
   - includes motor current sensing data in feedback samples
   - owns the ESP32 command heartbeat through one resettable timer: changed commands replace the latest value and restart the timer, callbacks resend only the current command including neutral and disabled states, and hardware-gateway shutdown explicitly cancels refresh
+  - active, neutral, disabled and heartbeat wheel frames share the single `motor.command` replacement key; neutral/disabled frames use stop priority so an older queued motion target can never execute after a newer stop
 - `src/controller/hidGameController.ts`: HID game controller input adapter and button event source.
 - `external-hardware/manual-tests/controller_inspector.js`: HID controller bring-up inspector; prints connection state, decoded axes/buttons, and raw packet data without depending on the legacy full-system parameter file.
 - `src/control/manualDriveProfile.ts`: manual drive demand shaping (deadband/arc/spin response).
@@ -547,7 +549,7 @@ This document maps problem domains to candidate files removing the need for Code
   - IMU pitch/roll: calculated from accelerometer using atan2 formulas
   - motor command deadband: sub-10% wheel outputs are treated as zero before hardware transmission and zero-timestamp tracking.
   - minimum active motor command: non-zero wheel outputs are raised to at least 30%, and one-wheel motion commands are converted before reaching hardware.
-  - motor API: `setMotorWheelOutputs(...)` sends the desired wheel pair through the normal I2C queue, `stopMotors()` issues a ramped zero-output stop with the drive still enabled so the ESP32 honours the configured deceleration profile, and `emergencyStopMotors()` issues a hard H-bridge disable for the operator stop button / stall detection / watchdog only; unchanged motor commands are suppressed and the ESP32 latches the last accepted command until a newer one arrives
+  - motor API: `setMotorWheelOutputs(...)` publishes the requested state before awaiting I2C and sends the desired wheel pair through the normal queue, so an older async send cannot restore stale non-zero state after a stop; `stopMotors()` issues a ramped zero-output stop with the drive still enabled so the ESP32 honours the configured deceleration profile, and `emergencyStopMotors()` issues a hard H-bridge disable for the operator stop button / stall detection / watchdog only
   - **obstruction detection**: emits `obstructionDetected` events for high motor current, wheel slip, and stall conditions; requests global stop when stall is detected after the startup grace period and a generous motion-observation window shows no meaningful progress; pivot-to-translation and translation-to-pivot command changes restart that observation window
 - `src/sensing/sensorEvents.ts`: type-safe event definitions for sensor controller.
   - `ImuHeadingUpdateEvent`: heading, pitch, roll from IMU
@@ -569,7 +571,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `test/liveI2cTransport.test.js`: transport reopen/retry behavior for recoverable bus faults.
 - `test/bmi160ImuSensor.test.js`: BMI160 initialise/calibration/read conversion tests.
 - `test/sensorController.test.js`: sensor controller loop and state integration tests.
-- `test/motorNodeClient.test.js`: motor command priority, duplicate suppression, active/neutral/disabled latest-command heartbeat, shutdown cancellation, and feedback-frame decode tests.
+- `test/motorNodeClient.test.js`: motor command priority, duplicate suppression, active/neutral/disabled latest-command heartbeat, queued motion-to-neutral replacement, shutdown cancellation, and feedback-frame decode tests.
 - `test/motorMapping.test.js`: motor direction sign mapping tests.
 - `test/manualDriveProfile.test.js`: manual-drive demand shaping tests.
 
@@ -610,7 +612,7 @@ This document maps problem domains to candidate files removing the need for Code
   - API endpoint: `POST /api/mowing/start`, `POST /api/mowing/stop`, `GET /api/mowing/status`, `GET /api/mowing/progress`
 - `src/server/homePage.ts`: expanded dashboard served at `/dashboard`, including navigation to Drive & Paths and a low-satellite warning banner when raw GNSS counts drop below the trusted threshold.
 - `src/server/deadReckoningPage.ts`: focused three-phase dead-reckoning calibration page (GNSS-measured straight, long forward CW arc, long forward CCW arc); presents raw encoder totals, independently derived wheel scales, each arc's converted wheel distances and effective track width, followed by explicit apply controls.
-- `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching; result distances are signed, with reverse-learning legs displayed as negative values.
+- `src/server/driveTuningPage.ts`: simplified drive tuning page with a start-distance input, a single short-distance training action, and a compact results table that polls live status without browser caching; result distances are signed, with reverse-learning legs displayed as negative values, and Status is derived from both execution completion and the configured X/Y acceptance requirements.
 - `src/server/sensorWidgets.js`: **WEB COMPONENT DEFINITIONS** — pure static JS served at `GET /sensor-widgets.js` (cached 1 hour).
   - `<imu-sensor-widget>`: custom element with shadow DOM; attributes: `status`, `error`, `heading-deg`, `pitch-deg`, `roll-deg`, `synced`
   - `<gnss-position-widget>`: custom element with shadow DOM; attributes: `status`, `error`, `heading-deg`, `heading-accuracy-deg`, `x-meters`, `y-meters`, `position-accuracy-meters`, `fix-type`, `satellites`, `synced`

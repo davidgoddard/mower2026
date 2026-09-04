@@ -12,6 +12,7 @@ import {
   DRIVE_LONG_DRIVE_MIN_DISTANCE_METERS,
   DRIVE_LONG_STEERING_HEADING_GAIN_PER_DEG,
   DRIVE_SHORT_BUCKET_DISTANCES_METERS,
+  DRIVE_SHORT_BUCKET_MAX_METERS,
   DRIVE_TARGET_CTE_METERS,
   DRIVE_LEARNING_PARAMETERS_PATH,
 } from "../constants.js";
@@ -226,7 +227,11 @@ export class DriveLearningModel {
       // Negative errorX = stopped short = braked too early = decrease brake distance.
       // Positive errorX = overshot = braked too late = increase brake distance.
       const adjustment = errorXValue * DRIVE_LEARNING_RATE;
-      const newBrake = this.clamp(currentBrake + adjustment, 0, driveDistance);
+      // A severe overshoot can prove that braking must begin as soon as the
+      // first post-command pose arrives. Preserve that evidence instead of
+      // clipping it to the requested leg length; DriveLineController treats a
+      // learned distance at/above the leg length as an immediate brake trigger.
+      const newBrake = this.clamp(currentBrake + adjustment, 0, DRIVE_SHORT_BUCKET_MAX_METERS);
 
       const cteGainBefore = this.getCteGainForDirection(direction);
       this.updateSteeringParameters(direction, maxCteValue, avgCteValue, data.steeringMetrics);
@@ -442,7 +447,7 @@ export class DriveLearningModel {
     const distances = [...DRIVE_SHORT_BUCKET_DISTANCES_METERS];
     const count = distances.length;
     return {
-      version: 7,
+      version: 8,
       longDriveBrakeDistanceForwardMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
       longDriveBrakeDistanceReverseMeters: DRIVE_BRAKE_DISTANCE_DEFAULT_METERS,
       longHeadingBiasForwardPercent: 0,
@@ -486,7 +491,7 @@ export class DriveLearningModel {
     );
 
     return {
-      version: 7,
+      version: 8,
       longDriveBrakeDistanceForwardMeters: this.readNumber(
         (raw as Record<string, unknown>).longDriveBrakeDistanceForwardMeters,
         this.readNumber(
@@ -587,7 +592,7 @@ export class DriveLearningModel {
     defaultFn: (d: number) => number,
   ): number[] {
     if (Array.isArray(value) && value.length === distances.length && value.every((v) => typeof v === "number" && Number.isFinite(v))) {
-      return value.map((v, i) => this.clamp(v, 0, distances[i]));
+      return value.map((v) => this.clamp(v, 0, DRIVE_SHORT_BUCKET_MAX_METERS));
     }
     return distances.map((d) => defaultFn(d));
   }

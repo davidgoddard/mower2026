@@ -1263,6 +1263,46 @@ describe("DriveLineController", () => {
     };
   }
 
+  it("does not accept brake pose updates until the initial motor command is written", async () => {
+    const mockLogger = createMockLogger();
+    const mockSensor = createMockSensorController();
+    const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
+    const mockLearning = createMockLearningModel();
+    let releaseStartCommand;
+    const startCommandGate = new Promise((resolve) => { releaseStartCommand = resolve; });
+    mockSensor.setMotorWheelOutputs = mock.fn(async (left, right) => {
+      if (left !== 0 || right !== 0) await startCommandGate;
+    });
+    const controller = new DriveLineController({
+      sensorController: mockSensor,
+      poseFusion: mockPose,
+      logger: mockLogger,
+      learningModel: mockLearning,
+      sleep: async () => {},
+    });
+
+    const resultPromise = controller.executeLineDrive({
+      targetPosition: createPosition(1, 0),
+      learningEnabled: false,
+    });
+    mockPose.setPose({
+      position: createPosition(1, 0),
+      heading: createInternalHeading(0),
+      quality: "gnss",
+    });
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length, 0);
+
+    releaseStartCommand();
+    await new Promise((resolve) => setImmediate(resolve));
+    mockPose.emit("poseUpdate", mockPose.getCurrentPose());
+    const result = await resultPromise;
+
+    assert.equal(result.status, "success");
+    assert.equal(mockSensor.requestNeutralMotorOutputs.mock.calls.length > 0, true);
+  });
+
   it("runs short distance training forward and reverse with signed drive directions", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
@@ -1436,6 +1476,10 @@ describe("DriveLineController", () => {
     assert.equal(calls[3].x, -DRIVE_SHORT_BUCKET_DISTANCES_METERS[0]);
     assert.equal(calls[4].x, DRIVE_SHORT_BUCKET_DISTANCES_METERS[1]);
     assert.equal(calls[4].driveDirectionSign, 1);
+    assert.equal(results[0].status, "success");
+    assert.equal(results[0].requirementsMet, false);
+    assert.equal(results[1].requirementsMet, true);
+    assert.equal(results[0].targetXErrorMeters, 0.04);
   });
 
   it("stops a line drive when cross-track error exceeds the configured limit", async () => {
@@ -2297,7 +2341,7 @@ describe("DriveLineController", () => {
     assert.equal(results.length, 1);
   });
 
-  it("stops at arrival even when brake distance exceeds the target distance", async () => {
+  it("brakes immediately when learned brake distance exceeds the target distance", async () => {
     const mockLogger = createMockLogger();
     const mockSensor = createMockSensorController();
     const mockPose = createEventDrivenMockPoseFusion(createPosition(0, 0));
@@ -2319,7 +2363,7 @@ describe("DriveLineController", () => {
 
     setTimeout(() => {
       mockPose.setPose({
-        position: createPosition(0.05, 0),
+        position: createPosition(0, 0),
         heading: createInternalHeading(0),
         quality: "gnss",
       });
@@ -2329,6 +2373,7 @@ describe("DriveLineController", () => {
     const result = await resultPromise;
 
     assert.equal(result.status, "success");
+    assert.equal(Number(result.errorX), -0.05);
     assert.equal(mockSensor.stopMotors.mock.calls.length > 0, true);
   });
 });
@@ -2353,7 +2398,7 @@ describe("DriveLearningModel", () => {
     await model.loadParameters();
     const params = model.getParameters();
 
-    assert.equal(params.version, 7);
+    assert.equal(params.version, 8);
     assert.equal(params.longDriveBrakeDistanceForwardMeters, 0.2);
     assert.equal(params.longDriveBrakeDistanceReverseMeters, 0.2);
     assert.equal(params.forwardCteGain, 0.3);
@@ -2386,7 +2431,7 @@ describe("DriveLearningModel", () => {
       const migrated = new DriveLearningModel({ logger: mockLogger, parametersPath });
       await migrated.loadParameters();
       const parameters = migrated.getParameters();
-      assert.equal(parameters.version, 7);
+      assert.equal(parameters.version, 8);
       assert.equal(parameters.forwardCteGain, 1.5);
       assert.equal(parameters.longDriveBrakeDistanceForwardMeters, 0.18);
       assert.equal(parameters.forwardCteDampingGain, 0.1);
@@ -2834,6 +2879,42 @@ describe("DriveLearningModel", () => {
     } finally {
       await rm(dirSmall, { recursive: true, force: true });
       await rm(dirLarge, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a large overshoot correction beyond the short leg length", async () => {
+    const mockLogger = createMockLogger();
+    const dir = await mkdtemp(join(tmpdir(), "mower-drive-learning-large-overshoot-"));
+    const parametersPath = join(dir, "drive-learning.json");
+
+    try {
+      const model = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await model.loadParameters();
+      await model.updateFromDrive({
+        startPosition: createPosition(0, 0),
+        targetPosition: createPosition(0.10, 0),
+        finalPosition: createPosition(0.57, 0),
+        driveDirectionSign: 1,
+        learningDistanceClass: "short",
+        errorX: createMeters(0.47),
+        errorY: createMeters(0),
+        maxCte: createMeters(0.005),
+        avgCte: createMeters(0.002),
+        brakeDistanceUsed: createMeters(0.05),
+      });
+
+      const learned = model.getParameters().shortDriveBuckets
+        ?.find((entry) => entry.bucketDistanceMeters === 0.10);
+      assert.ok(learned);
+      assert.equal(learned.brakeDistancePositiveMeters > 0.10, true);
+
+      const reloaded = new DriveLearningModel({ logger: mockLogger, parametersPath });
+      await reloaded.loadParameters();
+      const persisted = reloaded.getParameters().shortDriveBuckets
+        ?.find((entry) => entry.bucketDistanceMeters === 0.10);
+      assert.equal(persisted?.brakeDistancePositiveMeters, learned.brakeDistancePositiveMeters);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 

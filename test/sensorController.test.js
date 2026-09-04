@@ -1322,6 +1322,51 @@ test('SensorController requires an active motor operation for speed commands and
   });
 });
 
+test('SensorController keeps a newer neutral state when an older motor send completes late', async () => {
+  await withTempDir(async (dir) => {
+    systemStop.clearStop('sensor-command-ordering-test');
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+    let releaseMotion;
+    const pendingMotion = new Promise((resolve) => { releaseMotion = resolve; });
+    const primitivesStore = new PrimitivesStore();
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway: {
+        async initialise() {},
+        async readImu() { return null; },
+        async readGnss() { return null; },
+        async readMotorFeedback() { return null; },
+        async setMotorWheelOutputs(left, right) {
+          if (left !== 0 || right !== 0) await pendingMotion;
+        },
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => 100,
+    });
+
+    const motionCommand = controller.setMotorWheelOutputs(0.8, 0.8);
+    assert.equal(primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent, 0.8);
+    await controller.requestNeutralMotorOutputs();
+    assert.equal(primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent, 0);
+
+    releaseMotion();
+    await motionCommand;
+    assert.equal(primitivesStore.snapshot().motors.commandedLeftWheelOutputPercent, 0);
+    assert.equal(primitivesStore.snapshot().motors.commandedRightWheelOutputPercent, 0);
+    assert.equal(controller.getHeadingRebaseReadiness().motorCommandActive, false);
+
+    await logger.close();
+  });
+});
+
 test('SensorController treats sub-10-percent wheel outputs as a zero command', async () => {
   await withTempDir(async (dir) => {
     const logger = await SessionLogger.create({
