@@ -126,6 +126,12 @@ export function decodeGnssSample(payload: Uint8Array, context?: GnssDecodeContex
     : baselineRaw / BASELINE_SCALE_MM_TO_M;
 
   const sampleAgeMillis = view.getUint16(30, true);
+  // 0xffff is the firmware's explicit "no PVTSLNA sample has ever been
+  // received" sentinel.  It is not a real zero-satellite observation and
+  // must not replace the last successful telemetry shown to the operator.
+  if (sampleAgeMillis === UINT16_SENTINEL) {
+    throw new Error("GNSS receiver sample unavailable");
+  }
   const satellitesInUse = view.getUint8(33);
   const flags = view.getUint8(34);
   const logConfigMask = view.getUint8(35);

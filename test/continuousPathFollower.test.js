@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { createInternalHeading } from "../dist/geometry/headingTypes.js";
 import { createPose } from "../dist/geometry/positionTypes.js";
 import {
-  buildCommittedCornerCaptureTarget,
   capContinuousWheelCommands,
   computeContinuousPathBaseSpeed,
   computeContinuousPathWheelCommands,
@@ -106,7 +105,7 @@ test("continuous follower retains the incoming segment after consuming a transit
   assert.equal(commands[0].left >= 0 && commands[0].right >= 0, true);
 });
 
-test("continuous follower delegates one genuine waypoint corner through the drive controller", async () => {
+test("continuous follower uses the trained line driver to brake exactly at a genuine corner", async () => {
   let pose = createPose(0.86, 0, createInternalHeading(0), "gnss");
   const driveRequests = [];
   const follower = new ContinuousPathFollower({
@@ -114,11 +113,16 @@ test("continuous follower delegates one genuine waypoint corner through the driv
     driveController: {
       executeDrive: async (request) => {
         driveRequests.push(request);
-        pose = createPose(1, 0.4, createInternalHeading(90), "gnss");
+        pose = createPose(1, 0, createInternalHeading(0), "gnss");
         return { status: "success" };
       },
     },
-    turnController: { executeTurn: async () => ({ status: "success" }) },
+    turnController: {
+      executeTurn: async () => {
+        pose = createPose(1, 1, createInternalHeading(90), "gnss");
+        return { status: "success" };
+      },
+    },
     sensorController: {
       beginMotionSession: () => {},
       endMotionSession: () => {},
@@ -145,8 +149,10 @@ test("continuous follower delegates one genuine waypoint corner through the driv
   assert.equal(result.completed, true);
   assert.equal(driveRequests.length, 1);
   assert.equal(driveRequests[0].targetPosition.xMeters, 1);
-  assert.equal(driveRequests[0].targetPosition.yMeters, 0.4);
-  assert.equal(driveRequests[0].alwaysTurnToFaceTarget, true);
+  assert.equal(driveRequests[0].targetPosition.yMeters, 0);
+  assert.equal(driveRequests[0].skipInitialTurn, true);
+  assert.equal(driveRequests[0].cteReferenceStartPosition.xMeters, 0);
+  assert.equal(driveRequests[0].cteReferenceStartPosition.yMeters, 0);
   assert.ok(Math.abs(driveRequests[0].maxCrossTrackErrorMeters - 0.075) < 1e-9);
 });
 
@@ -158,18 +164,17 @@ test("continuous follower does not pass over consecutive nearby corners before c
     driveController: {
       executeDrive: async (request) => {
         driveRequests.push(request);
-        pose = createPose(
-          driveRequests.length === 1
-            ? request.targetPosition.xMeters + 0.05
-            : request.targetPosition.xMeters,
-          request.targetPosition.yMeters,
-          createInternalHeading(driveRequests.length === 1 ? 90 : 0),
-          "gnss",
-        );
+        pose = createPose(request.targetPosition.xMeters, request.targetPosition.yMeters, pose.heading, "gnss");
         return { status: "success" };
       },
     },
-    turnController: { executeTurn: async () => ({ status: "success" }) },
+    turnController: {
+      executeTurn: async () => {
+        if (driveRequests.length === 1) pose = createPose(1, 0, createInternalHeading(90), "gnss");
+        else pose = createPose(1.5, 0.1, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
     sensorController: {
       beginMotionSession: () => {},
       endMotionSession: () => {},
@@ -201,7 +206,7 @@ test("continuous follower does not pass over consecutive nearby corners before c
       request.targetPosition.xMeters,
       request.targetPosition.yMeters,
     ]),
-    [[1, 0.1], [1.4, 0.1]],
+    [[1, 0], [1, 0.1]],
   );
 });
 
@@ -357,16 +362,6 @@ test("continuous follower completes a perimeter near its final target without en
   assert.equal(commands.length, 0);
   assert.equal(events.some(({ message }) => message === "continuous_path.completion_proximity_reached"), true);
   assert.equal(events.some(({ message }) => message === "continuous_path.recovery_align_started"), false);
-});
-
-test("buildCommittedCornerCaptureTarget locks capture to the outgoing edge", () => {
-  const target = buildCommittedCornerCaptureTarget(
-    { xMeters: 1, yMeters: 1, capturedAt: 1 },
-    { xMeters: 1, yMeters: 2, capturedAt: 2 },
-  );
-
-  assert.equal(target.xMeters, 1);
-  assert.equal(target.yMeters, 1.4);
 });
 
 test("capContinuousWheelCommands preserves curvature while limiting the peak wheel output", () => {

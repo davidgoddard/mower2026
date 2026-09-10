@@ -374,7 +374,12 @@ The GNSS response payload should provide planar position and heading primitives,
 
 The application and current GNSS firmware shall use one 40-byte GNSS payload layout. Bytes 36–39 report the GNSS ESP boot identifier, reset-reason code, and coordinate-origin source so the Pi can distinguish a radio/receiver-quality outage from an ESP restart and origin reacquisition.
 
-The application should validate that GNSS responses are of the expected node/message type before accepting the sample.
+The application shall validate exact frame length, protocol version, CRC,
+node/message type, and request/response sequence before accepting a GNSS sample.
+The firmware's `sampleAgeMillis=65535` no-receiver-sample sentinel shall be
+treated as unavailable telemetry rather than as a genuine zero-satellite
+measurement; the last successful satellite count may remain visible only when
+clearly accompanied by stale/error state.
 
 The I2C GNSS request path should be resilient to transient client errors using short retries on the existing shared bus handle before surfacing a read failure. Sustained failures shall be rate-limited as specified for the Sensor Controller, with one recovery event when valid frames resume.
 
@@ -687,7 +692,7 @@ The sequence on first arrival at a boundary is:
 
 1. **Stop short.** The mowing strip or connector brings the mower to within the standoff distance (15 cm) of the boundary, then stops.  The boundary is flagged as not yet traced.
 2. **Align to the boundary tangent.** The mower turns on the spot to face tangentially along the boundary at the nearest recorded boundary point, choosing the direction that will travel around the boundary in the correct orientation (clockwise around obstacles, following the recorded direction for the area perimeter).
-3. **Line-follow the boundary.** The mower switches to the continuous path follower and follows the recorded boundary path.  It continues until it returns to the point at which it joined the boundary — the join point is detected when the mower is within the closed-loop tolerance of that starting point and has travelled enough distance to have genuinely completed a loop.
+3. **Line-follow the boundary.** The mower switches to the continuous path follower and follows the recorded boundary path at the highest configured non-stalling output. For a known sharp corner, it shall hand the remaining incoming leg to the ordinary trained line controller early enough for that controller's learned braking distance to stop at the corner coordinate. It shall then use the trained turn controller to face the outgoing edge before continuous following resumes. It shall not wait until a fixed proximity and then target a fixed distance beyond the corner. The trace continues until it returns to the point at which it joined the boundary — the join point is detected when the mower is within the closed-loop tolerance of that starting point and has travelled enough distance to have genuinely completed a loop.
 4. **Mark boundary as traced.** The boundary is flagged as fully traced for this mowing session.
 5. **Resume strip sequencing.** The mower returns to the strip end at which it first stopped and continues the normal strip-mowing sequence from that point.
 

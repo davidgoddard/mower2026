@@ -276,6 +276,18 @@ Important interpretation:
 - it does **not** explain a rover state where `fixType = none`, `satellites = 0`, and `sampleAgeMillis = 65535`
 - that rover state means the GNSS node is not seeing usable live receiver solution logs such as `PVTSLNA`, regardless of RTK quality
 
+The `sampleAgeMillis=65535` value is an explicit unavailable-data sentinel,
+used both before the first solution and once the last solution is too old.
+Current Pi software rejects that complete sample and retains the last successful
+satellite count with GNSS marked errored; it must never present the paired zero
+byte as a current receiver satellite observation.
+
+The deployed pair must be kept together: flash this sketch and rebuild the Pi
+`dist` tree from the same source revision. The Pi validates the exact 40-byte
+payload/51-byte frame, protocol version, CRC, node/message identifiers, and
+request sequence. A mismatched or stale response fails closed and is retried;
+there is no legacy payload fallback.
+
 Differences from the rover-side bring-up configuration are not automatically faults:
 
 - base `CONFIG RTK TIMEOUT 120` vs rover `600`

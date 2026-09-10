@@ -45,10 +45,14 @@ export function decodeFrame(frame: Uint8Array): EncodedFrame {
   }
 
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const version = view.getUint8(1);
+  if (version !== PROTOCOL_VERSION) {
+    throw new Error(`Unsupported protocol version ${version}, expected ${PROTOCOL_VERSION}`);
+  }
   const payloadLength = view.getUint16(7, true);
   const expectedLength = HEADER_SIZE + payloadLength + CRC_SIZE;
 
-  if (frame.length < expectedLength) {
+  if (frame.length !== expectedLength) {
     throw new Error(`Frame length mismatch: got=${frame.length} expected=${expectedLength} payload=${payloadLength}`);
   }
 
@@ -60,7 +64,7 @@ export function decodeFrame(frame: Uint8Array): EncodedFrame {
 
   return {
     header: {
-      version: view.getUint8(1),
+      version,
       nodeId: view.getUint8(2),
       messageType: view.getUint8(3),
       flags: view.getUint8(4),

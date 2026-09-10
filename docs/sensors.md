@@ -219,6 +219,17 @@ Request/response uses framed messages:
 - Payload bytes
 - CRC16-CCITT (`uint16`, little-endian) over header+payload excluding start byte
 
+The Pi requires an exact frame length, the current protocol version, GNSS node
+and message identifiers, a valid CRC, and a response sequence matching the
+request. A response from an earlier transaction is rejected rather than being
+published as current telemetry.
+
+The 40-byte GNSS sample uses `sampleAgeMillis = 65535` to mean that the rover
+ESP has no fresh, usable `PVTSLNA` receiver sample. This is an unavailable-data
+sentinel, not a real satellite observation. The Pi rejects the entire sample,
+marks GNSS transport/receiver status as errored, and retains the last successful
+position and satellite count for diagnosis.
+
 GNSS sample request:
 
 - `nodeId = 0x10`
