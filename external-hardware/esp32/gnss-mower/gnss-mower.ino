@@ -78,6 +78,11 @@ static const size_t GNSS_DEBUG_PAYLOAD_SIZE = 116;
 //   off 38     : esp_reset_reason_t code
 //   off 39     : origin source (0 none, 1 RTCM1006, 2 dynamic)
 static const size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + GNSS_DEBUG_PAYLOAD_SIZE + FRAME_CRC_SIZE;
+// ESP32 Arduino Wire currently provides a 128-byte slave TX buffer. Keep the
+// largest framed response inside that hard transport limit at compile time.
+static_assert(MAX_FRAME_SIZE <= 128, "GNSS I2C response exceeds Wire buffer");
+static_assert(FRAME_HEADER_SIZE + GNSS_SAMPLE_PAYLOAD_SIZE + FRAME_CRC_SIZE == 51,
+  "GNSS sample frame must remain exactly compatible with the Pi client");
 
 // ===== ESP32 pins =====
 static const uint8_t I2C_SDA_PIN = 21;
@@ -95,6 +100,7 @@ static const uint8_t LED_RTCM_ROUTE_PIN = 23;
 // UM982. The receiver must be provisioned persistently with a matching
 // `CONFIG COM2 460800` so it stays at this rate across power cycles.
 static const uint32_t UM982_UART_BAUD = 460800;
+static const uint32_t RECEIVER_SAMPLE_FRESH_MILLIS = 2000;
 
 HardwareSerial UM982(2);
 
@@ -1898,12 +1904,20 @@ void buildGnssPayload(uint8_t *payloadOut) {
   uint16_t sampleAgeMillis = 0xFFFF;
   if (g_latestPvtsln.valid) {
     uint32_t age = nowMillis - g_latestPvtsln.localMillis;
-    sampleAgeMillis = age > 65535u ? 65535u : static_cast<uint16_t>(age);
+    // Once the receiver solution is too old for control it is unavailable,
+    // not a live no-fix observation. Publish the same explicit sentinel used
+    // before the first PVTSLNA line so the Pi retains last-good telemetry.
+    if (age <= RECEIVER_SAMPLE_FRESH_MILLIS) {
+      sampleAgeMillis = static_cast<uint16_t>(age);
+    }
   }
 
   int32_t xMillimeters = 0;
   int32_t yMillimeters = 0;
-  const bool positionReady = g_latestPvtsln.valid
+  const bool receiverSampleFresh = g_latestPvtsln.valid
+    && sampleAgeMillis != 0xFFFF
+    && sampleAgeMillis <= RECEIVER_SAMPLE_FRESH_MILLIS;
+  const bool positionReady = receiverSampleFresh
     && g_latestPvtsln.fixType != FIX_NONE
     && localXYFromLatLon(
       g_latestPvtsln.latitudeDegrees,
@@ -1981,7 +1995,9 @@ void buildGnssPayload(uint8_t *payloadOut) {
     : static_cast<uint8_t>(FIX_NONE);
 
   // off 33: satellites in use
-  payloadOut[33] = g_latestPvtsln.satellitesInUse;
+  // Zero is an unavailable-data sentinel only when sampleAgeMillis is 0xffff.
+  // The Pi rejects that whole sample and retains the last successful count.
+  payloadOut[33] = receiverSampleFresh ? g_latestPvtsln.satellitesInUse : 0;
 
   // off 34: flags
   uint8_t flags = 0;
@@ -2099,7 +2115,8 @@ void onReceive(int numBytes) {
   uint16_t sequence = 0;
   uint16_t payloadLength = 0;
   const uint8_t *payload = nullptr;
-  if (!decodeFrame(buffer, count, messageType, sequence, payload, payloadLength)) {
+  if (!decodeFrame(buffer, count, messageType, sequence, payload, payloadLength)
+      || payloadLength != 0) {
     return;
   }
 

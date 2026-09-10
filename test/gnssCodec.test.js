@@ -31,6 +31,14 @@ test('decodeGnssSample rejects payloads of the wrong length', () => {
   assert.throws(() => decodeGnssSample(wrong), /Invalid GNSS payload length/);
 });
 
+test('decodeGnssSample rejects the firmware no-receiver-sample sentinel', () => {
+  const { payload, view } = makePayload();
+  view.setUint16(30, 0xffff, true);
+  view.setUint8(32, 0);
+  view.setUint8(33, 0);
+  assert.throws(() => decodeGnssSample(payload), /receiver sample unavailable/);
+});
+
 test('decodeGnssSample rejects implausibly distant local position coordinates', () => {
   const { payload, view } = makePayload();
   view.setInt32(8, 10_001_000, true);  // x = 10 001 m

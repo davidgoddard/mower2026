@@ -49,13 +49,14 @@ export class GnssNodeClient {
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
+        const requestSequence = this.sequence;
         const requestFrame = encodeFrame(
           {
             version: PROTOCOL_VERSION,
             nodeId: NodeId.Gnss,
             messageType: MessageType.GnssSample,
             flags: 0,
-            sequence: this.sequence,
+            sequence: requestSequence,
           },
           new Uint8Array(0),
         );
@@ -72,6 +73,9 @@ export class GnssNodeClient {
         const decoded = decodeFrame(responseFrame);
         if (decoded.header.nodeId !== NodeId.Gnss || decoded.header.messageType !== MessageType.GnssSample) {
           throw new Error("Unexpected GNSS response frame");
+        }
+        if (decoded.header.sequence !== requestSequence) {
+          throw new Error(`Stale GNSS response sequence ${decoded.header.sequence}, expected ${requestSequence}`);
         }
 
         return decodeGnssSample(decoded.payload, { nowMillis: this.nowMillis() });
@@ -91,13 +95,14 @@ export class GnssNodeClient {
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
+        const requestSequence = this.sequence;
         const requestFrame = encodeFrame(
           {
             version: PROTOCOL_VERSION,
             nodeId: NodeId.Gnss,
             messageType: MessageType.GnssDebugLine,
             flags: 0,
-            sequence: this.sequence,
+            sequence: requestSequence,
           },
           new Uint8Array(0),
         );
@@ -114,6 +119,9 @@ export class GnssNodeClient {
         const decoded = decodeFrame(responseFrame);
         if (decoded.header.nodeId !== NodeId.Gnss || decoded.header.messageType !== MessageType.GnssDebugLine) {
           throw new Error("Unexpected GNSS debug response frame");
+        }
+        if (decoded.header.sequence !== requestSequence) {
+          throw new Error(`Stale GNSS debug response sequence ${decoded.header.sequence}, expected ${requestSequence}`);
         }
 
         return decodeGnssDebugLine(decoded.payload);
