@@ -153,6 +153,12 @@ Interpretation:
   - local coordinate origin source and current latitude/longitude/height; production values are `rtcm1006` or `none`
 - `rtcmQueueDrops`
   - ESP-NOW packets dropped because the bounded handoff queue was full
+- `linkProbes` / `linkProbeAgeMs`
+  - count and age of the antenna-independent diagnostic probes broadcast by the paired base firmware
+- `espNowPackets` / `lastEspNowSender`
+  - count every packet delivered to the ESP-NOW receive callback before protocol or sender filtering, and expose the latest over-air source MAC; these remain useful when a packet is later rejected
+- `espNowReady` / `espNowChannel`
+  - whether station mode, power-save disablement, fixed-channel selection, ESP-NOW initialization, and receive-callback registration all succeeded; the active channel must be `1`; broadcast reception deliberately does not require peer registration
 - `bootId` / `resetReason`
   - lifecycle identifiers also sent to the Pi in payload bytes 36–39 so unexpected ESP resets are visible in the session log
 - `uniloglistAgeMs`
@@ -172,6 +178,12 @@ Useful failure patterns:
   output via SSH
 - `rtcmAgeMs=none`
   - rover has not recently received verified RTCM correction messages
+- `linkProbes` increasing while `rtcmAgeMs=none`
+  - the ESP-NOW base-to-mower radio path is healthy, but the base is not sending valid RTCM messages from its receiver
+- `linkProbes=0` with `espNowReady=yes` on channel `1`
+  - the rover radio is initialized correctly but is not hearing the base broadcasts
+- `espNowPackets` increasing but `linkProbes=0`
+  - packets reach the mower radio but do not match the paired base's probe payload; inspect `lastEspNowSender`, unknown-sender count, and rejected-fragment count
 - `rtcmAgeMs` fresh but `origin=none`
   - corrections are arriving, but no verified RTCM 1006 base-position message has been decoded yet; local position remains deliberately unusable
 

@@ -24,7 +24,7 @@
 // - the UM982 is expected to be provisioned already; boot-time configuration is
 //   intentionally passive by default
 // - base and rover must use the same fixed ESP-NOW Wi-Fi channel
-// - this sketch pairs with `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`
+// - this sketch pairs with `external-hardware/esp32/gnss-base-station/gnss-base-station.ino`
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -32,6 +32,13 @@
 #include <esp_wifi.h>
 #include <HardwareSerial.h>
 #include <Wire.h>
+#include <atomic>
+#include <errno.h>
+#include <limits.h>
+
+#if !CONFIG_IDF_TARGET_ESP32
+#error "This firmware targets the original ESP32 WROOM I2C slave hardware"
+#endif
 
 // Second-generation GNSS node for ESP32 + UM982.
 // Responsibilities:
@@ -101,6 +108,14 @@ static const uint8_t LED_RTCM_ROUTE_PIN = 23;
 // `CONFIG COM2 460800` so it stays at this rate across power cycles.
 static const uint32_t UM982_UART_BAUD = 460800;
 static const uint32_t RECEIVER_SAMPLE_FRESH_MILLIS = 2000;
+static const size_t UM982_RX_BUFFER_SIZE = 8192;
+static const size_t UM982_TX_BUFFER_SIZE = 4096;
+static const uint32_t SNAPSHOT_FRESH_MILLIS = 250;
+static std::atomic<uint32_t> g_uartErrors{0};
+static std::atomic<uint32_t> g_i2cWriteErrors{0};
+static uint32_t g_rtcmUartDrops = 0;
+static uint32_t g_receiverChecksumErrors = 0;
+static uint32_t g_receiverLineOverflows = 0;
 
 HardwareSerial UM982(2);
 
@@ -130,7 +145,6 @@ static const bool CONFIGURE_RECEIVER_AT_BOOT = false;
 static const bool VERIFY_EXPECTED_LOGS_AT_BOOT = true;
 
 // ===== RTCM relay =====
-static const size_t RTCM_BUFFER_SIZE = 4096;
 static const uint8_t RTCM_PREAMBLE = 0xD3;
 static const uint8_t RTCM_TRANSPORT_MAGIC_0 = 0x52;
 static const uint8_t RTCM_TRANSPORT_MAGIC_1 = 0x54;
@@ -141,6 +155,7 @@ static const uint8_t RTCM_TRANSPORT_HEADER_SIZE = 15;
 static const uint8_t RTCM_MAX_FRAGMENT_PAYLOAD = 235;
 static const uint16_t RTCM_MAX_MESSAGE_SIZE = 1029;
 static const uint8_t RTCM_MAX_FRAGMENT_COUNT = 5;
+static const uint8_t LINK_PROBE_PAYLOAD[] = { 0x52, 0x50, 0x01, 0x01 }; // "RP", v1, probe
 static const uint8_t RTCM_ASSEMBLY_SLOT_COUNT = 4;
 static const uint8_t RTCM_COMPLETED_CACHE_SIZE = 128;
 static const uint32_t RTCM_FRAGMENT_TIMEOUT_MILLIS = 500;
@@ -149,10 +164,7 @@ static const uint32_t RTCM_ROUTE_FRESH_MILLIS = 3000;
 static const uint8_t ESP_NOW_PACKET_QUEUE_CAPACITY = 16;
 static const uint16_t ESP_NOW_PACKET_MAX_LENGTH = 250;
 
-// A dynamic first-fix origin is useful on a bench but is unsafe for the mower:
-// after an ESP reset it silently creates a different coordinate frame. Keep
-// autonomous position unavailable until a verified RTCM1006 origin returns.
-static const bool ALLOW_DYNAMIC_ORIGIN_FALLBACK = false;
+// Keep autonomous position unavailable until a verified RTCM1006 origin returns.
 
 // TODO: Fill both station-mode MAC addresses before flashing this mower node.
 // Incoming ESP-NOW corrections are deliberately rejected while both are zero.
@@ -166,6 +178,7 @@ enum RtcmPacketSource : uint8_t {
 };
 
 struct PendingEspNowPacket {
+  uint32_t receivedMillis;
   RtcmPacketSource source;
   uint16_t length;
   uint8_t data[ESP_NOW_PACKET_MAX_LENGTH];
@@ -195,19 +208,20 @@ struct CompletedRtcmMessage {
   uint32_t completedMillis;
 };
 
-static uint8_t g_rtcmBuffer[RTCM_BUFFER_SIZE];
-static int g_rtcmIndex = 0;
-static uint16_t g_lastRtcmSequence = 0;
 static uint32_t g_lastRtcmMillis = 0;
 static uint32_t g_lastRtcmLedPulseMillis = 0;
 static uint32_t g_totalRtcmMessagesVerified = 0;
 static uint32_t g_totalRtcmMessagesRejected = 0;
 static uint32_t g_totalRtcmFragmentsAccepted = 0;
-static uint32_t g_totalRtcmFragmentsRejected = 0;
+static std::atomic<uint32_t> g_totalRtcmFragmentsRejected{0};
 static uint32_t g_totalRtcmFragmentsDuplicated = 0;
 static uint32_t g_totalRtcmAssemblyTimeouts = 0;
-static uint32_t g_totalRtcmUnknownSenders = 0;
-static uint32_t g_totalRtcmQueueDrops = 0;
+static std::atomic<uint32_t> g_totalRtcmUnknownSenders{0};
+static std::atomic<uint32_t> g_totalRtcmQueueDrops{0};
+static std::atomic<uint32_t> g_totalEspNowPacketsReceived{0};
+static std::atomic<uint32_t> g_totalLinkProbesReceived{0};
+static std::atomic<uint32_t> g_lastLinkProbeMillis{0};
+static uint8_t g_lastEspNowSenderMac[6] = {};
 static uint32_t g_totalRtcm1006Messages = 0;
 static uint32_t g_lastRtcm1006Millis = 0;
 static RtcmAssembly g_rtcmAssemblies[RTCM_ASSEMBLY_SLOT_COUNT] = {};
@@ -246,6 +260,7 @@ static bool g_positionLedOn = false;
 // ===== Receiver parsing =====
 static char g_lineBuffer[1024];
 static size_t g_lineLength = 0;
+static bool g_discardReceiverLine = false;
 static uint32_t g_lastAnyReceiverLineMillis = 0;
 static uint32_t g_lastDebugPrintMillis = 0;
 static uint32_t g_totalReceiverLineCount = 0;
@@ -257,7 +272,7 @@ static uint32_t g_lastUniloglistMillis = 0;
 static uint32_t g_lastDeviceReadyMillis = 0;
 static uint32_t g_totalDeviceReadyCount = 0;
 static uint8_t g_startupRawLinePrintCount = 0;
-static const uint8_t STARTUP_RAW_LINE_PRINT_LIMIT = 24;
+static const uint8_t STARTUP_RAW_LINE_PRINT_LIMIT = 0;
 static bool g_lowSatelliteTraceLatched = false;
 static uint32_t g_lastLowSatelliteTraceMillis = 0;
 static char g_lastLowSatelliteRawText[GNSS_DEBUG_PAYLOAD_SIZE - 4 + 1] = {0};
@@ -344,7 +359,6 @@ ParsedUniheading g_latestUniheading = { false, false, 0, 0.0f, 0.0f, 0.0f, false
 enum OriginSource : uint8_t {
   ORIGIN_NONE = 0,
   ORIGIN_RTCM1006 = 1,
-  ORIGIN_DYNAMIC = 2,
 };
 
 OriginSource g_originSource = ORIGIN_NONE;
@@ -354,16 +368,34 @@ double g_originHeightMeters = 0.0;
 
 uint8_t g_samplePayloadSnapshot[GNSS_SAMPLE_PAYLOAD_SIZE] = {};
 uint8_t g_debugPayloadSnapshot[GNSS_DEBUG_PAYLOAD_SIZE] = {};
-uint8_t g_txFrames[2][MAX_FRAME_SIZE] = {};
-size_t g_txFrameLengths[2] = { 0, 0 };
-volatile uint8_t g_activeTxFrameIndex = 0;
+uint32_t g_snapshotPublishedMillis = 0;
+uint32_t g_snapshotUtcAgeMillis = UINT32_MAX;
+uint32_t g_snapshotHeadingAgeMillis = UINT32_MAX;
 portMUX_TYPE g_i2cSnapshotMux = portMUX_INITIALIZER_UNLOCKED;
 uint16_t g_bootId = 0;
 uint8_t g_resetReasonCode = 0;
+bool g_espNowReady = false;
+uint8_t g_espNowActualChannel = 0;
 
 void readUm982Lines();
+void processPendingEspNowPackets();
+void refreshPayloadSnapshots();
+void serviceReceiverIO();
+void serviceDelay(uint32_t durationMillis);
 
 // ===== Helpers =====
+void printMac(const uint8_t *address) {
+  for (uint8_t index = 0; index < 6; index += 1) {
+    if (index > 0) {
+      Serial.print(":");
+    }
+    if (address[index] < 0x10) {
+      Serial.print("0");
+    }
+    Serial.print(address[index], HEX);
+  }
+}
+
 uint16_t crc16Ccitt(const uint8_t *data, size_t length) {
   uint16_t crc = 0xFFFF;
   for (size_t index = 0; index < length; index += 1) {
@@ -497,15 +529,46 @@ String payloadAfterSemicolon(const char *line) {
   return String(payloadStart).substring(0, asterisk - payloadStart);
 }
 
+bool validReceiverChecksum(const char *line) {
+  if (line[0] != '#') return false;
+  const char *star = strchr(line, '*');
+  if (star == nullptr || strlen(star + 1) != 8) return false;
+  uint32_t expected = 0;
+  for (const char *p = star + 1; *p; ++p) {
+    uint8_t digit;
+    if (*p >= '0' && *p <= '9') digit = *p - '0';
+    else if (*p >= 'a' && *p <= 'f') digit = *p - 'a' + 10;
+    else if (*p >= 'A' && *p <= 'F') digit = *p - 'A' + 10;
+    else return false;
+    expected = (expected << 4) | digit;
+  }
+  // Unicore N4 manual: exclude '#' and '*'; initial CRC 0, no final XOR.
+  uint32_t crc = 0;
+  for (const char *p = line + 1; p < star; ++p) {
+    crc ^= static_cast<uint8_t>(*p);
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0);
+  }
+  return crc == expected;
+}
+
+bool hasPayloadFields(const String &payload, size_t minimum) {
+  size_t count = payload.length() ? 1 : 0;
+  for (const char *p = payload.c_str(); *p; ++p) if (*p == ',') ++count;
+  return count >= minimum;
+}
+
 bool tryParseInt32Strict(const String &value, int32_t &out) {
   if (value.length() == 0) {
     return false;
   }
   char *end = nullptr;
+  errno = 0;
   const long parsed = strtol(value.c_str(), &end, 10);
-  if (end == value.c_str() || (end != nullptr && *end != '\0')) {
+  if (errno == ERANGE || !isfinite(static_cast<double>(parsed)) || end == value.c_str() || (end != nullptr && *end != '\0')) {
     return false;
   }
+  if (parsed < INT32_MIN || parsed > INT32_MAX) return false;
   out = static_cast<int32_t>(parsed);
   return true;
 }
@@ -515,8 +578,9 @@ bool tryParseFloatStrict(const String &value, float &out) {
     return false;
   }
   char *end = nullptr;
+  errno = 0;
   const float parsed = strtof(value.c_str(), &end);
-  if (end == value.c_str() || (end != nullptr && *end != '\0')) {
+  if (errno == ERANGE || !isfinite(static_cast<double>(parsed)) || end == value.c_str() || (end != nullptr && *end != '\0')) {
     return false;
   }
   out = parsed;
@@ -528,8 +592,9 @@ bool tryParseDoubleStrict(const String &value, double &out) {
     return false;
   }
   char *end = nullptr;
+  errno = 0;
   const double parsed = strtod(value.c_str(), &end);
-  if (end == value.c_str() || (end != nullptr && *end != '\0')) {
+  if (errno == ERANGE || !isfinite(static_cast<double>(parsed)) || end == value.c_str() || (end != nullptr && *end != '\0')) {
     return false;
   }
   out = parsed;
@@ -641,8 +706,6 @@ const char *originSourceLabel() {
   switch (g_originSource) {
     case ORIGIN_RTCM1006:
       return "rtcm1006";
-    case ORIGIN_DYNAMIC:
-      return "dynamic";
     case ORIGIN_NONE:
     default:
       return "none";
@@ -650,125 +713,18 @@ const char *originSourceLabel() {
 }
 
 void printDebugStatus() {
-  const uint32_t nowMillis = millis();
-  if ((nowMillis - g_lastDebugPrintMillis) < 1000u) {
-    return;
-  }
-  g_lastDebugPrintMillis = nowMillis;
-
-  const uint32_t receiverAgeMillis = g_lastAnyReceiverLineMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastAnyReceiverLineMillis;
-  const uint32_t pvtslnaAgeMillis = g_latestPvtsln.valid ? nowMillis - g_latestPvtsln.localMillis : 0xFFFFFFFFu;
-  const uint32_t uniheadingAgeMillis = g_latestUniheading.valid ? nowMillis - g_latestUniheading.localMillis : 0xFFFFFFFFu;
-  const uint32_t rtcmAgeMillis = g_lastRtcmMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastRtcmMillis;
-  const uint32_t rtcm1006AgeMillis = g_lastRtcm1006Millis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastRtcm1006Millis;
-  const uint32_t uniloglistAgeMillis = g_lastUniloglistMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastUniloglistMillis;
-  const uint32_t deviceReadyAgeMillis = g_lastDeviceReadyMillis == 0 ? 0xFFFFFFFFu : nowMillis - g_lastDeviceReadyMillis;
-
-  Serial.print("[GNSS] lines=");
-  Serial.print(g_totalReceiverLineCount);
-  Serial.print(" pvtslna=");
-  Serial.print(g_totalPvtslnaCount);
-  Serial.print(" rectimea=");
-  Serial.print(g_totalRectimeaCount);
-  Serial.print(" uniheadinga=");
-  Serial.print(g_totalUniheadingaCount);
-  Serial.print(" unknown=");
-  Serial.print(g_totalUnknownLineCount);
-  Serial.print(" readyEvents=");
-  Serial.print(g_totalDeviceReadyCount);
-  Serial.print(" logConfig=");
-  Serial.print(logVerificationLabel());
-  Serial.print("(");
-  Serial.print(g_unilogPvtslnaActive ? 1 : 0);
-  Serial.print(g_unilogRectimeaActive ? 1 : 0);
-  Serial.print(g_unilogUniheadingaActive ? 1 : 0);
-  Serial.print(")");
-  Serial.print(" fix=");
-  Serial.print(fixTypeLabel(g_latestPvtsln.fixType));
-  Serial.print(" sats=");
-  Serial.print(g_latestPvtsln.satellitesInUse);
-  Serial.print(" headingValid=");
-  Serial.print(g_latestPvtsln.headingValid ? "yes" : "no");
-  Serial.print(" receiverAgeMs=");
-  if (receiverAgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(receiverAgeMillis);
-  }
-  Serial.print(" pvtslnaAgeMs=");
-  if (pvtslnaAgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(pvtslnaAgeMillis);
-  }
-  Serial.print(" uniheadingAgeMs=");
-  if (uniheadingAgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(uniheadingAgeMillis);
-  }
-  Serial.print(" rtcmAgeMs=");
-  if (rtcmAgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(rtcmAgeMillis);
-  }
-  Serial.print(" rtcmFrags=");
-  Serial.print(g_totalRtcmFragmentsAccepted);
-  Serial.print("/");
-  Serial.print(g_totalRtcmFragmentsRejected);
-  Serial.print("/");
-  Serial.print(g_totalRtcmFragmentsDuplicated);
-  Serial.print("/");
-  Serial.print(g_totalRtcmAssemblyTimeouts);
-  Serial.print(" unknownRtcmSenders=");
-  Serial.print(g_totalRtcmUnknownSenders);
-  Serial.print(" rtcmQueueDrops=");
-  Serial.print(g_totalRtcmQueueDrops);
-  Serial.print(" rtcmRoute=");
-  if (g_lastRtcmRouteSourceMask == (RTCM_SOURCE_DIRECT | RTCM_SOURCE_RELAY)) {
-    Serial.print("mixed");
-  } else if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_RELAY) {
-    Serial.print("relay");
-  } else if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_DIRECT) {
-    Serial.print("direct");
-  } else {
-    Serial.print("none");
-  }
-  Serial.print(" rtcm1006=");
-  Serial.print(g_totalRtcm1006Messages);
-  Serial.print(" rtcm1006AgeMs=");
-  if (rtcm1006AgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(rtcm1006AgeMillis);
-  }
-  Serial.print(" origin=");
-  Serial.print(originSourceLabel());
-  Serial.print("(");
-  Serial.print(g_originLatitudeDegrees, 8);
-  Serial.print(",");
-  Serial.print(g_originLongitudeDegrees, 8);
-  Serial.print(",");
-  Serial.print(g_originHeightMeters, 3);
-  Serial.print(")");
-  Serial.print(" uniloglistAgeMs=");
-  if (uniloglistAgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(uniloglistAgeMillis);
-  }
-  Serial.print(" readyAgeMs=");
-  if (deviceReadyAgeMillis == 0xFFFFFFFFu) {
-    Serial.print("none");
-  } else {
-    Serial.print(deviceReadyAgeMillis);
-  }
-  Serial.print(" bootId=");
-  Serial.print(g_bootId);
-  Serial.print(" resetReason=");
-  Serial.print(g_resetReasonCode);
-  Serial.println();
+  if ((millis() - g_lastDebugPrintMillis) < 10000u) return;
+  g_lastDebugPrintMillis = millis();
+  char status[256];
+  const int length = snprintf(status, sizeof(status),
+    "[GNSS] pvt=%lu rtcm=%lu queueDrop=%lu txDrop=%lu uartError=%lu crcError=%lu lineOverflow=%lu i2cError=%lu probes=%lu\n",
+    (unsigned long)g_totalPvtslnaCount, (unsigned long)g_totalRtcmMessagesVerified,
+    (unsigned long)g_totalRtcmQueueDrops, (unsigned long)g_rtcmUartDrops,
+    (unsigned long)g_uartErrors.load(), (unsigned long)g_receiverChecksumErrors,
+    (unsigned long)g_receiverLineOverflows, (unsigned long)g_i2cWriteErrors.load(),
+    (unsigned long)g_totalLinkProbesReceived);
+  if (length > 0 && length < static_cast<int>(sizeof(status)) && Serial.availableForWrite() >= length)
+    Serial.write(reinterpret_cast<const uint8_t *>(status), length);
 }
 
 void printStartupRawLine(const char *line) {
@@ -821,12 +777,12 @@ bool waitForReceiverReadyEvent(uint32_t timeoutMillis) {
   g_resetReadySeen = false;
 
   while ((millis() - startMillis) < timeoutMillis) {
-    readUm982Lines();
+    serviceReceiverIO();
     if (g_resetReadySeen) {
       g_waitingForResetReady = false;
       return true;
     }
-    delay(10);
+    delay(1);
   }
 
   g_waitingForResetReady = false;
@@ -857,7 +813,7 @@ bool sendCommandAndWait(const char *command, CommandWaitMode waitMode, uint32_t 
 
   const uint32_t startMillis = millis();
   while ((millis() - startMillis) < timeoutMillis) {
-    readUm982Lines();
+    serviceReceiverIO();
     if (g_commandResponseSeen) {
       g_waitingForCommandResponse = false;
       if (!g_commandResponseOk) {
@@ -875,7 +831,7 @@ bool sendCommandAndWait(const char *command, CommandWaitMode waitMode, uint32_t 
       }
       return true;
     }
-    delay(10);
+    delay(1);
   }
 
   g_waitingForCommandResponse = false;
@@ -938,11 +894,11 @@ void flashStartupLeds() {
     digitalWrite(LED_HEADING_PIN, HIGH);
     digitalWrite(LED_POSITION_PIN, HIGH);
     digitalWrite(LED_RTCM_ROUTE_PIN, HIGH);
-    delay(100);
+    serviceDelay(100);
     digitalWrite(LED_HEADING_PIN, LOW);
     digitalWrite(LED_POSITION_PIN, LOW);
     digitalWrite(LED_RTCM_ROUTE_PIN, LOW);
-    delay(100);
+    serviceDelay(100);
   }
 }
 
@@ -995,25 +951,7 @@ void updateIndicatorLeds() {
   updateRtcmRouteLed(nowMillis);
 }
 
-void ensureOriginFromCurrentFix() {
-  if (!ALLOW_DYNAMIC_ORIGIN_FALLBACK) {
-    return;
-  }
-  // Only use the dynamic fallback if RTCM1006 has never arrived. Once a real
-  // base-station origin is established it is never replaced by a dynamic one.
-  if (g_originSource == ORIGIN_RTCM1006 || g_originSource == ORIGIN_DYNAMIC) {
-    return;
-  }
-  if (g_latestPvtsln.valid && g_latestPvtsln.fixType != FIX_NONE) {
-    g_originLatitudeDegrees = g_latestPvtsln.latitudeDegrees;
-    g_originLongitudeDegrees = g_latestPvtsln.longitudeDegrees;
-    g_originHeightMeters = 0.0;
-    g_originSource = ORIGIN_DYNAMIC;
-  }
-}
-
 bool localXYFromLatLon(double latitudeDegrees, double longitudeDegrees, int32_t &xMillimeters, int32_t &yMillimeters) {
-  ensureOriginFromCurrentFix();
 
   if (g_originSource == ORIGIN_NONE) {
     xMillimeters = 0;
@@ -1140,7 +1078,6 @@ bool noteRtcm1006BasePosition(const uint8_t *payload, int payloadLength) {
   bitOffset += 2;
   const int64_t ecefZRaw = readRtcmSignedBits(payload, bitOffset, 38);
   bitOffset += 38;
-  const uint16_t antennaHeightRaw = static_cast<uint16_t>(readRtcmBits(payload, bitOffset, 16));
 
   const double ecefX = static_cast<double>(ecefXRaw) * 0.0001;
   const double ecefY = static_cast<double>(ecefYRaw) * 0.0001;
@@ -1160,17 +1097,6 @@ bool noteRtcm1006BasePosition(const uint8_t *payload, int payloadLength) {
 
   g_totalRtcm1006Messages += 1;
   g_lastRtcm1006Millis = millis();
-
-  Serial.print("[RTCM1006] base=");
-  Serial.print(latitudeDegrees, 10);
-  Serial.print(",");
-  Serial.print(longitudeDegrees, 10);
-  Serial.print(",");
-  Serial.print(heightMeters, 3);
-  Serial.print(" antennaHeight=");
-  Serial.print(static_cast<double>(antennaHeightRaw) * 0.0001, 4);
-  Serial.print(" origin=");
-  Serial.println(originSourceLabel());
 
   return true;
 }
@@ -1316,56 +1242,22 @@ bool handleCompleteRtcmMessage(const uint8_t *message, int totalLength) {
     return false;
   }
 
+  // This task is the only UART writer. Reserve the entire message before
+  // writing so corrections never block receiver RX or become partial frames.
+  if (UM982.availableForWrite() < totalLength) {
+    g_rtcmUartDrops += 1;
+    return false; // Do not cache as completed; a broadcast repeat can recover it.
+  }
+  if (UM982.write(message, totalLength) != static_cast<size_t>(totalLength)) {
+    g_rtcmUartDrops += 1;
+    return false;
+  }
   noteRtcm1006BasePosition(&message[3], payloadLength);
-  UM982.write(message, totalLength);
   g_lastRtcmMillis = millis();
   g_lastRtcmLedPulseMillis = g_lastRtcmMillis;
   g_totalRtcmMessagesVerified += 1;
   digitalWrite(LED_RTCM_PIN, HIGH);
   return true;
-}
-
-void appendLegacyRtcmChunk(const uint8_t *incomingData, int len) {
-  if (len < 3) {
-    return;
-  }
-
-  uint16_t sequenceNumber = static_cast<uint16_t>(incomingData[0]) | (static_cast<uint16_t>(incomingData[1]) << 8);
-  const uint8_t *messageData = incomingData + 2;
-  int messageLength = len - 2;
-
-  if (g_lastRtcmSequence != 0 && sequenceNumber != static_cast<uint16_t>(g_lastRtcmSequence + 1)) {
-    g_rtcmIndex = 0;
-  }
-  g_lastRtcmSequence = sequenceNumber;
-
-  if ((g_rtcmIndex + messageLength) > static_cast<int>(RTCM_BUFFER_SIZE)) {
-    g_rtcmIndex = 0;
-    return;
-  }
-
-  memcpy(g_rtcmBuffer + g_rtcmIndex, messageData, messageLength);
-  g_rtcmIndex += messageLength;
-
-  if (g_rtcmIndex >= 1 && g_rtcmBuffer[0] != RTCM_PREAMBLE) {
-    g_rtcmIndex = 0;
-    g_totalRtcmMessagesRejected += 1;
-    return;
-  }
-
-  if (g_rtcmIndex >= 3) {
-    const int payloadLength = ((g_rtcmBuffer[1] & 0x03) << 8) | g_rtcmBuffer[2];
-    const int totalLength = payloadLength + 6;
-    if (payloadLength < 0 || totalLength > static_cast<int>(RTCM_BUFFER_SIZE)) {
-      g_rtcmIndex = 0;
-      g_totalRtcmMessagesRejected += 1;
-      return;
-    }
-    if (g_rtcmIndex >= totalLength) {
-      handleCompleteRtcmMessage(g_rtcmBuffer, totalLength);
-      g_rtcmIndex = 0;
-    }
-  }
 }
 
 bool isNewRtcmTransportPacket(const uint8_t *incomingData, int len) {
@@ -1504,9 +1396,22 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
     g_totalRtcmFragmentsRejected += 1;
     return;
   }
+
+  g_totalEspNowPacketsReceived += 1;
+  portENTER_CRITICAL(&g_espNowPacketQueueMux);
+  memcpy(g_lastEspNowSenderMac, info->src_addr, sizeof(g_lastEspNowSenderMac));
+  portEXIT_CRITICAL(&g_espNowPacketQueueMux);
+
   const RtcmPacketSource source = classifyRtcmSender(info->src_addr);
   if (source == RTCM_SOURCE_NONE) {
     g_totalRtcmUnknownSenders += 1;
+    return;
+  }
+
+  if (len == static_cast<int>(sizeof(LINK_PROBE_PAYLOAD))
+      && memcmp(incomingData, LINK_PROBE_PAYLOAD, sizeof(LINK_PROBE_PAYLOAD)) == 0) {
+    g_totalLinkProbesReceived += 1;
+    g_lastLinkProbeMillis = millis();
     return;
   }
 
@@ -1520,6 +1425,7 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
     return;
   }
   PendingEspNowPacket &queued = g_espNowPacketQueue[g_espNowPacketQueueTail];
+  queued.receivedMillis = millis();
   queued.source = source;
   queued.length = static_cast<uint16_t>(len);
   memcpy(queued.data, incomingData, static_cast<size_t>(len));
@@ -1535,6 +1441,7 @@ bool dequeueEspNowPacket(PendingEspNowPacket &packetOut) {
   portENTER_CRITICAL(&g_espNowPacketQueueMux);
   if (g_espNowPacketQueueCount > 0) {
     const PendingEspNowPacket &queued = g_espNowPacketQueue[g_espNowPacketQueueHead];
+    packetOut.receivedMillis = queued.receivedMillis;
     packetOut.source = queued.source;
     packetOut.length = queued.length;
     memcpy(packetOut.data, queued.data, queued.length);
@@ -1551,8 +1458,12 @@ bool dequeueEspNowPacket(PendingEspNowPacket &packetOut) {
 void processPendingEspNowPackets() {
   PendingEspNowPacket packet;
   uint8_t processed = 0;
-  while (processed < ESP_NOW_PACKET_QUEUE_CAPACITY && dequeueEspNowPacket(packet)) {
+  while (processed < 4 && dequeueEspNowPacket(packet)) {
     processed += 1;
+    if ((millis() - packet.receivedMillis) > RTCM_FRAGMENT_TIMEOUT_MILLIS) {
+      g_totalRtcmQueueDrops += 1;
+      continue;
+    }
     if (isNewRtcmTransportPacket(packet.data, packet.length)) {
       appendFragmentedRtcmPacket(packet.data, packet.length, packet.source);
       continue;
@@ -1602,7 +1513,7 @@ void resetReceiverConfiguration() {
   } else {
     Serial.println("[GNSS-CONFIG] receiver ready marker timeout");
   }
-  delay(250);
+  serviceDelay(250);
 }
 
 void verifyReceiverLogConfiguration() {
@@ -1680,7 +1591,10 @@ void parsePvtslna(const char *line) {
     tryParseFloatStrict(lonStdField, lonStd) &&
     tryParseInt32Strict(solnSatsField, satellitesInUse);
 
-  if (!hasCoreNumbers || satellitesInUse < 0 || satellitesInUse > 80) {
+  if (!hasPayloadFields(payload, 34) || !hasCoreNumbers
+      || latitudeDegrees < -90 || latitudeDegrees > 90
+      || longitudeDegrees < -180 || longitudeDegrees > 180
+      || latStd < 0 || lonStd < 0 || satellitesInUse < 0 || satellitesInUse > 80) {
     return;
   }
 
@@ -1694,20 +1608,23 @@ void parsePvtslna(const char *line) {
   g_latestPvtsln.positionAccuracyMeters = conservativeHorizontalAccuracy(latStd, lonStd);
   g_latestPvtsln.satellitesInUse = static_cast<uint8_t>(satellitesInUse);
 
-  g_latestPvtsln.groundSpeedValid = tryParseFloatStrict(groundSpeedField, groundSpeedMetersPerSecond);
+  g_latestPvtsln.groundSpeedValid = tryParseFloatStrict(groundSpeedField, groundSpeedMetersPerSecond)
+    && groundSpeedMetersPerSecond >= 0 && groundSpeedMetersPerSecond < 65.535f;
   g_latestPvtsln.groundSpeedMetersPerSecond = g_latestPvtsln.groundSpeedValid ? groundSpeedMetersPerSecond : 0.0f;
 
   g_latestPvtsln.headingValid = isHeadingTypeUsable(headingTypeField);
-  const bool headingParsed = tryParseFloatStrict(headingField, headingDegrees);
+  const bool headingParsed = tryParseFloatStrict(headingField, headingDegrees)
+    && headingDegrees >= 0 && headingDegrees < 360;
   g_latestPvtsln.headingValid = g_latestPvtsln.headingValid && headingParsed;
   g_latestPvtsln.headingDegrees = headingParsed ? headingDegrees : 0.0f;
 
-  g_latestPvtsln.pitchValid = tryParseFloatStrict(pitchField, g_latestPvtsln.pitchDegrees);
+  g_latestPvtsln.pitchValid = tryParseFloatStrict(pitchField, g_latestPvtsln.pitchDegrees)
+    && fabsf(g_latestPvtsln.pitchDegrees) <= 90;
   if (!g_latestPvtsln.pitchValid) {
     g_latestPvtsln.pitchDegrees = 0.0f;
   }
 
-  if (g_latestUniheading.valid && g_latestUniheading.headingStdDevValid && (millis() - g_latestUniheading.localMillis) < 1000) {
+  if (g_latestUniheading.valid && g_latestUniheading.headingValid && g_latestUniheading.headingStdDevValid && (millis() - g_latestUniheading.localMillis) < 1000) {
     g_latestPvtsln.headingAccuracyDegrees = g_latestUniheading.headingStdDevDegrees;
     g_latestPvtsln.headingAccuracyValid = true;
   } else {
@@ -1768,25 +1685,23 @@ void parseRectimea(const char *line) {
   String utcMs       = fieldAt(payload.c_str(), 9);
   String utcStatus   = fieldAt(payload.c_str(), 10);
 
+  g_latestRectime = {};
+  int32_t year, month, day, hour, minute, msOfMinute;
+  if (!hasPayloadFields(payload, 11)
+      || !tryParseInt32Strict(utcYear, year) || !tryParseInt32Strict(utcMonth, month)
+      || !tryParseInt32Strict(utcDay, day) || !tryParseInt32Strict(utcHour, hour)
+      || !tryParseInt32Strict(utcMin, minute) || !tryParseInt32Strict(utcMs, msOfMinute)
+      || year < 2000 || year >= 2100 || month < 1 || month > 12
+      || day < 1 || hour < 0 || hour > 23 || minute < 0 || minute > 59
+      || msOfMinute < 0 || msOfMinute >= 60000) return;
+  const uint8_t monthDays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  if (day > monthDays[month - 1] + (month == 2 && leap ? 1 : 0)) return;
   g_latestRectime.valid = true;
   g_latestRectime.localMillis = millis();
-  const bool utcStatusUsable = (clockStatus == "VALID")
-                            && (utcStatus == "VALID" || utcStatus == "WARNING");
-  g_latestRectime.utcValid = utcStatusUsable;
-
-  if (utcStatusUsable && utcYear.length() > 0 && utcMonth.length() > 0 && utcDay.length() > 0) {
-    int year   = utcYear.toInt();
-    int month  = utcMonth.toInt();
-    int day    = utcDay.toInt();
-    int hour   = utcHour.toInt();
-    int minute = utcMin.toInt();
-    long msOfMinute = utcMs.toInt();
-    int second = static_cast<int>((msOfMinute / 1000) % 60);
-    int millisOfSec = static_cast<int>(msOfMinute % 1000);
-    if (year >= 2000 && year < 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      g_latestRectime.utcEpochMillis = utcToEpochMillis(year, month, day, hour, minute, second, millisOfSec);
-    }
-  }
+  g_latestRectime.utcValid = clockStatus == "VALID" && (utcStatus == "VALID" || utcStatus == "WARNING");
+  if (g_latestRectime.utcValid)
+    g_latestRectime.utcEpochMillis = utcToEpochMillis(year, month, day, hour, minute, msOfMinute / 1000, msOfMinute % 1000);
 }
 
 void parseUniheadinga(const char *line) {
@@ -1811,15 +1726,21 @@ void parseUniheadinga(const char *line) {
   String pitchField     = fieldAt(payload.c_str(), 4);
   String headingStdField = fieldAt(payload.c_str(), 6);
 
+  g_latestUniheading = {};
+  if (!hasPayloadFields(payload, 17)) return;
   g_latestUniheading.valid = true;
   g_latestUniheading.localMillis = millis();
-  g_latestUniheading.headingValid = (solStat != "INSUFFICIENT_OBS" && posType != "NONE");
-  g_latestUniheading.headingDegrees = headingField.toFloat();
-  g_latestUniheading.pitchDegrees = pitchField.toFloat();
-  g_latestUniheading.headingStdDevDegrees = headingStdField.toFloat();
-  g_latestUniheading.headingStdDevValid = headingStdField.length() > 0 && g_latestUniheading.headingStdDevDegrees > 0.0f;
-  g_latestUniheading.baselineLengthMeters = baselineField.toFloat();
-  g_latestUniheading.baselineLengthValid = baselineField.length() > 0 && g_latestUniheading.baselineLengthMeters > 0.0f;
+  g_latestUniheading.headingValid = solStat == "SOL_COMPUTED" && isHeadingTypeUsable(posType)
+    && tryParseFloatStrict(headingField, g_latestUniheading.headingDegrees)
+    && g_latestUniheading.headingDegrees >= 0 && g_latestUniheading.headingDegrees < 360
+    && tryParseFloatStrict(pitchField, g_latestUniheading.pitchDegrees)
+    && fabsf(g_latestUniheading.pitchDegrees) <= 90;
+  g_latestUniheading.headingStdDevValid = g_latestUniheading.headingValid
+    && tryParseFloatStrict(headingStdField, g_latestUniheading.headingStdDevDegrees)
+    && g_latestUniheading.headingStdDevDegrees > 0 && g_latestUniheading.headingStdDevDegrees <= 180;
+  g_latestUniheading.baselineLengthValid = g_latestUniheading.headingValid
+    && tryParseFloatStrict(baselineField, g_latestUniheading.baselineLengthMeters)
+    && g_latestUniheading.baselineLengthMeters > 0 && g_latestUniheading.baselineLengthMeters < 65.535f;
 }
 
 void parseUniloglistHeader() {
@@ -1844,6 +1765,12 @@ void parseUniloglistEntry(const char *line) {
 }
 
 void handleUm982Line(const char *line) {
+  if ((strncmp(line, "#PVTSLNA,", 9) == 0 || strncmp(line, "#RECTIMEA,", 10) == 0
+      || strncmp(line, "#UNIHEADINGA,", 13) == 0) && !validReceiverChecksum(line)) {
+    g_receiverChecksumErrors += 1;
+    return;
+  }
+
   g_totalReceiverLineCount += 1;
   g_lastAnyReceiverLineMillis = millis();
   printStartupRawLine(line);
@@ -1853,11 +1780,11 @@ void handleUm982Line(const char *line) {
   if (strncmp(line, "$command,", 9) == 0) {
     noteCommandResponse(line);
   }
-  if (strncmp(line, "#PVTSLNA", 8) == 0) {
+  if (strncmp(line, "#PVTSLNA,", 9) == 0) {
     parsePvtslna(line);
-  } else if (strncmp(line, "#RECTIMEA", 9) == 0) {
+  } else if (strncmp(line, "#RECTIMEA,", 10) == 0) {
     parseRectimea(line);
-  } else if (strncmp(line, "#UNIHEADINGA", 12) == 0) {
+  } else if (strncmp(line, "#UNIHEADINGA,", 13) == 0) {
     parseUniheadinga(line);
   } else if (strncmp(line, "#UNILOGLIST", 11) == 0) {
     parseUniloglistHeader();
@@ -1873,8 +1800,19 @@ void handleUm982Line(const char *line) {
 }
 
 void readUm982Lines() {
-  while (UM982.available() > 0) {
+  static uint32_t observedUartErrors = 0;
+  const uint32_t errors = g_uartErrors.load();
+  if (errors != observedUartErrors) {
+    observedUartErrors = errors;
+    g_lineLength = 0;
+    g_discardReceiverLine = true;
+  }
+  for (size_t count = 0; count < 2048 && UM982.available() > 0; ++count) {
     char c = static_cast<char>(UM982.read());
+    if (g_discardReceiverLine) {
+      if (c == '\n') g_discardReceiverLine = false;
+      continue;
+    }
     if (c == '\r') {
       continue;
     }
@@ -1890,6 +1828,8 @@ void readUm982Lines() {
       g_lineBuffer[g_lineLength++] = c;
     } else {
       g_lineLength = 0;
+      g_discardReceiverLine = true;
+      g_receiverLineOverflows += 1;
     }
   }
 }
@@ -1929,7 +1869,11 @@ void buildGnssPayload(uint8_t *payloadOut) {
   // off 0..7: UTC fix time in Unix epoch ms.  When UTC is not yet valid the
   // field is zero and the Pi will use its own decode-time wallclock.
   uint64_t utcEpochMillis = 0;
-  if (g_latestRectime.valid && g_latestRectime.utcValid && g_latestRectime.utcEpochMillis != 0) {
+  const bool utcFresh = g_latestRectime.valid && g_latestRectime.utcValid
+    && (nowMillis - g_latestRectime.localMillis) < RECEIVER_SAMPLE_FRESH_MILLIS;
+  const bool auxiliaryHeadingFresh = g_latestUniheading.valid
+    && (nowMillis - g_latestUniheading.localMillis) < RECEIVER_SAMPLE_FRESH_MILLIS;
+  if (utcFresh && g_latestRectime.utcEpochMillis != 0) {
     // Project the receiver-clock UTC forward by the elapsed time since the
     // RECTIMEA line was parsed so the timestamp is "now" not "last RECTIMEA".
     uint32_t elapsed = nowMillis - g_latestRectime.localMillis;
@@ -1942,21 +1886,21 @@ void buildGnssPayload(uint8_t *payloadOut) {
   writeI32LE(&payloadOut[12], yMillimeters);
 
   // off 16..19: heading deg x 100 as int32 (sentinel 0x7FFFFFFF)
-  if (g_latestPvtsln.headingValid) {
+  if (receiverSampleFresh && g_latestPvtsln.headingValid) {
     writeI32LE(&payloadOut[16], static_cast<int32_t>(g_latestPvtsln.headingDegrees * 100.0f));
   } else {
     writeI32LE(&payloadOut[16], 0x7FFFFFFF);
   }
 
   // off 20..21: pitch deg x 100 as int16 (sentinel 0x7FFF)
-  if (g_latestPvtsln.pitchValid) {
+  if (receiverSampleFresh && g_latestPvtsln.pitchValid) {
     writeI16LE(&payloadOut[20], static_cast<int16_t>(g_latestPvtsln.pitchDegrees * 100.0f));
   } else {
     writeI16LE(&payloadOut[20], 0x7FFF);
   }
 
   // off 22..23: ground speed mm/s
-  if (g_latestPvtsln.groundSpeedValid) {
+  if (receiverSampleFresh && g_latestPvtsln.groundSpeedValid) {
     writeU16LE(&payloadOut[22], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.groundSpeedMetersPerSecond) * 1000.0f));
   } else {
     writeU16LE(&payloadOut[22], 0xFFFF);
@@ -1973,14 +1917,14 @@ void buildGnssPayload(uint8_t *payloadOut) {
   );
 
   // off 26..27: heading accuracy centideg
-  if (g_latestPvtsln.headingAccuracyValid) {
+  if (receiverSampleFresh && g_latestPvtsln.headingAccuracyValid) {
     writeU16LE(&payloadOut[26], static_cast<uint16_t>(max(0.0f, g_latestPvtsln.headingAccuracyDegrees) * 100.0f));
   } else {
     writeU16LE(&payloadOut[26], 0xFFFF);
   }
 
   // off 28..29: heading baseline length mm (from UNIHEADINGA when fresh)
-  if (g_latestUniheading.valid && g_latestUniheading.baselineLengthValid && (nowMillis - g_latestUniheading.localMillis) < 2000) {
+  if (auxiliaryHeadingFresh && g_latestUniheading.baselineLengthValid) {
     writeU16LE(&payloadOut[28], static_cast<uint16_t>(max(0.0f, g_latestUniheading.baselineLengthMeters) * 1000.0f));
   } else {
     writeU16LE(&payloadOut[28], 0xFFFF);
@@ -2001,9 +1945,9 @@ void buildGnssPayload(uint8_t *payloadOut) {
 
   // off 34: flags
   uint8_t flags = 0;
-  if (g_latestRectime.valid && g_latestRectime.utcValid) flags |= 0x01;
-  if (g_latestUniheading.valid && g_latestUniheading.headingValid) flags |= 0x02;
-  if (g_latestUniheading.valid && g_latestUniheading.baselineLengthValid) flags |= 0x04;
+  if (utcFresh) flags |= 0x01;
+  if (receiverSampleFresh && g_latestPvtsln.headingValid && auxiliaryHeadingFresh && g_latestUniheading.headingValid) flags |= 0x02;
+  if (auxiliaryHeadingFresh && g_latestUniheading.baselineLengthValid) flags |= 0x04;
   payloadOut[34] = flags;
 
   // off 35: log config mask
@@ -2041,6 +1985,7 @@ void buildGnssDebugPayload(uint8_t *payloadOut) {
 }
 
 void refreshPayloadSnapshots() {
+  const uint32_t publishedMillis = millis();
   uint8_t samplePayload[GNSS_SAMPLE_PAYLOAD_SIZE];
   uint8_t debugPayload[GNSS_DEBUG_PAYLOAD_SIZE];
   buildGnssPayload(samplePayload);
@@ -2052,14 +1997,21 @@ void refreshPayloadSnapshots() {
   portENTER_CRITICAL(&g_i2cSnapshotMux);
   memcpy(g_samplePayloadSnapshot, samplePayload, GNSS_SAMPLE_PAYLOAD_SIZE);
   memcpy(g_debugPayloadSnapshot, debugPayload, GNSS_DEBUG_PAYLOAD_SIZE);
+  g_snapshotPublishedMillis = publishedMillis;
+  g_snapshotUtcAgeMillis = g_latestRectime.valid ? publishedMillis - g_latestRectime.localMillis : UINT32_MAX;
+  g_snapshotHeadingAgeMillis = g_latestUniheading.valid ? publishedMillis - g_latestUniheading.localMillis : UINT32_MAX;
   portEXIT_CRITICAL(&g_i2cSnapshotMux);
 }
 
 void prepareTxFrame(uint8_t messageType, uint16_t sequence) {
   uint8_t payload[GNSS_DEBUG_PAYLOAD_SIZE];
   uint16_t payloadLength = GNSS_SAMPLE_PAYLOAD_SIZE;
+  uint32_t publishedMillis, utcAge, headingAge;
 
   portENTER_CRITICAL(&g_i2cSnapshotMux);
+  publishedMillis = g_snapshotPublishedMillis;
+  utcAge = g_snapshotUtcAgeMillis;
+  headingAge = g_snapshotHeadingAgeMillis;
   if (messageType == MESSAGE_TYPE_GNSS_DEBUG_LINE) {
     payloadLength = GNSS_DEBUG_PAYLOAD_SIZE;
     memcpy(payload, g_debugPayloadSnapshot, payloadLength);
@@ -2068,6 +2020,34 @@ void prepareTxFrame(uint8_t messageType, uint16_t sequence) {
   }
   portEXIT_CRITICAL(&g_i2cSnapshotMux);
 
+  const uint32_t elapsed = millis() - publishedMillis;
+  if (messageType == MESSAGE_TYPE_GNSS_SAMPLE) {
+    const uint32_t age = readU16LE(&payload[30]);
+    if (elapsed > SNAPSHOT_FRESH_MILLIS || age == 0xFFFF
+        || static_cast<uint64_t>(age) + elapsed > RECEIVER_SAMPLE_FRESH_MILLIS) {
+      writeU16LE(&payload[30], 0xFFFF);
+      payload[32] = FIX_NONE;
+      payload[33] = 0;
+      writeI32LE(&payload[16], INT32_MAX);
+      writeI16LE(&payload[20], INT16_MAX);
+      writeU16LE(&payload[22], 0xFFFF);
+      writeU16LE(&payload[24], 65000);
+      writeU16LE(&payload[26], 0xFFFF);
+      payload[34] &= ~0x02;
+    } else {
+      writeU16LE(&payload[30], age + elapsed);
+    }
+    if (elapsed > SNAPSHOT_FRESH_MILLIS || static_cast<uint64_t>(utcAge) + elapsed >= RECEIVER_SAMPLE_FRESH_MILLIS) {
+      payload[34] &= ~0x01;
+      writeU64LE(&payload[0], 0);
+    }
+    if (elapsed > SNAPSHOT_FRESH_MILLIS || static_cast<uint64_t>(headingAge) + elapsed >= RECEIVER_SAMPLE_FRESH_MILLIS) {
+      payload[34] &= ~0x06;
+      writeU16LE(&payload[28], 0xFFFF);
+    }
+  } else if (elapsed > SNAPSHOT_FRESH_MILLIS) {
+    memset(payload, 0, payloadLength);
+  }
   uint8_t flags = 0;
   if (messageType == MESSAGE_TYPE_GNSS_SAMPLE) {
     if (payload[32] == static_cast<uint8_t>(FIX_NONE)) {
@@ -2088,12 +2068,11 @@ void prepareTxFrame(uint8_t messageType, uint16_t sequence) {
     frame
   );
 
-  portENTER_CRITICAL(&g_i2cSnapshotMux);
-  const uint8_t inactiveIndex = static_cast<uint8_t>(1u - g_activeTxFrameIndex);
-  memcpy(g_txFrames[inactiveIndex], frame, frameLength);
-  g_txFrameLengths[inactiveIndex] = frameLength;
-  g_activeTxFrameIndex = inactiveIndex;
-  portEXIT_CRITICAL(&g_i2cSnapshotMux);
+  // Original ESP32 invokes onRequest after the read has completed. Preload
+  // the FIFO/driver queue here, during the preceding STOP-separated request.
+  // Only the I2C task calls this after startup; never preload from loop().
+  if (Wire.slaveWrite(frame, frameLength) != frameLength)
+    g_i2cWriteErrors.fetch_add(1);
 }
 
 // ===== I2C =====
@@ -2125,34 +2104,74 @@ void onReceive(int numBytes) {
   }
 }
 
-void onRequest() {
-  uint8_t frame[MAX_FRAME_SIZE];
-  size_t frameLength = 0;
-  portENTER_CRITICAL(&g_i2cSnapshotMux);
-  const uint8_t activeIndex = g_activeTxFrameIndex;
-  frameLength = g_txFrameLengths[activeIndex];
-  memcpy(frame, g_txFrames[activeIndex], frameLength);
-  portEXIT_CRITICAL(&g_i2cSnapshotMux);
-
-  if (frameLength > 0) {
-    Wire.write(frame, frameLength);
-  }
-}
-
 // ===== Setup / loop =====
 void setupEspNow() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_channel(RTCM_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-  if (esp_now_init() != ESP_OK) {
+  const bool stationModeReady = WiFi.mode(WIFI_STA);
+  const bool sleepDisabled = WiFi.setSleep(false);
+  const esp_err_t powerSaveResult = esp_wifi_set_ps(WIFI_PS_NONE);
+  const esp_err_t channelResult = esp_wifi_set_channel(RTCM_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  wifi_second_chan_t secondaryChannel = WIFI_SECOND_CHAN_NONE;
+  const esp_err_t readChannelResult = esp_wifi_get_channel(&g_espNowActualChannel, &secondaryChannel);
+
+  Serial.print("[GNSS-ESPNOW] stationMode=");
+  Serial.print(stationModeReady ? "ok" : "failed");
+  Serial.print(" sleepDisabled=");
+  Serial.print(sleepDisabled ? "yes" : "no");
+  Serial.print(" powerSaveResult=");
+  Serial.print(static_cast<int>(powerSaveResult));
+  Serial.print(" channelSetResult=");
+  Serial.print(static_cast<int>(channelResult));
+  Serial.print(" channelReadResult=");
+  Serial.print(static_cast<int>(readChannelResult));
+  Serial.print(" configuredChannel=");
+  Serial.print(RTCM_WIFI_CHANNEL);
+  Serial.print(" actualChannel=");
+  Serial.println(g_espNowActualChannel);
+
+  uint8_t stationMac[6] = {};
+  const esp_err_t macResult = esp_wifi_get_mac(WIFI_IF_STA, stationMac);
+  Serial.print("[GNSS-ESPNOW] stationMacResult=");
+  Serial.print(static_cast<int>(macResult));
+  Serial.print(" stationMac=");
+  printMac(stationMac);
+  Serial.println();
+
+  const esp_err_t initResult = esp_now_init();
+  Serial.print("[GNSS-ESPNOW] initResult=");
+  Serial.println(static_cast<int>(initResult));
+  if (initResult != ESP_OK) {
     return;
   }
-  esp_now_register_recv_cb(onEspNowDataReceived);
+
+  const esp_err_t callbackResult = esp_now_register_recv_cb(onEspNowDataReceived);
+  Serial.print("[GNSS-ESPNOW] receiveCallbackResult=");
+  Serial.println(static_cast<int>(callbackResult));
+  if (callbackResult != ESP_OK) {
+    return;
+  }
+
+  g_espNowReady = stationModeReady
+    && sleepDisabled
+    && powerSaveResult == ESP_OK
+    && channelResult == ESP_OK
+    && readChannelResult == ESP_OK
+    && g_espNowActualChannel == RTCM_WIFI_CHANNEL
+    && macResult == ESP_OK;
+  Serial.print("[GNSS-ESPNOW] ready=");
+  Serial.println(g_espNowReady ? "yes" : "no");
 }
 
 void setup() {
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
+  if (UM982.setRxBufferSize(UM982_RX_BUFFER_SIZE) != UM982_RX_BUFFER_SIZE
+      || UM982.setTxBufferSize(UM982_TX_BUFFER_SIZE) != UM982_TX_BUFFER_SIZE) {
+    Serial.println("[GNSS] UART buffer allocation failed");
+    ESP.restart();
+    return;
+  }
+  UM982.onReceiveError([](hardwareSerial_error_t) { g_uartErrors.fetch_add(1); });
   UM982.begin(UM982_UART_BAUD, SERIAL_8N1, UM982_RX_PIN, UM982_TX_PIN);
   g_bootId = static_cast<uint16_t>(esp_random() & 0xFFFFu);
   if (g_bootId == 0) {
@@ -2173,23 +2192,45 @@ void setup() {
   // checks. The Pi can then distinguish an initializing node (FIX_NONE) from
   // an absent device throughout the several-second startup path.
   refreshPayloadSnapshots();
+  if (Wire.setBufferSize(128) != 128) {
+    Serial.println("[GNSS] I2C buffer allocation failed");
+    ESP.restart();
+    return;
+  }
+  Wire.setTimeOut(1);
+  if (!Wire.begin(I2C_SLAVE_ADDRESS, I2C_SDA_PIN, I2C_SCL_PIN, 400000)) {
+    Serial.println("[GNSS] I2C initialization failed");
+    ESP.restart();
+    return;
+  }
   prepareTxFrame(MESSAGE_TYPE_GNSS_SAMPLE, 0);
-  Wire.begin(I2C_SLAVE_ADDRESS, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
   Wire.onReceive(onReceive);
-  Wire.onRequest(onRequest);
 
-  flashStartupLeds();
   setupEspNow();
-  delay(200);
+  flashStartupLeds();
+  serviceDelay(200);
   sendReceiverConfiguration();
   refreshPayloadSnapshots();
 }
 
-void loop() {
+void serviceReceiverIO() {
+  readUm982Lines();
   processPendingEspNowPackets();
   readUm982Lines();
   refreshPayloadSnapshots();
+}
+
+void serviceDelay(uint32_t durationMillis) {
+  const uint32_t start = millis();
+  while ((millis() - start) < durationMillis) {
+    serviceReceiverIO();
+    delay(1);
+  }
+}
+
+void loop() {
+  serviceReceiverIO();
   updateIndicatorLeds();
   printDebugStatus();
-  delay(5);
+  delay(1);
 }

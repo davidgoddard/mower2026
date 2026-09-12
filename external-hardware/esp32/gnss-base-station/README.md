@@ -4,7 +4,7 @@ This sketch reads RTCM3 messages from a UM980 base receiver on `Serial2` and for
 
 ## File
 
-- `external-hardware/esp32/gnss-base-station-v1/gnss-base-station-v1.ino`
+- `external-hardware/esp32/gnss-base-station/gnss-base-station.ino`
 
 ## Defaults
 
@@ -35,3 +35,25 @@ This sketch is paired with:
 
 The rover sketch accepts this fragmented transport and uses its message identity
 to suppress duplicate direct and relayed packets.
+
+## Radio-link diagnostics
+
+The base prints its Wi-Fi mode, configured and actual channel, ESP-NOW
+initialization, callback-registration, and peer-registration results at startup.
+ESP-IDF success is numeric result `0`; `espNowReady=yes` confirms that all
+required initialization calls succeeded.
+
+The base also sends a four-byte link probe once per second, independently of
+UM980 or antenna availability. This packet is deliberately not RTCM. The
+current mower firmware recognizes the configured base as its sender and reports
+the probe through `linkProbes` and `linkProbeAgeMs`, but cannot forward it to the
+UM982 or use it as a coordinate origin. An increasing mower `linkProbes` count
+proves that the base-to-mower ESP-NOW radio route works. Valid RTCM subsequently
+increases the first `rtcmFrags` number and pulses the mower's RTCM activity LED.
+
+Base status output is enabled and includes `sendCallbacks=succeeded/failed`,
+`probes=sent/dropped`, and `espNowReady=yes|no`. A probe is counted as sent only
+when the asynchronous ESP-NOW callback reports `ESP_NOW_SEND_SUCCESS`; the
+immediate `esp_now_send()` queueing result alone is not treated as delivery.
+Disable `ENABLE_LINK_PROBE` after radio-path diagnosis if the extra diagnostic
+packet is no longer wanted.

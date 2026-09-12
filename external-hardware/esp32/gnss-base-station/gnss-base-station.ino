@@ -11,11 +11,11 @@
 // - validates RTCM framing and CRC before any radio transmission
 // - fragments each RTCM frame into ESP-NOW packets with message metadata
 // - sends fragments on a fixed Wi-Fi channel with power save disabled
-// - prefers configured unicast rover peers; falls back to broadcast when enabled
+// - broadcasts twice with stable fragment identities for direct/relay deduplication
 // - pairs with `external-hardware/esp32/gnss-mower/gnss-mower.ino`
 //
 // Notes:
-// - set `ROVER_PEERS` and `ROVER_PEER_COUNT` for best field reliability
+// - broadcast delivery is not acknowledged by the mower; send counts are local only
 // - keep base and rover on the same fixed ESP-NOW Wi-Fi channel
 // - this sketch does not configure the UM980; it assumes the base receiver is
 //   already provisioned and streaming the required RTCM output
@@ -24,9 +24,14 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <HardwareSerial.h>
+#include <atomic>
 
-static const bool DEBUG_OUTPUT = false;
-static const uint32_t STATUS_PRINT_INTERVAL_MILLIS = 1000;
+static const bool DEBUG_OUTPUT = true;
+static const uint32_t STATUS_PRINT_INTERVAL_MILLIS = 10000;
+// Diagnostic probes are consumed only by the configured base/relay receivers.
+static const bool ENABLE_LINK_PROBE = true;
+static const uint32_t LINK_PROBE_INTERVAL_MILLIS = 1000;
+static const uint8_t LINK_PROBE_PAYLOAD[] = { 0x52, 0x50, 0x01, 0x01 }; // "RP", v1, probe
 static const uint8_t UM980_RX_PIN = 16;
 static const uint8_t UM980_TX_PIN = 17;
 static const uint32_t UM980_UART_BAUD = 115200;
@@ -41,23 +46,42 @@ static const uint8_t ESPNOW_MAX_PACKET_SIZE = 250;
 static const uint8_t RTCM_TRANSPORT_HEADER_SIZE = 15;
 static const uint8_t RTCM_MAX_FRAGMENT_PAYLOAD = ESPNOW_MAX_PACKET_SIZE - RTCM_TRANSPORT_HEADER_SIZE;
 static const uint8_t ESPNOW_MAX_SEND_RETRIES = 4;
-static const uint32_t ESPNOW_SEND_TIMEOUT_MILLIS = 15;
-static const bool ENABLE_BROADCAST_FALLBACK = true;
-static const size_t ROVER_PEER_COUNT = 0;
-static const uint8_t ROVER_PEERS[1][6] = {
-  { 0, 0, 0, 0, 0, 0 }
-};
+// Never abandon an outstanding send and reuse its callback for another packet.
+static const uint32_t ESPNOW_CALLBACK_TIMEOUT_MILLIS = 1000;
+static const uint16_t RTCM_MAX_MESSAGE_SIZE = 1029;
+static const uint8_t RTCM_TX_QUEUE_CAPACITY = 8;
+static const uint8_t RTCM_BROADCAST_PASSES = 2;
+static const uint32_t RTCM_MAX_QUEUE_AGE_MILLIS = 500;
+static const uint32_t RTCM_BYTE_TIMEOUT_MILLIS = 250;
+static const uint32_t PACKET_SPACING_MILLIS = 2;
+static const uint32_t REPEAT_SPACING_MILLIS = 10;
 static const uint8_t BROADCAST_PEER_ADDRESS[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 HardwareSerial UM980(2);
 
-static bool g_inRtcmMessage = false;
-static uint8_t g_rtcmBuffer[RTCM_BUFFER_SIZE];
+struct PendingRtcmMessage {
+  uint8_t data[RTCM_MAX_MESSAGE_SIZE];
+  uint16_t length;
+  uint16_t id;
+  uint32_t crc;
+  uint32_t receivedMillis;
+};
+static PendingRtcmMessage g_txQueue[RTCM_TX_QUEUE_CAPACITY];
+static uint8_t g_txHead = 0, g_txCount = 0;
+static uint8_t g_fragmentIndex = 0, g_broadcastPass = 0, g_sendAttempts = 0;
+static uint8_t g_rtcmBuffer[RTCM_MAX_MESSAGE_SIZE];
 static uint16_t g_rtcmLength = 0;
-static uint16_t g_rtcmExpectedPayloadLength = 0;
+static uint32_t g_lastRtcmByteMillis = 0;
 static uint16_t g_nextMessageId = 1;
-static volatile bool g_sendPending = false;
-static volatile esp_now_send_status_t g_lastSendStatus = ESP_NOW_SEND_FAIL;
+static bool g_sendPending = false;
+static bool g_sendingProbe = false;
+static uint32_t g_sendStartedMillis = 0, g_nextSendMillis = 0;
+static uint8_t g_sendPacket[ESPNOW_MAX_PACKET_SIZE];
+// One callback result, published by Wi-Fi and consumed by the main loop.
+static std::atomic<int> g_sendResult{-1};
+static std::atomic<uint32_t> g_uartErrors{0};
+static uint32_t g_totalEspNowSendCallbacksSucceeded = 0;
+static uint32_t g_totalEspNowSendCallbacksFailed = 0;
 static uint32_t g_totalRtcmMessagesRead = 0;
 static uint32_t g_totalRtcmMessagesSent = 0;
 static uint32_t g_totalRtcmMessagesDropped = 0;
@@ -65,7 +89,11 @@ static uint32_t g_totalRtcmMessagesRejected = 0;
 static uint32_t g_totalRtcmFragmentsSent = 0;
 static uint32_t g_totalEspNowRetries = 0;
 static uint32_t g_totalEspNowFailures = 0;
+static uint32_t g_totalLinkProbesSent = 0;
+static uint32_t g_totalLinkProbesDropped = 0;
 static uint32_t g_lastStatusPrintMillis = 0;
+static uint32_t g_lastLinkProbeMillis = 0;
+static bool g_espNowReady = false;
 
 uint32_t crc24q(const uint8_t *data, size_t length) {
   uint32_t crc = 0;
@@ -105,9 +133,7 @@ void printMac(const uint8_t *address) {
 }
 
 void resetRtcmParser() {
-  g_inRtcmMessage = false;
   g_rtcmLength = 0;
-  g_rtcmExpectedPayloadLength = 0;
 }
 
 bool validateRtcmMessage(const uint8_t *message, uint16_t length) {
@@ -128,197 +154,181 @@ bool validateRtcmMessage(const uint8_t *message, uint16_t length) {
 
 void onDataSent(const wifi_tx_info_t *txInfo, esp_now_send_status_t status) {
   (void)txInfo;
-  g_lastSendStatus = status;
-  g_sendPending = false;
+  g_sendResult.store(static_cast<int>(status), std::memory_order_release);
 }
 
-bool isBroadcastPeerAddress(const uint8_t *peerAddress) {
-  return memcmp(peerAddress, BROADCAST_PEER_ADDRESS, 6) == 0;
+void discardTxMessage() {
+  g_txHead = static_cast<uint8_t>((g_txHead + 1) % RTCM_TX_QUEUE_CAPACITY);
+  g_txCount -= 1;
+  g_fragmentIndex = g_broadcastPass = g_sendAttempts = 0;
 }
 
-bool waitForSendCompletion(uint32_t timeoutMillis) {
-  const uint32_t startMillis = millis();
-  while (g_sendPending && (millis() - startMillis) < timeoutMillis) {
-    delay(0);
-  }
-  return !g_sendPending;
-}
-
-bool sendPacketToPeer(const uint8_t *peerAddress, const uint8_t *packet, uint8_t length) {
-  for (uint8_t attempt = 0; attempt < ESPNOW_MAX_SEND_RETRIES; attempt += 1) {
-    if (!waitForSendCompletion(ESPNOW_SEND_TIMEOUT_MILLIS)) {
-      g_sendPending = false;
-    }
-
-    g_sendPending = true;
-    esp_err_t result = esp_now_send(peerAddress, packet, length);
-    if (result == ESP_ERR_ESPNOW_NO_MEM) {
-      g_sendPending = false;
-      g_totalEspNowRetries += 1;
-      delay(1);
-      continue;
-    }
-    if (result != ESP_OK) {
-      g_sendPending = false;
-      g_totalEspNowRetries += 1;
-      delay(1);
-      continue;
-    }
-
-    if (!waitForSendCompletion(ESPNOW_SEND_TIMEOUT_MILLIS)) {
-      g_totalEspNowRetries += 1;
-      g_sendPending = false;
-      delay(1);
-      continue;
-    }
-
-    if (g_lastSendStatus == ESP_NOW_SEND_SUCCESS || isBroadcastPeerAddress(peerAddress)) {
-      return true;
-    }
-
-    g_totalEspNowRetries += 1;
-    delay(1);
-  }
-
-  g_totalEspNowFailures += 1;
-  return false;
-}
-
-bool sendPacketToConfiguredPeers(const uint8_t *packet, uint8_t length) {
-  bool overallSuccess = true;
-  if (ROVER_PEER_COUNT > 0) {
-    for (size_t peerIndex = 0; peerIndex < ROVER_PEER_COUNT; peerIndex += 1) {
-      if (!sendPacketToPeer(ROVER_PEERS[peerIndex], packet, length)) {
-        overallSuccess = false;
-      }
-    }
-    return overallSuccess;
-  }
-
-  if (ENABLE_BROADCAST_FALLBACK) {
-    return sendPacketToPeer(BROADCAST_PEER_ADDRESS, packet, length);
-  }
-
-  return false;
-}
-
-bool sendRtcmMessage(const uint8_t *message, uint16_t length) {
-  if (length < 6 || length > RTCM_BUFFER_SIZE) {
+bool queueRtcmMessage(const uint8_t *message, uint16_t length) {
+  if (!g_espNowReady || g_txCount == RTCM_TX_QUEUE_CAPACITY) {
     return false;
   }
-
-  const uint8_t fragmentCount = static_cast<uint8_t>((length + RTCM_MAX_FRAGMENT_PAYLOAD - 1) / RTCM_MAX_FRAGMENT_PAYLOAD);
-  const uint16_t messageId = g_nextMessageId++;
-  const uint32_t payloadCrc = crc24q(message, length - 3);
-  uint16_t offset = 0;
-
-  for (uint8_t fragmentIndex = 0; fragmentIndex < fragmentCount; fragmentIndex += 1) {
-    const uint8_t fragmentPayloadLength = static_cast<uint8_t>(min(static_cast<uint16_t>(RTCM_MAX_FRAGMENT_PAYLOAD), static_cast<uint16_t>(length - offset)));
-    uint8_t packet[ESPNOW_MAX_PACKET_SIZE];
-    packet[0] = RTCM_TRANSPORT_MAGIC_0;
-    packet[1] = RTCM_TRANSPORT_MAGIC_1;
-    packet[2] = RTCM_TRANSPORT_VERSION;
-    packet[3] = RTCM_TRANSPORT_MESSAGE_RTCM_FRAGMENT;
-    packet[4] = 0;
-    writeU16LE(&packet[5], messageId);
-    packet[7] = fragmentIndex;
-    packet[8] = fragmentCount;
-    packet[9] = fragmentPayloadLength;
-    writeU16LE(&packet[10], length);
-    writeU24LE(&packet[12], payloadCrc);
-    memcpy(&packet[RTCM_TRANSPORT_HEADER_SIZE], message + offset, fragmentPayloadLength);
-
-    if (!sendPacketToConfiguredPeers(packet, static_cast<uint8_t>(RTCM_TRANSPORT_HEADER_SIZE + fragmentPayloadLength))) {
-      return false;
-    }
-
-    offset = static_cast<uint16_t>(offset + fragmentPayloadLength);
-    g_totalRtcmFragmentsSent += 1;
-  }
-
+  PendingRtcmMessage &pending = g_txQueue[(g_txHead + g_txCount) % RTCM_TX_QUEUE_CAPACITY];
+  memcpy(pending.data, message, length);
+  pending.length = length;
+  pending.id = g_nextMessageId++;
+  pending.crc = crc24q(message, length - 3);
+  pending.receivedMillis = millis();
+  g_txCount += 1;
   return true;
 }
 
-void maybePrintStatus() {
-  const uint32_t nowMillis = millis();
-  if ((nowMillis - g_lastStatusPrintMillis) < STATUS_PRINT_INTERVAL_MILLIS) {
-    return;
+void serviceRadio() {
+  const uint32_t now = millis();
+  if (!g_espNowReady) return;
+  if (g_sendPending) {
+    const int result = g_sendResult.exchange(-1, std::memory_order_acquire);
+    if (result < 0) {
+      if ((now - g_sendStartedMillis) >= ESPNOW_CALLBACK_TIMEOUT_MILLIS) {
+        // A reboot clears driver/callback state together. Never issue a second
+        // send while the first can still call back. UART remains serviced until here.
+        g_espNowReady = false;
+        ESP.restart();
+      }
+      return;
+    }
+    g_sendPending = false;
+    const bool success = result == ESP_NOW_SEND_SUCCESS;
+    if (success) g_totalEspNowSendCallbacksSucceeded += 1;
+    else g_totalEspNowSendCallbacksFailed += 1;
+    if (g_sendingProbe) {
+      if (success) g_totalLinkProbesSent += 1;
+      else g_totalLinkProbesDropped += 1;
+    } else if (success) {
+      g_sendAttempts = 0;
+      g_totalRtcmFragmentsSent += 1;
+      const uint8_t count = (g_txQueue[g_txHead].length + RTCM_MAX_FRAGMENT_PAYLOAD - 1) / RTCM_MAX_FRAGMENT_PAYLOAD;
+      if (++g_fragmentIndex == count) {
+        g_fragmentIndex = 0;
+        if (++g_broadcastPass == RTCM_BROADCAST_PASSES) {
+          g_totalRtcmMessagesSent += 1; // Local transmission, NOT mower delivery.
+          discardTxMessage();
+        } else {
+          g_nextSendMillis = now + REPEAT_SPACING_MILLIS;
+        }
+      }
+    } else {
+      g_totalEspNowRetries += 1;
+    }
   }
-  g_lastStatusPrintMillis = nowMillis;
-  Serial.print("[RTCM-BASE] messages=");
-  Serial.print(g_totalRtcmMessagesRead);
-  Serial.print(" sent=");
-  Serial.print(g_totalRtcmMessagesSent);
-  Serial.print(" dropped=");
-  Serial.print(g_totalRtcmMessagesDropped);
-  Serial.print(" rejected=");
-  Serial.print(g_totalRtcmMessagesRejected);
-  Serial.print(" fragments=");
-  Serial.print(g_totalRtcmFragmentsSent);
-  Serial.print(" retries=");
-  Serial.print(g_totalEspNowRetries);
-  Serial.print(" failures=");
-  Serial.println(g_totalEspNowFailures);
+  if (static_cast<int32_t>(now - g_nextSendMillis) < 0) return;
+  while (g_txCount > 0) {
+    if ((now - g_txQueue[g_txHead].receivedMillis) <= RTCM_MAX_QUEUE_AGE_MILLIS
+        && g_sendAttempts < ESPNOW_MAX_SEND_RETRIES) break;
+    g_totalRtcmMessagesDropped += 1;
+    discardTxMessage();
+  }
+
+  uint8_t length = 0;
+  g_sendingProbe = g_txCount == 0;
+  if (g_sendingProbe) {
+    if (!ENABLE_LINK_PROBE || (now - g_lastLinkProbeMillis) < LINK_PROBE_INTERVAL_MILLIS) return;
+    g_lastLinkProbeMillis = now;
+    length = sizeof(LINK_PROBE_PAYLOAD);
+    memcpy(g_sendPacket, LINK_PROBE_PAYLOAD, length);
+  } else {
+    const PendingRtcmMessage &message = g_txQueue[g_txHead];
+    const uint16_t offset = g_fragmentIndex * RTCM_MAX_FRAGMENT_PAYLOAD;
+    const uint8_t payloadLength = min(static_cast<uint16_t>(RTCM_MAX_FRAGMENT_PAYLOAD), static_cast<uint16_t>(message.length - offset));
+    g_sendPacket[0] = RTCM_TRANSPORT_MAGIC_0;
+    g_sendPacket[1] = RTCM_TRANSPORT_MAGIC_1;
+    g_sendPacket[2] = RTCM_TRANSPORT_VERSION;
+    g_sendPacket[3] = RTCM_TRANSPORT_MESSAGE_RTCM_FRAGMENT;
+    g_sendPacket[4] = 0;
+    writeU16LE(&g_sendPacket[5], message.id);
+    g_sendPacket[7] = g_fragmentIndex;
+    g_sendPacket[8] = (message.length + RTCM_MAX_FRAGMENT_PAYLOAD - 1) / RTCM_MAX_FRAGMENT_PAYLOAD;
+    g_sendPacket[9] = payloadLength;
+    writeU16LE(&g_sendPacket[10], message.length);
+    writeU24LE(&g_sendPacket[12], message.crc);
+    memcpy(&g_sendPacket[RTCM_TRANSPORT_HEADER_SIZE], message.data + offset, payloadLength);
+    length = RTCM_TRANSPORT_HEADER_SIZE + payloadLength;
+    g_sendAttempts += 1;
+  }
+  g_sendResult.store(-1, std::memory_order_release);
+  g_sendStartedMillis = now;
+  g_sendPending = true;
+  g_nextSendMillis = now + PACKET_SPACING_MILLIS;
+  if (esp_now_send(BROADCAST_PEER_ADDRESS, g_sendPacket, length) != ESP_OK) {
+    // Immediate rejection does not produce a callback.
+    g_sendPending = false;
+    g_totalEspNowFailures += 1;
+    if (g_sendingProbe) g_totalLinkProbesDropped += 1;
+    else g_totalEspNowRetries += 1;
+  }
+}
+
+void maybePrintStatus() {
+  if (!DEBUG_OUTPUT || (millis() - g_lastStatusPrintMillis) < STATUS_PRINT_INTERVAL_MILLIS) return;
+  g_lastStatusPrintMillis = millis();
+  char status[256];
+  const int length = snprintf(status, sizeof(status),
+    "[RTCM-BASE] read=%lu sentLocal=%lu drop=%lu reject=%lu retry=%lu uartError=%lu queue=%u callbacks=%lu/%lu\n",
+    (unsigned long)g_totalRtcmMessagesRead, (unsigned long)g_totalRtcmMessagesSent,
+    (unsigned long)g_totalRtcmMessagesDropped, (unsigned long)g_totalRtcmMessagesRejected,
+    (unsigned long)g_totalEspNowRetries, (unsigned long)g_uartErrors.load(), g_txCount,
+    (unsigned long)g_totalEspNowSendCallbacksSucceeded, (unsigned long)g_totalEspNowSendCallbacksFailed);
+  if (length > 0 && length < static_cast<int>(sizeof(status)) && Serial.availableForWrite() >= length)
+    Serial.write(reinterpret_cast<const uint8_t *>(status), length);
 }
 
 void processRtcmByte(uint8_t value) {
-  if (!g_inRtcmMessage) {
-    if (value == RTCM_PREAMBLE) {
-      g_inRtcmMessage = true;
-      g_rtcmBuffer[0] = value;
-      g_rtcmLength = 1;
-      g_rtcmExpectedPayloadLength = 0;
-    }
-    return;
-  }
-
-  if (g_rtcmLength >= RTCM_BUFFER_SIZE) {
-    g_totalRtcmMessagesDropped += 1;
-    resetRtcmParser();
-    return;
-  }
-
-  g_rtcmBuffer[g_rtcmLength++] = value;
-
-  if (g_rtcmLength == 3) {
-    g_rtcmExpectedPayloadLength = static_cast<uint16_t>(((g_rtcmBuffer[1] & 0x03) << 8) | g_rtcmBuffer[2]);
-    if ((g_rtcmExpectedPayloadLength + 6) > RTCM_BUFFER_SIZE) {
-      g_totalRtcmMessagesDropped += 1;
-      resetRtcmParser();
-      return;
-    }
-  }
-
-  if (g_rtcmLength < 3) {
-    return;
-  }
-
-  const uint16_t totalLength = static_cast<uint16_t>(g_rtcmExpectedPayloadLength + 6);
-  if (g_rtcmLength < totalLength) {
-    return;
-  }
-
-  g_totalRtcmMessagesRead += 1;
-  if (!validateRtcmMessage(g_rtcmBuffer, totalLength)) {
+  const uint32_t now = millis();
+  if (g_rtcmLength && (now - g_lastRtcmByteMillis) > RTCM_BYTE_TIMEOUT_MILLIS) {
     g_totalRtcmMessagesRejected += 1;
     resetRtcmParser();
-    return;
   }
-
-  if (sendRtcmMessage(g_rtcmBuffer, totalLength)) {
-    g_totalRtcmMessagesSent += 1;
-  } else {
-    g_totalRtcmMessagesDropped += 1;
+  g_lastRtcmByteMillis = now;
+  g_rtcmBuffer[g_rtcmLength++] = value;
+  while (g_rtcmLength > 0) {
+    if (g_rtcmBuffer[0] == RTCM_PREAMBLE) {
+      if (g_rtcmLength < 3) return;
+      if ((g_rtcmBuffer[1] & 0xFC) == 0) {
+        const uint16_t length = 6 + ((g_rtcmBuffer[1] & 3) << 8) + g_rtcmBuffer[2];
+        if (g_rtcmLength < length) return;
+        g_totalRtcmMessagesRead += 1;
+        if (validateRtcmMessage(g_rtcmBuffer, length)) {
+          if (!queueRtcmMessage(g_rtcmBuffer, length)) g_totalRtcmMessagesDropped += 1;
+          g_rtcmLength -= length;
+          memmove(g_rtcmBuffer, g_rtcmBuffer + length, g_rtcmLength);
+          continue;
+        }
+      }
+      g_totalRtcmMessagesRejected += 1;
+    }
+    // Slide to the next candidate instead of throwing away valid frames
+    // embedded in a damaged/truncated candidate.
+    g_rtcmLength -= 1;
+    memmove(g_rtcmBuffer, g_rtcmBuffer + 1, g_rtcmLength);
   }
-
-  resetRtcmParser();
 }
 
 void setupEspNow() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_channel(RTCM_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  const bool stationModeReady = WiFi.mode(WIFI_STA);
+  const bool sleepDisabled = WiFi.setSleep(false);
+  const esp_err_t powerSaveResult = esp_wifi_set_ps(WIFI_PS_NONE);
+  const esp_err_t channelResult = esp_wifi_set_channel(RTCM_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  uint8_t primaryChannel = 0;
+  wifi_second_chan_t secondaryChannel = WIFI_SECOND_CHAN_NONE;
+  const esp_err_t readChannelResult = esp_wifi_get_channel(&primaryChannel, &secondaryChannel);
+
+  Serial.print("[RTCM-BASE] wifi stationMode=");
+  Serial.print(stationModeReady ? "ok" : "failed");
+  Serial.print(" sleepDisabled=");
+  Serial.print(sleepDisabled ? "yes" : "no");
+  Serial.print(" powerSaveResult=");
+  Serial.print(static_cast<int>(powerSaveResult));
+  Serial.print(" channelSetResult=");
+  Serial.print(static_cast<int>(channelResult));
+  Serial.print(" channelReadResult=");
+  Serial.print(static_cast<int>(readChannelResult));
+  Serial.print(" actualChannel=");
+  Serial.println(primaryChannel);
 
   uint8_t stationMac[6];
   if (esp_wifi_get_mac(WIFI_IF_STA, stationMac) == ESP_OK) {
@@ -329,42 +339,57 @@ void setupEspNow() {
     Serial.println("[RTCM-BASE] failed to read station MAC");
   }
 
-  if (esp_now_init() != ESP_OK) {
+  const esp_err_t initResult = esp_now_init();
+  Serial.print("[RTCM-BASE] espNowInitResult=");
+  Serial.println(static_cast<int>(initResult));
+  if (initResult != ESP_OK) {
     return;
   }
 
-  esp_now_register_send_cb(onDataSent);
-
-  for (size_t peerIndex = 0; peerIndex < ROVER_PEER_COUNT; peerIndex += 1) {
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, ROVER_PEERS[peerIndex], 6);
-    peerInfo.channel = RTCM_WIFI_CHANNEL;
-    peerInfo.encrypt = false;
-    esp_now_add_peer(&peerInfo);
+  const esp_err_t callbackResult = esp_now_register_send_cb(onDataSent);
+  Serial.print("[RTCM-BASE] sendCallbackResult=");
+  Serial.println(static_cast<int>(callbackResult));
+  if (callbackResult != ESP_OK) {
+    return;
   }
 
-  if (ENABLE_BROADCAST_FALLBACK) {
-    esp_now_peer_info_t broadcastPeer = {};
-    memcpy(broadcastPeer.peer_addr, BROADCAST_PEER_ADDRESS, 6);
-    broadcastPeer.channel = RTCM_WIFI_CHANNEL;
-    broadcastPeer.encrypt = false;
-    esp_now_add_peer(&broadcastPeer);
-  }
+  esp_now_peer_info_t broadcastPeer = {};
+  memcpy(broadcastPeer.peer_addr, BROADCAST_PEER_ADDRESS, 6);
+  broadcastPeer.channel = RTCM_WIFI_CHANNEL;
+  broadcastPeer.ifidx = WIFI_IF_STA;
+  broadcastPeer.encrypt = false;
+  const esp_err_t peerResult = esp_now_add_peer(&broadcastPeer);
+  g_espNowReady = peerResult == ESP_OK && stationModeReady && sleepDisabled
+    && powerSaveResult == ESP_OK && channelResult == ESP_OK
+    && readChannelResult == ESP_OK && primaryChannel == RTCM_WIFI_CHANNEL;
+  Serial.print("[RTCM-BASE] espNowReady=");
+  Serial.println(g_espNowReady ? "yes" : "no");
 }
 
 void setup() {
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
-  UM980.setRxBufferSize(RTCM_BUFFER_SIZE);
+  if (UM980.setRxBufferSize(RTCM_BUFFER_SIZE) != RTCM_BUFFER_SIZE) {
+    Serial.println("[RTCM-BASE] UART buffer allocation failed");
+    ESP.restart();
+    return;
+  }
+  UM980.onReceiveError([](hardwareSerial_error_t) { g_uartErrors.fetch_add(1); });
   UM980.begin(UM980_UART_BAUD, SERIAL_8N1, UM980_RX_PIN, UM980_TX_PIN);
   setupEspNow();
 }
 
 void loop() {
-  while (UM980.available() > 0) {
+  static uint32_t observedUartErrors = 0;
+  const uint32_t errors = g_uartErrors.load();
+  if (errors != observedUartErrors) {
+    observedUartErrors = errors;
+    resetRtcmParser();
+  }
+  // Bound each batch so UART and radio both make progress under continuous input.
+  for (size_t count = 0; count < 512 && UM980.available() > 0; count += 1)
     processRtcmByte(static_cast<uint8_t>(UM980.read()));
-  }
-
-  if (DEBUG_OUTPUT) {
-    maybePrintStatus();
-  }
+  serviceRadio();
+  maybePrintStatus();
+  delay(1);
 }
