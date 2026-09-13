@@ -6,11 +6,11 @@
   "longHeadingBiasReversePercent": -0.005296122879025885,
   "longHeadingGainForwardPerDeg": 0.01,
   "longHeadingGainReversePerDeg": 0.01,
-  "forwardCteGain": 3,
+  "forwardCteGain": 2.9100200981249995,
   "reverseCteGain": 0.29013123895236603,
   "forwardCteDampingGain": 1.2,
   "reverseCteDampingGain": 0.08101573778154732,
-  "operationalSteeringSamplesForward": 149,
+  "operationalSteeringSamplesForward": 176,
   "operationalSteeringSamplesReverse": 0,
   "longDriveMinDistanceMeters": 1,
   "shortDriveBrakeDistancesPositive": [
@@ -139,5 +139,5 @@
     -0.008879622152428981,
     -0.013095693823694304
   ],
-  "updatedAt": "2026-09-04T15:41:39.982Z"
+  "updatedAt": "2026-09-13T13:48:58.147Z"
 }

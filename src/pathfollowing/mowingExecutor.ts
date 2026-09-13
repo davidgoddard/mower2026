@@ -1016,7 +1016,7 @@ export class MowingExecutor {
         });
         if (result.status !== "stopped" || !this.stripStallRetryPending) {
           if (result.status === "success" && options.captureTrace) {
-            appendTracePoint(result.finalPosition);
+            appendTracePoint(result.finalPosition ?? this.poseFusion.getCurrentPose().position);
             if (tracePoints.length >= 2) {
               this.coverageTraces.set(options.stripIndex, {
                 stripIndex: options.stripIndex,
@@ -1356,7 +1356,10 @@ export class MowingExecutor {
     };
   }
 
-  private async executeResumeOperation(operation: MowingResumeOperation): Promise<MowingResumeContinuation | null> {
+  private async executeResumeOperation(
+    operation: MowingResumeOperation,
+    connectorResumePathPrepared = false,
+  ): Promise<MowingResumeContinuation | null> {
     this.currentStripIndex = operation.stripIndex;
 
     if (operation.kind === "drive") {
@@ -1437,7 +1440,7 @@ export class MowingExecutor {
               targetY: operation.targetY,
             });
             this.persistResumeOperation(routedOperation);
-            return this.executeResumeOperation(routedOperation);
+            return this.executeResumeOperation(routedOperation, true);
           } catch (error) {
             this.executionError = "resume_drive_route_unavailable";
             this.logger.warn("mowing.resume.drive_route_unavailable", {
@@ -1525,6 +1528,32 @@ export class MowingExecutor {
 
     this.phase = operation.phase;
     if (
+      operation.phase === "tracing_boundary"
+      && operation.markBoundaryTraced
+      && (operation.followOptions.initialTargetIndex ?? 0) > 0
+    ) {
+      const livePose = this.poseFusion.getCurrentPose();
+      this.logger.info("mowing.resume.boundary_rejoin_started", {
+        boundary: operation.markBoundaryTraced,
+        previousTargetIndex: operation.followOptions.initialTargetIndex,
+        reason: "interrupted_boundary_progress",
+      });
+      const rejoined = await this.traceBoundary(
+        operation.markBoundaryTraced,
+        {
+          xMeters: unwrapMeters(livePose.position.xMeters),
+          yMeters: unwrapMeters(livePose.position.yMeters),
+          capturedAt: Date.now(),
+        },
+        {
+          stripIndex: operation.stripIndex,
+          continuation: operation.continuation,
+          markBoundaryTraced: operation.markBoundaryTraced,
+        },
+      );
+      return rejoined ? operation.continuation : null;
+    }
+    if (
       operation.phase === "following_connector"
       && operation.pathPoints.length === 2
     ) {
@@ -1533,7 +1562,7 @@ export class MowingExecutor {
         const replannedOperation = this.buildConnectorResumeRejoinOperation(operation);
         if (replannedOperation) {
           this.persistResumeOperation(replannedOperation);
-          return this.executeResumeOperation(replannedOperation);
+          return this.executeResumeOperation(replannedOperation, true);
         }
         this.executionError = "resume_connector_rejoin_unavailable";
         this.phase = "error";
@@ -1569,6 +1598,31 @@ export class MowingExecutor {
       operation.pathPoints,
       operation.followOptions.initialTargetIndex ?? 0,
     );
+    if (
+      operation.phase === "following_connector"
+      && !connectorResumePathPrepared
+    ) {
+      const replannedOperation = this.buildConnectorResumeRejoinOperation(operation);
+      if (replannedOperation) {
+        this.logger.info("mowing.resume.connector_rejoin_ready", {
+          stripIndex: operation.stripIndex,
+          livePathDistanceMeters,
+          previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
+          rejoinPointCount: replannedOperation.pathPoints.length,
+          reason: "interrupted_connector_progress",
+        });
+        this.persistResumeOperation(replannedOperation);
+        return this.executeResumeOperation(replannedOperation, true);
+      }
+      this.executionError = "resume_connector_rejoin_unavailable";
+      this.logger.warn("mowing.resume.connector_rejoin_unavailable", {
+        stripIndex: operation.stripIndex,
+        livePathDistanceMeters,
+        previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
+      });
+      this.phase = "error";
+      return null;
+    }
     if (livePathDistanceMeters > RESUME_FOLLOW_DIRECT_DISTANCE_METERS) {
       if (
         operation.phase === "tracing_boundary"
@@ -1594,27 +1648,6 @@ export class MowingExecutor {
           },
         );
         return rejoined ? operation.continuation : null;
-      }
-      if (operation.phase === "following_connector") {
-        const replannedOperation = this.buildConnectorResumeRejoinOperation(operation);
-        if (replannedOperation) {
-          this.logger.info("mowing.resume.connector_rejoin_ready", {
-            stripIndex: operation.stripIndex,
-            livePathDistanceMeters,
-            previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
-            rejoinPointCount: replannedOperation.pathPoints.length,
-          });
-          this.persistResumeOperation(replannedOperation);
-          return this.executeResumeOperation(replannedOperation);
-        }
-        this.executionError = "resume_connector_rejoin_unavailable";
-        this.logger.warn("mowing.resume.connector_rejoin_unavailable", {
-          stripIndex: operation.stripIndex,
-          livePathDistanceMeters,
-          previousTargetIndex: operation.followOptions.initialTargetIndex ?? 0,
-        });
-        this.phase = "error";
-        return null;
       }
       this.logger.warn("mowing.resume.follow_pose_too_far_from_route", {
         phase: operation.phase,

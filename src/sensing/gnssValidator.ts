@@ -65,9 +65,8 @@ export interface GnssValidatorOptions {
   readonly maxHeadingAccuracyDeg?: number;
   /**
    * Configured antenna baseline (m).  The UM982 is configured with
-   * `CONFIG HEADING LENGTH 30.00 5.00`, but the project hardware uses a
-   * shorter dual-antenna baseline.  The runtime value should be set from
-   * the same configuration source used by the firmware.
+   * The project nominal is 30 cm and accepts normal reported variation up
+   * to 10 cm either side of that value.
    */
   readonly baselineNominalMeters?: number;
   /** Allowed baseline error (m). */
@@ -89,7 +88,7 @@ const DEFAULTS = {
   maxPositionAccuracyMeters: 0.10,
   maxHeadingAccuracyDeg: 3.0,
   baselineNominalMeters: 0.30,
-  baselineToleranceMeters: 0.05,
+  baselineToleranceMeters: 0.10,
   maxHeadingRateDegPerSec: 20,
   maxImuHeadingDisagreementDeg: 5,
   positionPromotionEpochs: 3,

@@ -1,4 +1,4 @@
-import { DRIVE_FULL_SPEED_COMMAND_DEFAULT } from "../constants.js";
+import { DRIVE_FULL_SPEED_COMMAND_DEFAULT, DRIVE_SETTLE_TIME_MS, MOTOR_RAMP_DOWN_TIME_MS } from "../constants.js";
 import { PathFollowingParameters, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
 import { crossTrackError, angleTo, Pose, Position, unwrapMeters, createPosition } from "../geometry/positionTypes.js";
 import { headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
@@ -6,12 +6,12 @@ import { LoggerScope } from "../logging/types.js";
 import { SensorController } from "../sensing/sensorController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { systemStop } from "../control/systemStop.js";
-import { defaultSleep } from "../control/sleep.js";
+import { defaultSleep, sleepWithStopChecks } from "../control/sleep.js";
 import { PathFollowResult, PathPoint } from "./pathFollowerApi.js";
 import { advancePassedTargets } from "./segmentedBoundaryExecutor.js";
 import { planConservativeRouteLookahead } from "./conservativeLookahead.js";
 import type { DriveLearningModel } from "../control/driveLearningModel.js";
-import type { DriveController } from "../control/driveController.js";
+import type { MotorCalibration } from "../config/motorCalibration.js";
 import type { TurnController } from "../control/turnController.js";
 
 const CONTINUOUS_CONTROL_INTERVAL_MS = 20;
@@ -24,7 +24,6 @@ const CONTINUOUS_CORNER_LOOKAHEAD_LIMIT_DEG = 20;
 const CONTINUOUS_CTE_GAIN = 1.8;
 const CONTINUOUS_HEADING_GAIN = 0.02;
 const CONTINUOUS_MAX_WHEEL_COMMAND_DELTA_PER_SECOND = 0.8;
-const CONTINUOUS_CORNER_CAPTURE_CTE_RELAXATION = 1.5;
 const CONTINUOUS_ORDERED_PROJECTION_FORWARD_WINDOW_METERS = 0.5;
 // A route deviation is not itself an emergency: the controller may already be
 // applying the correct differential output to bring the mower back onto the
@@ -37,11 +36,11 @@ const CONTINUOUS_ROUTE_DEVIATION_IMMEDIATE_ABORT_MULTIPLIER = 2;
 export interface ContinuousPathFollowerOptions {
   readonly sensorController: SensorController;
   readonly poseFusion: PoseFusion;
-  readonly driveController: DriveController;
   readonly turnController: TurnController;
   readonly logger: LoggerScope;
   readonly baseSpeed?: number;
   readonly learningModel?: DriveLearningModel;
+  readonly motorCalibration?: MotorCalibration;
   readonly sleep?: (delayMs: number) => Promise<void>;
 }
 
@@ -81,20 +80,20 @@ export interface ContinuousPathFollowResult extends PathFollowResult {
 export class ContinuousPathFollower {
   private readonly sensorController: SensorController;
   private readonly poseFusion: PoseFusion;
-  private readonly driveController: DriveController;
   private readonly turnController: TurnController;
   private readonly logger: LoggerScope;
   private readonly baseSpeed: number;
   private readonly learningModel: DriveLearningModel | null;
+  private readonly motorCalibration: MotorCalibration | null;
   private readonly sleep: (delayMs: number) => Promise<void>;
   constructor(options: ContinuousPathFollowerOptions) {
     this.sensorController = options.sensorController;
     this.poseFusion = options.poseFusion;
-    this.driveController = options.driveController;
     this.turnController = options.turnController;
     this.logger = options.logger;
     this.baseSpeed = Math.max(0.2, Math.min(DRIVE_FULL_SPEED_COMMAND_DEFAULT, options.baseSpeed ?? CONTINUOUS_TRACE_SPEED));
     this.learningModel = options.learningModel ?? null;
+    this.motorCalibration = options.motorCalibration ?? null;
     this.sleep = options.sleep ?? defaultSleep;
   }
 
@@ -243,6 +242,7 @@ export class ContinuousPathFollower {
           advancedIndex,
           options.pivotAtWaypointTurnDeg,
           options.pivotAtWaypointDistanceMeters,
+          this.cornerBrakeDistanceMeters(pathPoints, indexBeforePassedTargetAdvance),
         );
         currentIndex = pendingCornerIndex ?? advancedIndex;
         preserveCurrentTargetAtPose = false;
@@ -308,59 +308,74 @@ export class ContinuousPathFollower {
         // has already identified any sharp corner that is still owed, so that
         // corner owns the manoeuvre even when the adjacent segment is now
         // geometrically closer to the live pose.
-        const cornerVertexIndex = pendingCornerIndex ?? (projection.segmentStartIndex + 1);
+        // `projection` may remain geometrically closest to the incoming edge
+        // after a corner turn.  Progress is authoritative here: once that
+        // corner advances `currentIndex`, do not select the old vertex again.
+        const cornerVertexIndex = pendingCornerIndex ?? currentIndex;
         if (
           Number.isFinite(options.pivotAtWaypointTurnDeg)
           && Number.isFinite(options.pivotAtWaypointDistanceMeters)
           && cornerVertexIndex < pathPoints.length - 1
+          && remainingDistanceOnIncomingEdge(
+            pose,
+            pathPoints[cornerVertexIndex - 1],
+            pathPoints[cornerVertexIndex],
+          ) <= this.cornerBrakeDistanceMeters(pathPoints, cornerVertexIndex)
           && isCornerAtLeast(pathPoints, cornerVertexIndex, Math.abs(options.pivotAtWaypointTurnDeg ?? 0))
         ) {
-          // Hand the whole remaining incoming leg to the trained line driver.
-          // It owns the learned brake point and stops at the corner itself;
-          // waiting until a fixed 15 cm radius and then commanding neutral was
-          // too late at full perimeter speed and caused repeatable overshoot.
+          const brakeDistanceMeters = this.cornerBrakeDistanceMeters(pathPoints, cornerVertexIndex);
+          this.logger.info("continuous_path.corner_braking_started", {
+            vertexIndex: cornerVertexIndex,
+            brakeDistanceMeters,
+            remainingDistanceMeters: remainingDistanceOnIncomingEdge(
+              pose,
+              pathPoints[cornerVertexIndex - 1],
+              pathPoints[cornerVertexIndex],
+            ),
+          });
           await this.sensorController.requestNeutralMotorOutputs();
           appliedLeftCommand = 0;
           appliedRightCommand = 0;
-          const cornerCaptureMaxCteMeters = Math.max(
-            parameters.segmentedDriveMaxCteMeters,
-            Math.min(
-              parameters.mowingStandoffMeters,
-              parameters.segmentedDriveMaxCteMeters * CONTINUOUS_CORNER_CAPTURE_CTE_RELAXATION,
-            ),
+          const rampDownTimeMs = this.motorCalibration?.getRampDownTime() ?? MOTOR_RAMP_DOWN_TIME_MS;
+          const settled = await sleepWithStopChecks(
+            (2 * rampDownTimeMs) + DRIVE_SETTLE_TIME_MS,
+            () => systemStop.isStopped(),
+            this.sleep,
           );
-          this.logger.info("continuous_path.corner_braking_started", {
-            vertexIndex: cornerVertexIndex,
-            cornerX: pathPoints[cornerVertexIndex].xMeters,
-            cornerY: pathPoints[cornerVertexIndex].yMeters,
-          });
-          const cornerResult = await this.driveController.executeDrive({
-            targetPosition: createPosition(
-              pathPoints[cornerVertexIndex].xMeters,
-              pathPoints[cornerVertexIndex].yMeters,
-            ),
-            cteReferenceStartPosition: pointToPosition(pathPoints[cornerVertexIndex - 1]),
-            learningEnabled: false,
-            maxCrossTrackErrorMeters: cornerCaptureMaxCteMeters,
-            skipInitialTurn: true,
-            maximumWheelOutputPercent: options.maximumSpeed,
-          });
-          if (cornerResult.status !== "success") {
-            this.logger.warn("continuous_path.corner_drive_failed", {
-              vertexIndex: cornerVertexIndex,
-              status: cornerResult.status,
-              error: cornerResult.errorMessage,
-            });
+          if (!settled) {
             return {
               algorithm: "continuous_path_follow",
               completed: false,
-              reason: cornerResult.status === "stopped" ? "user_stopped" : "error",
-              error: cornerResult.errorMessage ?? "continuous_path_corner_drive_failed",
+              reason: "user_stopped",
+              error: "continuous_path_corner_settle_stopped",
               pointCount: pathPoints.length,
               completedWaypoints: currentIndex,
             };
           }
           const stoppedPose = this.poseFusion.getCurrentPose();
+          const cornerArrivalErrorMeters = distanceFromPoseToPoint(
+            stoppedPose,
+            pathPoints[cornerVertexIndex],
+          );
+          const cornerArrivalToleranceMeters = Math.max(
+            parameters.segmentedDriveMaxCteMeters,
+            Math.max(0, options.pivotAtWaypointDistanceMeters ?? 0),
+          );
+          if (cornerArrivalErrorMeters > cornerArrivalToleranceMeters) {
+            this.logger.warn("continuous_path.corner_arrival_outside_tolerance", {
+              vertexIndex: cornerVertexIndex,
+              cornerArrivalErrorMeters,
+              cornerArrivalToleranceMeters,
+            });
+            return {
+              algorithm: "continuous_path_follow",
+              completed: false,
+              reason: "error",
+              error: "continuous_path_corner_arrival_outside_tolerance",
+              pointCount: pathPoints.length,
+              completedWaypoints: currentIndex,
+            };
+          }
           const outgoingHeading = angleTo(
             pointToPosition(pathPoints[cornerVertexIndex]),
             pointToPosition(pathPoints[cornerVertexIndex + 1]),
@@ -470,6 +485,15 @@ export class ContinuousPathFollower {
       await this.sensorController.requestNeutralMotorOutputs().catch(() => {});
       this.sensorController.endMotionSession();
     }
+  }
+
+  private cornerBrakeDistanceMeters(points: PathPoint[], vertexIndex: number): number {
+    if (!this.learningModel || vertexIndex <= 0 || vertexIndex >= points.length) return 0;
+    return unwrapMeters(this.learningModel.getBrakeDistanceForDrive(
+      pointToPosition(points[vertexIndex - 1]),
+      pointToPosition(points[vertexIndex]),
+      1,
+    ));
   }
 }
 
@@ -780,6 +804,7 @@ function findPendingCornerCaptureIndex(
   advancedIndex: number,
   pivotAtWaypointTurnDeg: number | undefined,
   pivotAtWaypointDistanceMeters: number | undefined,
+  brakeDistanceMeters: number,
 ): number | null {
   if (!Number.isFinite(pivotAtWaypointTurnDeg) || !Number.isFinite(pivotAtWaypointDistanceMeters)) {
     return null;
@@ -788,13 +813,30 @@ function findPendingCornerCaptureIndex(
   for (let index = Math.max(1, startIndex); index <= finalCornerIndex; index += 1) {
     if (
       isCornerAtLeast(points, index, Math.abs(pivotAtWaypointTurnDeg ?? 0))
-      && distanceFromPoseToPoint(pose, points[index])
-        <= Math.max(0, pivotAtWaypointDistanceMeters ?? 0)
+      && remainingDistanceOnIncomingEdge(pose, points[index - 1], points[index])
+        <= (brakeDistanceMeters > 0
+          ? brakeDistanceMeters
+          : Math.max(0, pivotAtWaypointDistanceMeters ?? 0))
     ) {
       return index;
     }
   }
   return null;
+}
+
+function remainingDistanceOnIncomingEdge(
+  pose: Pose,
+  incomingStart: PathPoint,
+  waypoint: PathPoint,
+): number {
+  const edgeX = waypoint.xMeters - incomingStart.xMeters;
+  const edgeY = waypoint.yMeters - incomingStart.yMeters;
+  const edgeLength = Math.hypot(edgeX, edgeY);
+  if (edgeLength <= 1e-9) return 0;
+  const poseX = unwrapMeters(pose.position.xMeters) - incomingStart.xMeters;
+  const poseY = unwrapMeters(pose.position.yMeters) - incomingStart.yMeters;
+  const alongEdgeMeters = ((poseX * edgeX) + (poseY * edgeY)) / edgeLength;
+  return Math.max(0, edgeLength - alongEdgeMeters);
 }
 
 function distanceFromPoseToPoint(pose: Pose, point: PathPoint): number {

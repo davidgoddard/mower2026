@@ -221,6 +221,9 @@ static std::atomic<uint32_t> g_totalRtcmQueueDrops{0};
 static std::atomic<uint32_t> g_totalEspNowPacketsReceived{0};
 static std::atomic<uint32_t> g_totalLinkProbesReceived{0};
 static std::atomic<uint32_t> g_lastLinkProbeMillis{0};
+// A recognised probe proves only that this mower hears the base or relay.
+// It drives the dedicated route LED, never solution or RTCM activity LEDs.
+static std::atomic<uint32_t> g_lastLinkHeartbeatLedPulseMillis{0};
 static uint8_t g_lastEspNowSenderMac[6] = {};
 static uint32_t g_totalRtcm1006Messages = 0;
 static uint32_t g_lastRtcm1006Millis = 0;
@@ -715,14 +718,18 @@ const char *originSourceLabel() {
 void printDebugStatus() {
   if ((millis() - g_lastDebugPrintMillis) < 10000u) return;
   g_lastDebugPrintMillis = millis();
-  char status[256];
+  char status[512];
   const int length = snprintf(status, sizeof(status),
-    "[GNSS] pvt=%lu rtcm=%lu queueDrop=%lu txDrop=%lu uartError=%lu crcError=%lu lineOverflow=%lu i2cError=%lu probes=%lu\n",
+    "[GNSS] pvt=%lu rtcm=%lu queueDrop=%lu txDrop=%lu uartError=%lu crcError=%lu lineOverflow=%lu i2cError=%lu probes=%lu packets=%lu unknown=%lu pvtAgeMs=%lu rtcmAgeMs=%lu origin=%u route=%u\n",
     (unsigned long)g_totalPvtslnaCount, (unsigned long)g_totalRtcmMessagesVerified,
     (unsigned long)g_totalRtcmQueueDrops, (unsigned long)g_rtcmUartDrops,
     (unsigned long)g_uartErrors.load(), (unsigned long)g_receiverChecksumErrors,
     (unsigned long)g_receiverLineOverflows, (unsigned long)g_i2cWriteErrors.load(),
-    (unsigned long)g_totalLinkProbesReceived);
+    (unsigned long)g_totalLinkProbesReceived.load(), (unsigned long)g_totalEspNowPacketsReceived.load(),
+    (unsigned long)g_totalRtcmUnknownSenders.load(),
+    (unsigned long)(g_latestPvtsln.valid ? millis() - g_latestPvtsln.localMillis : UINT32_MAX),
+    (unsigned long)(g_totalRtcmMessagesVerified ? millis() - g_lastRtcmMillis : UINT32_MAX),
+    static_cast<unsigned>(g_originSource), static_cast<unsigned>(g_lastRtcmRouteSourceMask));
   if (length > 0 && length < static_cast<int>(sizeof(status)) && Serial.availableForWrite() >= length)
     Serial.write(reinterpret_cast<const uint8_t *>(status), length);
 }
@@ -903,20 +910,11 @@ void flashStartupLeds() {
 }
 
 void updateRtcmRouteLed(uint32_t nowMillis) {
-  if (g_lastRtcmRouteMillis == 0 || (nowMillis - g_lastRtcmRouteMillis) > RTCM_ROUTE_FRESH_MILLIS) {
-    digitalWrite(LED_RTCM_ROUTE_PIN, LOW);
-    return;
-  }
-
-  const uint16_t phaseMillis = static_cast<uint16_t>(nowMillis % 1000u);
-  if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_DIRECT) {
-    digitalWrite(LED_RTCM_ROUTE_PIN, HIGH);
-  } else if (g_lastRtcmRouteSourceMask == RTCM_SOURCE_RELAY) {
-    digitalWrite(LED_RTCM_ROUTE_PIN, phaseMillis < 200u ? HIGH : LOW);
-  } else {
-    const bool doubleFlash = phaseMillis < 120u || (phaseMillis >= 240u && phaseMillis < 360u);
-    digitalWrite(LED_RTCM_ROUTE_PIN, doubleFlash ? HIGH : LOW);
-  }
+  const uint32_t lastHeartbeatPulseMillis = g_lastLinkHeartbeatLedPulseMillis.load();
+  digitalWrite(
+    LED_RTCM_ROUTE_PIN,
+    (nowMillis - lastHeartbeatPulseMillis) <= 100u ? HIGH : LOW
+  );
 }
 
 void updateIndicatorLeds() {
@@ -1411,7 +1409,11 @@ void onEspNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomi
   if (len == static_cast<int>(sizeof(LINK_PROBE_PAYLOAD))
       && memcmp(incomingData, LINK_PROBE_PAYLOAD, sizeof(LINK_PROBE_PAYLOAD)) == 0) {
     g_totalLinkProbesReceived += 1;
-    g_lastLinkProbeMillis = millis();
+    const uint32_t receivedMillis = millis();
+    g_lastLinkProbeMillis.store(receivedMillis);
+    // The route LED pulses; all solution and RTCM activity LEDs retain their
+    // ordinary meanings.
+    g_lastLinkHeartbeatLedPulseMillis.store(receivedMillis);
     return;
   }
 
@@ -2232,5 +2234,5 @@ void loop() {
   serviceReceiverIO();
   updateIndicatorLeds();
   printDebugStatus();
-  delay(1);
+  delay(5);
 }

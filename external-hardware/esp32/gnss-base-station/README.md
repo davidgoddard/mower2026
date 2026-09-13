@@ -1,59 +1,62 @@
 # GNSS Base Station ESP32
 
-This sketch reads RTCM3 messages from a UM980 base receiver on `Serial2` and forwards them over ESP-NOW to the rover GNSS node.
+The UM980 sends RTCM3 over Serial2 at 115200 baud (RX GPIO16, TX GPIO17).
+The ESP32 validates framing and CRC24Q, then broadcasts fragmented messages on
+ESP-NOW channel 1 with Wi-Fi power saving disabled. The receiver must already
+be provisioned, including periodic RTCM 1006 so the mower can establish its origin.
 
-## File
+## Broadcast and relay operation
 
-- `external-hardware/esp32/gnss-base-station/gnss-base-station.ino`
+Broadcast is the only transmission mode. No mower MAC is needed at the base.
+The broadcast address is registered with the ESP-NOW driver; this is not a
+unicast connection and does not acknowledge reception by the mower.
 
-## Defaults
+Set the station MAC printed at base startup as `BASE_STATION_MAC` in the mower
+and optional relay. The mower also accepts `GNSS_RELAY_MAC`. The relay forwards
+packets unchanged, so the mower can assemble mixed direct/relay fragments and
+suppress duplicate complete messages. The existing relay packet format is unchanged.
 
-- UM980 UART pins: `RX=16`, `TX=17`
-- UM980 UART baud: `115200`
-- ESP-NOW channel: `1`
-- Transport: fragmented RTCM packets with message ID, fragment index/count, total message length, and RTCM CRC tag
+Each valid RTCM message receives two broadcast passes with identical message ID,
+fragment indexes, length and CRC. Packet starts are spaced at least 2 ms apart;
+the second pass starts at least 10 ms after the first pass completes. This bounds
+repeat traffic and improves recovery from packet loss without waiting for a return
+route. It is not guaranteed delivery, and no application acknowledgement is added.
 
-At startup the serial console prints the station-mode MAC address as:
+## Scheduling and failure handling
 
-```text
-[RTCM-BASE] station MAC=AA:BB:CC:DD:EE:FF
+- A 4096-byte UART RX buffer feeds an eight-message transmit queue. Each loop
+  drains at most 512 serial bytes, services the radio, then yields for 1 ms.
+- At most one radio send is outstanding. Only its callback advances the state;
+  a delayed callback can never be mistaken for the next packet's result.
+- Immediate errors or failed callbacks allow at most four attempts per fragment
+  per pass. Queue overflow, retry exhaustion and messages older than 500 ms are
+  counted as drops. A send already in flight is allowed to finish.
+- A callback missing for one second restarts the base ESP32, clearing radio and
+  callback state together. It does not restart or reconfigure the UM980.
+- UART errors are counted. RTCM parsing slides to the next candidate after a
+  bad header/CRC; a partial frame expires after a 250 ms inter-byte gap.
+- Idle radio time permits a diagnostic probe about once per second. Probes are
+  never forwarded to a GNSS receiver or used as an origin.
+
+## Diagnostics
+
+Startup reports Wi-Fi/channel setup, station MAC, ESP-NOW initialization and
+callback registration; `espNowReady=yes` requires successful setup and the
+expected channel. Every ten seconds a nonblocking summary reports `read`,
+`sentLocal`, `drop`, `reject`, `retry`, `uartError`, `queue` and `callbacks=ok/fail`.
+`sentLocal` means both passes completed locally, not that the mower received them.
+Summaries are skipped if the serial output buffer has insufficient space.
+
+## Build and verification
+
+Validated with Arduino ESP32 core **3.3.5**, FQBN `esp32:esp32:esp32`:
+
+```sh
+arduino-cli compile --fqbn esp32:esp32:esp32 external-hardware/esp32/gnss-base-station
+node --test test/gnssFirmware.test.js
 ```
 
-Use this address for `BASE_STATION_MAC` in the relay and mower GNSS firmware.
-
-## Peer configuration
-
-For best reliability, set one or more rover MAC addresses in `ROVER_PEERS` and increase `ROVER_PEER_COUNT`.
-
-Default behavior is broadcast fallback only. Broadcast is convenient for bench pairing, but unicast is the intended field mode because it reduces packet loss.
-
-## Rover compatibility
-
-This sketch is paired with:
-
-- `external-hardware/esp32/gnss-mower/gnss-mower.ino`
-
-The rover sketch accepts this fragmented transport and uses its message identity
-to suppress duplicate direct and relayed packets.
-
-## Radio-link diagnostics
-
-The base prints its Wi-Fi mode, configured and actual channel, ESP-NOW
-initialization, callback-registration, and peer-registration results at startup.
-ESP-IDF success is numeric result `0`; `espNowReady=yes` confirms that all
-required initialization calls succeeded.
-
-The base also sends a four-byte link probe once per second, independently of
-UM980 or antenna availability. This packet is deliberately not RTCM. The
-current mower firmware recognizes the configured base as its sender and reports
-the probe through `linkProbes` and `linkProbeAgeMs`, but cannot forward it to the
-UM982 or use it as a coordinate origin. An increasing mower `linkProbes` count
-proves that the base-to-mower ESP-NOW radio route works. Valid RTCM subsequently
-increases the first `rtcmFrags` number and pulses the mower's RTCM activity LED.
-
-Base status output is enabled and includes `sendCallbacks=succeeded/failed`,
-`probes=sent/dropped`, and `espNowReady=yes|no`. A probe is counted as sent only
-when the asynchronous ESP-NOW callback reports `ESP_NOW_SEND_SUCCESS`; the
-immediate `esp_now_send()` queueing result alone is not treated as delivery.
-Disable `ENABLE_LINK_PROBE` after radio-path diagnosis if the extra diagnostic
-packet is no longer wanted.
+The native tests compile both actual sketches with deterministic hardware stubs
+and need a C++17 compiler (`CXX` may select it). See
+[GNSS transport verification](../../../docs/gnss-transport-verification.md)
+for hardware acceptance checks. Compilation alone does not flash the ESP32.

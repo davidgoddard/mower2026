@@ -365,18 +365,33 @@ This is useful for documenting the correction source, but it does not by itself 
 
 That symptom indicates the rover is not parsing usable live receiver logs such as `PVTSLNA`.
 
-The heading-length command currently encodes an antenna baseline assumption of about `0.30 m` with `0.05 m` tolerance.
+The receiver heading-length command uses an antenna baseline assumption of about `0.30 m`; runtime validation accepts reported baseline lengths within `0.10 m` of that nominal value.
 
 ## GNSS ESP processing pipeline
 
-1. Receive RTCM fragments over ESP-NOW from the base node and copy them into a bounded queue; the Wi-Fi callback must not parse RTCM, write UART, or mutate origin/I2C state.
-2. Drain a bounded number of queued packets in the main loop and reassemble full RTCM messages.
-3. Forward RTCM messages to the UM982 serial port.
-4. Read `PVTSLNB` continuously.
-5. Read `RECTIMEB` at low rate for time validity.
-6. Optionally read `UNIHEADINGB` for heading-quality enrichment.
-7. Convert receiver fields into one compact navigation sample.
-8. Build the compact payload in the main loop and atomically publish an immutable snapshot. I2C request/receive callbacks may only copy/encode that snapshot, never read live parser or origin fields. Register the I2C node before startup LED/configuration delays so it remains discoverable while initializing.
+1. The base validates UM980 RTCM3 framing/CRC and enqueues complete messages.
+   A bounded asynchronous sender broadcasts each message twice with stable fragment
+   identity, one outstanding send and no rover acknowledgement requirement.
+2. The mower accepts base/relay source MACs, queues bounded copies from the Wi-Fi
+   callback, reassembles out-of-order fragments and deduplicates complete messages.
+3. CRC-valid corrections are admitted only if the complete frame fits in the
+   UM982 TX buffer; failed admission remains eligible for broadcast-repeat recovery.
+4. Read current `PVTSLNA` (20 Hz), `RECTIMEA` (1 Hz) and `UNIHEADINGA` (5 Hz)
+   ASCII logs in bounded UART batches, including during startup waits. The binary
+   names earlier in this document describe an earlier proposal, not the current path.
+5. Validate receiver CRC32, field counts and numeric ranges before trusting logs;
+   drop oversized/damaged lines through newline and expire auxiliary validity.
+6. Build and atomically publish the compact payload and freshness metadata in
+   the main loop. The original ESP32's I2C receive callback ages that snapshot and
+   preloads the driver's response FIFO with the requested type and sequence.
+   A snapshot stalled for more than 250 ms is unavailable, independently of the
+   two-second receiver-sample expiry. No parser/coordinate conversion runs in I2C.
+7. Preserve the existing 51-byte sample and 127-byte diagnostic response contract.
+   The Pi writes a request with STOP then reads separately; validate this timing
+   on hardware rather than assuming a repeated START or an after-read callback works.
+
+See [transport verification](gnss-transport-verification.md) and the firmware
+READMEs for buffer sizes, deadline policies, build commands and hardware checks.
 
 ## Indoor comms test guidance
 

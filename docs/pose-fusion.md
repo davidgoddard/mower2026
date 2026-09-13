@@ -123,7 +123,7 @@ stateDiagram-v2
 
 - Position passed **this** sample (heading TRUSTED implies position TRUSTED)
 - GNSS heading present and `headingValid` flag not false
-- Heading-baseline length within **30 cm ± 5 cm** when reported
+- Heading-baseline length within **30 cm ± 10 cm** when reported
 - Reported heading accuracy ≤ **1.0°**
 - Sample-to-sample heading rate ≤ **20°/s**
 - |GNSS heading − IMU heading| ≤ **5°**

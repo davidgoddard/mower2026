@@ -29,7 +29,8 @@ inline uint32_t clockMillis = 100;
 inline uint32_t millis() { return clockMillis; }
 inline void delay(uint32_t ms) { clockMillis += ms; }
 inline void pinMode(int, int) {}
-inline void digitalWrite(int, int) {}
+inline int pinLevels[40] = {};
+inline void digitalWrite(int pin, int level) { if (pin >= 0 && pin < 40) pinLevels[pin] = level; }
 class String {
   std::string value;
 public:

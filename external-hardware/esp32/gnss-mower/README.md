@@ -14,7 +14,7 @@ File:
 - runs as I2C slave at `0x52`
 - receives RTCM fragments over ESP-NOW and forwards them to the UM982
 - assumes the UM982 has already been configured persistently
-- verifies expected logs at startup
+- verifies expected logs at startup while servicing UART/radio input
 - parses:
   - `PVTSLNA`
   - `RECTIMEA`
@@ -93,116 +93,89 @@ Heading and position LEDs use the same pattern:
 - `3` flashes every `2 s`: float RTK solution
 - solid on: fixed RTK solution
 
-RTCM activity on `GPIO19` pulses briefly only when a complete RTCM message has:
+The route LED (`GPIO23`) flashes for 100 ms when a configured base or relay
+link probe arrives, even if the base receiver has no antenna or emits no RTCM.
+The base sends that probe once per second while ESP-NOW is initialized, so this
+flash proves the one-way broadcast path to the mower. It is never forwarded to
+the UM982. GPIO23 no longer displays direct/relay route patterns; the source
+route remains available in diagnostics.
+
+When RTCM is present, `GPIO19` also pulses briefly only when a complete RTCM message has:
 
 - the correct RTCM preamble `0xD3`
 - a complete length-matched payload
 - a valid RTCM CRC24Q
 
-Only then is it forwarded to the UM982 and allowed to pulse the LED. Random ESP-NOW traffic or malformed RTCM-like fragments should no longer flash this LED.
+Only then is it forwarded to the UM982 and allowed to pulse the LED. Random ESP-NOW traffic, probes from unknown senders and malformed RTCM-like fragments do not flash the LED.
 
 If no fresh `PVTSLNA` fix has been parsed for more than about `2 s`, the heading and position LEDs are forced off.
 
+## Transport reliability
+
+The current target is the original ESP32 WROOM using Arduino ESP32 core 3.3.5.
+Both base and optional relay use broadcast on channel 1. `BASE_STATION_MAC` and
+`GNSS_RELAY_MAC` are receive filters, including for link probes; they are not
+unicast peers. The two base broadcast passes and direct/relayed copies share
+message identity and are forwarded to the UM982 only once after CRC validation.
+
+The receiver UART uses 8192-byte RX and 4096-byte TX buffers. Corrections are
+written only when a complete frame fits in the TX buffer; otherwise they are
+counted as drops and remain eligible for recovery by a later broadcast copy.
+The normal main loop runs on a 5 ms cadence and reads bounded UART batches before and after processing up to four
+radio packets. It also services input during startup LED and command waits.
+Packets queued for more than 500 ms are discarded.
+
+PVTSLNA, RECTIMEA and UNIHEADINGA must carry valid Unicore CRC32 checksums.
+Non-finite/out-of-range numbers are rejected. Oversized or UART-error-damaged
+lines are discarded through newline. UTC, auxiliary heading and baseline flags
+expire with their corresponding data; malformed dates clear previous UTC.
+
+## I2C responses
+
+The 40-byte sample payload / 51-byte frame and 116-byte debug payload / 127-byte
+frame remain unchanged. Each request is an 11-byte CRC-protected frame followed
+by a STOP and a separate read, as used by the Pi transport. Combined repeated-START
+requests are not the supported transaction pattern.
+
+On the original ESP32, the Arduino read callback runs after the transaction.
+The firmware therefore calls `Wire.slaveWrite()` from the receive callback to
+preload the response before the master reads. It never loads a response from
+`loop()` or from an after-read callback. Buffer allocation, I2C initialization,
+and slave-write results are checked. The master must still reject wrong CRCs,
+lengths and sequence numbers and retry, as the production Pi client already does.
+
+The receive callback copies an immutable payload plus age metadata under a short
+lock and computes CRC outside it. Sample age advances at request time. If the
+main loop has not published for more than 250 ms, a new request receives the
+unavailable sample-age sentinel (`65535`), even if I2C itself remains responsive.
+The normal receiver-sample expiry remains two seconds. No wire-format or Pi
+application change is required.
+
 ## Diagnostics
 
-The sketch still emits a compact boot/debug summary on the USB serial console
-for bench work, but low-satellite raw text is now fetched by the Pi and written
-into the normal session log instead of relying on a local serial monitor.
+Startup prints radio setup results and station MAC. Every ten seconds, a bounded
+nonblocking summary reports `pvt`, `rtcm`, `queueDrop`, `txDrop`, `uartError`,
+`crcError`, `lineOverflow`, `i2cError`, `probes`, `packets`, `unknown`, `pvtAgeMs`,
+`rtcmAgeMs`, `origin` and `route`. The age sentinel `4294967295` means no sample.
+Origin 1 is RTCM1006; route 1/2/3 means direct/relay/mixed for the latest message.
+Route age is reflected separately by the route LED's existing freshness rule.
 
-Example summary:
+`probes` or `packets` increasing proves radio activity, while increasing `rtcm`
+proves complete CRC-valid corrections were accepted into the receiver TX path.
+`unknown` indicates source-MAC filtering. Increasing UART, checksum, queue or
+I2C error counters requires investigation. Low-satellite raw payload text remains
+available through the Pi diagnostic frame. High-volume startup raw-line printing
+and per-1006 serial tracing are disabled/removed.
 
-```text
-[GNSS] lines=128 pvtslna=42 rectimea=4 uniheadinga=21 unknown=11 logConfig=ok(111) fix=single sats=17 headingValid=yes receiverAgeMs=12 pvtslnaAgeMs=95 uniheadingAgeMs=180 rtcmAgeMs=640 uniloglistAgeMs=220
+Build and native regression tests:
+
+```sh
+arduino-cli compile --fqbn esp32:esp32:esp32 external-hardware/esp32/gnss-mower
+node --test test/gnssFirmware.test.js
 ```
 
-Interpretation:
-
-- `lines`
-  - total UM982 text lines seen by the ESP
-- `pvtslna`
-  - how many `#PVTSLNA` logs have been parsed
-- `rectimea`
-  - how many `#RECTIMEA` logs have been parsed
-- `uniheadinga`
-  - how many `#UNIHEADINGA` logs have been parsed
-- `fix`
-  - current compact fix state derived from `PVTSLNA`
-- `logConfig`
-  - result of the post-config `UNILOGLIST` verification
-  - `ok(111)` means `PVTSLNA COM2`, `RECTIMEA COM2`, and `UNIHEADINGA COM2` were all observed in the receiver log list
-  - `partial` means only some of the expected logs were present
-  - `none` means the verification ran but none of the expected logs were observed
-  - `unknown` means no `UNILOGLIST` result has been parsed yet
-- `sats`
-  - current satellites-in-use count from `PVTSLNA`
-- `headingValid`
-  - whether the rover currently has a usable heading solution
-- `receiverAgeMs`
-  - milliseconds since any UM982 line was last seen
-- `pvtslnaAgeMs`
-  - milliseconds since the last parsed `PVTSLNA`
-- `uniheadingAgeMs`
-  - milliseconds since the last parsed `UNIHEADINGA`
-- `rtcmAgeMs`
-  - milliseconds since the last verified RTCM message was forwarded to the UM982
-- `rtcm1006`
-  - count of verified RTCM 1006 base-position messages decoded by the rover
-- `rtcm1006AgeMs`
-  - milliseconds since the last verified RTCM 1006 message was decoded
-- `origin`
-  - local coordinate origin source and current latitude/longitude/height; production values are `rtcm1006` or `none`
-- `rtcmQueueDrops`
-  - ESP-NOW packets dropped because the bounded handoff queue was full
-- `linkProbes` / `linkProbeAgeMs`
-  - count and age of the antenna-independent diagnostic probes broadcast by the paired base firmware
-- `espNowPackets` / `lastEspNowSender`
-  - count every packet delivered to the ESP-NOW receive callback before protocol or sender filtering, and expose the latest over-air source MAC; these remain useful when a packet is later rejected
-- `espNowReady` / `espNowChannel`
-  - whether station mode, power-save disablement, fixed-channel selection, ESP-NOW initialization, and receive-callback registration all succeeded; the active channel must be `1`; broadcast reception deliberately does not require peer registration
-- `bootId` / `resetReason`
-  - lifecycle identifiers also sent to the Pi in payload bytes 36–39 so unexpected ESP resets are visible in the session log
-- `uniloglistAgeMs`
-  - milliseconds since the last parsed `UNILOGLIST` response
-
-Useful failure patterns:
-
-- `lines=0`
-  - ESP is not receiving any UM982 serial output
-- `lines` increasing but `pvtslna=0`
-  - UM982 is talking, but not producing the expected `PVTSLNA` log
-- `pvtslna` increasing but `fix=none sats=0`
-  - parser is running, but the receiver solution itself is not usable
-- when `sats` drops below 8, the Pi requests the latest raw `PVTSLNA`
-  payload text after the semicolon over I2C and logs it into the mower
-  session file so parsing can be checked against the receiver's own text
-  output via SSH
-- `rtcmAgeMs=none`
-  - rover has not recently received verified RTCM correction messages
-- `linkProbes` increasing while `rtcmAgeMs=none`
-  - the ESP-NOW base-to-mower radio path is healthy, but the base is not sending valid RTCM messages from its receiver
-- `linkProbes=0` with `espNowReady=yes` on channel `1`
-  - the rover radio is initialized correctly but is not hearing the base broadcasts
-- `espNowPackets` increasing but `linkProbes=0`
-  - packets reach the mower radio but do not match the paired base's probe payload; inspect `lastEspNowSender`, unknown-sender count, and rejected-fragment count
-- `rtcmAgeMs` fresh but `origin=none`
-  - corrections are arriving, but no verified RTCM 1006 base-position message has been decoded yet; local position remains deliberately unusable
-
-Startup diagnostics were also extended:
-
-- every configuration command sent to the UM982 is printed with:
-  - `[GNSS-CONFIG] ...`
-- the first few raw lines received back from the UM982 are printed with:
-  - `[GNSS-RAW] ...`
-- after configuration, the sketch now sends:
-  - `UNILOGLIST`
-  - and verifies that the three expected `COM2` logs are actually active
-
-This makes it possible to tell whether the receiver is:
-
-- echoing configuration commands
-- returning errors
-- outputting unexpected log types
-- or simply not streaming `PVTSLNA`
+See [GNSS transport verification](../../../docs/gnss-transport-verification.md)
+for the required hardware checks and actual validation results.
 
 ## UM982 configuration
 

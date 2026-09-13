@@ -2897,9 +2897,9 @@ export async function startMowerServer(options: StartMowerServerOptions = {}): P
     continuousPathFollower = new ContinuousPathFollower({
       sensorController,
       poseFusion,
-      driveController,
       turnController,
       learningModel: driveLearningModel,
+      motorCalibration: motorCalibration!,
       logger: logger.child({ context: "pathfollowing", source: "ContinuousPathFollower" }),
     });
 

@@ -57,6 +57,28 @@ test("GnssValidator accepts a first sample with no previous anchor (cold start)"
   assert.equal(result.positionRejections.length, 0);
 });
 
+test("GnssValidator accepts a reported heading baseline within 30 cm plus or minus 10 cm", () => {
+  const validator = new GnssValidator({ logger: createMockLogger() });
+  const accepted = {
+    ...makeTrustedSample(1000),
+    headingBaselineMeters: 0.395,
+  };
+  const result = validator.validate(accepted, createInternalHeading(90));
+
+  assert.equal(result.headingRejections.includes("heading_baseline_out_of_range"), false);
+});
+
+test("GnssValidator still rejects a reported heading baseline beyond 40 cm", () => {
+  const validator = new GnssValidator({ logger: createMockLogger() });
+  const rejected = {
+    ...makeTrustedSample(1000),
+    headingBaselineMeters: 0.401,
+  };
+  const result = validator.validate(rejected, createInternalHeading(90));
+
+  assert.equal(result.headingRejections.includes("heading_baseline_out_of_range"), true);
+});
+
 test("GnssValidator keeps heading trusted through short glitches and only demotes after the longer failure window", () => {
   const validator = new GnssValidator({ logger: createMockLogger() });
   const imuHeading = createInternalHeading(90);

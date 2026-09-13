@@ -77,7 +77,30 @@ int main() {
   assert(rover::UM982.tx == message);
   for (size_t i = 5; i < 10; ++i) receive(radioPackets[i], true);
   assert(rover::UM982.tx == message);
-  puts("PASS broadcast/relay reassembly, repeats and deduplication");
+  // A corrupted fragment must not reach UART; a later full repeat recovers it.
+  resetBase(); feedBase(correction(30));
+  base::serviceRadio();
+  auto corruptPacket = radioPackets.front(); corruptPacket.back() ^= 1;
+  const auto uartBytes = rover::UM982.tx.size();
+  receive(corruptPacket); assert(rover::UM982.tx.size() == uartBytes);
+  receive(radioPackets.front(), true); assert(rover::UM982.tx.size() == uartBytes + 36);
+  // Unknown senders cannot fake a paired-base link probe.
+  esp_now_recv_info_t unknown{};
+  auto probes = rover::g_totalLinkProbesReceived.load();
+  rover::onEspNowDataReceived(&unknown, rover::LINK_PROBE_PAYLOAD, sizeof(rover::LINK_PROBE_PAYLOAD));
+  assert(rover::g_totalLinkProbesReceived == probes);
+  memcpy(unknown.src_addr, rover::GNSS_RELAY_MAC, 6);
+  rover::g_lastRtcmLedPulseMillis = clockMillis - 101;
+  rover::onEspNowDataReceived(&unknown, rover::LINK_PROBE_PAYLOAD, sizeof(rover::LINK_PROBE_PAYLOAD));
+  assert(rover::g_totalLinkProbesReceived == probes + 1);
+  rover::updateIndicatorLeds();
+  assert(pinLevels[rover::LED_RTCM_PIN] == LOW);
+  assert(pinLevels[rover::LED_RTCM_ROUTE_PIN] == HIGH);
+  clockMillis += 101;
+  rover::updateIndicatorLeds();
+  assert(pinLevels[rover::LED_RTCM_PIN] == LOW);
+  assert(pinLevels[rover::LED_RTCM_ROUTE_PIN] == LOW);
+  puts("PASS broadcast/relay reassembly, CRC rejection, repeats, deduplication and probe filtering");
 
   // No second send is issued after 15 ms; the late callback belongs to the
   // same fragment. Ingress still runs while that callback is pending.
@@ -164,4 +187,12 @@ int main() {
   auto invalidTime = receiverLine("RECTIMEA,97,GPS,FINE,2190,365121000,0,0,18,12;VALID,0,0,-18,2026,2,30,5,25,3000,VALID");
   rover::handleUm982Line(invalidTime.c_str()); assert(!rover::g_latestRectime.utcValid);
   puts("PASS invalid dates clear earlier UTC");
+
+  clockMillis = UINT32_MAX - 20;
+  rover::handleUm982Line(pvt().c_str()); rover::refreshPayloadSnapshots();
+  clockMillis += 50; request(rover::MESSAGE_TYPE_GNSS_SAMPLE, 13);
+  assert(rover::readU16LE(&Wire.tx[9+30]) == 50);
+  clockMillis += 251; request(rover::MESSAGE_TYPE_GNSS_SAMPLE, 14);
+  assert(rover::readU16LE(&Wire.tx[9+30]) == 0xFFFF);
+  puts("PASS snapshot age remains correct across millis wrap");
 }

@@ -2099,7 +2099,7 @@ test("MowingExecutor locally replans once when a live connector leaves its route
   assert.deepEqual(driveTargets, [[1.2, 0]]);
 });
 
-test("MowingExecutor passes saved continuous-follow progress back to the follower on resume", async () => {
+test("MowingExecutor anchors nearby saved connector progress to the live pose on resume", async () => {
   const pathPoints = [
     { xMeters: 0, yMeters: 0, capturedAt: 1 },
     { xMeters: 0.2, yMeters: 0, capturedAt: 2 },
@@ -2159,7 +2159,7 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
       async executeTurn() { return { status: "success" }; },
     },
     poseFusion: {
-      getCurrentPose() { return createPose(0.4, 0, createInternalHeading(0), "gnss"); },
+      getCurrentPose() { return createPose(0.39, 0.05, createInternalHeading(0), "gnss"); },
     },
     continuousPathFollower: {
       async executePath(points, options) {
@@ -2181,7 +2181,12 @@ test("MowingExecutor passes saved continuous-follow progress back to the followe
 
   assert.equal(status.phase, "complete");
   assert.equal(followCalls.length, 1);
-  assert.equal(followCalls[0].options.initialTargetIndex, 2);
+  assert.deepEqual(
+    followCalls[0].points.map(({ xMeters, yMeters }) => [xMeters, yMeters]),
+    [[0.39, 0.05], [0.4, 0], [0.6, 0]],
+  );
+  assert.equal(followCalls[0].options.initialTargetIndex, 1);
+  assert.equal(followCalls[0].options.preserveFirstTargetAtPose, true);
   assert.equal(followCalls[0].options.pivotAtWaypointTurnDeg, 20);
   assert.equal(followCalls[0].options.pivotAtWaypointDistanceMeters, 0.15);
   assert.equal(followCalls[0].options.minimumSpeed, 1);
