@@ -2739,14 +2739,20 @@ export class MowingExecutor {
         settledPose.heading,
         targetHeading,
       )));
+      const entryDistanceMeters = unwrapMeters(distanceBetween(
+        settledPose.position,
+        createPosition(entry.x, entry.y),
+      ));
       const positionStable = pivotDisplacementMeters <= pivotDisplacementToleranceMeters;
       const baselineStable = baselineCteMeters <= baselineToleranceMeters;
       const headingStable = headingErrorDeg <= headingToleranceDeg;
+      const entryTargetReached = entryDistanceMeters < MOWING_MINIMUM_TRANSLATION_METERS;
 
       this.logger.info("mowing.strip_entry.pivot_validated", {
         stripIndex,
         attempt,
         pivotDisplacementMeters,
+        entryDistanceMeters,
         baselineCteMeters,
         headingErrorDeg,
         pivotDisplacementToleranceMeters,
@@ -2755,11 +2761,12 @@ export class MowingExecutor {
         positionStable,
         baselineStable,
         headingStable,
+        entryTargetReached,
         xMeters: unwrapMeters(settledPose.position.xMeters),
         yMeters: unwrapMeters(settledPose.position.yMeters),
       });
 
-      if (positionStable && baselineStable && headingStable) {
+      if (positionStable && (baselineStable || entryTargetReached) && headingStable) {
         return "success";
       }
       if (attempt >= MOWING_STRIP_ENTRY_MAX_ATTEMPTS) {
@@ -2787,7 +2794,7 @@ export class MowingExecutor {
         headingErrorDeg,
       });
 
-      if (!positionStable || !baselineStable) {
+      if ((!positionStable || !baselineStable) && !entryTargetReached) {
         this.phase = "approaching_strip";
         this.persistResumeOperation({
           kind: "drive",
@@ -2801,7 +2808,7 @@ export class MowingExecutor {
         const approachResult = await this.executeGeometryCheckedDrive({
           targetPosition: createPosition(entry.x, entry.y),
           learningEnabled: true,
-          minimumDriveDistanceMeters: 0,
+          minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
           maxCrossTrackErrorMeters: baselineToleranceMeters,
         });
         if (approachResult.status !== "success") {

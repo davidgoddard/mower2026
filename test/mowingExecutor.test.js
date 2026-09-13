@@ -114,7 +114,7 @@ test("MowingExecutor reapproaches and realigns once after an excessive strip-ent
     driveController: {
       async executeDrive(request) {
         driveCalls += 1;
-        assert.equal(request.minimumDriveDistanceMeters, 0);
+        assert.equal(request.minimumDriveDistanceMeters, 0.15);
         assert.equal(request.validateTranslationPath(pose.position, request.targetPosition), null);
         pose = createPose(1, 1, createInternalHeading(90), "gnss");
         return { status: "success", maxCteMeters: 0 };
@@ -224,6 +224,43 @@ test("MowingExecutor leaves a normal small strip-entry offset for baseline conve
     { x: 1, y: 1 },
     { x: 9, y: 1 },
   ), "success");
+  assert.equal(driveCalls, 0);
+});
+
+test("MowingExecutor accepts a settled strip entry inside the minimum useful drive distance", async () => {
+  let pose = createPose(1, 1, createInternalHeading(90), "gnss");
+  let turnCalls = 0;
+  let driveCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: { async executeDrive() { driveCalls += 1; return { status: "success", maxCteMeters: 0 }; } },
+    turnController: {
+      async executeTurn() {
+        turnCalls += 1;
+        pose = createPose(1, 1.12, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["alignMowingStripEntry"](
+    4,
+    0,
+    { x: 1, y: 1 },
+    { x: 9, y: 1 },
+  ), "success");
+  assert.equal(turnCalls, 1);
   assert.equal(driveCalls, 0);
 });
 

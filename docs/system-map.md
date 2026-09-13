@@ -450,6 +450,7 @@ This document maps problem domains to candidate files removing the need for Code
   - follows multi-point inter-lane connectors with the same continuous follower used for perimeter tracing so lane changes and obstacle-wrap connectors stay smooth instead of degenerating into repeated micro turn-drive retargets
   - only falls back to routed connector following when a direct transfer line is blocked by an obstacle
   - skips approach / strip / direct-connector micro-corrections when the live pose is already within 10 cm of the target, avoiding large turns for effectively completed 5 cm moves
+  - accepts a settled strip-entry pivot inside the 15 cm minimum useful translation distance when its heading is already suitable, avoiding a centimetre-scale reapproach followed by a redundant second turn
   - keeps two-point connectors as direct line drives between standoff targets
   - starts an in-run area watchdog after the initial perimeter trace and requests an immediate stop if the mower drifts more than 25 cm outside the mowing area
   - stops the mowing workflow if a boundary trace does not complete successfully
