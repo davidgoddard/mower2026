@@ -492,7 +492,7 @@ export class SensorController extends EventEmitter {
       isZeroCommand !== wasZeroCommand ||
       isActiveCommand !== wasActiveCommand;
     if (motionChanged) {
-      this.logger.info("motors.commanded", {
+      this.logger.debug("motors.commanded", {
         leftWheelOutputPercent: normalizedLeftWheelOutputPercent,
         rightWheelOutputPercent: normalizedRightWheelOutputPercent,
       });
@@ -827,7 +827,7 @@ export class SensorController extends EventEmitter {
     const summary = this.getRecentImuDiagnosticSummary();
     this.lastImuMotionStopSummary = summary;
     if (summary !== null) {
-      this.logger.info("sensor.imu.motion_stop_summary", {
+      this.logger.debug("sensor.imu.motion_stop_summary", {
         reason,
         imuDiagnostics: summary,
       });

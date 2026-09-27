@@ -1741,13 +1741,6 @@ test("MowingExecutor traces the boundary referenced by the strip, not whichever 
   const executor = new MowingExecutor({
     plan,
     skipInitialBoundaryTrace: true,
-    initialEntryPlan: {
-      entryPoint: { xMeters: 3, yMeters: 0, capturedAt: 13 },
-      approachTarget: { xMeters: 3, yMeters: 0.15 },
-      segmentIndex: 0,
-      distanceMeters: 0.15,
-      tangentHeadingDeg: 90,
-    },
     areaPoints,
     obstaclePointsArray: obstaclePoints,
     driveController,
@@ -1837,6 +1830,72 @@ test("MowingExecutor adjusts an outside initial entry target to a point inside t
   assert.equal(status.phase, "complete");
   assert.equal(driveTargets.length >= 1, true);
   assert.equal(driveTargets[0][1] < 2, true);
+});
+
+test("initial entry routes around a concave out-of-bounds corner", async () => {
+  const areaPoints = [
+    [0, 0], [4, 0], [4, 1], [1, 1], [1, 4], [0, 4],
+  ].map(([xMeters, yMeters], index) => ({ xMeters, yMeters, capturedAt: index + 1 }));
+  const directDrives = [];
+  const routedPaths = [];
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    initialEntryPlan: {
+      entryPoint: { xMeters: 4, yMeters: 0.5, capturedAt: 7 },
+      approachTarget: { xMeters: 3.5, yMeters: 0.5 },
+      segmentIndex: 1,
+      distanceMeters: 4,
+      tangentHeadingDeg: 90,
+    },
+    skipInitialBoundaryTrace: true,
+    areaPoints,
+    obstaclePointsArray: [],
+    driveController: { async executeDrive(request) { directDrives.push(request); return { status: "success" }; } },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    poseFusion: { getCurrentPose() { return createPose(0.5, 3.5, createInternalHeading(0), "gnss"); } },
+    continuousPathFollower: { async executePath(points) {
+      routedPaths.push(points);
+      return { completed: true, reason: "reached_end" };
+    } },
+    logger: createLogger(),
+  });
+
+  const status = await executor.execute();
+  assert.equal(status.phase, "complete");
+  assert.equal(directDrives.length, 0);
+  assert.equal(routedPaths.length, 1);
+  assert.ok(routedPaths[0].length > 2);
+  assert.equal(isMowingExecutionPathSafe(routedPaths[0], areaPoints, []), true);
+});
+
+test("initial entry rejects an exterior shortcut to a distant boundary edge before moving", async () => {
+  const areaPoints = [
+    [0, 0], [4, 0], [4, 4], [0, 4],
+  ].map(([xMeters, yMeters], index) => ({ xMeters, yMeters, capturedAt: index + 1 }));
+  let motionCount = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    initialEntryPlan: {
+      entryPoint: { xMeters: 0, yMeters: 2, capturedAt: 5 },
+      approachTarget: { xMeters: 0.2, yMeters: 2 },
+      segmentIndex: 3,
+      distanceMeters: 4,
+      tangentHeadingDeg: 90,
+    },
+    skipInitialBoundaryTrace: true,
+    areaPoints,
+    obstaclePointsArray: [],
+    driveController: { async executeDrive() { motionCount++; return { status: "success" }; } },
+    turnController: { async executeTurn() { motionCount++; return { status: "success" }; } },
+    poseFusion: { getCurrentPose() { return createPose(2, -0.3, createInternalHeading(0), "gnss"); } },
+    continuousPathFollower: { async executePath() { motionCount++; return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  const status = await executor.execute();
+  assert.equal(status.phase, "error");
+  assert.equal(status.error, "initial_entry_exterior_corner_shortcut");
+  assert.equal(motionCount, 0);
 });
 
 test("MowingExecutor skips tiny initial-entry approach drives when already at the staging point", async () => {
@@ -2592,6 +2651,7 @@ test("MowingExecutor stages a displaced obstacle-boundary resume before followin
   const status = await executor.execute();
 
   assert.equal(status.phase, "complete");
+  assert.equal(status.tracedBoundaryCount, 1);
   assert.deepEqual(driveTargets, [[3.9, 4]]);
   assert.equal(turnRequests.length, 1);
   assert.equal(followedPaths.length, 1);

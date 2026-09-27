@@ -301,7 +301,8 @@ A normal mowing session looks like this:
 ## Diagnostics
 
 - `getDiagnosticSnapshot()` returns a single bundle (fused state, encoder-only track, calibration, last GNSS event, last rejection reason and age, blend separation) for the per-drive heartbeat. Designed to be sampled at ~5 Hz during a drive.
-- `pose_fusion.gnss_rejected.<reason>` warnings are emitted when the active rejection reason changes and then summarized at most once per minute per reason, including heading-only failures while position remains trusted.
+- `pose_fusion.gnss_rejected.<reason>` warnings are emitted when a reason becomes active and then summarized at most once per minute per reason. Position acceptance does not reset active heading failures, and concurrent rejection reasons are tracked independently, so alternating validator results cannot bypass the limiter.
+- Per-command motor transitions, raw IMU stop-window summaries, repeated learning-policy skips, and per-line calibration snapshots are debug-only. The normal information-level session log retains lifecycle, result, safety, recovery, and heartbeat records without duplicating those high-frequency diagnostics.
 - `pose_fusion.wheel_slip_suspected` fires once on each transition into the suspected state.
 - `pose_fusion.gnss_heading_rebase_stationary_override` fires whenever the wide-tolerance stationary path is used, with the disagreement and yaw rate at the moment of rebase.
 

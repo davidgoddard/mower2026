@@ -154,6 +154,63 @@ test("continuous follower uses learned braking while retaining ownership of a ge
   assert.equal(neutralCalls >= 2, true);
 });
 
+test("ordered follower cannot project onto a nearby hairpin exit before reaching its corner", async () => {
+  const route = [
+    { xMeters: 15.783314479623305, yMeters: 10.171239623198423, capturedAt: 1 },
+    { xMeters: 17.563857519782292, yMeters: 10.840665265319151, capturedAt: 2 },
+    { xMeters: 11.700422351333435, yMeters: 8.399311372830295, capturedAt: 3 },
+  ];
+  let pose = createPose(
+    16.194692201488234,
+    10.257717858014713,
+    createInternalHeading(20.6),
+    "gnss",
+  );
+  const commands = [];
+  let turnCalls = 0;
+  const follower = new ContinuousPathFollower({
+    poseFusion: { getCurrentPose: () => pose },
+    learningModel: {
+      getBrakeDistanceForDrive: () => 0.15,
+      getCteGainForDirection: () => 1.8,
+      getLongHeadingGainForDirection: () => 0.02,
+    },
+    turnController: {
+      executeTurn: async () => {
+        turnCalls += 1;
+        pose = createPose(route[2].xMeters, route[2].yMeters, createInternalHeading(-157.4), "gnss");
+        return { status: "success" };
+      },
+    },
+    sensorController: {
+      beginMotionSession: () => {},
+      endMotionSession: () => {},
+      setMotorWheelOutputs: async (left, right) => {
+        commands.push({ left, right });
+        pose = createPose(17.45, 10.80, createInternalHeading(20.6), "gnss");
+      },
+      requestNeutralMotorOutputs: async () => {
+        pose = createPose(route[1].xMeters, route[1].yMeters, createInternalHeading(20.6), "gnss");
+      },
+    },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath(route, {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+    pivotAtWaypointTurnDeg: 20,
+    pivotAtWaypointDistanceMeters: 0.15,
+  });
+
+  assert.equal(result.completed, true);
+  assert.equal(turnCalls, 1);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].left > 0 && commands[0].right > 0, true);
+});
+
 test("continuous follower does not repeat a completed corner while projection remains on its incoming edge", async () => {
   let pose = createPose(0.86, 0, createInternalHeading(0), "gnss");
   let turnCalls = 0;
@@ -584,6 +641,74 @@ test("continuous steering uses the learned CTE gain supplied by straight driving
   );
 
   assert.equal(Math.abs(learned.left - learned.right) > Math.abs(gentle.left - gentle.right), true);
+});
+
+test("continuous steering applies learned CTE-rate damping when error is growing", () => {
+  const pose = createPose(0, 0.08, createInternalHeading(0), "gnss");
+  const pathStart = { xMeters: 0, yMeters: 0, capturedAt: 1 };
+  const pathTarget = { xMeters: 1, yMeters: 0, capturedAt: 2 };
+  const lookahead = { xMeters: 2, yMeters: 0, capturedAt: 3 };
+  const undamped = computeContinuousPathWheelCommands(
+    pose, pathStart, pathTarget, lookahead, 1,
+    { cteGain: 1, cteDampingGain: 0, cteSlope: -0.2, headingGain: 0 },
+  );
+  const damped = computeContinuousPathWheelCommands(
+    pose, pathStart, pathTarget, lookahead, 1,
+    { cteGain: 1, cteDampingGain: 1, cteSlope: -0.2, headingGain: 0 },
+  );
+
+  assert.equal(Math.abs(damped.left - damped.right) > Math.abs(undamped.left - undamped.right), true);
+});
+
+test("continuous follower stops a persistent growing CTE before broad route loss", async () => {
+  let pose = createPose(0, 0.1, createInternalHeading(0), "gnss");
+  let commandCount = 0;
+  const warnings = [];
+  const follower = new ContinuousPathFollower({
+    poseFusion: { getCurrentPose: () => pose },
+    learningModel: {
+      getCteGainForDirection: () => 3,
+      getCteDampingGainForDirection: () => 1,
+      getLongHeadingGainForDirection: () => 0.01,
+      getBrakeDistanceForDrive: () => 0.15,
+    },
+    turnController: { async executeTurn() { return { status: "success" }; } },
+    sensorController: {
+      beginMotionSession() {},
+      endMotionSession() {},
+      async requestNeutralMotorOutputs() {},
+      async setMotorWheelOutputs() {
+        commandCount += 1;
+        pose = createPose(
+          pose.position.xMeters + 0.02,
+          pose.position.yMeters + 0.003,
+          createInternalHeading(0),
+          "gnss",
+        );
+      },
+    },
+    logger: {
+      info() {},
+      debug() {},
+      warn(message, data) { warnings.push({ message, data }); },
+    },
+    sleep: async () => {},
+  });
+
+  const result = await follower.executePath([
+    { xMeters: 0, yMeters: 0, capturedAt: 1 },
+    { xMeters: 10, yMeters: 0, capturedAt: 2 },
+  ], {
+    loopPath: false,
+    strictOrderedProgress: true,
+    initialTargetIndex: 1,
+  });
+
+  assert.equal(result.completed, false);
+  assert.equal(result.error, "continuous_path_non_converging");
+  assert.equal(commandCount < 60, true);
+  assert.equal(Math.abs(pose.position.yMeters) < 0.25, true);
+  assert.equal(warnings.some(({ message }) => message === "continuous_path.non_converging"), true);
 });
 
 

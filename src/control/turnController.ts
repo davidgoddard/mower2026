@@ -463,7 +463,7 @@ export class TurnController {
           direction: request.direction,
         });
       } else if (request.learningEnabled !== false && !learningAllowedByPolicy) {
-        this.logger.info("turn.learning.skipped_policy", {
+        this.logger.debug("turn.learning.skipped_policy", {
           learningSource: request.learningSource ?? "operation",
         });
       }

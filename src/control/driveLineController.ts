@@ -612,7 +612,7 @@ export class DriveLineController {
       const wheelbasePlausible = calibrationDiag.wheelbaseMeters >= 0.20 && calibrationDiag.wheelbaseMeters <= 1.5;
       const leftMtPlausible = calibrationDiag.leftMetersPerTick >= 1e-5 && calibrationDiag.leftMetersPerTick <= 1e-2;
       const rightMtPlausible = calibrationDiag.rightMetersPerTick >= 1e-5 && calibrationDiag.rightMetersPerTick <= 1e-2;
-      this.logger.info("drive.line.calibration_state", {
+      this.logger.debug("drive.line.calibration_state", {
         leftMetersPerTick: calibrationDiag.leftMetersPerTick,
         rightMetersPerTick: calibrationDiag.rightMetersPerTick,
         wheelbaseMeters: calibrationDiag.wheelbaseMeters,

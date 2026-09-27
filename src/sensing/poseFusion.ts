@@ -173,7 +173,7 @@ export class PoseFusion extends EventEmitter {
   private lastGnssRejectionAtMs: number | null = null;
   private lastGnssRejectionLogAtMs: Map<string, number> = new Map();
   private suppressedGnssRejectionLogs: Map<string, number> = new Map();
-  private activeGnssRejectionReason: string | null = null;
+  private activeGnssRejectionReasons: Set<string> = new Set();
   // Stationary heading-rebase log throttle. The override path fires on
   // every GNSS sample (~20 Hz) while the mower is parked but the
   // validator hasn't yet promoted the heading to TRUSTED. Logging each
@@ -633,6 +633,7 @@ export class PoseFusion extends EventEmitter {
 
     const validation = this.gnssValidator.validate(event, this.currentHeading);
     const nowMs = this.sensorController.getCurrentTimeMillis?.() ?? Date.now();
+    this.recordValidationRejections(validation, nowMs);
 
     const currentPositionSamplePassed = validation.positionRejections.length === 0;
     if (validation.position === "TRUSTED" && currentPositionSamplePassed) {
@@ -653,8 +654,6 @@ export class PoseFusion extends EventEmitter {
       this.currentQuality = "gnss";
       this.lastGnssSyncTimeMs = nowMs;
       this.lastGnssAcceptedAtMs = nowMs;
-      this.lastGnssRejectionReason = null;
-      this.activeGnssRejectionReason = null;
       this.gnssQualityLostTimeMs = null;
       // Re-anchor the encoder-only track to the freshly-snapped fused
       // position on every TRUSTED-position update so that, when GNSS later
@@ -674,7 +673,6 @@ export class PoseFusion extends EventEmitter {
       // integration.  Surface the most-recent rejection reason for the
       // diagnostic snapshot — the validator already logs promotion/demotion
       // events for the state machine itself.
-      this.recordValidationRejection(validation, nowMs);
       if (this.currentQuality === "gnss" && this.gnssQualityLostTimeMs === null) {
         this.gnssQualityLostTimeMs = nowMs;
       }
@@ -683,10 +681,6 @@ export class PoseFusion extends EventEmitter {
     // Heading validation is independent of position validation.  Previously
     // these reasons were recorded only when position also failed, leaving a
     // heading-only demotion unexplained even though position stayed GNSS.
-    if (currentPositionSamplePassed && validation.headingRejections.length > 0) {
-      this.recordValidationRejection(validation, nowMs);
-    }
-
     const headingDisagreementDeg = event.heading === null
       ? null
       : Math.abs(unwrapRelativeAngle(headingDifference(this.currentHeading, event.heading)));
@@ -750,53 +744,61 @@ export class PoseFusion extends EventEmitter {
     this.emitPoseUpdate(true);
   }
 
-  private recordValidationRejection(validation: GnssValidationResult, nowMs: number): void {
-    const reasons = validation.positionRejections.length > 0
-      ? validation.positionRejections
-      : validation.headingRejections;
-    if (reasons.length === 0) return;
-
-    // Use the first reason as the canonical "why" for the heartbeat snapshot.
-    const reason = reasons[0];
-    const reasonChanged = this.activeGnssRejectionReason !== reason;
-    this.activeGnssRejectionReason = reason;
-    this.lastGnssRejectionReason = reason;
-    this.lastGnssRejectionAtMs = nowMs;
-    const lastLogged = this.lastGnssRejectionLogAtMs.get(reason);
-    if (reasonChanged || lastLogged === undefined || nowMs - lastLogged >= GNSS_REJECTION_LOG_INTERVAL_MS) {
-      const suppressedSinceLastLog = this.suppressedGnssRejectionLogs.get(reason) ?? 0;
-      this.logger.warn(`pose_fusion.gnss_rejected.${reason}`, {
-        suppressedSinceLastLog,
-        summaryIntervalMs: GNSS_REJECTION_LOG_INTERVAL_MS,
-        positionState: validation.position,
-        headingState: validation.heading,
-        positionRejections: validation.positionRejections,
-        headingRejections: validation.headingRejections,
-        gnssEvent: this.lastGnssEvent === null
-          ? null
-          : {
-            xMeters: this.lastGnssEvent.xMeters,
-            yMeters: this.lastGnssEvent.yMeters,
-            fixType: this.lastGnssEvent.fixType,
-            satellitesInUse: this.lastGnssEvent.satellitesInUse,
-            positionAccuracyMeters: this.lastGnssEvent.positionAccuracyMeters,
-            headingAccuracyDeg: this.lastGnssEvent.headingAccuracyDeg,
-            headingBaselineMeters: this.lastGnssEvent.headingBaselineMeters ?? null,
-            headingValid: this.lastGnssEvent.headingValid ?? null,
-            headingDeg: this.lastGnssEvent.heading === null ? null : unwrapInternalHeading(this.lastGnssEvent.heading),
-            sampleAgeMillis: this.lastGnssEvent.sampleAgeMillis,
-            timestampMillis: this.lastGnssEvent.timestampMillis,
-          },
-        gnssRawSample: this.lastGnssEvent?.rawSample ?? null,
-      });
-      this.lastGnssRejectionLogAtMs.set(reason, nowMs);
-      this.suppressedGnssRejectionLogs.set(reason, 0);
-    } else {
-      this.suppressedGnssRejectionLogs.set(
-        reason,
-        (this.suppressedGnssRejectionLogs.get(reason) ?? 0) + 1,
-      );
+  private recordValidationRejections(validation: GnssValidationResult, nowMs: number): void {
+    const reasons = [...new Set([
+      ...validation.positionRejections,
+      ...validation.headingRejections,
+    ])];
+    if (reasons.length === 0) {
+      this.activeGnssRejectionReasons.clear();
+      this.lastGnssRejectionReason = null;
+      return;
     }
+
+    // Use the first reason as the canonical "why" for the heartbeat snapshot,
+    // while rate-limiting each concurrently active reason independently.
+    this.lastGnssRejectionReason = reasons[0];
+    this.lastGnssRejectionAtMs = nowMs;
+    const nextActiveReasons = new Set(reasons);
+    for (const reason of reasons) {
+      const newlyActive = !this.activeGnssRejectionReasons.has(reason);
+      const lastLogged = this.lastGnssRejectionLogAtMs.get(reason);
+      if (newlyActive || lastLogged === undefined || nowMs - lastLogged >= GNSS_REJECTION_LOG_INTERVAL_MS) {
+        const suppressedSinceLastLog = this.suppressedGnssRejectionLogs.get(reason) ?? 0;
+        this.logger.warn(`pose_fusion.gnss_rejected.${reason}`, {
+          suppressedSinceLastLog,
+          summaryIntervalMs: GNSS_REJECTION_LOG_INTERVAL_MS,
+          positionState: validation.position,
+          headingState: validation.heading,
+          positionRejections: validation.positionRejections,
+          headingRejections: validation.headingRejections,
+          gnssEvent: this.lastGnssEvent === null
+            ? null
+            : {
+              xMeters: this.lastGnssEvent.xMeters,
+              yMeters: this.lastGnssEvent.yMeters,
+              fixType: this.lastGnssEvent.fixType,
+              satellitesInUse: this.lastGnssEvent.satellitesInUse,
+              positionAccuracyMeters: this.lastGnssEvent.positionAccuracyMeters,
+              headingAccuracyDeg: this.lastGnssEvent.headingAccuracyDeg,
+              headingBaselineMeters: this.lastGnssEvent.headingBaselineMeters ?? null,
+              headingValid: this.lastGnssEvent.headingValid ?? null,
+              headingDeg: this.lastGnssEvent.heading === null ? null : unwrapInternalHeading(this.lastGnssEvent.heading),
+              sampleAgeMillis: this.lastGnssEvent.sampleAgeMillis,
+              timestampMillis: this.lastGnssEvent.timestampMillis,
+            },
+          gnssRawSample: this.lastGnssEvent?.rawSample ?? null,
+        });
+        this.lastGnssRejectionLogAtMs.set(reason, nowMs);
+        this.suppressedGnssRejectionLogs.set(reason, 0);
+      } else {
+        this.suppressedGnssRejectionLogs.set(
+          reason,
+          (this.suppressedGnssRejectionLogs.get(reason) ?? 0) + 1,
+        );
+      }
+    }
+    this.activeGnssRejectionReasons = nextActiveReasons;
   }
 
   private applyGnssHeadingRebase(gnssHeading: InternalHeading, timestampMillis: number): void {

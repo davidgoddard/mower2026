@@ -368,6 +368,55 @@ export class MowingExecutor {
 
     const approachX = "xMeters" in approachTarget ? approachTarget.xMeters : approachTarget.x;
     const approachY = "yMeters" in approachTarget ? approachTarget.yMeters : approachTarget.y;
+    const approachPoint = { xMeters: approachX, yMeters: approachY, capturedAt: Date.now() };
+    const startPose = this.poseFusion.getCurrentPose();
+    const startPoint = {
+      xMeters: unwrapMeters(startPose.position.xMeters),
+      yMeters: unwrapMeters(startPose.position.yMeters),
+      capturedAt: Date.now(),
+    };
+    const startOutsideMeters = outsideDistanceFromAreaMeters(startPoint.xMeters, startPoint.yMeters, this.areaPoints);
+    let approachRoute: PathPoint[];
+    try {
+      if (startOutsideMeters > 0.01) {
+        // An exterior start may enter across its nearest boundary edge. It may
+        // not travel along the exterior to a different edge or cut a concavity.
+        const nearestBoundary = nearestPointOnAreaBoundary(startPoint, this.areaPoints);
+        if (!nearestBoundary || Math.hypot(
+          nearestBoundary.x - entryPlan.entryPoint.xMeters,
+          nearestBoundary.y - entryPlan.entryPoint.yMeters,
+        ) > this.standoff) {
+          throw new Error("initial_entry_exterior_corner_shortcut");
+        }
+        approachRoute = [startPoint, approachPoint];
+        if (!initialExteriorEntryPathSafe(approachRoute, this.areaPoints, this.obstaclePointsArray)) {
+          throw new Error("initial_entry_exterior_path_unsafe");
+        }
+      } else {
+        approachRoute = buildMowingTransitPath(
+          this.areaPoints,
+          this.obstaclePointsArray,
+          startPoint,
+          approachPoint,
+          this.standoff,
+        );
+        if (!isMowingExecutionPathSafe(approachRoute, this.areaPoints, this.obstaclePointsArray)) {
+          throw new Error("initial_entry_route_unsafe");
+        }
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn("mowing.initial_entry.route_rejected", { reason, startOutsideMeters });
+      this.phase = "error";
+      return { ...this.getStatus(), error: reason };
+    }
+    this.logger.info("mowing.initial_entry.route_ready", {
+      pointCount: approachRoute.length,
+      startOutsideMeters,
+    });
+    if (startOutsideMeters <= 0.01) {
+      this.startAreaEscapeMonitor();
+    }
     this.persistResumeOperation({
       kind: "drive",
       phase: "approaching_area_perimeter",
@@ -379,11 +428,33 @@ export class MowingExecutor {
         ? { stage: "strip_approach", stripIndex: 0 }
         : { stage: "initial_boundary_trace", stripIndex: 0 },
     });
-    if (!this.isNearCurrentPose(approachX, approachY)) {
+    if (!this.isNearCurrentPose(approachX, approachY) && approachRoute.length > 2) {
+      const routeResult = await this.followConnector(
+        approachRoute,
+        0,
+        this.skipInitialBoundaryTrace
+          ? { stage: "strip_approach", stripIndex: 0 }
+          : { stage: "initial_boundary_trace", stripIndex: 0 },
+        false,
+      );
+      if (!routeResult.completed) {
+        this.phase = routeResult.reason === "user_stopped" ? "stopped" : "error";
+        return { ...this.getStatus(), error: routeResult.error ?? "initial_entry_route_failed" };
+      }
+    } else if (!this.isNearCurrentPose(approachX, approachY)) {
       const approachResult = await this.driveController.executeDrive({
         targetPosition: createPosition(approachX, approachY),
         learningEnabled: true,
         minimumDriveDistanceMeters: MOWING_MINIMUM_TRANSLATION_METERS,
+        validateTranslationPath: (startPosition, targetPosition) => (
+          startOutsideMeters > 0.01
+            ? initialExteriorEntryPathSafe([
+              { xMeters: unwrapMeters(startPosition.xMeters), yMeters: unwrapMeters(startPosition.yMeters), capturedAt: Date.now() },
+              { xMeters: unwrapMeters(targetPosition.xMeters), yMeters: unwrapMeters(targetPosition.yMeters), capturedAt: Date.now() },
+            ], this.areaPoints, this.obstaclePointsArray)
+              ? null : "initial_entry_exterior_path_unsafe"
+            : this.mowingTranslationPathRejection(startPosition, targetPosition)
+        ),
       });
       if (approachResult.status !== "success") {
         if (approachResult.status === "stopped") {
@@ -1551,6 +1622,9 @@ export class MowingExecutor {
           markBoundaryTraced: operation.markBoundaryTraced,
         },
       );
+      if (rejoined) {
+        this.tracedBoundaries.add(operation.markBoundaryTraced);
+      }
       return rejoined ? operation.continuation : null;
     }
     if (
@@ -1647,6 +1721,9 @@ export class MowingExecutor {
             markBoundaryTraced: operation.markBoundaryTraced,
           },
         );
+        if (rejoined) {
+          this.tracedBoundaries.add(operation.markBoundaryTraced);
+        }
         return rejoined ? operation.continuation : null;
       }
       this.logger.warn("mowing.resume.follow_pose_too_far_from_route", {
@@ -3037,6 +3114,18 @@ export class MowingExecutor {
     if (!pointInPolygon(approachTarget.xMeters, approachTarget.yMeters, this.areaPoints)) {
       return null;
     }
+    if (!currentInsideArea) {
+      const nearestBoundary = nearestPointOnAreaBoundary(
+        { xMeters: current.x, yMeters: current.y },
+        this.areaPoints,
+      );
+      if (!nearestBoundary || Math.hypot(
+        nearestBoundary.x - perimeterPoint.xMeters,
+        nearestBoundary.y - perimeterPoint.yMeters,
+      ) > this.standoff) {
+        return null;
+      }
+    }
     if (!this.isAreaStartAnchorReachable(
       current,
       approachTarget,
@@ -3302,6 +3391,34 @@ export function isMowingExecutionPathSafe(
     }
   }
   return true;
+}
+
+function initialExteriorEntryPathSafe(
+  points: readonly [PathPoint, PathPoint] | ReadonlyArray<PathPoint>,
+  areaPoints: ReadonlyArray<PathPoint>,
+  obstaclePointsArray: ReadonlyArray<ReadonlyArray<PathPoint>>,
+): boolean {
+  if (points.length !== 2) return false;
+  const [start, end] = points;
+  if (outsideDistanceFromAreaMeters(end.xMeters, end.yMeters, areaPoints) > 0.01) return false;
+  const length = Math.hypot(end.xMeters - start.xMeters, end.yMeters - start.yMeters);
+  const sampleCount = Math.max(1, Math.ceil(length / 0.025));
+  let previousOutside = outsideDistanceFromAreaMeters(start.xMeters, start.yMeters, areaPoints);
+  for (let index = 0; index <= sampleCount; index += 1) {
+    const fraction = index / sampleCount;
+    const x = start.xMeters + ((end.xMeters - start.xMeters) * fraction);
+    const y = start.yMeters + ((end.yMeters - start.yMeters) * fraction);
+    const outside = outsideDistanceFromAreaMeters(x, y, areaPoints);
+    if (outside > previousOutside + 1e-6 || obstaclePointsArray.some((obstacle) => pointInPolygon(x, y, obstacle))) {
+      return false;
+    }
+    previousOutside = outside;
+  }
+  return !obstaclePointsArray.some((obstacle) => segmentIntersectsPolygon(
+    { x: start.xMeters, y: start.yMeters },
+    { x: end.xMeters, y: end.yMeters },
+    normalizePolygon(obstacle),
+  ));
 }
 
 function normalise(v: { x: number; y: number }): { x: number; y: number } {

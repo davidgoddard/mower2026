@@ -153,6 +153,33 @@ test("PoseFusion summarizes a sustained GNSS rejection no more than once per min
   await fusion.stop();
 });
 
+test("PoseFusion rate-limits heading rejection logs while GNSS position remains trusted", async () => {
+  const sensorController = new EventEmitter();
+  let nowMillis = 0;
+  sensorController.getCurrentTimeMillis = () => nowMillis;
+  sensorController.setHeading = mock.fn();
+  sensorController.getHeadingRebaseReadiness = () => ({ safe: false });
+  const logger = createMockLogger();
+  const fusion = new PoseFusion({ sensorController, logger });
+  await fusion.start();
+
+  for (let sample = 0; sample < 700; sample += 1) {
+    nowMillis = sample * 100;
+    emitGnssPosition(sensorController, {
+      headingDeg: 90,
+      headingValid: false,
+      timestampMillis: nowMillis,
+    });
+  }
+
+  const rejectionLogs = logger.warn.mock.calls.filter((call) => (
+    call.arguments[0] === "pose_fusion.gnss_rejected.heading_invalid_flag"
+  ));
+  assert.equal(rejectionLogs.length, 2);
+  assert.ok(rejectionLogs[1].arguments[1].suppressedSinceLastLog > 500);
+  await fusion.stop();
+});
+
 test("PoseFusion retains the established GNSS heading synchronisation while IMU owns heading", async () => {
   const sensorController = new EventEmitter();
   sensorController.setHeading = mock.fn();

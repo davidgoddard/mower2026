@@ -1,4 +1,11 @@
-import { DRIVE_FULL_SPEED_COMMAND_DEFAULT, DRIVE_SETTLE_TIME_MS, MOTOR_RAMP_DOWN_TIME_MS } from "../constants.js";
+import {
+  DRIVE_CTE_SLOPE_FILTER_FACTOR,
+  DRIVE_CTE_SLOPE_MAX_ABS,
+  DRIVE_FULL_SPEED_COMMAND_DEFAULT,
+  DRIVE_SETTLE_TIME_MS,
+  DRIVE_STEERING_MAX_TRIM_PERCENT,
+  MOTOR_RAMP_DOWN_TIME_MS,
+} from "../constants.js";
 import { PathFollowingParameters, DEFAULT_PATH_FOLLOWING_PARAMETERS } from "../config/pathFollowingConfig.js";
 import { crossTrackError, angleTo, Pose, Position, unwrapMeters, createPosition } from "../geometry/positionTypes.js";
 import { headingDifference, unwrapRelativeAngle } from "../geometry/headingTypes.js";
@@ -32,6 +39,11 @@ const CONTINUOUS_ORDERED_PROJECTION_FORWARD_WINDOW_METERS = 0.5;
 // area watchdog remains responsible for stopping an actual garden escape.
 const CONTINUOUS_ROUTE_DEVIATION_CONFIRMATION_SAMPLES = 25;
 const CONTINUOUS_ROUTE_DEVIATION_IMMEDIATE_ABORT_MULTIPLIER = 2;
+const CONTINUOUS_TRACKING_LOG_INTERVAL_MS = 1_000;
+const CONTINUOUS_DIVERGENCE_CONFIRMATION_SAMPLES = 25;
+const CONTINUOUS_DIVERGENCE_CTE_MULTIPLIER = 2;
+const CONTINUOUS_DIVERGENCE_MIN_CTE_METERS = 0.1;
+const CONTINUOUS_DIVERGENCE_MIN_SLOPE = 0.05;
 
 export interface ContinuousPathFollowerOptions {
   readonly sensorController: SensorController;
@@ -119,6 +131,22 @@ export class ContinuousPathFollower {
     let appliedLeftCommand = 0;
     let appliedRightCommand = 0;
     let consecutiveRouteDeviationSamples = 0;
+    let consecutiveDivergenceSamples = 0;
+    const slopeState: {
+      previousSample: {
+        readonly segmentStartIndex: number;
+        readonly distanceAlongPathMeters: number;
+        readonly cteMeters: number;
+      } | null;
+      filteredCteSlope: number;
+    } = {
+      previousSample: null,
+      filteredCteSlope: 0,
+    };
+    let lastTrackingLogAt = 0;
+    let trackingSampleCount = 0;
+    let absoluteCteSumMeters = 0;
+    let maximumAbsoluteCteMeters = 0;
     const analysedLookaheadPlan = planConservativeRouteLookahead(pathPoints, {
       minimumLookaheadMeters: parameters.continuousPathMinimumLookaheadMeters,
       maximumLookaheadMeters: parameters.continuousPathMaximumLookaheadMeters,
@@ -148,6 +176,7 @@ export class ContinuousPathFollower {
         entryPose,
         currentIndex,
         options.strictOrderedProgress ?? false,
+        pendingCornerProjectionLimit(pathPoints, currentIndex, options),
       );
       const entryGuidance = buildContinuousGuidance(
         pathPoints,
@@ -255,6 +284,7 @@ export class ContinuousPathFollower {
           pose,
           currentIndex,
           options.strictOrderedProgress ?? false,
+          pendingCornerProjectionLimit(pathPoints, currentIndex, options),
         );
         const maximumRouteJoinDistanceMeters = Math.max(
           parameters.mowingStandoffMeters,
@@ -411,6 +441,38 @@ export class ContinuousPathFollower {
           projection,
           lookaheadPlan.lookaheadMeters,
         );
+        const cteMeters = unwrapMeters(crossTrackError(
+          pose.position,
+          pointToPosition(guidance.segmentStart),
+          pointToPosition(guidance.segmentEnd),
+        ));
+        const previousSlopeSample = slopeState.previousSample;
+        if (previousSlopeSample?.segmentStartIndex === projection.segmentStartIndex) {
+          const deltaAlongMeters = projection.distanceAlongPathMeters
+            - previousSlopeSample.distanceAlongPathMeters;
+          if (deltaAlongMeters >= 0.01) {
+            const rawCteSlope = clamp(
+              (cteMeters - previousSlopeSample.cteMeters) / deltaAlongMeters,
+              -DRIVE_CTE_SLOPE_MAX_ABS,
+              DRIVE_CTE_SLOPE_MAX_ABS,
+            );
+            slopeState.filteredCteSlope += DRIVE_CTE_SLOPE_FILTER_FACTOR
+              * (rawCteSlope - slopeState.filteredCteSlope);
+            slopeState.previousSample = {
+              segmentStartIndex: projection.segmentStartIndex,
+              distanceAlongPathMeters: projection.distanceAlongPathMeters,
+              cteMeters,
+            };
+          }
+        } else {
+          slopeState.previousSample = {
+            segmentStartIndex: projection.segmentStartIndex,
+            distanceAlongPathMeters: projection.distanceAlongPathMeters,
+            cteMeters,
+          };
+          slopeState.filteredCteSlope = 0;
+          consecutiveDivergenceSamples = 0;
+        }
         const executionBaseSpeed = Math.max(
           0.2,
           Math.min(this.baseSpeed, options.maximumSpeed ?? this.baseSpeed),
@@ -424,6 +486,8 @@ export class ContinuousPathFollower {
           {
             minimumSpeed: options.minimumSpeed,
             cteGain: this.learningModel?.getCteGainForDirection(1),
+            cteDampingGain: this.learningModel?.getCteDampingGainForDirection?.(1),
+            cteSlope: slopeState.filteredCteSlope,
             headingGain: this.learningModel?.getLongHeadingGainForDirection(1),
           },
         );
@@ -444,6 +508,56 @@ export class ContinuousPathFollower {
           CONTINUOUS_CONTROL_INTERVAL_MS / 1000,
         );
 
+        const divergenceCteMeters = Math.max(
+          CONTINUOUS_DIVERGENCE_MIN_CTE_METERS,
+          parameters.segmentedDriveMaxCteMeters * CONTINUOUS_DIVERGENCE_CTE_MULTIPLIER,
+        );
+        const movingAwayFromPath = cteMeters * slopeState.filteredCteSlope > 0
+          && Math.abs(slopeState.filteredCteSlope) >= CONTINUOUS_DIVERGENCE_MIN_SLOPE;
+        consecutiveDivergenceSamples = Math.abs(cteMeters) >= divergenceCteMeters
+          && movingAwayFromPath
+          ? consecutiveDivergenceSamples + 1
+          : 0;
+
+        trackingSampleCount += 1;
+        absoluteCteSumMeters += Math.abs(cteMeters);
+        maximumAbsoluteCteMeters = Math.max(maximumAbsoluteCteMeters, Math.abs(cteMeters));
+        const now = Date.now();
+        if (now - lastTrackingLogAt >= CONTINUOUS_TRACKING_LOG_INTERVAL_MS) {
+          lastTrackingLogAt = now;
+          this.logger.info("continuous_path.tracking", {
+            currentIndex,
+            projectionSegmentStartIndex: projection.segmentStartIndex,
+            cteMeters,
+            filteredCteSlope: slopeState.filteredCteSlope,
+            requestedLeft: requestedCommands.left,
+            requestedRight: requestedCommands.right,
+            appliedLeft: appliedLeftCommand,
+            appliedRight: appliedRightCommand,
+            consecutiveDivergenceSamples,
+          });
+        }
+        if (consecutiveDivergenceSamples >= CONTINUOUS_DIVERGENCE_CONFIRMATION_SAMPLES) {
+          this.logger.warn("continuous_path.non_converging", {
+            currentIndex,
+            projectionSegmentStartIndex: projection.segmentStartIndex,
+            cteMeters,
+            filteredCteSlope: slopeState.filteredCteSlope,
+            divergenceCteMeters,
+            consecutiveDivergenceSamples,
+            requestedLeft: requestedCommands.left,
+            requestedRight: requestedCommands.right,
+          });
+          return {
+            algorithm: "continuous_path_follow",
+            completed: false,
+            reason: "error",
+            error: "continuous_path_non_converging",
+            pointCount: pathPoints.length,
+            completedWaypoints: currentIndex,
+          };
+        }
+
         this.logger.debug("continuous_path.control", {
           currentIndex,
           projectionSegmentStartIndex: projection.segmentStartIndex,
@@ -462,6 +576,13 @@ export class ContinuousPathFollower {
         await this.sleep(CONTINUOUS_CONTROL_INTERVAL_MS);
       }
 
+      this.logger.info("continuous_path.tracking_summary", {
+        sampleCount: trackingSampleCount,
+        averageAbsoluteCteMeters: trackingSampleCount > 0
+          ? absoluteCteSumMeters / trackingSampleCount
+          : 0,
+        maximumAbsoluteCteMeters,
+      });
       return {
         algorithm: "continuous_path_follow",
         completed: true,
@@ -538,6 +659,8 @@ export function computeContinuousPathWheelCommands(
   options: {
     readonly minimumSpeed?: number;
     readonly cteGain?: number;
+    readonly cteDampingGain?: number;
+    readonly cteSlope?: number;
     readonly headingGain?: number;
   } = {},
 ): { left: number; right: number; pivoting: boolean } {
@@ -561,8 +684,14 @@ export function computeContinuousPathWheelCommands(
     cteMeters,
     options.minimumSpeed,
   );
+  const cteDampingTrim = clamp(
+    (options.cteSlope ?? 0) * (options.cteDampingGain ?? 0),
+    -DRIVE_STEERING_MAX_TRIM_PERCENT,
+    DRIVE_STEERING_MAX_TRIM_PERCENT,
+  );
   const trim = clamp(
     (cteMeters * (options.cteGain ?? CONTINUOUS_CTE_GAIN))
+      + cteDampingTrim
       + (headingErrorDeg * (options.headingGain ?? CONTINUOUS_HEADING_GAIN)),
     -adaptiveBaseSpeed,
     adaptiveBaseSpeed,
@@ -671,6 +800,7 @@ export function projectPoseOntoPath(
   pose: Pose,
   startIndex: number,
   strictOrderedProgress: boolean,
+  maximumSegmentStartIndex = points.length - 2,
 ): ContinuousPathProjection {
   const cumulativeDistances = buildCumulativeDistances(points);
   const clampedStartIndex = Math.max(0, Math.min(startIndex, points.length - 2));
@@ -691,6 +821,10 @@ export function projectPoseOntoPath(
       maxSegmentStartIndex += 1;
     }
   }
+  maxSegmentStartIndex = Math.max(
+    minSegmentStartIndex,
+    Math.min(maxSegmentStartIndex, maximumSegmentStartIndex),
+  );
   let bestSegmentStartIndex = clampedStartIndex;
   let bestDistanceSq = Number.POSITIVE_INFINITY;
   let bestDistanceAlongPathMeters = cumulativeDistances[bestSegmentStartIndex];
@@ -722,6 +856,26 @@ export function projectPoseOntoPath(
     distanceAlongPathMeters: bestDistanceAlongPathMeters,
     distanceToPathMeters: Math.sqrt(bestDistanceSq),
   };
+}
+
+function pendingCornerProjectionLimit(
+  points: PathPoint[],
+  currentIndex: number,
+  options: ContinuousPathExecutionOptions,
+): number {
+  if (
+    options.strictOrderedProgress
+    && Number.isFinite(options.pivotAtWaypointTurnDeg)
+    && Number.isFinite(options.pivotAtWaypointDistanceMeters)
+    && isCornerAtLeast(points, currentIndex, Math.abs(options.pivotAtWaypointTurnDeg ?? 0))
+  ) {
+    // Until ordered progress or the corner manoeuvre explicitly consumes this
+    // vertex, projection must remain on its incoming edge. A hairpin's outgoing
+    // edge can run beside that incoming edge and otherwise appear closer long
+    // before the mower has reached the vertex.
+    return currentIndex - 1;
+  }
+  return points.length - 2;
 }
 
 function buildContinuousGuidance(
