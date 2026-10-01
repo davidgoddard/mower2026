@@ -146,6 +146,8 @@ The IMU is the live heading source. GNSS only writes into the IMU on a rebase. T
 2. **Trusted-state rebase**: the heading state machine reports TRUSTED, the current epoch itself passes every heading check, and the mower is stationary and safe to rebase. The validator has verified disagreement is ≤ 5°, so this is a small correction. A TRUSTED latch that is waiting for its demotion dwell never makes a rejected current sample eligible for fusion.
 3. **Stationary override**: position is TRUSTED, the sensor controller reports the rebase is safe, and five consecutive samples pass every GNSS heading check except IMU agreement. The IMU is then rebased regardless of disagreement angle. Fix quality, position accuracy, heading validity, heading accuracy, antenna baseline, and sample-to-sample heading stability must remain good throughout the dwell; any failure or unsafe/moving state resets it. This lets a parked mower recover from arbitrarily large IMU drift without allowing one questionable GNSS sample to overwrite the IMU.
 
+For all three paths, “safe to rebase” means no controller owns a motion session, both motor outputs are commanded to zero, the latest IMU yaw-rate sample is fresh, and the bias-corrected tilt-compensated yaw rate has remained within ±1 degree/second continuously for at least one second. Encoder feedback is deliberately excluded. In particular, a turn owns its motion session through ramp-down, settling, final IMU measurement, and result delivery, so GNSS cannot change the IMU reference frame part-way through a turn.
+
 Every rebase also re-anchors the encoder-only diagnostic track and bumps DR confidence by 0.5.
 
 After the first successful rebase, `isHeadingSynchronized()` and the primitive `usingGnssHeading` flag remain true for the lifetime of that pose-fusion process. This records that the IMU's absolute reference has been established; it does not claim that every subsequent GNSS epoch is being consumed. A process restart resets the invariant and autonomous mowing waits for a fresh accepted stationary rebase.
@@ -304,7 +306,7 @@ A normal mowing session looks like this:
 - `pose_fusion.gnss_rejected.<reason>` warnings are emitted when a reason becomes active and then summarized at most once per minute per reason. Position acceptance does not reset active heading failures, and concurrent rejection reasons are tracked independently, so alternating validator results cannot bypass the limiter.
 - Per-command motor transitions, raw IMU stop-window summaries, repeated learning-policy skips, and per-line calibration snapshots are debug-only. The normal information-level session log retains lifecycle, result, safety, recovery, and heartbeat records without duplicating those high-frequency diagnostics.
 - `pose_fusion.wheel_slip_suspected` fires once on each transition into the suspected state.
-- `pose_fusion.gnss_heading_rebase_stationary_override` fires whenever the wide-tolerance stationary path is used, with the disagreement and yaw rate at the moment of rebase.
+- `pose_fusion.gnss_heading_rebase_stationary_override` fires whenever the wide-tolerance stationary path is used, with the disagreement, quiet-IMU duration, latest yaw rate, and IMU sample age at the moment of rebase.
 
 ---
 

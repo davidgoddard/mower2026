@@ -84,12 +84,14 @@ This document maps problem domains to candidate files removing the need for Code
   - neutral stop requests while `systemStop` is latched must resend disabled motor frames rather than zero-speed enabled frames, so the ESP32 keeps seeing a hard stop and never resumes on a stale command
   - stall progress is motion-specific: trusted GNSS displacement for translation and IMU heading change for pivots; encoder rotation alone does not prove chassis progress, while at least 2.8 A sustained for roughly two seconds is independently sufficient to stop, with 2.6 A clear hysteresis
   - IMU yaw-bias auto-recalibration is idle-only: motion-session owners suppress it during tuning/test runs, and the controller only re-arms after a long idle period.
+  - GNSS-to-IMU heading rebase readiness ignores motor encoder feedback: rebasing is blocked for the full lifetime of every motion session and until motor commands are zero, fresh IMU yaw-rate samples remain within 1 degree/second for one continuous second.
 - `src/control/manualDriveCoordinator.ts`: manual-drive stop clearing and disconnect handling.
   - live HID input while manual drive is armed clears a latched global stop so the operator can consciously recover from a stall/stop during manual manoeuvring
   - unchanged held-stick commands are coalesced; the motor I2C client is the sole owner of latest-command heartbeat refreshes, including neutral and disabled states, while HID snapshots retain their independent stale-input halt window
   - shutdown now unregisters HID event listeners and closes the controller before awaiting the control-loop drain, so tests and process shutdown do not stay alive on stale manual-drive events
 - `src/control/turnController.ts`: turn stop checks and stop handling.
   - IMU heading watchdog timers are internal safety timers only and are `unref()`'d so an abandoned turn test does not keep Node alive by itself
+  - owns its sensor motion session until the asynchronous turn result resolves, including ramp-down, settling, and final IMU measurement, so pose fusion cannot rebase heading mid-turn
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
@@ -98,7 +100,7 @@ This document maps problem domains to candidate files removing the need for Code
   - continuous operations persist their exact ordered route with progress and validate connector samples against the area and obstacles before initial or resumed execution
   - area boundary tracing now uses the continuous follower and aborts the mow if tracing fails, instead of continuing into strips from a bad pose
   - after tracing a boundary encountered at an unmown strip entrance, re-approaches that strip's inward standoff through the ordinary pivot-then-straight drive controller before strip mowing resumes, including after resume
-  - before a normal or resumed strip drive, validates settled pivot displacement (15 cm anomaly threshold), immutable-baseline CTE (1.5-times recovery hysteresis around the configured CTE limit), and residual heading; an excessive result gets one geometry-checked return to the frozen entry and one final turn, then logs and delegates any remaining alignment to the ordinary geometry-checked drive/immutable-baseline controller instead of creating a threshold-chatter stop/resume loop
+  - before a normal or resumed strip drive, validates settled pivot displacement (15 cm anomaly threshold), immutable-baseline CTE (1.5-times recovery hysteresis around the configured CTE limit), and residual heading; an excessive result at least 25 cm from entry gets one geometry-checked return to the frozen entry and one final turn, while a closer correction keeps the settled strip heading and delegates residual convergence to the immutable-baseline strip controller instead of point-facing toward a target too near to translate usefully
   - normal mowing segment requests use the 15 cm post-pivot minimum translation; the single exceptional strip-entry correction disables that deadband so an observed position error above the configured 5 cm CTE limit can actually be corrected; routed connectors and perimeter traces use the conservative continuous follower
   - an unsafe frozen inter-strip connector receives one local repair attempt from the current fused pose to its unchanged destination; the replacement must pass executor safety validation and is persisted for resume without replanning the remaining strips
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
@@ -453,7 +455,7 @@ This document maps problem domains to candidate files removing the need for Code
   - follows multi-point inter-lane connectors with the same continuous follower used for perimeter tracing so lane changes and obstacle-wrap connectors stay smooth instead of degenerating into repeated micro turn-drive retargets
   - only falls back to routed connector following when a direct transfer line is blocked by an obstacle
   - skips approach / strip / direct-connector micro-corrections when the live pose is already within 10 cm of the target, avoiding large turns for effectively completed 5 cm moves
-  - accepts a settled strip-entry pivot inside the 15 cm minimum useful translation distance when its heading is already suitable, avoiding a centimetre-scale reapproach followed by a redundant second turn
+  - accepts a settled strip-entry pivot inside the 25 cm point-reapproach usefulness threshold when its heading is already suitable, avoiding a short point-facing reapproach whose pivot displacement can consume the translation and force a redundant opposite turn
   - keeps two-point connectors as direct line drives between standoff targets
   - starts an in-run area watchdog after the initial perimeter trace and requests an immediate stop if the mower drifts more than 25 cm outside the mowing area
   - stops the mowing workflow if a boundary trace does not complete successfully

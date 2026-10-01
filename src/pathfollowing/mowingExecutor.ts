@@ -115,6 +115,12 @@ const COVERAGE_GAP_CONFIRMATION_LENGTH_METERS = 0.2;
 const MOWING_STRIP_ENTRY_MAX_ATTEMPTS = 2;
 const MOWING_STRIP_ENTRY_MAX_PIVOT_DISPLACEMENT_METERS = 0.15;
 const MOWING_STRIP_ENTRY_CTE_RECOVERY_MULTIPLIER = 1.5;
+// A point-facing reapproach can itself displace the control point by 10–20 cm
+// on soft ground. Do not launch that manoeuvre for a similarly short position
+// correction: it can turn almost 180 degrees, skip the now-sub-15 cm drive,
+// then immediately turn back to the strip heading. The immutable-baseline
+// strip controller can converge this bounded residual while moving forward.
+const MOWING_STRIP_ENTRY_REAPPROACH_MIN_TRANSLATION_METERS = 0.25;
 
 interface TurnToHeadingOptions {
   readonly alignmentToleranceDeg?: number;
@@ -2824,6 +2830,8 @@ export class MowingExecutor {
       const baselineStable = baselineCteMeters <= baselineToleranceMeters;
       const headingStable = headingErrorDeg <= headingToleranceDeg;
       const entryTargetReached = entryDistanceMeters < MOWING_MINIMUM_TRANSLATION_METERS;
+      const reapproachTranslationUseful =
+        entryDistanceMeters >= MOWING_STRIP_ENTRY_REAPPROACH_MIN_TRANSLATION_METERS;
 
       this.logger.info("mowing.strip_entry.pivot_validated", {
         stripIndex,
@@ -2839,11 +2847,29 @@ export class MowingExecutor {
         baselineStable,
         headingStable,
         entryTargetReached,
+        reapproachTranslationUseful,
+        reapproachMinimumTranslationMeters: MOWING_STRIP_ENTRY_REAPPROACH_MIN_TRANSLATION_METERS,
         xMeters: unwrapMeters(settledPose.position.xMeters),
         yMeters: unwrapMeters(settledPose.position.yMeters),
       });
 
-      if (positionStable && (baselineStable || entryTargetReached) && headingStable) {
+      if (
+        headingStable &&
+        (
+          (positionStable && baselineStable) ||
+          !reapproachTranslationUseful
+        )
+      ) {
+        if (!baselineStable && !reapproachTranslationUseful) {
+          this.logger.info("mowing.strip_entry.close_reapproach_skipped", {
+            stripIndex,
+            attempt,
+            entryDistanceMeters,
+            baselineCteMeters,
+            headingErrorDeg,
+            reapproachMinimumTranslationMeters: MOWING_STRIP_ENTRY_REAPPROACH_MIN_TRANSLATION_METERS,
+          });
+        }
         return "success";
       }
       if (attempt >= MOWING_STRIP_ENTRY_MAX_ATTEMPTS) {
@@ -2871,7 +2897,7 @@ export class MowingExecutor {
         headingErrorDeg,
       });
 
-      if ((!positionStable || !baselineStable) && !entryTargetReached) {
+      if ((!positionStable || !baselineStable) && reapproachTranslationUseful) {
         this.phase = "approaching_strip";
         this.persistResumeOperation({
           kind: "drive",

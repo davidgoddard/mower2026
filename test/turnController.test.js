@@ -141,6 +141,8 @@ describe("TurnController", () => {
       direction: "ccw",
       learningEnabled: true,
     });
+    assert.equal(mockSensor.beginMotionSession.mock.calls.length, 1);
+    assert.equal(mockSensor.endMotionSession.mock.calls.length, 0);
 
     await new Promise(resolve => setTimeout(resolve, 10));
     // First event: 84° progress
@@ -155,6 +157,7 @@ describe("TurnController", () => {
     const result = await turnPromise;
 
     assert.equal(result.status, "success");
+    assert.equal(mockSensor.endMotionSession.mock.calls.length, 1);
     assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
     assert.equal(mockLearning.updateFromTurn.mock.calls.length, 1);
   });

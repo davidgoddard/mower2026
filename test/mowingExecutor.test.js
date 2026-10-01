@@ -124,7 +124,7 @@ test("MowingExecutor reapproaches and realigns once after an excessive strip-ent
       async executeTurn() {
         turnCalls += 1;
         pose = turnCalls === 1
-          ? createPose(1, 1.17, createInternalHeading(0), "gnss")
+          ? createPose(1, 1.30, createInternalHeading(0), "gnss")
           : createPose(1.01, 1, createInternalHeading(0), "gnss");
         return { status: "success" };
       },
@@ -171,7 +171,7 @@ test("MowingExecutor hands repeated strip-entry instability to the geometry-chec
     turnController: {
       async executeTurn() {
         turnCalls += 1;
-        pose = createPose(1, 1.17, createInternalHeading(0), "gnss");
+        pose = createPose(1, 1.30, createInternalHeading(0), "gnss");
         return { status: "success" };
       },
     },
@@ -256,6 +256,50 @@ test("MowingExecutor accepts a settled strip entry inside the minimum useful dri
 
   assert.equal(await executor["alignMowingStripEntry"](
     4,
+    0,
+    { x: 1, y: 1 },
+    { x: 9, y: 1 },
+  ), "success");
+  assert.equal(turnCalls, 1);
+  assert.equal(driveCalls, 0);
+});
+
+test("MowingExecutor skips a point-facing reapproach when the close correction would be consumed by pivot displacement", async () => {
+  let pose = createPose(1, 1, createInternalHeading(-143), "gnss");
+  let turnCalls = 0;
+  let driveCalls = 0;
+  const executor = new MowingExecutor({
+    plan: { headingDeg: 0, stripSpacingMeters: 0.3, bladeWidthMeters: 0.4, stripCount: 0, strips: [], connectors: [] },
+    areaPoints: [
+      { xMeters: 0, yMeters: 0, capturedAt: 1 },
+      { xMeters: 10, yMeters: 0, capturedAt: 2 },
+      { xMeters: 10, yMeters: 10, capturedAt: 3 },
+      { xMeters: 0, yMeters: 10, capturedAt: 4 },
+      { xMeters: 0, yMeters: 0, capturedAt: 5 },
+    ],
+    obstaclePointsArray: [],
+    driveController: {
+      async executeDrive() {
+        driveCalls += 1;
+        return { status: "success", maxCteMeters: 0 };
+      },
+    },
+    turnController: {
+      async executeTurn() {
+        turnCalls += 1;
+        // Reproduce the log shape: the strip-heading pivot leaves the control
+        // point 16.3 cm from entry with excessive baseline CTE.
+        pose = createPose(1, 1.163, createInternalHeading(0), "gnss");
+        return { status: "success" };
+      },
+    },
+    poseFusion: { getCurrentPose() { return pose; } },
+    continuousPathFollower: { async executePath() { return { completed: true, reason: "reached_end" }; } },
+    logger: createLogger(),
+  });
+
+  assert.equal(await executor["alignMowingStripEntry"](
+    17,
     0,
     { x: 1, y: 1 },
     { x: 9, y: 1 },

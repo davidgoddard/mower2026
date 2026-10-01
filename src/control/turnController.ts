@@ -155,7 +155,8 @@ export class TurnController {
   }
 
   executeTurn(request: TurnRequest): Promise<TurnResult> {
-    return new Promise<TurnResult>((resolve) => {
+    this.sensorController.beginMotionSession();
+    const turnPromise = new Promise<TurnResult>((resolve) => {
       this.turnResolve = resolve;
       this.startTurnAsync(request).catch((error) => {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -175,11 +176,13 @@ export class TurnController {
         });
       });
     });
+    return turnPromise.finally(() => {
+      this.sensorController.endMotionSession();
+    });
   }
 
   private async startTurnAsync(request: TurnRequest): Promise<void> {
     let subscribed = false;
-    this.sensorController.beginMotionSession();
     try {
       this.currentTurn = request;
       this.status = "starting";
@@ -250,8 +253,6 @@ export class TurnController {
       this.status = "idle";
       this.currentTurn = null;
       throw error;
-    } finally {
-      this.sensorController.endMotionSession();
     }
   }
 

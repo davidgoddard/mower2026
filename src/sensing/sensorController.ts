@@ -63,13 +63,10 @@ const IMU_DIAGNOSTIC_MAX_SAMPLES = 1_000;
 const IMU_DIAGNOSTIC_RECENT_SAMPLE_LIMIT = 20;
 const IMU_HEADING_HISTORY_WINDOW_MS = 5_000;
 const IMU_HEADING_HISTORY_MAX_SAMPLES = 1_000;
-// Encoder-delta magnitude (ticks per motor poll) at or below which a wheel
-// is considered stationary for heading-rebase / stop-detection purposes.
-// Zero ticks is the most honest signal; a tolerance of one tick absorbs
-// single-count counter jitter without admitting genuine motion. We do not
-// derive m/s here because the encoder-to-metres calibration is not yet
-// available and the rest of the system avoids absolute speeds on principle.
 const WHEELS_STATIONARY_TICK_THRESHOLD = 1;
+const HEADING_REBASE_MAX_ABS_IMU_YAW_RATE_DEG_PER_SEC = 1;
+const HEADING_REBASE_IMU_STATIONARY_DWELL_MS = 1_000;
+const HEADING_REBASE_IMU_SAMPLE_MAX_AGE_MS = 250;
 const IMU_BIAS_RECALIBRATION_WINDOW_MS = 2_000;
 const IMU_BIAS_RECALIBRATION_MIN_SAMPLES = 20;
 const IMU_BIAS_RECALIBRATION_MAX_ABS_BIAS_DEG_PER_SEC = 3;
@@ -166,10 +163,13 @@ export interface ImuDiagnosticSummary {
 export interface HeadingRebaseReadiness {
   readonly safe: boolean;
   readonly motorCommandActive: boolean;
-  readonly leftEncoderDelta: number | null;
-  readonly rightEncoderDelta: number | null;
-  readonly wheelsStationary: boolean;
-  readonly maxStationaryTickDelta: number;
+  readonly motionSessionActive: boolean;
+  readonly imuStationary: boolean;
+  readonly imuStationaryDurationMs: number;
+  readonly latestImuYawRateDegPerSec: number | null;
+  readonly latestImuSampleAgeMs: number | null;
+  readonly maxAbsImuYawRateDegPerSec: number;
+  readonly requiredImuStationaryDwellMs: number;
 }
 
 export interface MotorFeedbackHealth {
@@ -207,6 +207,9 @@ export class SensorController extends EventEmitter {
   private motorStoppedSinceMillis: number | null = null;
   private motionSessionDepth = 0;
   private motionSessionIdleSinceMillis: number | null = null;
+  private imuStationarySinceMillis: number | null = null;
+  private latestImuYawRateDegPerSec: number | null = null;
+  private latestImuRateObservedAtMillis: number | null = null;
   private lastGnssPollStartedMillis: number | null = null;
   private gnssFailureCount = 0;
   private gnssFailureStartedMillis: number | null = null;
@@ -298,6 +301,9 @@ export class SensorController extends EventEmitter {
     this.motorStoppedSinceMillis = null;
     this.motionSessionDepth = 0;
     this.motionSessionIdleSinceMillis = this.nowMillis();
+    this.imuStationarySinceMillis = null;
+    this.latestImuYawRateDegPerSec = null;
+    this.latestImuRateObservedAtMillis = null;
     this.lastGnssPollStartedMillis = null;
     this.gnssFailureCount = 0;
     this.gnssFailureStartedMillis = null;
@@ -659,26 +665,31 @@ export class SensorController extends EventEmitter {
 
   getHeadingRebaseReadiness(): HeadingRebaseReadiness {
     const motorCommandActive = this.isMotorCommandMotion(this.lastMotorCommand);
-    const motors = this.primitivesStore.snapshot().motors;
-    const leftEncoderDelta = motors.leftEncoderDelta;
-    const rightEncoderDelta = motors.rightEncoderDelta;
-    // Treat unknown encoder delta (no feedback yet) as stationary so the
-    // bootstrap rebase can fire before the first motor-feedback sample.
-    const leftStationary =
-      leftEncoderDelta === null ||
-      Math.abs(leftEncoderDelta) <= WHEELS_STATIONARY_TICK_THRESHOLD;
-    const rightStationary =
-      rightEncoderDelta === null ||
-      Math.abs(rightEncoderDelta) <= WHEELS_STATIONARY_TICK_THRESHOLD;
-    const wheelsStationary = leftStationary && rightStationary;
+    const motionSessionActive = this.motionSessionDepth > 0;
+    const nowMillis = this.nowMillis();
+    const latestImuSampleAgeMs = this.latestImuRateObservedAtMillis === null
+      ? null
+      : Math.max(0, nowMillis - this.latestImuRateObservedAtMillis);
+    const imuStationaryDurationMs = this.imuStationarySinceMillis === null
+      ? 0
+      : Math.max(0, nowMillis - this.imuStationarySinceMillis);
+    const imuSampleFresh = latestImuSampleAgeMs !== null
+      && latestImuSampleAgeMs <= HEADING_REBASE_IMU_SAMPLE_MAX_AGE_MS;
+    const imuStationary =
+      imuSampleFresh &&
+      this.imuStationarySinceMillis !== null &&
+      imuStationaryDurationMs >= HEADING_REBASE_IMU_STATIONARY_DWELL_MS;
 
     return {
-      safe: !motorCommandActive && wheelsStationary,
+      safe: !motorCommandActive && !motionSessionActive && imuStationary,
       motorCommandActive,
-      leftEncoderDelta,
-      rightEncoderDelta,
-      wheelsStationary,
-      maxStationaryTickDelta: WHEELS_STATIONARY_TICK_THRESHOLD,
+      motionSessionActive,
+      imuStationary,
+      imuStationaryDurationMs,
+      latestImuYawRateDegPerSec: this.latestImuYawRateDegPerSec,
+      latestImuSampleAgeMs,
+      maxAbsImuYawRateDegPerSec: HEADING_REBASE_MAX_ABS_IMU_YAW_RATE_DEG_PER_SEC,
+      requiredImuStationaryDwellMs: HEADING_REBASE_IMU_STATIONARY_DWELL_MS,
     };
   }
 
@@ -951,8 +962,8 @@ export class SensorController extends EventEmitter {
       idleThresholdMs: IMU_BIAS_AUTO_RECALIBRATION_IDLE_MS,
       zeroCommandSinceMillis: this.motorZeroCommandSinceMillis,
       stoppedSinceMillis,
-      leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
-      rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
+      imuStationaryDurationMs: rebaseReadiness.imuStationaryDurationMs,
+      latestImuYawRateDegPerSec: rebaseReadiness.latestImuYawRateDegPerSec,
     });
   }
 
@@ -1029,6 +1040,16 @@ export class SensorController extends EventEmitter {
         rollDeg,
       );
       const biasCorrectedYawRateDegPerSec = tiltCompensatedYawRateDegPerSec - this.imuYawRateBiasDegPerSec;
+      const imuRateObservedAtMillis = this.nowMillis();
+      this.latestImuYawRateDegPerSec = biasCorrectedYawRateDegPerSec;
+      this.latestImuRateObservedAtMillis = imuRateObservedAtMillis;
+      if (Math.abs(biasCorrectedYawRateDegPerSec) <= HEADING_REBASE_MAX_ABS_IMU_YAW_RATE_DEG_PER_SEC) {
+        if (this.imuStationarySinceMillis === null) {
+          this.imuStationarySinceMillis = imuRateObservedAtMillis;
+        }
+      } else {
+        this.imuStationarySinceMillis = null;
+      }
       let yawDeltaDeg = 0;
       if (sampleDeltaMs !== null) {
         const safeDeltaSeconds = sampleDeltaMs / MS_PER_SECOND;

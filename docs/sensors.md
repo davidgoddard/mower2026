@@ -170,9 +170,9 @@ The BMI160 gyro is configured for the `2000 dps` range, which corresponds to `16
 - heading always normalized to `(-180, 180]`
 
 `SensorController` also keeps a short in-memory IMU diagnostic window so the runtime can emit one compact turn summary when pose fusion rebases GNSS heading. That gives us the raw sample interval and integrated yaw evidence without writing a log line for every IMU sample.
-When a non-zero motor command transitions to a stop command, the controller snapshots that same window as `sensor.imu.motion_stop_summary`. Pose fusion prefers this stop-time summary when it later logs a GNSS heading rebase, because the actual turn may be several seconds behind the stationary rebase.
+When a non-zero motor command transitions to a stop command, the controller snapshots that same window as `sensor.imu.motion_stop_summary`. Pose fusion prefers this stop-time summary when it later logs a GNSS heading rebase, because the actual turn may be several seconds behind the stationary rebase. A GNSS heading rebase is forbidden while any motion session remains active and subsequently requires zero commanded motor output plus fresh IMU yaw-rate samples continuously within 1 degree/second for one second. Encoder feedback is not used to decide rebase readiness.
 
-GNSS heading rebases are only allowed when the motor command is stopped and the latest tilt-compensated yaw rate is within 1 deg/s. During active turns the GNSS heading can still be observed for quality and position updates, but it does not write back into the IMU heading baseline.
+GNSS heading rebases are only allowed when no motion session is active, the motor command is stopped, and the bias-corrected tilt-compensated yaw rate has remained within 1 deg/s for one second with fresh IMU sampling. During active turns the GNSS heading can still be observed for quality and position updates, but it does not write back into the IMU heading baseline.
 
 ### Pitch and Roll Calculation
 

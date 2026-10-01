@@ -1378,7 +1378,7 @@ test('SensorController requires an active motor operation for speed commands and
     assert.equal(afterStop.motors.commandedLeftWheelOutputPercent, 0);
     assert.equal(afterStop.motors.commandedRightWheelOutputPercent, 0);
     assert.equal(controller.getMotorZeroCommandSinceMillis(), 0);
-    assert.equal(controller.getHeadingRebaseReadiness().safe, true);
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
 
     // stopMotors() issues a normalised zero-output speed command (with
     // enableDrive=true) so the ESP32 honours the configured deceleration
@@ -1387,6 +1387,75 @@ test('SensorController requires an active motor operation for speed commands and
       { type: 'speed', left: 0.5, right: -0.5 },
       { type: 'speed', left: 0, right: 0 },
     ]);
+
+    await logger.close();
+  });
+});
+
+test('SensorController gates heading rebases on motion ownership and a sustained quiet IMU', async () => {
+  await withTempDir(async (dir) => {
+    const logger = await SessionLogger.create({
+      app: 'core-app',
+      context: 'test',
+      source: 'SensorControllerTest',
+      logDir: dir,
+      minLevel: 'error',
+    });
+    let nowMillis = 0;
+    let yawRateDegPerSec = 0.2;
+    const primitivesStore = new PrimitivesStore();
+    const controller = new SensorController({
+      logger,
+      primitivesStore,
+      gateway: {
+        async initialise() {},
+        async readImu() {
+          return {
+            timestampMillis: nowMillis,
+            angularVelocity: { zDegreesPerSecond: yawRateDegPerSec },
+          };
+        },
+        async readGnss() { return null; },
+        async readMotorFeedback() { return null; },
+        async setMotorWheelOutputs() {},
+        async stopMotors() {},
+        async close() {},
+      },
+      nowMillis: () => nowMillis,
+      monotonicMillis: () => nowMillis,
+    });
+
+    await controller.pollImu();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
+    nowMillis = 500;
+    await controller.pollImu();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
+    nowMillis = 1000;
+    await controller.pollImu();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, true);
+
+    controller.beginMotionSession();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
+    assert.equal(controller.getHeadingRebaseReadiness().motionSessionActive, true);
+    controller.endMotionSession();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, true);
+
+    await controller.setMotorWheelOutputs(0.5, -0.5);
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
+    await controller.stopMotors();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, true);
+
+    yawRateDegPerSec = 2;
+    nowMillis = 1100;
+    await controller.pollImu();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
+    yawRateDegPerSec = 0.2;
+    nowMillis = 2000;
+    await controller.pollImu();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, false);
+    nowMillis = 3000;
+    await controller.pollImu();
+    assert.equal(controller.getHeadingRebaseReadiness().safe, true);
 
     await logger.close();
   });

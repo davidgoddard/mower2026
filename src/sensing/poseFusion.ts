@@ -731,8 +731,9 @@ export class PoseFusion extends EventEmitter {
         this.logger.info("pose_fusion.gnss_heading_rebase_stationary_override", {
           disagreementDeg: headingDisagreementDeg,
           goodHeadingEpochs: this.stationaryHeadingOverrideGoodEpochs,
-          leftEncoderDelta: rebaseReadiness.leftEncoderDelta,
-          rightEncoderDelta: rebaseReadiness.rightEncoderDelta,
+          imuStationaryDurationMs: rebaseReadiness.imuStationaryDurationMs,
+          latestImuYawRateDegPerSec: rebaseReadiness.latestImuYawRateDegPerSec,
+          latestImuSampleAgeMs: rebaseReadiness.latestImuSampleAgeMs,
         });
         this.lastStationaryOverrideLogAtMs = nowMs;
       }
