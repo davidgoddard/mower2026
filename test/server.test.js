@@ -161,9 +161,9 @@ test('tuning pages expose the simplified drive training controls', () => {
   assert.equal(turnPage.includes('Bucket</th>'), true);
   assert.equal(turnPage.includes('Trigger</th>'), true);
   assert.equal(turnPage.includes('Bias</th>'), false);
-  assert.equal(turnPage.includes('CCW Brake Time'), true);
+  assert.equal(turnPage.includes('CCW Rate Horizon'), true);
   assert.equal(turnPage.includes('Brake Scalar</th>'), true);
-  assert.equal(turnPage.includes('small timeout'), true);
+  assert.equal(turnPage.includes('small IMU rate'), true);
   assert.equal(turnPage.includes('rate × scalar'), true);
   assert.equal(turnPage.includes('function formatControlMode(mode)'), true);
   assert.equal(turnPage.includes('function formatTrigger(result)'), true);

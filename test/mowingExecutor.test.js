@@ -121,7 +121,8 @@ test("MowingExecutor reapproaches and realigns once after an excessive strip-ent
       },
     },
     turnController: {
-      async executeTurn() {
+      async executeTurn(request) {
+        assert.equal(request.learningSource, "mowing_strip");
         turnCalls += 1;
         pose = turnCalls === 1
           ? createPose(1, 1.30, createInternalHeading(0), "gnss")

@@ -33,7 +33,7 @@ export interface TurnResult {
   readonly errorAngle: RelativeAngle;
   readonly durationMs: number;
   readonly brakeDistanceUsed: RelativeAngle;
-  readonly controlMode?: "small_timeout" | "large_rate_scalar";
+  readonly controlMode?: "small_rate_horizon" | "large_rate_scalar";
   readonly learningBucketAngleDeg?: number;
   readonly triggerProgressUsedDeg?: number;
   readonly triggerTimeUsedMs?: number;

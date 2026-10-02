@@ -732,8 +732,8 @@ ${getOperatorPageCommonScriptTag()}
                 <thead>
                   <tr>
                     <th>Bucket</th>
-                    <th>CCW Brake Time</th>
-                    <th>CW Brake Time</th>
+                    <th>CCW Rate Horizon</th>
+                    <th>CW Rate Horizon</th>
                     <th>CCW Samples</th>
                     <th>CW Samples</th>
                   </tr>
@@ -935,7 +935,7 @@ ${getAppDialogScript()}
       diagnosticsEl.innerHTML = [
         ['Learning rate', diagnostics.learningRate?.toFixed(3) ?? '—'],
         ['Small-angle threshold', formatAngle(parameters.smallAngleThresholdDeg ?? 0)],
-        ['Small brake-time clamp', formatMilliseconds(diagnostics.smallTurnBrakeTimeMinMs ?? 0) + ' .. ' + formatMilliseconds(diagnostics.smallTurnBrakeTimeMaxMs ?? 0)],
+        ['Small rate-horizon clamp', formatMilliseconds(diagnostics.smallTurnBrakeTimeMinMs ?? 0) + ' .. ' + formatMilliseconds(diagnostics.smallTurnBrakeTimeMaxMs ?? 0)],
         ['Large brake-scalar clamp', formatMilliseconds(diagnostics.largeTurnBrakeScalarMinMs ?? 0) + ' .. ' + formatMilliseconds(diagnostics.largeTurnBrakeScalarMaxMs ?? 0)],
       ].map(([label, value]) => '<div class="parameter-row"><span>' + label + '</span><span>' + value + '</span></div>').join('');
 
@@ -963,7 +963,7 @@ ${getAppDialogScript()}
     }
 
     function formatControlMode(mode) {
-      if (mode === 'small_timeout') return 'small timeout';
+      if (mode === 'small_rate_horizon') return 'small IMU rate';
       if (mode === 'large_rate_scalar') return 'rate × scalar';
       return '—';
     }

@@ -343,11 +343,8 @@ export class TurnController {
       this.rateWindow.shift();
     }
 
-    let shouldBrake = false;
-    if (this.turnIsSmallAngle) {
-      const elapsedMs = this.nowMillis() - this.turnStartTime;
-      shouldBrake = elapsedMs >= (this.turnBrakeTimeMs ?? 0);
-    } else {
+    let shouldBrake = absProgress >= absAngle;
+    if (!shouldBrake) {
       if (this.rateWindow.length < 2) {
         return;
       }
@@ -362,7 +359,17 @@ export class TurnController {
         return;
       }
       const remainingDeg = absAngle - absProgress;
-      const predictedCoastDeg = rateDegPerMs * this.largeTurnBrakeScalarMs;
+      // Small pivots previously stopped on elapsed wall time alone. That made
+      // the achieved angle directly dependent on grass and wheel traction: a
+      // learned 42-degree duration could physically turn almost 80 degrees.
+      // Retain the learned per-angle/per-direction time as a coast horizon,
+      // but combine it with the live IMU angular rate and progress. Faster
+      // motion therefore requests zero output earlier; slow or initially
+      // stalled motion remains powered until it has made real progress.
+      const coastHorizonMs = this.turnIsSmallAngle
+        ? (this.turnBrakeTimeMs ?? 0)
+        : this.largeTurnBrakeScalarMs;
+      const predictedCoastDeg = rateDegPerMs * coastHorizonMs;
       if (remainingDeg <= predictedCoastDeg) {
         this.brakeRateUsedDegPerMs = rateDegPerMs;
         this.turnBrakeDistance = createRelativeAngle(predictedCoastDeg);
@@ -445,7 +452,7 @@ export class TurnController {
         finalHeading: finalHeadingDeg,
         achievedAngleUnwrappedDeg,
         brakeDistanceUsed: unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0)),
-        mode: this.turnIsSmallAngle ? "small_timeout" : "large_rate_scalar",
+        mode: this.turnIsSmallAngle ? "small_rate_horizon" : "large_rate_scalar",
         durationMs: this.nowMillis() - this.turnStartTime,
       });
 
@@ -478,10 +485,9 @@ export class TurnController {
         errorAngle,
         durationMs: this.nowMillis() - this.turnStartTime,
         brakeDistanceUsed: brakeDistanceUsed ?? createRelativeAngle(0),
-        controlMode: this.turnIsSmallAngle ? "small_timeout" : "large_rate_scalar",
+        controlMode: this.turnIsSmallAngle ? "small_rate_horizon" : "large_rate_scalar",
         learningBucketAngleDeg,
-        triggerProgressUsedDeg: this.turnIsSmallAngle ? undefined : Math.abs(unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0))),
-        triggerTimeUsedMs: this.turnIsSmallAngle ? this.turnBrakeTimeMs ?? undefined : undefined,
+        triggerProgressUsedDeg: Math.abs(unwrapRelativeAngle(brakeDistanceUsed ?? createRelativeAngle(0))),
         smallTurnBrakeTimeUsedMs: smallTurnBrakeTimeMs,
         largeTurnBrakeScalarUsedMs: this.turnIsSmallAngle ? undefined : this.largeTurnBrakeScalarMs,
         motorEngaged: true,

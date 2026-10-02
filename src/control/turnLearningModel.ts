@@ -160,7 +160,10 @@ export class TurnLearningModel {
       );
       const errorDeg = achievedAbs - requestedAbs;
       const normalizedError = errorDeg / Math.max(1, requestedAbs);
-      const adjustmentMs = -currentBrakeTimeMs * normalizedError * this.learningRate;
+      // This value is a live-rate coast horizon. Overshoot means the controller
+      // must predict farther ahead and brake earlier, so increase the horizon;
+      // undershoot decreases it.
+      const adjustmentMs = currentBrakeTimeMs * normalizedError * this.learningRate;
       const clampedBrakeTimeMs = Math.max(
         SMALL_TURN_MIN_BRAKE_TIME_MS,
         Math.min(SMALL_TURN_MAX_BRAKE_TIME_MS, currentBrakeTimeMs + adjustmentMs),
@@ -182,7 +185,7 @@ export class TurnLearningModel {
         bucketAngleDeg,
         requestedAngleDeg: requestedAbs,
         achievedAngleDeg: achievedAbs,
-        mode: "bucketed_timeout_and_halt",
+        mode: "bucketed_rate_horizon",
         currentBrakeTimeMs,
         brakeTimeUsedMs: result.brakeTimeUsedMs,
         errorDeg,

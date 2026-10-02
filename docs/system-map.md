@@ -92,6 +92,7 @@ This document maps problem domains to candidate files removing the need for Code
 - `src/control/turnController.ts`: turn stop checks and stop handling.
   - IMU heading watchdog timers are internal safety timers only and are `unref()`'d so an abandoned turn test does not keep Node alive by itself
   - owns its sensor motion session until the asynchronous turn result resolves, including ramp-down, settling, and final IMU measurement, so pose fusion cannot rebase heading mid-turn
+  - small turns brake from live IMU angular progress and rate multiplied by the learned angle/direction coast horizon; elapsed time alone cannot terminate a slow or traction-limited pivot
 - `src/control/driveController.ts`: drive stop checks and stop handling.
 - `src/pathfollowing/segmentedBoundaryExecutor.ts`: perimeter-follow stop checks and stop handling.
 - `src/pathfollowing/mowingExecutor.ts`: mowing workflow stop checks while approaching, tracing, mowing, and following connectors.
@@ -105,6 +106,8 @@ This document maps problem domains to candidate files removing the need for Code
   - an unsafe frozen inter-strip connector receives one local repair attempt from the current fused pose to its unchanged destination; the replacement must pass executor safety validation and is persisted for resume without replanning the remaining strips
   - area-escape monitoring uses an `unref()`'d interval so safety polling still works during execution but does not pin test shutdown if a run aborts early
   - after the final strip, follows the shorter direction around the recorded area perimeter and then returns to the session's original GNSS start position; the return path and start point are persisted for stop/resume recovery
+  - qualified strip-entry pivots identify themselves as mowing turns so the configured mowing-and-training policy can update turn learning
+- `src/pathfollowing/mowingCoverage.ts`: compares adjacent measured strip traces perpendicular to the planned strip heading and detects sustained cutter-width gaps; constructs the full bisector between both traces for the coverage repair pass, after which the executor remows the current strip to restore the planned alternating traversal endpoint
 - `src/pathfollowing/mowingPlanner.ts`: clips strips to the area and obstacles, removes sub-30cm boundary slivers that the mandatory perimeter trace covers, assigns stable sweep-topology regions only to executable passes, builds both sweep orientations for every region, and optimises the actual open route from the preferred entry using a fast distance-plus-routing-penalty estimate before fully constructing and validating only the selected safe connectors. Free-space transit routing uses the inward-offset area loop, never raw physical-boundary vertices, when a concavity prevents a direct line. Region metadata and the combined-wheel-travel estimate are persisted in the plan and returned by preview APIs.
 - `src/pathfollowing/mowingExecutor.ts`: the initial approach to a selected perimeter entry uses safe transit routing from an inside start; an outside start may enter only through its nearby boundary edge on an obstacle-free inward path. An approach that would cut across an out-of-bounds corner fails before motion. This applies to both Mow Area and Mow From Perimeter.
 - `src/pathfollowing/continuousPathFollower.ts`: continuous perimeter and routed-connector control that performs one TurnController-owned entry alignment before starting, then runs 50Hz forward-only differential steering with elapsed-time wheel-command slew limiting, learned forward CTE/heading gains, learned incoming-edge corner braking, ordered local-path projection, and a stable route-wide moving lookahead. The single execution-level genuine-corner test delegates only the outgoing pivot to `TurnController`; sustained route-deviation confirmation owns abort decisions.
@@ -181,8 +184,8 @@ This document maps problem domains to candidate files removing the need for Code
   - records IMU-achieved angle versus real pose change for tuning-page inspection
 - `src/control/turnLearningModel.ts`: turn parameter learning and persistence
   - direction-specific learning (CCW vs CW asymmetry)
-  - small-angle learning uses 3° timeout buckets up to the configured small-angle threshold, meaning each bucket learns how many milliseconds from turn start the mower should keep driving before commanding stop; intermediate requested angles interpolate between neighboring bucket times for prediction only, and learning only writes back when the requested angle is effectively on a real bucket
-  - default small-angle timeout buckets are seeded from clean tuning results through 30° and conservatively extrapolated above 30°; loading a pre-calibration parameter file migrates only buckets with zero samples, preserving genuinely trained values
+  - small-angle learning uses 3° rate-horizon buckets up to the configured small-angle threshold; each bucket supplies the milliseconds of live angular-rate projection used to predict coast, intermediate requested angles interpolate between neighboring buckets, and learning only writes back when the requested angle is effectively on a real bucket
+  - default small-angle rate-horizon buckets are seeded from clean tuning results through 30° and conservatively extrapolated above 30°; loading a pre-calibration parameter file migrates only buckets with zero samples, preserving genuinely trained values
   - small-turn learning uses normalized achieved angle so tiny reverse movement cannot be mistaken for a near-360° overshoot
   - large-angle learning uses independent 10° angular-rate scalar buckets per direction above the small-angle threshold; each scalar multiplies the live angular rate to predict remaining coast, and intermediate requested angles interpolate between neighboring bucket scalars for prediction only while learning only writes back when the requested angle is effectively on a real bucket
   - JSON persistence at `config/turn-learning-parameters.json`
@@ -193,7 +196,7 @@ This document maps problem domains to candidate files removing the need for Code
   - results table with error visualization and without the misleading legacy brake-distance display
   - each turn result row now shows the active control mode, learned bucket, and the actual brake trigger used (timeout for small turns, predicted brake angle for large turns)
   - real-pose validation sweep table comparing IMU and pose fusion headings
-  - learning parameter display showing the actual persisted small-angle timeout buckets, large-angle rate-scalar buckets, and learning-rate diagnostics used by the current controller
+  - learning parameter display showing the actual persisted small-angle rate-horizon buckets, large-angle rate-scalar buckets, and learning-rate diagnostics used by the current controller
   - sticky IMU and GNSS live widgets in a left sidebar, cloned from the main dashboard
   - prominent STOP button for emergency abort
 - `src/server/driveTuningPage.ts`: drive tuning UI with live primitive sidebar

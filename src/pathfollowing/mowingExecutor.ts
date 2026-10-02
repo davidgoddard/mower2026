@@ -10,6 +10,7 @@ import { TurnController } from "../control/turnController.js";
 import { PoseFusion } from "../sensing/poseFusion.js";
 import { LoggerScope } from "../logging/types.js";
 import { systemStop } from "../control/systemStop.js";
+import type { LearningSource } from "../config/learningPolicyConfig.js";
 import { createPosition, crossTrackError, distanceBetween, unwrapMeters, type Pose } from "../geometry/positionTypes.js";
 import { headingDifference, unwrapInternalHeading, unwrapRelativeAngle, createInternalHeading } from "../geometry/headingTypes.js";
 import type { PathFollowingParameters } from "../config/pathFollowingConfig.js";
@@ -125,6 +126,7 @@ const MOWING_STRIP_ENTRY_REAPPROACH_MIN_TRANSLATION_METERS = 0.25;
 interface TurnToHeadingOptions {
   readonly alignmentToleranceDeg?: number;
   readonly safeForwardExitTarget?: { readonly x: number; readonly y: number };
+  readonly learningSource?: LearningSource;
 }
 
 export class MowingExecutor {
@@ -2653,6 +2655,7 @@ export class MowingExecutor {
       targetAngle: turnAngle,
       direction: unwrapRelativeAngle(turnAngle) >= 0 ? "ccw" : "cw",
       learningEnabled: true,
+      learningSource: options.learningSource,
     });
     if (result.status === "success") {
       const settledPose = this.poseFusion.getCurrentPose();
@@ -2800,6 +2803,7 @@ export class MowingExecutor {
       const turnStatus = await this.turnToHeading(targetHeadingDeg, {
         alignmentToleranceDeg: headingToleranceDeg,
         safeForwardExitTarget: exit,
+        learningSource: "mowing_strip",
       });
       if (turnStatus !== "success") {
         return turnStatus;

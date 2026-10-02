@@ -37,7 +37,7 @@ The system shall:
     - encoder/motor-feedback-derived turn angle, wheelbase-based heading and IMU/encoder turn disagreement are diagnostic values only; they shall not steer, stop, correct, validate or otherwise influence a turn or any navigation decision
     - turns should request one wheel to go forward, the other backward to turn on the spot and run the motors at full speed.
     - turns should learn when to request zero speed (brake) so that the in-built motor ramping down time is built into the stopping distance/angle thus aim to stop with zero degree error
-    - small-angle turns should learn their brake fraction using angle buckets from 3° to 60° rather than using a fixed halt point
+    - small-angle turns shall combine live IMU angular progress and angular rate with a learned per-direction, per-angle coast horizon from 3° to 60°; elapsed wall time alone shall never complete a turn
     - every turn ever should add to the learning
 - when driving: continually monitor the driving and adjust its internal control parameters to reduce errors:
     - Every drive should be as straight as possible and arrive at the target with a minimal X and Y error distance
@@ -438,7 +438,7 @@ Being able to turn 10 degrees will be tough but consideration should be given to
 
 The operation of the braking is such that once the mower is up to full speed which it does not know so we will use a magnitude based gate, then small angles are managed one way and angles above the gate simply run at full speed until the remaining angle is less than the learned brake angle.  There will be one brake angle for positive and negative turns. 
 
-For small angles run without a brake distance and simply request zero speed when the half way point (a leaned point) has been reached.  I.e. for a 20 degree turn, power on until only 10 degrees left.  The code must learn and update this 'mid point' based on results to get more accurate.  Again, due to mower assymetry there should be one learned value for positive and one for negative.
+For small angles, request zero speed when the remaining angle is no greater than the live IMU angular rate multiplied by the learned coast horizon. The horizon is bucketed by requested angle and direction so drivetrain asymmetry is retained. Overshoot increases the horizon and therefore brakes earlier; undershoot decreases it. A lack of physical angular progress must not be mistaken for completion merely because time has elapsed.
 
 The transition from small to large angles will be a configuration value set initially to 30 degrees.
 
@@ -665,6 +665,8 @@ The mowing planner divides a recorded area perimeter into a set of parallel mowi
 Once all strips are computed the planner sequences them as an adjacent-strip sweep. The first strip is chosen at the lowest normal-axis offset and entered from the end with the highest projection along the mowing direction, or is chosen nearest a supplied perimeter start. After the first transition the planner records which side of the area (which normal-axis direction) it advanced toward and locks that crossing direction in for the remainder of the plan. The preferred start affects only the first strip. Subsequent choices must use the next unmown normal-axis offset in that direction while one remains; only when the local sweep is exhausted may the planner cross back or seek an isolated fragment.
 
 Geometric strip fragments shorter than 30 cm shall not enter the executable mowing sequence or create their own sweep regions. These narrow boundary slivers are covered by the mandatory area/obstacle perimeter trace. The 30 cm planning minimum deliberately exceeds the drive controller's 15 cm minimum command so pose settling and arrival tolerance cannot turn a previewed cutting pass into a sequence of stationary turns. The executor shall never count a drive explicitly skipped as below the minimum command distance as a completed mowing strip.
+
+When adjacent measured strip traces prove a cutter-width coverage gap for the configured confirmation distance, the mower shall drive the full bisector between those traces and then remow the current strip. The repeat restores the mower to the current strip's planned exit so the alternating traversal direction and the next persisted connector remain correct.
 
 Before a mowing point-to-point movement, the 15 cm minimum useful translation shall be checked before an initial alignment pivot and again after any necessary pivot. A target already inside that deadband shall not cause a stationary turn. At strip entry, residual heading within the ordinary 5-degree line-drive turn threshold shall be left to forward CTE/heading convergence rather than causing an immediate opposite corrective pivot.
 

@@ -235,23 +235,22 @@ describe("TurnController", () => {
       learningEnabled: true,
     });
 
-    // Small turns now brake on learned elapsed time from turn start. The mock
-    // model returns 45ms/deg, so a 10° request brakes after 450ms.
+    // Small turns combine live IMU rate with the learned 450ms coast horizon.
     await new Promise(resolve => setTimeout(resolve, 10));
     elapsed = 400;
-    mockSensor._testSetHeading(createInternalHeading(4.5));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(4.5), 400);
+    mockSensor._testSetHeading(createInternalHeading(4));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(4), 400);
     await new Promise(resolve => setTimeout(resolve, 5));
     elapsed = 450;
-    mockSensor._testSetHeading(createInternalHeading(5.0));
-    mockSensor._testEmitHeadingUpdate(createInternalHeading(5.0), 425);
+    mockSensor._testSetHeading(createInternalHeading(5));
+    mockSensor._testEmitHeadingUpdate(createInternalHeading(5), 450);
 
     const result = await turnPromise;
 
     assert.equal(result.status, "success");
     assert.equal(result.motorEngaged, true);
-    assert.equal(result.controlMode, "small_timeout");
-    assert.equal(result.triggerTimeUsedMs, 450);
+    assert.equal(result.controlMode, "small_rate_horizon");
+    assert.equal(result.triggerProgressUsedDeg, 9);
     // Small turns use the same ramp-down path as large turns
     assert.equal(mockSensor.setMotorWheelOutputs.mock.calls.length > 0, true);
   });
@@ -576,7 +575,7 @@ describe("TurnLearningModel", () => {
     }
   });
 
-  it("returns no brake angle for small-angle timeout buckets", () => {
+  it("returns no static brake angle for small-angle rate-horizon buckets", () => {
     const mockLogger = createMockLogger();
     const model = new TurnLearningModel({
       logger: mockLogger,
@@ -719,7 +718,7 @@ describe("TurnLearningModel", () => {
     assert.equal(differentBucketDiff > 1, true, `Expected different-bucket diff > 1 but got ${differentBucketDiff}`);
   });
 
-  it("learns the small-angle brake time and persists it", async () => {
+  it("learns the small-angle rate horizon and persists it", async () => {
     const mockLogger = createMockLogger();
     const dir = await mkdtemp(join(tmpdir(), "mower-turn-learning-"));
     const parametersPath = join(dir, "turn-learning.json");
@@ -749,7 +748,7 @@ describe("TurnLearningModel", () => {
       const updatedBucket = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 21);
       assert.ok(updatedBucket);
       assert.equal(updatedBucket.sampleCountCcw, bucket.sampleCountCcw + 1);
-      assert.equal(updatedBucket.brakeTimeCcwMs > startBrakeTimeMs, true);
+      assert.equal(updatedBucket.brakeTimeCcwMs < startBrakeTimeMs, true);
 
       const reloaded = new TurnLearningModel({
         logger: mockLogger,
@@ -791,7 +790,7 @@ describe("TurnLearningModel", () => {
       const after = model.getParameters();
       const updatedBucket = after.smallTurnBuckets.find((entry) => entry.bucketAngleDeg === 6);
       assert.ok(updatedBucket);
-      assert.equal(updatedBucket.brakeTimeCcwMs > startBucket.brakeTimeCcwMs, true);
+      assert.equal(updatedBucket.brakeTimeCcwMs < startBucket.brakeTimeCcwMs, true);
       assert.equal(updatedBucket.sampleCountCcw, startBucket.sampleCountCcw + 1);
     } finally {
       await rm(dir, { recursive: true, force: true });
